@@ -3606,6 +3606,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     elif _is_deep_sim_prompt(req.user_message):
         log.info("[template] promoted explicit simulation prompt to deep_sim room=%s previous=%s", req.room_id, room_template)
         room_template = "deep_sim"
+    # Connector-enabled rooms collaborate WITH tools: in swarm, every non-lead
+    # agent runs its OWN tool-capable ReAct loop (read/act) and the lead
+    # synthesizes — so agents interact AND each uses gmail/docs, instead of the
+    # debate just arguing. Promote a plain debate room to swarm when connectors
+    # are on. (Explicit deep_sim/decision/etc. picks are respected.)
+    _conns_for_template = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
+    if _conns_for_template and room_template == "debate":
+        log.info("[template] connectors=%s → promoting debate→swarm for collaborative tool use room=%s",
+                 _conns_for_template, req.room_id)
+        room_template = "swarm"
     # A4: pull trust scores for display only (no routing weight yet).
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
@@ -3654,54 +3664,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "turn_seq": seq,
         })
     _mark("router_ms")
-
-    # ── Execution mode — connector-enabled rooms ACT (openswarm-style) ──
-    # If the room has live connectors toggled on, run the lead as a ReAct tool
-    # loop that completes the task end-to-end (read → act → write), instead of
-    # debating about it. Falls through to the normal templates when none enabled
-    # or when the loop produces nothing.
-    _room_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
-    if _room_conns and (req.flyby_decision or "").strip().lower() not in ("agree", "disagree"):
-        await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": lead.get("slug"), "kind": "executing"})
-        exec_prompt = (
-            f"{req.user_message}\n\n"
-            f"You have live connector tools enabled for this room: {', '.join(_room_conns)} "
-            f"(e.g. gmail_search, gmail_get, docs_create, docs_append). USE them now to complete "
-            f"the task end-to-end. Do not ask for permission or for document IDs (docs_create "
-            f"creates a new doc). When finished, reply with the result, including any document URL."
-        )
-        try:
-            _exec_agent = await _build_agent_for_room(
-                req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
-            )
-            _exec_reply = await _exec_agent(Msg(name="user", content=exec_prompt, role="user"))
-        except Exception as exc:  # noqa: BLE001 — fall through to templates on failure
-            log.warning("[exec] lead execution failed: %s", exc)
-            _exec_reply = None
-        _exec_text = _msg_to_text(_exec_reply) if _exec_reply else ""
-        if _exec_text:
-            _report_turn(lead["id"], req.user_message, _exec_reply)
-            _tok = max(300, len(_exec_text) // 4)
-            cost_tokens += _tok
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "line", "agent": lead.get("slug"), "round": 1,
-                "kind": "synthesis", "content": _exec_text, "tokens": _tok,
-            })
-            await _emit_event(req.callback_url, req.turn_id, _build_final_report(
-                user_message=req.user_message, final_text=_exec_text, template=room_template,
-                room_goal=req.room_goal or "", status="complete", verdict="DONE", score=5.0,
-                lead=lead, action_items=[], evidence_ids=[], evidence=[],
-                sources=_web_sources_for_turn(req.turn_id), claims=[], reviews=[], votes=[],
-                web_intel_used=False, project_scoped=bool(req.project_id), project_memory_hits=0,
-            ))
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
-                "duration_ms": int((time.time() - started) * 1000),
-                "template": "execute", "tools": 1,
-            })
-            _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
-            return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
-        log.info("[exec] empty execution result — falling through to %s", room_template)
 
     # ── Deep simulation template — MiroFish-style live room ───────────
     if room_template == "deep_sim":

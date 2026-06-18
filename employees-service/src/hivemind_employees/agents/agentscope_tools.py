@@ -328,7 +328,7 @@ def _register_connector_tools(
                 j = _google_json("docs_create", {"title": title, "content": content})
                 _record_artifact("google-docs", _artifact_url(j), title=title, label=f"Open “{title}”")
                 return _tool_response(j)
-            docs_create.__doc__ = "Create a new Google Doc (e.g. a pitch deck or report). title = doc title; content = the full written body. Returns documentId + shareable url. Produced after the team agrees; no approval needed."
+            docs_create.__doc__ = "Create a new Google Doc (e.g. a pitch deck or report). title = doc title; content = the full body in MARKDOWN (# / ## / ### headings, **bold**, - bullets, 1. numbered lists, | tables |) — it is rendered into a polished, formatted document, so structure it well. Returns documentId + shareable url. Produced after the team agrees; no approval needed."
             def docs_append(documentId: str, text: str) -> ToolResponse:
                 held = _consensus_gate("docs_append")
                 if held is not None:

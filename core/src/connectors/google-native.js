@@ -52,6 +52,105 @@ function extractBody(payload) {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Markdown → Google Docs batchUpdate requests. One insertText (the full plain
+// text) followed by paragraph/text-style requests against the FINAL indices
+// (batchUpdate applies in order, so the styles land on the inserted text). Gives
+// real headings, bold, bullet + numbered lists, and bold-header tables — an
+// aesthetically rendered doc instead of a plain wall of text. The agents write
+// the doc body in markdown; this turns it into a polished document in-tool.
+function mdToDocsRequests(content) {
+  const rawLines = String(content || '').replace(/\r/g, '').split('\n');
+  let text = '';
+  let cursor = 1; // Google Docs body starts at index 1
+  const paraStyles = [];   // { start, end, type }
+  const bulletRanges = []; // { start, end, preset }
+  const boldRanges = [];   // { start, end }
+
+  // Strip **bold** markers, recording bold ranges in stripped coordinates.
+  const parseBold = (line, baseIndex) => {
+    let out = '';
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '*' && line[i + 1] === '*') {
+        const close = line.indexOf('**', i + 2);
+        if (close !== -1) {
+          const inner = line.slice(i + 2, close);
+          const s = baseIndex + out.length;
+          out += inner;
+          boldRanges.push({ start: s, end: baseIndex + out.length });
+          i = close + 2;
+          continue;
+        }
+      }
+      out += line[i];
+      i += 1;
+    }
+    return out;
+  };
+
+  let prevTable = false;
+  for (const rawLine of rawLines) {
+    let line = rawLine;
+    let type = null;
+    let bullet = null;
+    let boldWhole = false;
+    let isTable = false;
+
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) {
+      type = h[1].length === 1 ? 'HEADING_1' : h[1].length === 2 ? 'HEADING_2' : 'HEADING_3';
+      line = h[2];
+    } else if (/^\s*[-*+]\s+/.test(line)) {
+      bullet = 'BULLET_DISC_CIRCLE_SQUARE';
+      line = line.replace(/^\s*[-*+]\s+/, '');
+    } else if (/^\s*\d+[.)]\s+/.test(line)) {
+      bullet = 'NUMBERED_DECIMAL_ALPHA_ROMAN';
+      line = line.replace(/^\s*\d+[.)]\s+/, '');
+    } else if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) { prevTable = true; continue; } // skip |---| rule
+      isTable = true;
+      const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      line = cells.join('   ·   ');
+      if (!prevTable) boldWhole = true; // first row of a table block = header
+    }
+    prevTable = isTable;
+
+    const lineStart = cursor;
+    const stripped = parseBold(line, lineStart);
+    if (boldWhole && stripped.length) boldRanges.push({ start: lineStart, end: lineStart + stripped.length });
+    const piece = `${stripped}\n`;
+    text += piece;
+    cursor += piece.length;
+    const lineEnd = cursor;
+
+    if (type) paraStyles.push({ start: lineStart, end: lineEnd, type });
+    if (bullet) bulletRanges.push({ start: lineStart, end: lineEnd, preset: bullet });
+  }
+
+  if (!text.trim()) return [];
+  const requests = [{ insertText: { location: { index: 1 }, text } }];
+  for (const p of paraStyles) {
+    requests.push({ updateParagraphStyle: {
+      range: { startIndex: p.start, endIndex: p.end },
+      paragraphStyle: { namedStyleType: p.type },
+      fields: 'namedStyleType',
+    } });
+  }
+  for (const b of bulletRanges) {
+    requests.push({ createParagraphBullets: {
+      range: { startIndex: b.start, endIndex: b.end },
+      bulletPreset: b.preset,
+    } });
+  }
+  for (const r of boldRanges) {
+    if (r.end > r.start) requests.push({ updateTextStyle: {
+      range: { startIndex: r.start, endIndex: r.end },
+      textStyle: { bold: true }, fields: 'bold',
+    } });
+  }
+  return requests;
+}
+
 // Tool registry. Each: provider (Nango key) + async run(token, args).
 export const GOOGLE_TOOLS = {
   gmail_search: {
@@ -107,16 +206,18 @@ export const GOOGLE_TOOLS = {
   },
   docs_create: {
     provider: 'google-docs',
-    description: 'Create a new Google Doc. args: { title, content (optional initial text) }. Returns documentId + shareable url.',
+    description: 'Create a new Google Doc. args: { title, content (markdown: # headings, **bold**, - bullets, 1. lists, | tables |) }. Rendered into a polished document. Returns documentId + url.',
     run: async (token, a) => {
       const doc = await g('https://docs.googleapis.com/v1/documents', token, {
         method: 'POST', body: JSON.stringify({ title: a.title || 'Untitled' }),
       });
       if (a.content) {
-        await g(`https://docs.googleapis.com/v1/documents/${doc.documentId}:batchUpdate`, token, {
-          method: 'POST',
-          body: JSON.stringify({ requests: [{ insertText: { location: { index: 1 }, text: String(a.content) } }] }),
-        });
+        const requests = mdToDocsRequests(a.content);
+        if (requests.length) {
+          await g(`https://docs.googleapis.com/v1/documents/${doc.documentId}:batchUpdate`, token, {
+            method: 'POST', body: JSON.stringify({ requests }),
+          });
+        }
       }
       return { documentId: doc.documentId, title: doc.title, url: `https://docs.google.com/document/d/${doc.documentId}/edit` };
     },

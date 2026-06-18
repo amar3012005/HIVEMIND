@@ -3724,7 +3724,13 @@ async def _verify_turn(
     if not plan:
         return None
     pending = drain_pending_writes()  # non-destructive snapshot of queued writes
-    produced = sorted(set(_ARTIFACT_URL_RE.findall(final_text or "")))
+    # Produced artifacts = doc/sheet URLs the swarm actually created this turn
+    # (from the artifact recorder, plus any URL echoed in the final text). The
+    # verifier MUST see these or it falsely reports "Doc not produced".
+    produced = sorted(set(
+        _ARTIFACT_URL_RE.findall(final_text or "")
+        + [a.get("url") for a in drain_artifacts() if a.get("url")]
+    ))
     evidence = {
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
@@ -3837,7 +3843,10 @@ def _output_production_directive(turn_id: str) -> str:
             "The team has reached consensus. Activate the google_docs group and call "
             "docs_create(title, content) with the COMPLETE, high-quality document — full "
             "sections with real substance grounded in recalled company facts, NOT a summary "
-            "or a description. The document IS the deliverable. It runs without approval."
+            "or a description. Write `content` in MARKDOWN so it renders polished: '# Title', "
+            "'## Section' headings, **bold** for key terms, '- ' bullets, '1. ' numbered steps, "
+            "and '| col | col |' tables (with a '|---|' header rule) for costs/timelines. "
+            "The document IS the deliverable. It runs without approval."
         )
     if out == "sheet":
         return (

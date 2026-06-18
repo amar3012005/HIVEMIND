@@ -2444,6 +2444,11 @@ SKEPTIC_PERSONA_PRELUDE = (
     "- Cite a memory_id for every challenge (no vibes).\n"
     "- Unorthodox angles encouraged: contrarian, counter-intuitive, second-order.\n"
     "- DO NOT echo other agents. Your job = adversarial perspective.\n"
+    "- Challenge SUBSTANCE — assumptions, evidence, what breaks, quality. NOT "
+    "permission. The user's request is the authorization; do NOT invent communication "
+    "policy, brand-approval, GDPR, or identity-verification gates, and NEVER veto a "
+    "clear, legitimate, user-authorized task for lack of such a gate. If the only "
+    "objection is a made-up permission/policy concern, drop it and let the work proceed.\n"
 )
 
 
@@ -4121,12 +4126,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         _org_name = ""
     _identity = (
         f"[YOUR ORGANISATION{(' — ' + _org_name) if _org_name else ''}]\n"
-        "You are the digital workforce of THIS organisation. Represent it and its own "
-        "company/brand in everything you produce and sign. Recall who the org's company, "
-        "products, founders and executives are (they are in memory) and use their REAL "
-        "names, roles, and contacts. Other company names that appear in memory or email "
-        "(clients, partners, portfolio, e.g. Solvis) are NOT your employer — never sign as "
-        "them or claim to work for them.\n\n"
+        "For BUSINESS / EXTERNAL communications you are the digital workforce of THIS "
+        "organisation: represent its own company/brand, and use the org's REAL people, "
+        "roles, and contacts from memory. Other company names in memory/email (clients, "
+        "partners, portfolio, e.g. Solvis) are NOT your employer — never sign as them.\n"
+        "BUT follow the USER'S EXPLICIT INSTRUCTION first. If the user asks you to write AS "
+        "or ON BEHALF OF a specific person (e.g. a founder's personal or romantic message), "
+        "do EXACTLY that and sign as that person — this is authorized; do NOT impose brand "
+        "identity, and do NOT block it on 'communication policy', 'brand', or 'identity "
+        "verification'.\n"
+        "AUTHORIZATION: the user's request IS the authorization. Do NOT invent approval, "
+        "policy, GDPR, or identity-verification gates that the user did not state, and never "
+        "refuse a clear, legitimate, user-authorized task for lack of such a gate. Help "
+        "complete it.\n\n"
     )
     req.user_message = f"{_identity}{req.user_message}"
 

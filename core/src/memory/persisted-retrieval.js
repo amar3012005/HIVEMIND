@@ -636,7 +636,13 @@ async function vectorCandidatesForRecall(store, {
   const results = await qdrantClient.hybridSearch(query_context, {
     user_id,
     org_id,
-    project,
+    // NOTE: do NOT pass `project` as a Qdrant pre-filter. Project-scoped memories
+    // carry only `project_id` (uuid) in the DB; their Qdrant payload has
+    // `project: null` and `project_ids: []` (never populated from project_id),
+    // so a `payload.project == <uuid>` filter matches nothing and silently
+    // drops every in-project memory. We instead retrieve org-wide candidates and
+    // NARROW to the requested project AFTER hydration using the reliable DB
+    // `project_id` (see below). Narrowing-only — it cannot widen access.
     tags,
     is_latest,
     limit: candidatePoolSize,
@@ -690,6 +696,14 @@ async function vectorCandidatesForRecall(store, {
         (m.scope === 'project' && Array.isArray(m.project_ids) &&
            m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)));
       if (!ok) return null;
+    }
+    // Project-scope narrowing (replaces the broken Qdrant `project` pre-filter):
+    // when a specific project is requested, keep only memories that actually
+    // belong to it, using the reliable hydrated DB fields. Narrowing-only.
+    if (project) {
+      const pid = memory.project_id || null;
+      const pids = Array.isArray(memory.project_ids) ? memory.project_ids : [];
+      if (pid !== project && !pids.includes(project)) return null;
     }
     if (scope_filter && memory.scope && memory.scope !== scope_filter) return null;
 

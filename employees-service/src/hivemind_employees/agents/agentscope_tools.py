@@ -429,8 +429,12 @@ def build_hivemind_toolkit(
                 body = {"query_context": query, "max_memories": max_memories}
                 # Room scope: when the room belongs to a project HIVEMIND, every
                 # agent recall is scoped to that project so the room stays on-topic.
+                # core /api/recall reads `project`/`preferred_project` (NOT
+                # `project_id`) — same keys recall_emulated sends — so the agents
+                # hit the exact project-scoped recall path the grounding pass uses.
                 if project_id:
-                    body["project_id"] = project_id
+                    body["project"] = project_id
+                    body["preferred_project"] = project_id
                 r = c.post("/api/recall", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())

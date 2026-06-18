@@ -401,6 +401,19 @@ def build_react_agent(
             # Per-character connector grants for this room (P3 HyperAgents×Connectors).
             connectors=employee_row.get("connectors") or [],
         )
+        # Phase 2: connectors are registered as INACTIVE groups. Pre-equip the
+        # ones this agent should have so tool use is reliable (llama doesn't
+        # always call the meta-tool itself). The plan's subset narrows this in
+        # P3; the meta-tool still lets the agent equip MORE at runtime.
+        # `activate_connectors` (plan-driven) takes precedence; else all granted.
+        _to_activate = employee_row.get("activate_connectors") or _conns
+        if toolkit is not None and _to_activate:
+            try:
+                toolkit.update_tool_groups(
+                    group_names=[str(c).replace("-", "_") for c in _to_activate], active=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("connector group activation failed: %s", exc)
 
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)

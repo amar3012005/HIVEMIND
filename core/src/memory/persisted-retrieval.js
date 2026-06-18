@@ -1,4 +1,4 @@
-import { computeTokenSimilarity } from './conflict-detector.js';
+import { computeTokenSimilarity, tokenCountMap, cosineFromCounts } from './conflict-detector.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { getRetrievalConfig } from './retrieval-config.js';
@@ -116,10 +116,8 @@ function tokenSet(content = '') {
   );
 }
 
-function lexicalCoverage(leftContent = '', rightContent = '') {
-  const left = tokenSet(leftContent);
-  const right = tokenSet(rightContent);
-  if (left.size === 0 || right.size === 0) return 0;
+function overlapMinRatio(left, right) {
+  if (!left || !right || left.size === 0 || right.size === 0) return 0;
   const smaller = left.size <= right.size ? left : right;
   const larger = left.size <= right.size ? right : left;
   let overlap = 0;
@@ -127,6 +125,22 @@ function lexicalCoverage(leftContent = '', rightContent = '') {
     if (larger.has(token)) overlap += 1;
   }
   return overlap / smaller.size;
+}
+function lexicalCoverage(leftContent = '', rightContent = '') {
+  return overlapMinRatio(tokenSet(leftContent), tokenSet(rightContent));
+}
+// Per-candidate memoization for the O(n²) dedup pass: tokenize each candidate's
+// content ONCE (the slow \p{L}\p{N} unicode regex + the sim count-map), cache it
+// on the item object, reuse across ALL pairwise comparisons. The dedup loop was
+// re-tokenizing both sides up to 4× per pair → ~1s of the warm recall. Same
+// tokens, same formulas, ~120× fewer tokenizations on a wide pool.
+function memoTokenSet(item) {
+  if (!item._dedupTokSet) item._dedupTokSet = tokenSet(item.memory?.content || '');
+  return item._dedupTokSet;
+}
+function memoSimCounts(item) {
+  if (!item._dedupSimCounts) item._dedupSimCounts = tokenCountMap(item.memory?.content || '');
+  return item._dedupSimCounts;
 }
 
 function tagOverlapRatio(leftTags = [], rightTags = []) {
@@ -143,7 +157,9 @@ function tagOverlapRatio(leftTags = [], rightTags = []) {
 }
 
 function isNearDuplicate(left, right) {
-  const similarity = computeTokenSimilarity(left.memory.content || '', right.memory.content || '');
+  // Memoized: cosineFromCounts(cached count-maps) === computeTokenSimilarity(content,content);
+  // overlapMinRatio(cached token-sets) === lexicalCoverage(content,content). Same result, no re-tokenize.
+  const similarity = cosineFromCounts(memoSimCounts(left), memoSimCounts(right));
   if (similarity >= 0.85) return true;
 
   // Extracted facts with same title prefix are likely duplicates from chunked documents
@@ -156,7 +172,7 @@ function isNearDuplicate(left, right) {
 
   const sameSourcePlatform = (left.memory.source_metadata?.source_platform || left.memory.source)
     && (left.memory.source_metadata?.source_platform || left.memory.source) === (right.memory.source_metadata?.source_platform || right.memory.source);
-  const coverage = lexicalCoverage(left.memory.content || '', right.memory.content || '');
+  const coverage = overlapMinRatio(memoTokenSet(left), memoTokenSet(right));
   const tagOverlap = tagOverlapRatio(left.memory.tags || [], right.memory.tags || []);
   if (sameSourcePlatform && tagOverlap >= 0.5 && coverage >= 0.60) return true;
 

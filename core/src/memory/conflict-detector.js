@@ -50,6 +50,30 @@ export function computeTokenSimilarity(left = '', right = '') {
   return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
 }
 
+// Memoization helpers for callers that compare ONE doc against MANY (recall
+// dedup is O(n²)): precompute each doc's token count-map ONCE, then cosine from
+// the cached maps. Bit-identical to computeTokenSimilarity (same tokenize +
+// normalizeToken + cosine) — just avoids re-tokenizing the same content per pair.
+export function tokenCountMap(text = '') {
+  const counts = new Map();
+  for (const token of tokenize(text).map(normalizeToken)) {
+    counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  return counts;
+}
+export function cosineFromCounts(leftCounts, rightCounts) {
+  if (!leftCounts || !rightCounts || leftCounts.size === 0 || rightCounts.size === 0) return 0;
+  const vocabulary = new Set([...leftCounts.keys(), ...rightCounts.keys()]);
+  let dot = 0, leftMagnitude = 0, rightMagnitude = 0;
+  for (const token of vocabulary) {
+    const l = leftCounts.get(token) || 0;
+    const r = rightCounts.get(token) || 0;
+    dot += l * r; leftMagnitude += l * l; rightMagnitude += r * r;
+  }
+  if (leftMagnitude === 0 || rightMagnitude === 0) return 0;
+  return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
+}
+
 /**
  * Cosine similarity over dense embedding vectors.
  * Returns 0 if vectors are missing/mismatched dimensions.

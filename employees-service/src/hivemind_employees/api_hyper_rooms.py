@@ -3932,10 +3932,12 @@ _DOC_AUTHORING_GUIDE = (
 
 
 # Recipient-name patterns: "to Ceyda", "email Rama", "cc Maya", "for Dr. Park".
+# Trigger words are case-insensitive (inline (?i:...)), but the NAME capture is
+# case-SENSITIVE — a global re.IGNORECASE makes [A-Z] match "to"/"for", so the
+# regex captured "to Rama" instead of "Rama" and resolution failed.
 _RECIPIENT_RE = re.compile(
-    r"\b(?:to|cc|for|email|e-?mail|mail|message|send(?:\s+(?:this|it|a\s+mail|an?\s+email))?\s+to)\s+"
-    r"((?:Dr\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)",
-    re.IGNORECASE,
+    r"\b(?i:to|cc|for|e-?mail|email|mail|message|send(?:\s+(?:this|it|a\s+mail|an?\s+email))?\s+to)\s+"
+    r"((?:Dr\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)"
 )
 
 
@@ -3978,6 +3980,57 @@ async def _fetch_correspondence(req: "RoomTurnRequest", name: str, email: str) -
             out = excerpts
             break
     return out
+
+
+_STYLE_SIGNALS = (
+    "style", "voice", "patterns", "previous", "past", "in his", "in her",
+    "like he", "like she", "tone", "follow", "his writing", "her writing",
+)
+
+
+async def _gather_evidence(
+    req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: str
+) -> Dict[str, Any]:
+    """GATHER phase — pull read-only connector evidence the team reasons OVER,
+    before it acts. (1) Resolve any named people to REAL contacts (org directory
+    + Gmail). (2) Fetch relevant prior correspondence when the task references a
+    person, their style, or past communication. HIVEMIND recall + web are
+    gathered elsewhere. Stashes the pack on the plan (contacts/correspondence
+    consumed by the production directives) and emits a `gather` event. Generalizes
+    the old email-only bolt-on to every output type."""
+    out = plan.get("intended_output")
+    msg = clean_msg or ""
+    sources = ["hivemind"]  # recall (blackboard) always runs
+    contacts: List[Dict[str, Any]] = []
+    correspondence: List[Dict[str, Any]] = []
+
+    # Resolve named people for any output that addresses/▸references someone.
+    if out in ("email", "slack") or _RECIPIENT_RE.search(msg):
+        contacts = await _resolve_recipients(req, msg)
+        if contacts:
+            sources.append("org_directory")
+
+    # Prior correspondence for voice/style or person-referencing tasks.
+    target = contacts[0] if contacts else {}
+    style_signal = any(t in msg.lower() for t in _STYLE_SIGNALS)
+    if (out == "email" or style_signal) and (target.get("name") or target.get("email")):
+        correspondence = await _fetch_correspondence(
+            req, target.get("name", ""), target.get("email", ""))
+        if correspondence:
+            sources.append("gmail")
+
+    plan["verified_contacts"] = contacts          # consumed by production directives
+    plan["correspondence"] = correspondence
+    plan["evidence"] = {"contacts": contacts, "correspondence": correspondence, "sources": sources}
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "gather",
+        "sources": sources,
+        "contacts": len(contacts),
+        "correspondence": len(correspondence),
+    })
+    log.info("[gather] room=%s sources=%s contacts=%d corr=%d",
+             req.room_id, ",".join(sources), len(contacts), len(correspondence))
+    return plan["evidence"]
 
 
 async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
@@ -4278,24 +4331,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         log.warning("[plan] skipped: %s", exc)
         _plan = None
     if _plan:
-        # For email output, DETERMINISTICALLY resolve named recipients now
-        # (org directory + Gmail) and hand the agents the exact addresses, so
-        # they can't fabricate firstname@company.com.
-        if _plan.get("intended_output") == "email":
-            try:
-                _plan["verified_contacts"] = await _resolve_recipients(req, _clean_user_request)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[recipients] resolve failed: %s", exc)
-                _plan["verified_contacts"] = []
-            # Pull prior emails with the recipient so the team writes in the real
-            # voice/style (the room goal often says "follow X's style/patterns").
-            try:
-                _c0 = (_plan["verified_contacts"] or [{}])[0]
-                _plan["correspondence"] = await _fetch_correspondence(
-                    req, _c0.get("name", ""), _c0.get("email", ""))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[correspondence] fetch failed: %s", exc)
-                _plan["correspondence"] = []
         _PLAN_BY_TURN[req.turn_id] = _plan
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "plan",
@@ -4308,6 +4343,14 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
         log.info("[plan] room=%s output=%s steps=%d assignments=%d",
                  req.room_id, _plan["intended_output"], len(_plan["steps"]), len(_plan["assignments"]))
+        # ── GATHER phase ── one connector-inclusive evidence step the team
+        # reasons OVER (replaces the old email-only recipient/correspondence
+        # bolt-on; generalizes to any output). HIVEMIND recall + web are gathered
+        # elsewhere (blackboard / web worker); this adds connector evidence.
+        try:
+            await _gather_evidence(req, _plan, _clean_user_request)
+        except Exception as exc:  # noqa: BLE001 — never fail a turn over gathering
+            log.warning("[gather] failed: %s", exc)
         # Phase 3 — drive execution from the plan. The lead's plan is folded
         # into the turn input so every template (debate/swarm/deep_sim) and
         # every agent acts on it: target output, done-criterion, ordered steps,

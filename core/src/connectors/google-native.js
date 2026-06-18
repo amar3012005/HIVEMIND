@@ -222,9 +222,9 @@ export const GOOGLE_TOOLS = {
       const ids = (list.messages || []).map(m => m.id);
       const messages = [];
       for (const id of ids) {
-        const m = await g(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`, token);
+        const m = await g(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Date`, token);
         const h = Object.fromEntries((m.payload?.headers || []).map(x => [x.name, x.value]));
-        messages.push({ id, subject: h.Subject || '(no subject)', from: h.From || '', date: h.Date || '', snippet: m.snippet || '' });
+        messages.push({ id, threadId: m.threadId, subject: h.Subject || '(no subject)', from: h.From || '', to: h.To || '', date: h.Date || '', snippet: m.snippet || '' });
       }
       return { count: messages.length, messages };
     },

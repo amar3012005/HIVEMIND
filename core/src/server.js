@@ -9958,13 +9958,35 @@ exit \$RC
                 members = members.filter((m) =>
                   (m.name || '').toLowerCase().includes(q) || (m.email || '').toLowerCase().includes(q));
               }
+              // Named person not in the org directory → resolve a REAL address
+              // from Gmail (so callers never have to guess one). Same-process
+              // bridge call; noreply/digest noise filtered.
+              let gmailCandidates = [];
+              if (q && members.length === 0) {
+                try {
+                  const { runGoogleTool } = await import('./connectors/google-native.js');
+                  const gr = await runGoogleTool('gmail_search', { query: q, max: 8 }, { user_id: userId, org_id: orgId }, prisma);
+                  const seen = new Set();
+                  for (const msg of (gr?.messages || [])) {
+                    for (const field of [msg.from || '', msg.to || '']) {
+                      if (!field.toLowerCase().includes(q)) continue;
+                      for (const addr of (field.match(/[\w.+-]+@[\w.-]+\.\w+/g) || [])) {
+                        const al = addr.toLowerCase();
+                        if (seen.has(al) || al.includes('noreply') || al.includes('no-reply') || al.includes('notifications@')) continue;
+                        seen.add(al);
+                        gmailCandidates.push({ email: addr, seen_in: String(msg.subject || '').slice(0, 60) });
+                      }
+                    }
+                  }
+                } catch { /* gmail may be unconnected — org result still stands */ }
+              }
               let orgName = '';
               try {
                 const o = await prisma.$queryRawUnsafe(
                   'SELECT name FROM hivemind.organizations WHERE id = $1::uuid', orgId);
                 orgName = o?.[0]?.name || '';
               } catch { /* org name is best-effort */ }
-              return jsonResponse(res, { org_name: orgName, count: members.length, members });
+              return jsonResponse(res, { org_name: orgName, count: members.length, members, gmail_candidates: gmailCandidates });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }

@@ -3866,6 +3866,44 @@ _DOC_AUTHORING_GUIDE = (
 )
 
 
+# Recipient-name patterns: "to Ceyda", "email Rama", "cc Maya", "for Dr. Park".
+_RECIPIENT_RE = re.compile(
+    r"\b(?:to|cc|for|email|e-?mail|mail|message|send(?:\s+(?:this|it|a\s+mail|an?\s+email))?\s+to)\s+"
+    r"((?:Dr\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)",
+    re.IGNORECASE,
+)
+
+
+async def _resolve_recipients(req: "RoomTurnRequest") -> List[Dict[str, Any]]:
+    """Extract recipient names from the turn and resolve each to a REAL email via
+    the org directory (which also checks Gmail). Returns [{name, email, source}].
+    Hands the agents verified addresses so they never fabricate one."""
+    msg = req.user_message or ""
+    cands: List[str] = []
+    for m in _RECIPIENT_RE.finditer(msg):
+        nm = re.sub(r"^(Dr|Mr|Ms|Mrs)\.?\s+", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
+        # Drop generic words that capitalize after "to/for" (e.g. "European").
+        if nm and nm.lower() not in ("the", "european", "summit", "team", "everyone", "all") and nm not in cands:
+            cands.append(nm)
+    resolved: List[Dict[str, Any]] = []
+    seen_names = set()
+    for name in cands[:5]:
+        if name.lower() in seen_names:
+            continue
+        seen_names.add(name.lower())
+        try:
+            d = await org_members_emulated(name, user_id=req.user_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            continue
+        members = (d or {}).get("members") or []
+        gmail_c = (d or {}).get("gmail_candidates") or []
+        if members and members[0].get("email"):
+            resolved.append({"name": name, "email": members[0]["email"], "source": "org"})
+        elif gmail_c and gmail_c[0].get("email"):
+            resolved.append({"name": name, "email": gmail_c[0]["email"], "source": "gmail"})
+    return resolved
+
+
 def _output_production_directive(turn_id: str) -> str:
     """The synthesis-time instruction that turns the agreed result into the real
     deliverable. Output tools are consensus-locked during the debate and only
@@ -3893,20 +3931,40 @@ def _output_production_directive(turn_id: str) -> str:
             "deliverable. It runs without approval."
         )
     if out == "email":
+        contacts = plan.get("verified_contacts") or []
+        if contacts:
+            contact_block = (
+                "\nVERIFIED CONTACTS (use these EXACT addresses — do NOT alter or guess):\n"
+                + "\n".join(f"  - {c['name']} → {c['email']} (from {c.get('source','dir')})" for c in contacts)
+                + "\n"
+            )
+        else:
+            contact_block = (
+                "\n(No recipient was pre-resolved. If a person is named without an "
+                "address, call org_directory('<name>') — it checks the org directory AND "
+                "Gmail — and use what it returns.)\n"
+            )
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
             "The team has reached consensus.\n"
-            "1) RESOLVE THE RECIPIENT: if a person is named without an address (e.g. "
-            "'send to Rama'/'send to Ceyda'), call org_directory('<name>') — it checks "
-            "the org directory AND Gmail. Use the returned member/gmail address. If "
-            "neither has it, ask the user — NEVER invent an address.\n"
-            "2) GROUND WHO THEY ARE: recall the recipient's real role and relationship "
-            "(e.g. Ceyda Sarioglu is COO of Davinci AI) and write to them in that "
-            "context — and sign as YOUR organisation, never as a client/partner.\n"
-            "3) Activate the gmail group and call gmail_send(to, subject, body). It is "
-            "SAVED AS A DRAFT and surfaced for the user's one-click approval.\n"
+            "1) RECIPIENT ADDRESS — CRITICAL: " + contact_block +
+            "   NEVER fabricate an address. Do NOT invent patterns like "
+            "firstname@company.com / c.surname@brand.com. Use ONLY a VERIFIED CONTACT "
+            "above, an address the USER explicitly typed, or one returned by "
+            "org_directory. If you cannot get a real address, say so and stop — do not "
+            "make one up.\n"
+            "2) GROUND WHO THEY ARE: recall the recipient's real role/relationship "
+            "(e.g. Ceyda Sarioglu is COO of Davinci AI) and write in that context; sign "
+            "as YOUR organisation/brand, never as a client/partner.\n"
+            "3) SIGNATURE & CC: sign with your name + your organisation/brand only — do "
+            "NOT invent personal email addresses for yourself or colleagues (no "
+            "n.klein@brand.com, no amar.gadde@brand.com). cc ONLY verified addresses; "
+            "unverified ones are dropped automatically.\n"
+            "4) Activate the gmail group and call gmail_send(to, subject, body[, cc]) with "
+            "the verified address. It is SAVED AS A DRAFT and surfaced for the user's "
+            "one-click approval.\n"
             "Do NOT claim the email was sent or is in the Sent folder — it is a draft "
-            "pending the user's approval. Report it as such."
+            "pending the user's approval."
         )
     return ""
 
@@ -4087,6 +4145,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         log.warning("[plan] skipped: %s", exc)
         _plan = None
     if _plan:
+        # For email output, DETERMINISTICALLY resolve named recipients now
+        # (org directory + Gmail) and hand the agents the exact addresses, so
+        # they can't fabricate firstname@company.com.
+        if _plan.get("intended_output") == "email":
+            try:
+                _plan["verified_contacts"] = await _resolve_recipients(req)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[recipients] resolve failed: %s", exc)
+                _plan["verified_contacts"] = []
         _PLAN_BY_TURN[req.turn_id] = _plan
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "plan",

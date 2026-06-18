@@ -301,12 +301,54 @@ def _register_connector_tools(
                 ),
             )
 
+            def _recipient_verified(to: str) -> bool:
+                """True only if `to` is a REAL address — an org member, or one that
+                appears in the room owner's actual Gmail. Blocks fabricated
+                addresses (firstname@company.com) at the tool boundary."""
+                if not to or "@" not in to:
+                    return False
+                tol = to.strip().lower()
+                try:
+                    with _client(api_key, user_id, org_id) as c:
+                        om = c.post("/api/org/members", json={"query": to})
+                        om.raise_for_status()
+                        if any((str(m.get("email", "")).lower() == tol) for m in (om.json().get("members") or [])):
+                            return True
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    with _client(api_key, user_id, org_id) as c:
+                        gr = c.post("/api/connectors/google/exec", json={
+                            "tool": "gmail_search", "arguments": {"query": to, "max": 5}})
+                        gr.raise_for_status()
+                        for m in ((gr.json().get("result") or {}).get("messages") or []):
+                            if tol in (str(m.get("from", "")) + str(m.get("to", ""))).lower():
+                                return True
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
+
             def _send_via_draft(label, summary, draft_args):
                 """Save a real Gmail DRAFT now (reviewable), then queue approval
                 to SEND that draft. The draft is the preview; approve = it goes."""
                 held = _consensus_gate(label)
                 if held is not None:
                     return held
+                _to = draft_args.get("to") or ""
+                if _to and not _recipient_verified(_to):
+                    return _tool_response_text(
+                        f"⛔ '{_to}' is NOT a verified address — it is not an org member and "
+                        f"does not appear in the mailbox, so it looks fabricated. Do NOT send "
+                        f"to a guessed address. Call org_directory('<name>') to get the real "
+                        f"address (it checks the directory AND Gmail), or ask the user. Then retry.",
+                        metadata={"status": "unverified_recipient", "to": _to},
+                    )
+                # Strip fabricated CC addresses (keep only verified ones) so a guessed
+                # cc like amar.gadde@brand.com never goes out.
+                _cc = draft_args.get("cc") or ""
+                if _cc:
+                    kept = [a for a in re.split(r"[,;\s]+", _cc) if a and "@" in a and _recipient_verified(a)]
+                    draft_args = {**draft_args, "cc": ", ".join(kept)}
                 draft = _google_json("gmail_create_draft", draft_args)
                 res = draft.get("result") if isinstance(draft.get("result"), dict) else draft
                 draft_id = (res or {}).get("draftId")
@@ -341,6 +383,12 @@ def _register_connector_tools(
                 held = _consensus_gate("gmail_create_draft")
                 if held is not None:
                     return held
+                if to and not _recipient_verified(to):
+                    return _tool_response_text(
+                        f"⛔ '{to}' is NOT a verified address (not an org member, not in the "
+                        f"mailbox) — it looks fabricated. Call org_directory('<name>') for the "
+                        f"real address; never guess one.",
+                        metadata={"status": "unverified_recipient", "to": to})
                 j = _google_json("gmail_create_draft", {"to": to, "subject": subject, "body": body, "cc": cc, "threadId": threadId})
                 _record_artifact("gmail", _artifact_url(j), title=subject or "Draft", label="Review draft")
                 return _tool_response(j)

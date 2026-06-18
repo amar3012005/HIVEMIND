@@ -52,22 +52,52 @@ function extractBody(payload) {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Markdown → Google Docs batchUpdate requests. One insertText (the full plain
-// text) followed by paragraph/text-style requests against the FINAL indices
-// (batchUpdate applies in order, so the styles land on the inserted text). Gives
-// real headings, bold, bullet + numbered lists, and bold-header tables — an
-// aesthetically rendered doc instead of a plain wall of text. The agents write
-// the doc body in markdown; this turns it into a polished document in-tool.
-function mdToDocsRequests(content) {
-  const rawLines = String(content || '').replace(/\r/g, '').split('\n');
-  let text = '';
-  let cursor = 1; // Google Docs body starts at index 1
-  const paraStyles = [];   // { start, end, type }
-  const bulletRanges = []; // { start, end, preset }
-  const boldRanges = [];   // { start, end }
+// ─── Markdown → polished Google Doc renderer (in-tool, with NATIVE tables) ───
+// Agents write the doc body in markdown; this renders headings, bold, bullet +
+// numbered lists, AND real drawn Google Docs tables (insertTable + populated
+// cells), not a plain text dump. A markdown table block becomes an actual table.
 
-  // Strip **bold** markers, recording bold ranges in stripped coordinates.
-  const parseBold = (line, baseIndex) => {
+async function _docsGet(token, id) {
+  return g(`https://docs.googleapis.com/v1/documents/${id}`, token);
+}
+async function _docsBatch(token, id, requests) {
+  if (!requests || !requests.length) return;
+  await g(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, token, {
+    method: 'POST', body: JSON.stringify({ requests }),
+  });
+}
+function _bodyEnd(doc) {
+  const c = doc.body?.content || [];
+  return c.length ? (c[c.length - 1].endIndex || 1) : 1;
+}
+
+// Split markdown into ordered blocks: { kind:'text', lines:[] } | { kind:'table', rows:[[cell]] }.
+function _parseBlocks(content) {
+  const lines = String(content || '').replace(/\r/g, '').split('\n');
+  const blocks = [];
+  let cur = null;
+  for (const ln of lines) {
+    if (/^\s*\|.*\|\s*$/.test(ln)) {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(ln)) continue; // |---| separator
+      const cells = ln.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      if (!cur || cur.kind !== 'table') { cur = { kind: 'table', rows: [] }; blocks.push(cur); }
+      cur.rows.push(cells);
+    } else {
+      if (!cur || cur.kind !== 'text') { cur = { kind: 'text', lines: [] }; blocks.push(cur); }
+      cur.lines.push(ln);
+    }
+  }
+  return blocks;
+}
+
+// Build insertText + style requests for a text block, inserted at `start`.
+function _textRequests(lines, start) {
+  let text = '';
+  let cursor = start;
+  const paraStyles = [];
+  const bulletRanges = [];
+  const boldRanges = [];
+  const parseBold = (line, base) => {
     let out = '';
     let i = 0;
     while (i < line.length) {
@@ -75,80 +105,94 @@ function mdToDocsRequests(content) {
         const close = line.indexOf('**', i + 2);
         if (close !== -1) {
           const inner = line.slice(i + 2, close);
-          const s = baseIndex + out.length;
+          const s = base + out.length;
           out += inner;
-          boldRanges.push({ start: s, end: baseIndex + out.length });
-          i = close + 2;
-          continue;
+          boldRanges.push({ start: s, end: base + out.length });
+          i = close + 2; continue;
         }
       }
-      out += line[i];
-      i += 1;
+      out += line[i]; i += 1;
     }
     return out;
   };
-
-  let prevTable = false;
-  for (const rawLine of rawLines) {
-    let line = rawLine;
+  for (const raw of lines) {
+    let line = raw;
     let type = null;
     let bullet = null;
-    let boldWhole = false;
-    let isTable = false;
-
     const h = line.match(/^(#{1,3})\s+(.*)$/);
     if (h) {
       type = h[1].length === 1 ? 'HEADING_1' : h[1].length === 2 ? 'HEADING_2' : 'HEADING_3';
       line = h[2];
     } else if (/^\s*[-*+]\s+/.test(line)) {
-      bullet = 'BULLET_DISC_CIRCLE_SQUARE';
-      line = line.replace(/^\s*[-*+]\s+/, '');
+      bullet = 'BULLET_DISC_CIRCLE_SQUARE'; line = line.replace(/^\s*[-*+]\s+/, '');
     } else if (/^\s*\d+[.)]\s+/.test(line)) {
-      bullet = 'NUMBERED_DECIMAL_ALPHA_ROMAN';
-      line = line.replace(/^\s*\d+[.)]\s+/, '');
-    } else if (/^\s*\|.*\|\s*$/.test(line)) {
-      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) { prevTable = true; continue; } // skip |---| rule
-      isTable = true;
-      const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
-      line = cells.join('   ·   ');
-      if (!prevTable) boldWhole = true; // first row of a table block = header
+      bullet = 'NUMBERED_DECIMAL_ALPHA_ROMAN'; line = line.replace(/^\s*\d+[.)]\s+/, '');
     }
-    prevTable = isTable;
-
     const lineStart = cursor;
     const stripped = parseBold(line, lineStart);
-    if (boldWhole && stripped.length) boldRanges.push({ start: lineStart, end: lineStart + stripped.length });
     const piece = `${stripped}\n`;
-    text += piece;
-    cursor += piece.length;
+    text += piece; cursor += piece.length;
     const lineEnd = cursor;
-
     if (type) paraStyles.push({ start: lineStart, end: lineEnd, type });
     if (bullet) bulletRanges.push({ start: lineStart, end: lineEnd, preset: bullet });
   }
-
-  if (!text.trim()) return [];
-  const requests = [{ insertText: { location: { index: 1 }, text } }];
-  for (const p of paraStyles) {
-    requests.push({ updateParagraphStyle: {
-      range: { startIndex: p.start, endIndex: p.end },
-      paragraphStyle: { namedStyleType: p.type },
-      fields: 'namedStyleType',
-    } });
-  }
-  for (const b of bulletRanges) {
-    requests.push({ createParagraphBullets: {
-      range: { startIndex: b.start, endIndex: b.end },
-      bulletPreset: b.preset,
-    } });
-  }
-  for (const r of boldRanges) {
-    if (r.end > r.start) requests.push({ updateTextStyle: {
-      range: { startIndex: r.start, endIndex: r.end },
-      textStyle: { bold: true }, fields: 'bold',
-    } });
-  }
+  if (!text) return [];
+  const requests = [{ insertText: { location: { index: start }, text } }];
+  for (const p of paraStyles) requests.push({ updateParagraphStyle: {
+    range: { startIndex: p.start, endIndex: p.end }, paragraphStyle: { namedStyleType: p.type }, fields: 'namedStyleType' } });
+  for (const b of bulletRanges) requests.push({ createParagraphBullets: {
+    range: { startIndex: b.start, endIndex: b.end }, bulletPreset: b.preset } });
+  for (const r of boldRanges) if (r.end > r.start) requests.push({ updateTextStyle: {
+    range: { startIndex: r.start, endIndex: r.end }, textStyle: { bold: true }, fields: 'bold' } });
   return requests;
+}
+
+// Render a whole markdown doc, drawing native tables. Processes blocks in order,
+// always appending at the current end of the body. For tables: insertTable, then
+// re-fetch to read real cell indices and populate them (reverse-order inserts so
+// earlier cells' indices stay valid), then bold the header row.
+async function renderMarkdownDoc(token, id, content) {
+  const blocks = _parseBlocks(content);
+  for (const b of blocks) {
+    const doc = await _docsGet(token, id);
+    const at = Math.max(_bodyEnd(doc) - 1, 1);
+    if (b.kind === 'text') {
+      await _docsBatch(token, id, _textRequests(b.lines, at));
+      continue;
+    }
+    // native table
+    const nRows = b.rows.length;
+    const nCols = Math.max(...b.rows.map(r => r.length), 1);
+    if (nRows < 1) continue;
+    await _docsBatch(token, id, [{ insertTable: { rows: nRows, columns: nCols, location: { index: at } } }]);
+    const doc2 = await _docsGet(token, id);
+    const el = (doc2.body?.content || []).find(e => e.table && e.startIndex >= at);
+    if (!el || !el.table) continue;
+    const inserts = [];
+    el.table.tableRows.forEach((row, r) => {
+      row.tableCells.forEach((cell, c) => {
+        const val = (b.rows[r] && b.rows[r][c] != null) ? String(b.rows[r][c]).replace(/\*\*/g, '') : '';
+        const idx = cell.content?.[0]?.startIndex;
+        if (val && idx != null) inserts.push({ index: idx, text: val });
+      });
+    });
+    inserts.sort((x, y) => y.index - x.index); // reverse → lower indices stay valid
+    await _docsBatch(token, id, inserts.map(i => ({ insertText: { location: { index: i.index }, text: i.text } })));
+    // bold the header row (re-fetch for accurate ranges after text inserts)
+    const doc3 = await _docsGet(token, id);
+    const el3 = (doc3.body?.content || []).find(e => e.table && e.startIndex >= at);
+    const headerCells = el3?.table?.tableRows?.[0]?.tableCells || [];
+    const boldReqs = [];
+    for (const cell of headerCells) {
+      const p = cell.content?.[0];
+      if (p?.startIndex != null && p?.endIndex != null && p.endIndex - 1 > p.startIndex) {
+        boldReqs.push({ updateTextStyle: {
+          range: { startIndex: p.startIndex, endIndex: p.endIndex - 1 },
+          textStyle: { bold: true }, fields: 'bold' } });
+      }
+    }
+    await _docsBatch(token, id, boldReqs);
+  }
 }
 
 // Tool registry. Each: provider (Nango key) + async run(token, args).
@@ -212,12 +256,7 @@ export const GOOGLE_TOOLS = {
         method: 'POST', body: JSON.stringify({ title: a.title || 'Untitled' }),
       });
       if (a.content) {
-        const requests = mdToDocsRequests(a.content);
-        if (requests.length) {
-          await g(`https://docs.googleapis.com/v1/documents/${doc.documentId}:batchUpdate`, token, {
-            method: 'POST', body: JSON.stringify({ requests }),
-          });
-        }
+        await renderMarkdownDoc(token, doc.documentId, String(a.content));
       }
       return { documentId: doc.documentId, title: doc.title, url: `https://docs.google.com/document/d/${doc.documentId}/edit` };
     },

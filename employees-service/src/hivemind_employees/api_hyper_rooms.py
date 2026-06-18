@@ -3829,6 +3829,29 @@ async def _verify_and_emit(
     return verdict
 
 
+# Dedicated doc-authoring guide injected into the LLM at production time — the
+# "rendering skill" for the agents (they're AgentScope LLMs, not Claude, so this
+# is the functional equivalent of a skill: a structured authoring contract). It
+# teaches the markdown the in-tool renderer understands + a quality bar, so the
+# produced Google Doc is well-structured and uses DRAWN tables where they help.
+_DOC_AUTHORING_GUIDE = (
+    "  • Open with '# <Title>' then a one-paragraph executive summary.\n"
+    "  • Use '## <Section>' for each major section, '### ' for sub-sections.\n"
+    "  • **Bold** key terms, names, figures, and decisions.\n"
+    "  • Use '- ' bullets for lists and '1. ' for ordered steps/timelines.\n"
+    "  • For ANY numeric, comparative, schedule, cost, or option data, USE A "
+    "TABLE — it is drawn as a real Google Docs table. Markdown table syntax:\n"
+    "        | Column A | Column B | Column C |\n"
+    "        |---|---|---|\n"
+    "        | val | val | val |\n"
+    "    (first row = header, then a '|---|' rule line, then data rows). Prefer a "
+    "table over prose whenever you'd otherwise list figures inline.\n"
+    "  • Be specific and grounded: real numbers/dates from recall, not placeholders. "
+    "If a figure is uncertain, give the range and add a short 'Gaps to confirm' section.\n"
+    "  • End with a concrete next-step checklist."
+)
+
+
 def _output_production_directive(turn_id: str) -> str:
     """The synthesis-time instruction that turns the agreed result into the real
     deliverable. Output tools are consensus-locked during the debate and only
@@ -3841,12 +3864,11 @@ def _output_production_directive(turn_id: str) -> str:
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
             "The team has reached consensus. Activate the google_docs group and call "
-            "docs_create(title, content) with the COMPLETE, high-quality document — full "
-            "sections with real substance grounded in recalled company facts, NOT a summary "
-            "or a description. Write `content` in MARKDOWN so it renders polished: '# Title', "
-            "'## Section' headings, **bold** for key terms, '- ' bullets, '1. ' numbered steps, "
-            "and '| col | col |' tables (with a '|---|' header rule) for costs/timelines. "
-            "The document IS the deliverable. It runs without approval."
+            "docs_create(title, content) with the COMPLETE document. `content` is MARKDOWN and "
+            "is rendered into a polished Google Doc (real headings, bold, lists, and DRAWN "
+            "tables), so author it well:\n" + _DOC_AUTHORING_GUIDE +
+            "\nThe document IS the deliverable — full substance grounded in recalled facts, not a "
+            "summary. It runs without approval."
         )
     if out == "sheet":
         return (

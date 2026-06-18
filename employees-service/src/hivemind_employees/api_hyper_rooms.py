@@ -3883,30 +3883,41 @@ async def _fetch_correspondence(req: "RoomTurnRequest", name: str, email: str) -
     """Pull a few prior emails involving a contact (by name/email) so the agents
     can MATCH the real voice/style/patterns and ground facts — instead of writing
     a generic template. Best-effort; returns [] if Gmail isn't connected."""
-    query = (name or email or "").strip()
-    if not query:
+    who = (name or email or "").strip()
+    if not who:
         return []
-    res = await google_exec_emulated(
-        "gmail_search", {"query": query, "max": 8}, user_id=req.user_id, org_id=req.org_id)
-    msgs = (res or {}).get("messages") or []
-    excerpts: List[Dict[str, Any]] = []
-    for m in msgs:
-        mid = m.get("id")
-        if not mid:
-            continue
-        full = await google_exec_emulated(
-            "gmail_get", {"id": mid}, user_id=req.user_id, org_id=req.org_id)
-        body = ((full or {}).get("body") or m.get("snippet") or "").strip()
-        if not body:
-            continue
-        excerpts.append({
-            "from": (full or {}).get("from") or m.get("from") or "",
-            "subject": (full or {}).get("subject") or m.get("subject") or "",
-            "body": body[:700],
-        })
-        if len(excerpts) >= 3:
+    # Pull the SENDER'S OWN past emails to this person — `from:me` is the user's
+    # authentic voice — and EXCLUDE drafts/trash so we don't echo the room's own
+    # AI-generated drafts (the "verify its own draft" bug). Fall back to a plain
+    # search only if there's no sent history.
+    out: List[Dict[str, Any]] = []
+    for q in (f"from:me {who} -in:drafts -in:trash", f"{who} -in:drafts -in:trash"):
+        res = await google_exec_emulated(
+            "gmail_search", {"query": q, "max": 10}, user_id=req.user_id, org_id=req.org_id)
+        msgs = (res or {}).get("messages") or []
+        excerpts: List[Dict[str, Any]] = []
+        for m in msgs:
+            mid = m.get("id")
+            if not mid:
+                continue
+            full = await google_exec_emulated(
+                "gmail_get", {"id": mid}, user_id=req.user_id, org_id=req.org_id)
+            body = ((full or {}).get("body") or m.get("snippet") or "").strip()
+            subject = (full or {}).get("subject") or m.get("subject") or ""
+            # Skip the room's own AI drafts that may already sit in the mailbox.
+            if not body or any(p in subject.lower() for p in ("a quiet love", "you light up my world")):
+                continue
+            excerpts.append({
+                "from": (full or {}).get("from") or m.get("from") or "",
+                "subject": subject,
+                "body": body[:700],
+            })
+            if len(excerpts) >= 3:
+                break
+        if excerpts:
+            out = excerpts
             break
-    return excerpts
+    return out
 
 
 async def _resolve_recipients(req: "RoomTurnRequest") -> List[Dict[str, Any]]:

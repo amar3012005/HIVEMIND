@@ -3795,6 +3795,7 @@ async def _verify_turn(
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
         "assignments": list((plan.get("assignments") or {}).keys()),
+        "assignments_executed": [c.get("owner") for c in (plan.get("execution") or [])],
         "tools_used": {str(k): int(v) for k, v in (tool_call_counts or {}).items()},
         "writes_pending_approval": [p.get("label") for p in pending],
         "produced_artifacts": produced,
@@ -3835,6 +3836,9 @@ async def _verify_turn(
         "or INVENTED facts (names, roles, commitments, numbers not backed by memory/tools), or that "
         "omits required content, is NOT done — set met=false and list the offending claim(s) in gaps "
         "so it is reworked BEFORE the user approves it. Do not pass a known-flawed draft.\n"
+        "- assignments_ok=true when assignments_executed covers the assigned owners (each ran their "
+        "slice in the EXECUTE phase this turn) AND the final text reflects that work. Do NOT require "
+        "more than the plan assigned.\n"
         "- grounded_ok=false if the result asserts specific facts with memory_hits=0 and no tools "
         "used, or invents a person/role/commitment that the gathered evidence does not support. "
         "If nothing is missing, gaps must be []. Output JSON only."
@@ -4209,6 +4213,102 @@ async def _recon_pre(req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: st
     return verdict
 
 
+# Cap on how many assigned owners actually execute their slice in the EXECUTE
+# phase (cost/latency bound — one LLM call each, sequential for handoff).
+_EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "5"))
+
+
+async def _execute_assignments(
+    req: "RoomTurnRequest", plan: Dict[str, Any],
+    participants: List[Dict[str, Any]],
+) -> None:
+    """EXECUTE phase — make the plan REAL, irrespective of room type. Walk the
+    lead's per-owner assignments and have EACH owner agent (in persona) actually
+    DO their slice — grounded in the gathered evidence and BUILDING ON the prior
+    owners' contributions (sequential handoff = the deep, phased interaction the
+    flat single-pass synthesis never produced). Stashes plan['execution'] and
+    emits one `execute` event per owner so the FE shows the phases. Tool-less +
+    single-shot per owner (reliable, no fake-JSON-tool-call quirk); the team's
+    debate/swarm template then challenges and integrates this real work, instead
+    of the lead writing a solo plan that seals in one round.
+
+    This runs for ANY template (debate / swarm / deep_sim) — it executes BEFORE
+    the template, so all of them synthesize over genuine per-owner output."""
+    assignments = plan.get("assignments") or {}
+    if not assignments:
+        return
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for p in participants:
+        for k in (p.get("slug"), p.get("name")):
+            if k:
+                by_name[str(k)] = p
+    try:
+        boot = {b["id"]: b for b in await fetch_bootstrap()}
+    except Exception:  # noqa: BLE001
+        boot = {}
+    out = plan.get("intended_output")
+    hits = plan.get("connector_hits") or []
+    corr = plan.get("correspondence") or []
+    ev_parts: List[str] = []
+    if hits:
+        ev_parts.append("Gathered files:\n" + "\n".join(
+            f"  - [{h.get('kind','file')}] {h.get('title')} — {h.get('url')}" for h in hits[:6]))
+    if corr:
+        ev_parts.append(f"{len(corr)} prior emails were fetched (voice/facts evidence).")
+    ev_block = "\n".join(ev_parts) or "(broad recall + connectors were already swept this turn — reason over them.)"
+    contributions: List[Dict[str, Any]] = []
+    for owner, subtask in list(assignments.items())[:_EXECUTE_MAX_OWNERS]:
+        emp = by_name.get(str(owner))
+        if not emp:
+            continue
+        boot_emp = boot.get(emp.get("id"), {}) or {}
+        prior = ("\n\n".join(f"{c['owner']} — {c['subtask']}:\n{c['contribution']}"
+                             for c in contributions) or "(you are first — set the foundation.)")
+        prompt = (
+            f"Room goal: {req.room_goal or '(none)'}\n"
+            f"User request: {req.user_message}\n"
+            f"Target output for the team: {out}\n\n"
+            f"GATHERED EVIDENCE (reason over it; do not claim it is missing):\n{ev_block}\n\n"
+            f"TEAMMATES' WORK SO FAR (build ON it, don't repeat it):\n{prior}\n\n"
+            f"YOUR ASSIGNED PART: {subtask}\n"
+            "Do your part NOW, in your own voice. Deliver your concrete contribution — real "
+            "findings, numbers, a drafted section, or a decision for your slice — in 4–8 "
+            "sentences. Ground every specific in the evidence or your recall; if something is "
+            "genuinely unknown, say so plainly rather than inventing it. Reply as prose (no JSON)."
+        )
+        exec_emp = {
+            **emp,
+            "tools": ["_exec_noop"],   # truthy → empty toolkit (no fake JSON tool-call 400s)
+            "connectors": [],
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "max_iters": 1,
+        }
+        try:
+            agent = build_react_agent(
+                exec_emp, boot_emp.get("api_key") or "",
+                user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+            )
+            reply = await agent(Msg(name="user", content=prompt, role="user"))
+            text = (_msg_to_text(reply) or "").strip()
+        except Exception as exc:  # noqa: BLE001 — never fail a turn over execution
+            log.warning("[execute] owner=%s failed: %s", owner, exc)
+            continue
+        if not text:
+            continue
+        contributions.append({"owner": str(owner), "subtask": str(subtask)[:300],
+                              "contribution": text[:1200]})
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "execute",
+            "owner": emp.get("slug") or str(owner),
+            "name": emp.get("name") or str(owner),
+            "subtask": str(subtask)[:300],
+            "contribution": text[:700],
+        })
+    plan["execution"] = contributions
+    log.info("[execute] room=%s owners=%d", req.room_id, len(contributions))
+
+
 async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
     """Extract recipient names from the turn and resolve each to a REAL email via
     the org directory (which also checks Gmail). Returns [{name, email, source}].
@@ -4544,6 +4644,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _recon_pre(req, _plan, _clean_user_request)
         except Exception as exc:  # noqa: BLE001
             log.warning("[recon-pre] failed: %s", exc)
+        # ── EXECUTE phase ── make the plan REAL for ANY room type: each assigned
+        # owner does their slice in persona, building on the prior owners (phased,
+        # deep interaction) BEFORE the template runs. Without this the lead writes
+        # a solo plan and the turn seals in one pass; with it the debate/swarm
+        # integrates genuine per-owner work.
+        try:
+            await _execute_assignments(req, _plan, participants)
+        except Exception as exc:  # noqa: BLE001 — never fail a turn over execution
+            log.warning("[execute] failed: %s", exc)
         # Phase 3 — drive execution from the plan. The lead's plan is folded
         # into the turn input so every template (debate/swarm/deep_sim) and
         # every agent acts on it: target output, done-criterion, ordered steps,
@@ -4577,6 +4686,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "GATHERED EVIDENCE (already pulled this turn — reason OVER it; do not ask for it "
             "again or object that it is missing):\n" + "\n".join(_evidence_lines)
         ) if _evidence_lines else ""
+        # EXECUTED WORK — each owner already did their slice (EXECUTE phase). Fold
+        # it into the shared context so the team integrates/challenges REAL output
+        # instead of re-deriving a plan from scratch and sealing in one pass.
+        _exec = _plan.get("execution") or []
+        _exec_block = ""
+        if _exec:
+            _exec_block = (
+                "WORK ALREADY DONE THIS TURN (each owner executed their assigned part — "
+                "integrate, cross-check, and challenge the SUBSTANCE; build the final output "
+                "ON this, do not restate the plan):\n"
+                + "\n".join(f"  ▸ {c['owner']} — {c['subtask']}:\n    {c['contribution']}" for c in _exec)
+            )
         _preamble_parts = [
             f"[TEAM PLAN — set by {lead.get('name') or lead.get('slug')}]",
             f"Target output: {_plan['intended_output']}.",
@@ -4585,6 +4706,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             (f"Assignments:\n{_assign_lines}" if _assign_lines else ""),
             _hits_line,
             _evidence_block,
+            _exec_block,
             (
                 "Each of you: do YOUR assigned part using your tools (activate the "
                 "connector group first if needed), build on each other with healthy "

@@ -17,6 +17,17 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Agentic orchestrator on gpt-oss-120b + JSON plan — flag OFF (produce gap)
+- **commits:** `cc52f40d` (flag `HYPER_AGENTIC_ORCHESTRATOR` default OFF; `HYPER_AGENTIC_MODEL` default `openai/gpt-oss-120b`)
+- **what:** `_route_groq` respects explicit `openai/gpt-oss-*` (no force-downgrade); agentic agents run 120b. Lead plan via JSON CONTENT + `_first_json_object` (NOT AgentScope `structured_model` — on Groq gpt-oss emits plan as content not a `generate_response` tool call → 400 "did not call a tool"). Lead declares `intended_output`.
+- **verified (flag forced on, 120b):** lead classifies `out=doc/answer/email` correctly, decomposes into subtasks, owners execute with tools, grounds to REAL facts (Münzer, Beladeweiche features), `grounded_ok=true`, no fabrication. The plan/decompose/execute/ground chain WORKS on 120b.
+- **REMAINING (the produce last-mile — flag stays OFF, next focused block):**
+  1. **Connector-exec 400**: owners call `docs_create` but `POST /api/connectors/google/exec` returns 400 (placeholder/malformed args from the owner; the deterministic path works because `_produce_output` gets clean synth content). Need clean payload + content.
+  2. **Agent narrates, doesn't call**: owners write "docs_create title=… (placeholder)" instead of invoking the tool with the REAL recalled content; `tools_used empty`. Need the producing-owner to actually invoke its connector tool with real content + capture the artifact URL.
+  3. **Persistence**: loop until functionally done (artifact produced), not one pass.
+- **gotchas:** AgentScope `structured_model` is INCOMPATIBLE with Groq gpt-oss (forces a tool call the model won't emit → 400). Use JSON-content + parse, or Groq-native `response_format` strict (bypasses AgentScope). gpt-oss-20b can't do nested tool schemas; 120b can but the produce path still needs clean tool-arg payloads.
+- **scorecard:** recon ✓✓ (AgentScope API + Groq structured-output docs). Multiple smoke iterations on the box isolated the real blockers (20b ceiling → 120b; structured_model 400 → JSON content; produce → connector-exec 400). Honest checkpoint: prod stays on the verified deterministic path; agentic reaches ground-truth-grounded plan+execute but not artifact-produce. The produce block is the next session's work.
+
 ## 2026-06-19 — Agentic orchestrator P1 (structured flat plan + MsgHub) — flag OFF
 - **commits:** scaffold `ffee9849`, working `77004cd8` (flag `HYPER_AGENTIC_ORCHESTRATOR`, default OFF)
 - **what:** New `_orchestrate_agentic`: lead decomposes the task via STRUCTURED OUTPUT (`_AgenticPlan` = goal/done_criterion/subtasks:list[str], one forced generate_response) → owners each execute their 'Owner — task' with single-arg tools (recall + connectors) in a MsgHub → lead synthesizes → reuse grounding gate + verify + produce + seal. `build_react_agent` gained optional `plan_notebook` (+ activates the gated `plan_related` group). `_agent_reply_resilient` retries the harmony tool-name leak.

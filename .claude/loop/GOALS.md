@@ -19,10 +19,9 @@ purple/violet, no dark surfaces, near-zero shadow).
 
 ### Shipping-blocker bugs (fix first)
 - [ ] **Memories.jsx** — remove the duplicate data-fetch layer (parent `Memories()` ~911-1147 re-runs listMemories+quickSearch the child already does → double network requests every filter change); fix off-token low-contrast badges (181-184, 280: `text-*-400/70` → 600/700); drop redundant page bg/padding (1152 `min-h-screen bg-[#faf9f4]`); guard `Invalid Date` (2304,2462); fix `contradictions` tab link (1262) or remove.
-- [ ] **HyperAgents.jsx** — fix malformed Tailwind `rounded-none-[24px]` (2841) + `rounded-none-[20px]` (3116) → real radii (modals render 0px corners now). Confirm sharp-corner intent vs design.
-- [ ] **DigitalEmployees.jsx** — guard `employee.model.split` crash (450 → `(employee.model||'').split`); guard `renderInline` link match (1561); cap/stop the 2.5s transcript poll (545-569); flatten dark code-block surface (1575,1588) + blue gradient canvas (820).
-- [ ] **Settings.jsx** — owner locked out of Project Access Policy (331 gate `=== 'admin'` → also `'owner'`); surface save/revoke errors (162-179 silent `catch{}`); fix dead docs domain `docs.hivemind.dev` → canonical (504,513).
-- [ ] **Billing.jsx** — wrong "Graph Queries" limit (540 uses `searches`); annual toggle mischarges (cosmetic −20% but checkout sends monthly — wire `billingCycle` or remove); alert()+console → inline errors (419-432); numeric price in PLANS not `parseInt(replace('€'))`.
+- [~] **DigitalEmployees.jsx** — ✅ crash guard `(employee.model||'').split` (450, shipped 85f4f98). REMAINING: guard `renderInline` link match (1561); cap/stop the 2.5s transcript poll (545-569); flatten dark code-block surface (1575,1588) + blue gradient canvas (820).
+- [~] **Settings.jsx** — ✅ owner role-gate fixed (331, shipped 85f4f98). REMAINING: surface save/revoke errors (162-179 silent `catch{}`); fix dead docs domain `docs.hivemind.dev` → canonical (504,513).
+- [!] **Billing.jsx** — NEEDS USER DECISION: "Graph Queries" meter (540) uses the `searches` limit because no `graphQueries` quota exists in the PLANS data — what's the per-plan graph-query quota (or drop the meter)? Also: annual toggle is cosmetic (−20% label but checkout charges monthly) — wire `billingCycle` into `createBillingCheckout` or remove the toggle? Once decided: also replace alert()+console with inline errors (419-432) + numeric price in PLANS.
 - [ ] **WebIntelligence.jsx** — i18n renders `[object Object]` (908: JSX passed as interpolation value → plain string); align radii `rounded-xl`→`[10px]` + H1 recipe; surface silent save errors (248-313); a11y label/htmlFor on crawl inputs.
 
 ### Theme hard-rule violations (purple/violet/off-shell)
@@ -42,4 +41,5 @@ purple/violet, no dark surfaces, near-zero shadow).
 - [ ] **MemoryGraph.jsx** — remove the permanently-dead `{false && (...)}` temporal panel + its orphaned rAF/state (947-999, 1517-1664) OR re-enable it; remove eslint-disabled unused imports (14-21).
 
 ## Done (archive — newest first)
+- [x] **HyperAgents.jsx** — malformed Tailwind `rounded-none-[24px]`/`-[20px]` → `rounded-none` (sharp, matches the 41 sibling popup classes). Da-vinci `85f4f98`, CI build clean.
 <!-- the agent moves [x] goals here with their commit sha -->

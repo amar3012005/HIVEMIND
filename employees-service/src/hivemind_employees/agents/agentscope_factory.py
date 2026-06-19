@@ -225,7 +225,12 @@ def _resolve_openai_compatible_target(
         fallback_default = "openai/gpt-oss-20b"
     else:
         fallback_default = env_default
-    if provider != "groq" or "/" in model:
+    if "/" in model and model.lower().startswith("openai/gpt-oss"):
+        # Respect an explicitly-requested gpt-oss model (20b OR 120b). 120b is
+        # far stronger at nested tool schemas + structured output — used by the
+        # agentic orchestrator. Do NOT downgrade it to the fallback.
+        groq_model = model
+    elif provider != "groq" or "/" in model:
         groq_model = fallback_default
     elif "llama-3" in model.lower() or "llama3" in model.lower():
         log.info("Swapping Groq tool-unreliable model %s -> %s", model, fallback_default)

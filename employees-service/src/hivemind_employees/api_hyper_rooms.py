@@ -4552,10 +4552,15 @@ async def _orchestrate_agentic(
     conns = [str(c) for c in (enabled_connectors or [])]
     boot = {b["id"]: b for b in await fetch_bootstrap()}
 
+    # gpt-oss-120b drives nested tool schemas + structured output far more
+    # reliably than 20b (the 400s/harmony leaks were a 20b-capability ceiling).
+    _agentic_model = os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
+
     def _mk(emp: Dict[str, Any], iters: int) -> ReActAgent:
         be = boot.get(emp.get("id"), {}) or {}
         merged = {
             **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": conns,
+            "llm_provider": "groq", "model": _agentic_model,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
             "max_iters": iters,
         }
@@ -4565,36 +4570,41 @@ async def _orchestrate_agentic(
 
     roster = ", ".join(f"{p.get('name') or p.get('slug')}" for p in participants)
 
-    # 1. LEAD decomposes via STRUCTURED OUTPUT — a FLAT plan (list[str]) in ONE
-    #    forced generate_response. gpt-oss handles this reliably; the nested
-    #    PlanNotebook create_plan tool is beyond it. We build/drive the plan in
-    #    Python. The DECOMPOSITION is still the model's (agent-driven, not coded).
+    # 1. LEAD decomposes — asks for JSON, we parse it. gpt-oss on Groq emits the
+    #    plan as clean JSON CONTENT (not a tool call), so AgentScope's
+    #    structured_model (which forces a generate_response tool) 400s with "did
+    #    not call a tool". The deterministic _plan_turn already uses this
+    #    JSON-content + _first_json_object pattern reliably on Groq — mirror it.
+    #    The DECOMPOSITION + output-type are the model's (agent-driven).
     lead_agent = _mk(lead, 8)
     plan_prompt = (
         f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
         f"USER TASK: {req.user_message}\n\n"
-        "Decompose into 2–5 concrete subtasks. Each MUST start with the owning teammate then "
-        "' — ' then a tool-doable action, e.g. 'Lina Park — recall the recipient email from "
-        "HIVEMIND'. Assign only real teammates from the team. Return goal, done_criterion, and "
-        "the subtasks list."
+        "Reply with STRICT JSON only (no prose, no markdown):\n"
+        '{\n'
+        '  "intended_output": one of ["doc","sheet","email","answer"],\n'
+        '  "done_criterion": "<one sentence: how we know it is fully, functionally done>",\n'
+        '  "subtasks": ["<Owner Name — concrete tool-doable action>", ...]\n'
+        '}\n'
+        "2–5 subtasks; each starts with a real teammate then ' — ' then an action doable with "
+        "tools (recall HIVEMIND, search Gmail/Docs). Pick intended_output from the user's intent: "
+        "'create/write a doc/report'→doc, 'tracker/table'→sheet, 'email/send to X'→email, a "
+        "question→answer."
     )
-    subtasks_raw: List[str] = []
-    done_txt = ""
-    try:
-        pr = await lead_agent.reply(
-            Msg(name="user", content=plan_prompt, role="user"), structured_model=_AgenticPlan)
-        cost_tokens += max(80, len(_msg_to_text(pr) or "") // 4)
-        meta = getattr(pr, "metadata", None) or {}
-        subtasks_raw = [str(s) for s in (meta.get("subtasks") or []) if str(s).strip()][:_EXECUTE_MAX_OWNERS]
-        done_txt = str(meta.get("done_criterion") or "")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[agentic] structured plan failed: %s", exc)
+    plan_text = await _agent_reply_resilient(lead_agent, plan_prompt)
+    cost_tokens += max(80, len(plan_text) // 4)
+    plan_obj = _first_json_object(plan_text) or {}
+    subtasks_raw = [str(s) for s in (plan_obj.get("subtasks") or []) if str(s).strip()][:_EXECUTE_MAX_OWNERS]
+    done_txt = str(plan_obj.get("done_criterion") or "")
+    intended_output = str(plan_obj.get("intended_output") or "answer").strip().lower()
+    if intended_output not in ("doc", "sheet", "email", "answer"):
+        intended_output = "answer"
     await _emit_event(req.callback_url, req.turn_id, {
-        "t": "plan", "agent": lead.get("slug"), "intended_output": "agentic",
+        "t": "plan", "agent": lead.get("slug"), "intended_output": intended_output,
         "done_criterion": done_txt, "steps": subtasks_raw,
         "assignments": {s: s for s in subtasks_raw},
     })
-    log.info("[agentic] plan room=%s subtasks=%d", req.room_id, len(subtasks_raw))
+    log.info("[agentic] plan room=%s out=%s subtasks=%d", req.room_id, intended_output, len(subtasks_raw))
 
     def _owner_for(line: str, idx: int) -> Dict[str, Any]:
         low = (line or "").lower()
@@ -4659,7 +4669,7 @@ async def _orchestrate_agentic(
 
     # 4. GROUNDING GATE + VERIFY (reuse). Stash a minimal plan for the verifier.
     _PLAN_BY_TURN[req.turn_id] = {
-        "intended_output": "answer", "done_criterion": done_txt or req.user_message,
+        "intended_output": intended_output, "done_criterion": done_txt or req.user_message,
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
         "verified_contacts": [],

@@ -3950,13 +3950,20 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
         elif out == "email":
             contacts = plan.get("verified_contacts") or []
             to = (contacts[0].get("email") if contacts else "") or ""
+            # Agent-driven recipient: an owner may have RECALLED the contact from
+            # HIVEMIND (a past email/doc/note) during EXECUTE — prefer that grounded
+            # address over the deterministic org/Gmail resolver. Scan the executed
+            # work + the synthesis for a real email.
             if not to:
-                for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", body):
-                    if "noreply" not in addr.lower() and "no-reply" not in addr.lower():
-                        to = addr
-                        break
+                _pool = " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + body
+                for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _pool):
+                    low = addr.lower()
+                    if "noreply" in low or "no-reply" in low or "example." in low:
+                        continue
+                    to = addr
+                    break
             if not to:
-                log.info("[produce] email skipped — no verified recipient")
+                log.info("[produce] email skipped — no recipient (org/Gmail + HIVEMIND recall all empty)")
                 return
             subject = _derive_title(plan, body, req.room_goal or "A message")
             email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
@@ -4289,6 +4296,11 @@ async def _execute_assignments(
             "memory-recall tool for any fact/number/name/spec, and your connector tools "
             "(Gmail / Docs / Sheets search) for documents or addresses. Call the tools by the "
             "exact names in your tool list. Work toward your slice until you have a grounded result.\n"
+            "If your part needs a PERSON — a recipient, a CEO, a stakeholder, their email or "
+            "identity — RECALL HIVEMIND for them BY NAME first (the contact may live in a past "
+            "email, a doc, or a note). Search memory before ever concluding it's unavailable; only "
+            "say a contact is missing AFTER recall genuinely returns nothing. When you find a real "
+            "email/contact, state it explicitly so the team can use it.\n"
             "STRICT GROUNDING — this is enforced downstream:\n"
             "  • Every specific claim (number, spec, name, date, email, citation) MUST come "
             "from a recall hit or a tool result. After each, cite it inline like "
@@ -4320,8 +4332,27 @@ async def _execute_assignments(
             reply = await agent(Msg(name="user", content=prompt, role="user"))
             text = (_msg_to_text(reply) or "").strip()
         except Exception as exc:  # noqa: BLE001 — never fail a turn over execution
-            log.warning("[execute] owner=%s failed: %s", owner, exc)
-            continue
+            # gpt-oss intermittently leaks the harmony channel marker into the tool
+            # NAME (`recall<|channel|>commentary`) → Groq 400 tool_use_failed. It's
+            # flaky, so ONE retry with an explicit name-discipline hint usually
+            # recovers (and the agent's memory carries its progress so far).
+            es = str(exc)
+            if "tool_use_failed" in es or "not in request.tools" in es or "tool call validation" in es.lower():
+                try:
+                    reply = await agent(Msg(
+                        name="user",
+                        content=("Your last tool call was malformed — the tool NAME contained extra "
+                                 "characters. Call tools using ONLY their exact registered name "
+                                 "(e.g. `recall`, `org_directory`) with no suffix, channel marker, "
+                                 "or '<|...|>'. Retry and finish your assigned part."),
+                        role="user"))
+                    text = (_msg_to_text(reply) or "").strip()
+                except Exception as exc2:  # noqa: BLE001
+                    log.warning("[execute] owner=%s failed after retry: %s", owner, exc2)
+                    continue
+            else:
+                log.warning("[execute] owner=%s failed: %s", owner, exc)
+                continue
         if not text:
             continue
         contributions.append({"owner": str(owner), "subtask": str(subtask)[:300],

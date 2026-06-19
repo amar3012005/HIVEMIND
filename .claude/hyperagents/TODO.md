@@ -27,4 +27,5 @@ When all phases ship → move a summary line to [JOURNAL.md](./JOURNAL.md) and c
 ## Backlog (known next increments)
 - [ ] MCP-connector search in GATHER (Notion/Slack/GitHub) — only when a room enables an MCP connector.
 - [ ] Verifier strictness on LLM-authored `done_criterion` (it sometimes demands sections the user didn't ask for → met=false partial). Consider grounding done_criterion to the user's actual ask.
-- [ ] Per-owner EXECUTE could optionally allow tool use (recall/connectors) for owners whose slice needs fresh data — currently tool-less for reliability.
+- [ ] Extend the GROUNDING GATE (save+seal block) to the swarm + deep_sim paths — it's currently in the debate path + the goalkeeper (all templates loop on grounded_ok, but swarm's own save isn't gated). Debate covers the transcript cases; swarm save-gate is the residual.
+- [x] ~~Per-owner EXECUTE tool use~~ — DONE (30d03725): owners now run real tools (recall+connectors) in a bounded ReAct loop.

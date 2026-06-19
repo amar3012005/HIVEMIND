@@ -109,6 +109,9 @@ JSON'"
 - **Answer/decision outputs have no artifact** — the synthesis text IS the deliverable; verifier must not demand a doc/email for them.
 - **Don't `synthesize-now` on a real org's KB** (destructive drift-compaction).
 - Email is NEVER "sent" in-turn — draft + approval card; never claim sent.
+- **Agents fabricate when tool-less. Tool-GROUND them.** Owners with `tools:["_exec_noop"]`/max_iters=1 invent specs, CEOs, citations, addresses with fake precision. Give them real tools (recall + connectors) + a bounded ReAct loop so they actually query. Pair with the GROUNDING GATE: `grounded_ok=false` → not saved (would poison recall), not RESOLVED. A confident claim with a fake source is the bug; an honest `UNVERIFIED` is fine.
+- **Tool NAME ≠ gate key.** The registered recall tool is `recall` (the function name); `"hivemind_recall"` is only the `enabled_tool_names` gate key. NEVER hardcode a tool name in a prompt — say "use your recall/connector tools" — or Groq returns 400 `tool_use_failed: not in request.tools`.
+- **Editing vs git cwd gotcha.** Edit/Read target `/Users/amar/HIVE-MIND/...` = the MAIN worktree (branch `main`, the live code). Bash `git` defaults to the `.claude/worktrees/suspicious-goldstine-65eaca` worktree (a STALE `claude/hermes-phase-6h` checkout, ~2700-line api_hyper_rooms.py). So commit code with `git -C /Users/amar/HIVE-MIND ...` and `grep` the file before trusting any `git diff` (a huge deletion diff = you're diffing the wrong worktree, not a real change).
 
 ## Key IDs (test org — leonardo@bundb.de)
 

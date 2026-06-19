@@ -17,6 +17,15 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Tool-grounded execution + hard grounding gate (stop fabrication)
+- **commits:** `30d03725`
+- **what:** EXECUTE owners now run real tools (recall + connectors) in a bounded ReAct loop and ground every claim; a GROUNDING GATE verifies BEFORE save/seal so `grounded_ok=false` → not saved, not RESOLVED, UNVERIFIED banner.
+- **why:** Solvis transcripts fabricated CEO "Markus Schröder", fake specs w/ invented Confluence citations, fake doc link + email — all sealed RESOLVED. Tool-less owners (max_iters=1) narrated from imagination; grounding was advisory.
+- **files:** `api_hyper_rooms.py` (`_execute_assignments` tool-enabled, `_orchestrate` grounding gate + tool_call_counts moved before gate, `_verify_turn` fabrication-tell rules).
+- **verified:** JEE room — "who is CEO of solvis" now grounds to REAL MDs Münzer/Kube (not fabricated Schröder), grounded_ok=true; ungroundable spec request stays honest (grounded_ok, no fake specs, not RESOLVED); clean recall, no tool-call 400s. cost 249–760/turn.
+- **gotchas:** Registered recall tool name is `recall`, NOT `hivemind_recall` (that's only the `enabled_tool_names` gate key) — NEVER hardcode tool names in a prompt or you get Groq 400 `tool_use_failed`. Grounding gate is in the DEBATE path + the goalkeeper (all templates loop on grounded_ok); swarm/deep_sim save-gate still TODO.
+- **scorecard:** recon-held ✓ (ground-truthed the tool-less bug myself; AgentScope research accurate). feature-recon ✓ (extended, didn't rebuild). verify NOT first-try — 2 bugs caught on box (tool_call_counts NameError from moving verify above its def; hardcoded `hivemind_recall`→400), 2 fix rounds. Wasted: a branch-confusion scare (Bash git defaults to the stale suspicious-goldstine worktree; my Edits target the main worktree) — no wrong action, caught pre-commit. → harness changes proposed: 2 new CONTEXT gotchas (below).
+
 ## 2026-06-19 — EXECUTE phase (owners do their slices in phases, any room type)
 - **commits:** `a1e3c6bd`, pointer `f565d04d` (+ Da-vinci `8a5492f`)
 - **what:** New `_execute_assignments` runs after RECON-PRE, before the template dispatch (so it applies to debate/swarm/deep_sim). Each assigned owner agent does their slice in persona with sequential handoff; executed work folds into the shared preamble; FE renders each as a phase.

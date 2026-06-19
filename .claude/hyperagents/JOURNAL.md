@@ -17,6 +17,13 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Agentic orchestrator DEFAULT-ON: guaranteed gather + intent guard
+- **commits:** `08c56fc4` (flag now DEFAULT-ON; `HYPER_AGENTIC_ORCHESTRATOR=off` disables)
+- **what:** (1) Guaranteed recall GATHER up front, injected into lead/owners/synth context → fixes CEO-not-found recall variance. (2) Conservative intent guard: planning/strategy → answer (don't over-classify to doc/email needing OAuth). (3) Flipped flag default-on — the agentic swarm loop is now the live room behavior.
+- **verified:** 'who is CEO of solvis' → met=True grounded=True BOTH runs ("Gabriele Münzer, evidence support"). Answer/decision/planning work end-to-end, grounded, no fabrication. Health 200.
+- **live behavior:** gather → decompose (lead JSON plan) → per-owner tool-grounded execution (recall, MsgHub) → synthesize → produce → verify → persist (goalkeeper).
+- **known constraints (honest):** agentic is slower/costlier than the deterministic path (multi-agent, gpt-oss-120b); doc/email ARTIFACTS still 403 until the org re-authorizes Google with Docs/gmail.compose scopes (surfaced as "re-authorize", not fabricated); FE renders plan/execute/verify via existing handlers (no bespoke subtask widget yet). To revert instantly: set `HYPER_AGENTIC_ORCHESTRATOR=off`.
+
 ## 2026-06-19 — ROOT CAUSE of the produce gap: Google OAuth read-only (not the orchestrator)
 - **commits:** `b78e9848`
 - **finding:** The doc/email artifact never produced because this org's Google connector is authorized READ-ONLY. Direct bridge call `docs_create` → `Google API 403: "Request had insufficient authentication scopes" PERMISSION_DENIED`. NOT an orchestrator bug — the agentic loop calls docs_create correctly; Google rejects the write.

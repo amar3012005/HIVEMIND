@@ -167,6 +167,11 @@ def _record_artifact(connector: str, url: str, title: str = "", label: str = "")
         _OUTPUT_UNLOCKED.set(False)
 
 
+def record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+    """Public: orchestrator records a produced doc/sheet artifact (→ connector_logo)."""
+    _record_artifact(connector, url, title=title, label=label)
+
+
 def _artifact_url(payload: object) -> str:
     """Pull a doc/sheet URL out of a bridge ToolResponse's underlying json."""
     if not isinstance(payload, dict):

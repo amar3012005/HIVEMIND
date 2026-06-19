@@ -52,7 +52,7 @@ from .agents.agentscope_tools import (
     drain_pending_writes,
     execute_pending_write,
     queue_email_approval,
-    unlock_output,
+    record_artifact,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
@@ -2306,7 +2306,6 @@ async def _orchestrate_deep_sim(
         "Write 5-8 concise bullets: decision, why, objections addressed, what to watch, next irreversible choice. "
         "Do not soften strong POVs; preserve dissent where unresolved."
     )
-    unlock_output()  # consensus reached → the synthesis may now produce the deliverable
     conclusion_prompt = conclusion_prompt + _output_production_directive(req.turn_id)
     final_reply = await lead_agent(Msg(name="user", content=conclusion_prompt, role="user"))
     _report_turn(lead["id"], req.user_message, final_reply)
@@ -3433,7 +3432,6 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 winning_id=consensus["winning_id"] or "none",
                 room_goal=req.room_goal or "",
             )
-            unlock_output()  # consensus reached → synthesis may now produce the deliverable
             synth_prompt = synth_prompt + _output_production_directive(req.turn_id)
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)
@@ -3837,47 +3835,90 @@ async def _verify_turn(
     return verdict
 
 
-async def _ensure_email_deliverable(req: "RoomTurnRequest", final_text: str) -> None:
-    """Deterministic fallback: when the turn's output is an email but the agents
-    composed it in chat WITHOUT firing gmail_send, the orchestrator creates the
-    Gmail draft itself (from the synthesized text → the verified recipient) and
-    queues it for approval. Guarantees an email turn always yields a draft +
-    approval card. No-ops if a deliverable was already produced/queued."""
+def _md_table_to_rows(text: str) -> List[List[str]]:
+    """Parse the first markdown table in `text` into rows (skips the |---| rule)."""
+    rows: List[List[str]] = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not (s.startswith("|") and s.endswith("|")):
+            if rows:
+                break  # table block ended
+            continue
+        if re.match(r"^\|[\s:|-]+\|$", s):
+            continue  # separator
+        rows.append([c.strip() for c in s.strip("|").split("|")])
+    return rows
+
+
+def _derive_title(plan: Dict[str, Any], final_text: str, fallback: str) -> str:
+    m = re.search(r"^\s*#\s+(.+)$", final_text or "", re.MULTILINE) or \
+        re.search(r"subject\s*:\s*(.+)", final_text or "", re.IGNORECASE) or \
+        re.search(r"title\s*:\s*(.+)", final_text or "", re.IGNORECASE)
+    if m:
+        return m.group(1).splitlines()[0].strip()[:120]
+    return (fallback or "Untitled")[:120]
+
+
+async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
+    """UNIFIED PRODUCE phase — the SINGLE place a turn's artifact is created.
+    Deterministic, post-consensus, idempotent. Agents write the *content* in
+    synthesis (no tool calls); this turns `final_text` into the real artifact:
+      doc   → docs_create (markdown rendered)        → connector_logo
+      sheet → sheets_create (markdown table → rows)  → connector_logo
+      email → gmail_create_draft → queue approval    → approval card
+    Other outputs (answer/decision/slack) need no artifact. Replaces the three
+    racing paths (ambient tool / synthesis directive / fallback)."""
     plan = _PLAN_BY_TURN.get(req.turn_id)
-    if not isinstance(plan, dict) or plan.get("intended_output") != "email":
+    if not isinstance(plan, dict):
         return
-    if drain_pending_writes() or drain_artifacts():
-        return  # an agent already produced or queued the deliverable
-    body = final_text or ""
-    if not body.strip():
+    out = plan.get("intended_output")
+    body = (final_text or "").strip()
+    if out not in ("doc", "sheet", "email") or not body:
         return
-    contacts = plan.get("verified_contacts") or []
-    to = (contacts[0].get("email") if contacts else "") or ""
-    # Fallback: if pre-resolution missed, take a real address the agents surfaced
-    # in the synthesized text (e.g. "To: ramasantoshi1206@gmail.com"). Skip the
-    # connected/sender account so we don't email the user themselves.
-    if not to:
-        for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", body):
-            al = addr.lower()
-            if "noreply" in al or "no-reply" in al:
-                continue
-            to = addr
-            break
-    if not to:
-        return
-    m = re.search(r"subject\s*:\s*(.+)", body, re.IGNORECASE)
-    subject = (m.group(1).splitlines()[0].strip() if m else "") or (req.room_goal or "A message")[:90]
-    body_clean = re.sub(r"^\s*subject\s*:.*$", "", body, count=1, flags=re.IGNORECASE | re.MULTILINE).strip() or body
+    if drain_artifacts() or drain_pending_writes():
+        return  # already produced (idempotent)
     try:
-        res = await google_exec_emulated(
-            "gmail_create_draft", {"to": to, "subject": subject, "body": body_clean},
-            user_id=req.user_id, org_id=req.org_id)
-        draft_id = (res or {}).get("draftId")
-        if draft_id:
-            queue_email_approval(to, subject, draft_id, (res or {}).get("url") or "")
-            log.info("[email] orchestrator fallback draft → %s", to)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[email] fallback draft failed: %s", exc)
+        if out == "doc":
+            title = _derive_title(plan, body, req.room_goal or "Document")
+            res = await google_exec_emulated(
+                "docs_create", {"title": title, "content": body}, user_id=req.user_id, org_id=req.org_id)
+            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
+            if url:
+                record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
+                log.info("[produce] doc → %s", url)
+        elif out == "sheet":
+            title = _derive_title(plan, body, req.room_goal or "Spreadsheet")
+            rows = _md_table_to_rows(body)
+            res = await google_exec_emulated(
+                "sheets_create", {"title": title, "rows": rows}, user_id=req.user_id, org_id=req.org_id)
+            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
+            if url:
+                record_artifact("google-sheets", url, title=title, label=f"Open “{title}”")
+                log.info("[produce] sheet (%d rows) → %s", len(rows), url)
+        elif out == "email":
+            contacts = plan.get("verified_contacts") or []
+            to = (contacts[0].get("email") if contacts else "") or ""
+            if not to:
+                for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", body):
+                    if "noreply" not in addr.lower() and "no-reply" not in addr.lower():
+                        to = addr
+                        break
+            if not to:
+                log.info("[produce] email skipped — no verified recipient")
+                return
+            subject = _derive_title(plan, body, req.room_goal or "A message")
+            email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
+                                flags=re.IGNORECASE | re.MULTILINE).strip() or body
+            res = await google_exec_emulated(
+                "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
+                user_id=req.user_id, org_id=req.org_id)
+            draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
+            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
+            if draft_id:
+                queue_email_approval(to, subject, draft_id, url)
+                log.info("[produce] email draft → %s", to)
+    except Exception as exc:  # noqa: BLE001 — never fail a turn over production
+        log.warning("[produce] failed (%s): %s", out, exc)
 
 
 async def _verify_and_emit(
@@ -3890,8 +3931,9 @@ async def _verify_and_emit(
 ) -> Optional[Dict[str, Any]]:
     """Run the verify pass, emit a `verify` event, stash the verdict on the
     plan (so the handler/P6 goalkeeper can read it), and return it."""
-    # Guarantee the email deliverable exists before we verify against it.
-    await _ensure_email_deliverable(req, final_text)
+    # UNIFIED PRODUCE — create the artifact from the agreed synthesis BEFORE we
+    # verify against it (single deterministic path: doc/sheet/email).
+    await _produce_output(req, final_text)
     verdict = await _verify_turn(
         req, lead, final_text=final_text,
         tool_call_counts=tool_call_counts, blackboard=blackboard,
@@ -4117,89 +4159,68 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
 
 
 def _output_production_directive(turn_id: str) -> str:
-    """The synthesis-time instruction that turns the agreed result into the real
-    deliverable. Output tools are consensus-locked during the debate and only
-    unlocked here, so the artifact is produced ONCE, after the swarm aligns."""
+    """CONTENT directive for the synthesis. The agents do NOT call connector tools
+    to produce the artifact — they write the deliverable AS their synthesis text,
+    and the room's single PRODUCE step (_produce_output) turns it into the real
+    Google Doc / Sheet / email draft. This keeps ONE deterministic produce path."""
     plan = _PLAN_BY_TURN.get(turn_id)
     if not isinstance(plan, dict):
         return ""
     out = plan.get("intended_output")
-    # RECON-PRE gaps: evidence the produce step must resolve or flag, not fabricate.
     _gaps = plan.get("evidence_gaps") or []
     _gap_prefix = (
-        ("\n\n⚠ EVIDENCE GAPS (resolve these BEFORE producing, or flag them — do NOT "
+        ("\n\n⚠ EVIDENCE GAPS (resolve these in your synthesis, or flag them — do NOT "
          "fabricate to fill them):\n" + "\n".join(f"  - {g}" for g in _gaps))
         if _gaps else ""
     )
+    _no_tools = ("\nDo NOT call any connector tool to send/create the artifact — just "
+                 "WRITE the content; the room produces and surfaces it for you.")
     if out == "doc":
         return (
-            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
-            "The team has reached consensus. Activate the google_docs group and call "
-            "docs_create(title, content) with the COMPLETE document. `content` is MARKDOWN and "
-            "is rendered into a polished Google Doc (real headings, bold, lists, and DRAWN "
-            "tables), so author it well:\n" + _DOC_AUTHORING_GUIDE +
-            "\nThe document IS the deliverable — full substance grounded in recalled facts, not a "
-            "summary. It runs without approval."
+            _gap_prefix +
+            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
+            "Write the COMPLETE document AS your synthesis, in MARKDOWN — it renders into a "
+            "polished Google Doc (real headings, bold, lists, DRAWN tables):\n" + _DOC_AUTHORING_GUIDE +
+            "\nFull substance grounded in recalled facts, not a summary." + _no_tools
         )
     if out == "sheet":
         return (
-            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
-            "The team has reached consensus. Activate the google_sheets group and call "
-            "sheets_create(title, rows_json) with a DETAILED table as a JSON 2-D array string "
-            "(first row = headers), grounded in recalled company numbers. The sheet IS the "
-            "deliverable. It runs without approval."
+            _gap_prefix +
+            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
+            "Present the data AS your synthesis in a MARKDOWN TABLE — first row = headers, "
+            "then a '|---|' rule, then data rows (real numbers from recall):\n"
+            "    | Year | ARR (€) | Customers |\n    |---|---|---|\n    | 2026 | 120000 | 3 |\n"
+            "The room builds the Google Sheet from your table." + _no_tools
         )
     if out == "email":
         contacts = plan.get("verified_contacts") or []
         if contacts:
             contact_block = (
-                "\nVERIFIED CONTACTS (use these EXACT addresses — do NOT alter or guess):\n"
-                + "\n".join(f"  - {c['name']} → {c['email']} (from {c.get('source','dir')})" for c in contacts)
-                + "\n"
+                "\nRECIPIENT (the room sends to this VERIFIED address — do not guess another):\n"
+                + "\n".join(f"  - {c['name']} → {c['email']}" for c in contacts) + "\n"
             )
         else:
-            contact_block = (
-                "\n(No recipient was pre-resolved. If a person is named without an "
-                "address, call org_directory('<name>') — it checks the org directory AND "
-                "Gmail — and use what it returns.)\n"
-            )
+            contact_block = ("\n(No recipient pre-resolved — if you name one, the room resolves it "
+                             "via org_directory/Gmail; never invent an address.)\n")
         corr = plan.get("correspondence") or []
         if corr:
             style_block = (
-                "\nPRIOR EMAILS — the REAL voice & facts. MATCH this tone, phrasing, and "
-                "patterns; ground the email in these (this answers 'follow their style'):\n"
+                "\nPRIOR EMAILS — the REAL voice & facts. MATCH this tone/phrasing/patterns:\n"
                 + "\n---\n".join(f"From {c.get('from','')} | {c.get('subject','')}\n{c.get('body','')}" for c in corr)
                 + "\nWrite in THIS voice, not a generic template.\n"
             )
         else:
-            style_block = (
-                "\n(If the task says to follow someone's style, call gmail_search for their "
-                "past emails and gmail_get to read them, then match that voice — do not "
-                "write a generic template.)\n"
-            )
+            style_block = "\n(Match the sender's real voice from recalled mail; no generic template.)\n"
         return (
             _gap_prefix +
-            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
-            "The team has reached consensus.\n"
-            "0) VOICE/STYLE: " + style_block +
-            "1) RECIPIENT ADDRESS — CRITICAL: " + contact_block +
-            "   NEVER fabricate an address. Do NOT invent patterns like "
-            "firstname@company.com / c.surname@brand.com. Use ONLY a VERIFIED CONTACT "
-            "above, an address the USER explicitly typed, or one returned by "
-            "org_directory. If you cannot get a real address, say so and stop — do not "
-            "make one up.\n"
-            "2) GROUND WHO THEY ARE: recall the recipient's real role/relationship "
-            "(e.g. Ceyda Sarioglu is COO of Davinci AI) and write in that context; sign "
-            "as YOUR organisation/brand, never as a client/partner.\n"
-            "3) SIGNATURE & CC: sign with your name + your organisation/brand only — do "
-            "NOT invent personal email addresses for yourself or colleagues (no "
-            "n.klein@brand.com, no amar.gadde@brand.com). cc ONLY verified addresses; "
-            "unverified ones are dropped automatically.\n"
-            "4) Activate the gmail group and call gmail_send(to, subject, body[, cc]) with "
-            "the verified address. It is SAVED AS A DRAFT and surfaced for the user's "
-            "one-click approval.\n"
-            "Do NOT claim the email was sent or is in the Sent folder — it is a draft "
-            "pending the user's approval."
+            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
+            "Write the final email AS your synthesis: a 'Subject: ...' line then the body.\n"
+            "VOICE/STYLE: " + style_block +
+            "RECIPIENT: " + contact_block +
+            "Sign with your name + YOUR organisation/brand only — never invent personal "
+            "addresses for yourself or colleagues. The room saves it as a Gmail DRAFT to the "
+            "verified recipient and surfaces it for the user's one-click approval — it is NOT "
+            "sent until they approve, so don't claim it was sent." + _no_tools
         )
     return ""
 
@@ -4883,7 +4904,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                    f"{get_template_overlay(room_template).get('synth_hint', '')}\n"
                    if get_template_overlay(room_template).get('synth_hint') else "")
             )
-            unlock_output()  # consensus reached → synthesis may now produce the deliverable
             synth_prompt = synth_prompt + _output_production_directive(req.turn_id)
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)

@@ -17,6 +17,13 @@ Entry format:
 
 ---
 
+## 2026-06-19 — ROOT CAUSE of the produce gap: Google OAuth read-only (not the orchestrator)
+- **commits:** `b78e9848`
+- **finding:** The doc/email artifact never produced because this org's Google connector is authorized READ-ONLY. Direct bridge call `docs_create` → `Google API 403: "Request had insufficient authentication scopes" PERMISSION_DENIED`. NOT an orchestrator bug — the agentic loop calls docs_create correctly; Google rejects the write.
+- **agentic fixes shipped (flag off):** produce-BEFORE-verify (verifier was running before produce → artifact_ok always false); agents recall/reason-only (no connector write tools — gpt-oss owners spammed docs_create with placeholder args → 400s); synth writes the COMPLETE deliverable; `google_exec_emulated` returns the error; `_surface_produce_error` reports a 403 as "re-authorize the connector" + doesn't thrash-retry (scope errors aren't retryable).
+- **state:** agentic loop (plan→decompose→execute→ground→produce-call→verify→persist) is BUILT + grounds with no fabrication; answer/decision outputs work (no Google write). doc/email artifacts are blocked ONLY by the missing Google write scope.
+- **USER ACTION to fully unblock (I cannot — OAuth grant is the user's):** re-authorize the org's Google connector with **Docs** + **gmail.compose** scopes. Then doc/email artifacts produce end-to-end. Verify after: direct `docs_create` bridge call returns a url (not 403).
+
 ## 2026-06-19 — Agentic orchestrator on gpt-oss-120b + JSON plan — flag OFF (produce gap)
 - **commits:** `cc52f40d` (flag `HYPER_AGENTIC_ORCHESTRATOR` default OFF; `HYPER_AGENTIC_MODEL` default `openai/gpt-oss-120b`)
 - **what:** `_route_groq` respects explicit `openai/gpt-oss-*` (no force-downgrade); agentic agents run 120b. Lead plan via JSON CONTENT + `_first_json_object` (NOT AgentScope `structured_model` — on Groq gpt-oss emits plan as content not a `generate_response` tool call → 400 "did not call a tool"). Lead declares `intended_output`.

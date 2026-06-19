@@ -12,6 +12,7 @@ Entry format:
 - **files:** ...
 - **verified:** how (e2e command + observed result)
 - **gotchas:** anything the next session must know
+- **scorecard:** recon-held? feature-recon caught prior art? verify first-try or N reworks? wasted rounds? → harness change proposed (or "none")
 ```
 
 ---

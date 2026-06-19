@@ -18,6 +18,16 @@ Read, in order:
 
 Then announce: "Using hyperagents-builder — loaded context, JOURNAL has N entries, TODO is <idle|feature X at phase Y>."
 
+## Completion contract (scoped goal-loop — drive to the end, but bounded)
+
+Once a task is planned, **drive it to completion without yielding** — do not stop
+half-done. BUT this is bounded, not blind persistence:
+- **Stop = verified working on the box** (e2e per CONTEXT.md), shipped, journaled. That is "done."
+- **Honest-exit:** if blocked on a decision only the user can make (which address? which of two products? is this the intended scope?), STOP and surface it — do NOT thrash. Asking the human is success, not failure. (The Ethan turn was right to stop, not loop 4 rounds.)
+- **Bounded:** if a single phase fails its verify 3× for the same reason, STOP and report the blocker with evidence — never loop indefinitely.
+This mirrors the runtime goalkeeper: rework toward success, cap the retries, fail honest.
+(Blanket `/goal` on every task is the anti-pattern — it thrashes on ambiguous conditions.)
+
 ## The mandatory pipeline (NO workflows — agents only; workflows are expensive)
 
 When the user asks for ANY HyperAgents change, run these phases **in order**, as
@@ -59,6 +69,15 @@ deploy per CONTEXT.md (`docker cp` + restart `hm-employees` / both `hm-core hm-c
 **Immediately append a JOURNAL.md entry** (commits, what, why, files, verified, gotchas)
 and clear the TODO "Current feature" block. This is non-negotiable — the journal is how
 the next session/device inherits what happened.
+
+### 7. RETROSPECTIVE  (lightweight meta-pass after every ship — PROPOSE, never auto-apply)
+A single cheap agent scores the run JUST completed and proposes harness improvements.
+**It does not silently rewrite anything** — auto-rewriting your own instructions drifts
+and reward-hacks the score. It writes a diff/suggestion; you (or the user) approve.
+- **Score the run** (1 line each): did RECON-REDTEAM hold against ground truth, or was it stale? did FEATURE-RECON catch prior art (or did we almost rebuild)? did VERIFY pass first try or after N reworks? wasted rounds / wrong turns? Put this scorecard in the JOURNAL entry.
+- **Delegate distillation to the `hivemind-skill-evolver` skill** — it owns the verified-only observe→verify→distill→refine loop + the instinct/skill substrate. Do NOT build a parallel scorer. It learns ONLY from verified runs (gate: committed+pushed+verified+not-user-corrected).
+- **Propose, gate, version:** any CONTEXT.md / SKILL.md change is an additive lesson by default (a new gotcha, a sharper anchor); a structural rewrite is proposed as a diff for human approval. Everything is in git → reversible. If the lesson is just "this already worked," change nothing.
+- Goal of the score: measurable next-run improvement (recon held, fewer rework rounds), not wording churn. If a proposed rewrite can't name the failure it prevents, drop it.
 
 ## Explaining to a new session / device / person
 

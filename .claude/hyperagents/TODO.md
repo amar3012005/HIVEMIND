@@ -22,6 +22,7 @@ When all phases ship → move a summary line to [JOURNAL.md](./JOURNAL.md) and c
 > - [ ] P2 — ...
 > - [ ] Verify — e2e on box (command + expected)
 > - [ ] Ship — commit (author amarsai3012005) + push + JOURNAL entry
+> - [ ] Retrospective — score the run (scorecard → JOURNAL), delegate to `hivemind-skill-evolver`, propose (don't auto-apply) any harness improvement
 
 ## Backlog (known next increments)
 - [ ] MCP-connector search in GATHER (Notion/Slack/GitHub) — only when a room enables an MCP connector.

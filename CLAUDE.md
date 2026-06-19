@@ -76,3 +76,20 @@ Every memory MUST include:
 - a session identity tag like `session-b` if running in parallel with another session
 
 At the END of every session, ALWAYS save a master-index memory tagged `session-trail-<date>` + `master-index` summarising what was done, the commits, the pending actions, and the IDs of child memories. New sessions recall via that one tag and rehydrate everything.
+
+---
+
+## HyperAgents work → AUTO-INVOKE the `hyperagents-builder` skill FIRST
+
+Any request touching **HyperAgents / Digital-Employees rooms** (the multi-agent room
+pipeline, `api_hyper_rooms.py`, agent prompts/personas, room turns/owners/assignments,
+connectors-in-rooms, the room UI `HyperAgents.jsx`, recall grounding, write-approval) —
+**invoke the `hyperagents-builder` skill before touching code or answering.** It owns the
+mandatory dev pipeline and the living docs in `.claude/hyperagents/`:
+
+- **`.claude/hyperagents/CONTEXT.md`** — orientation: 8-phase pipeline, file map, deploy, test harness, lessons, key IDs. Read to onboard any new session/device.
+- **`.claude/hyperagents/JOURNAL.md`** — append-only ship log (newest-first), written after every ship. Read it to avoid rebuilding existing features.
+- **`.claude/hyperagents/TODO.md`** — recon+plan phases for the current feature, executed one-by-one.
+
+Pipeline the skill enforces for a new feature (**agents, never Workflows — they're expensive**):
+**recon-redteam agent → feature-recon (anti-duplication) → plan → write TODO.md phases → execute one-by-one → verify on box → ship → append JOURNAL.md.** Always verify recon/graph claims against `grep`/`Read` ground truth (they go stale).

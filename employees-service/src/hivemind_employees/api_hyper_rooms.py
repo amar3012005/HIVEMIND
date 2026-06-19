@@ -4492,8 +4492,19 @@ def _output_production_directive(turn_id: str) -> str:
     return ""
 
 
+class _AgenticPlan(BaseModel):
+    """FLAT plan the lead emits via structured output. Flat on purpose — gpt-oss
+    handles a list[str] in one forced generate_response, but chokes on the nested
+    PlanNotebook create_plan schema. We build/drive the plan in Python from this."""
+    goal: str = Field(description="One line: what the team must accomplish.")
+    done_criterion: str = Field(description="One line: how we know it's fully done.")
+    subtasks: list[str] = Field(
+        description="2-5 items, each 'Owner Name — concrete tool-doable action', "
+                    "e.g. 'Lina Park — recall the recipient email from HIVEMIND'.")
+
+
 def _agentic_enabled() -> bool:
-    """Flag — the AgentScope PlanNotebook+MsgHub agentic orchestrator. OFF by
+    """Flag — the AgentScope structured-plan + MsgHub agentic orchestrator. OFF by
     default; the deterministic pipeline stays live until this reaches parity."""
     return os.environ.get("HYPER_AGENTIC_ORCHESTRATOR", "").lower() in ("1", "true", "yes", "on")
 
@@ -4539,103 +4550,94 @@ async def _orchestrate_agentic(
     approval drain + seal. Works for ANY task shape (nothing is task-coded)."""
     cost_tokens = 0
     conns = [str(c) for c in (enabled_connectors or [])]
-    notebook = PlanNotebook()
-
-    async def _on_plan_change(_nb, plan):  # FE: surface plan + subtask states
-        try:
-            if not plan:
-                return
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "plan", "agent": lead.get("slug"), "intended_output": "agentic",
-                "done_criterion": getattr(plan, "expected_outcome", "") or "",
-                "steps": [st.name for st in plan.subtasks],
-                "assignments": {st.name: st.description for st in plan.subtasks},
-            })
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        notebook.register_plan_change_hook("fe", _on_plan_change)
-    except Exception:  # noqa: BLE001
-        pass
-
     boot = {b["id"]: b for b in await fetch_bootstrap()}
 
-    def _mk(emp: Dict[str, Any], with_plan: bool) -> ReActAgent:
+    def _mk(emp: Dict[str, Any], iters: int) -> ReActAgent:
         be = boot.get(emp.get("id"), {}) or {}
         merged = {
             **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": conns,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
-            "max_iters": 12 if with_plan else 8,
+            "max_iters": iters,
         }
         return build_react_agent(
             merged, be.get("api_key") or "", user_id=req.user_id, org_id=req.org_id,
-            project_id=req.project_id, plan_notebook=notebook if with_plan else None)
+            project_id=req.project_id)
 
     roster = ", ".join(f"{p.get('name') or p.get('slug')}" for p in participants)
 
-    # 1. LEAD decomposes the task into SubTasks (calls create_plan itself).
-    lead_agent = _mk(lead, with_plan=True)
+    # 1. LEAD decomposes via STRUCTURED OUTPUT — a FLAT plan (list[str]) in ONE
+    #    forced generate_response. gpt-oss handles this reliably; the nested
+    #    PlanNotebook create_plan tool is beyond it. We build/drive the plan in
+    #    Python. The DECOMPOSITION is still the model's (agent-driven, not coded).
+    lead_agent = _mk(lead, 8)
     plan_prompt = (
-        f"You lead this room. Team: {roster}. "
-        f"Connectors available: {', '.join(conns) or 'none'}.\n"
+        f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
         f"USER TASK: {req.user_message}\n\n"
-        "Break this into 2–5 concrete SUBTASKS and call the `create_plan` tool "
-        "(name, description, expected_outcome, subtasks). Start each subtask name with the "
-        "owning teammate, e.g. 'Lina Park — recall the recipient's email from HIVEMIND'. Each "
-        "subtask must be DOABLE with tools (recall HIVEMIND for facts/people/contacts, search "
-        "Gmail/Docs, create a doc, draft an email). Assign only real teammates. After "
-        "`create_plan`, STOP — the team executes next."
+        "Decompose into 2–5 concrete subtasks. Each MUST start with the owning teammate then "
+        "' — ' then a tool-doable action, e.g. 'Lina Park — recall the recipient email from "
+        "HIVEMIND'. Assign only real teammates from the team. Return goal, done_criterion, and "
+        "the subtasks list."
     )
-    plan_text = await _agent_reply_resilient(lead_agent, plan_prompt)
-    cost_tokens += max(80, len(plan_text) // 4)
-    plan = getattr(notebook, "current_plan", None)
-    subtasks = list(getattr(plan, "subtasks", []) or []) if plan else []
+    subtasks_raw: List[str] = []
+    done_txt = ""
+    try:
+        pr = await lead_agent.reply(
+            Msg(name="user", content=plan_prompt, role="user"), structured_model=_AgenticPlan)
+        cost_tokens += max(80, len(_msg_to_text(pr) or "") // 4)
+        meta = getattr(pr, "metadata", None) or {}
+        subtasks_raw = [str(s) for s in (meta.get("subtasks") or []) if str(s).strip()][:_EXECUTE_MAX_OWNERS]
+        done_txt = str(meta.get("done_criterion") or "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic] structured plan failed: %s", exc)
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "plan", "agent": lead.get("slug"), "intended_output": "agentic",
+        "done_criterion": done_txt, "steps": subtasks_raw,
+        "assignments": {s: s for s in subtasks_raw},
+    })
+    log.info("[agentic] plan room=%s subtasks=%d", req.room_id, len(subtasks_raw))
 
-    # 2. OWNERS execute their SubTasks (own ReAct loop + tools), in a MsgHub so
-    #    each result is observed by peers. Owner picked by name match in the
-    #    subtask, else round-robin across the roster.
-    owner_agents: Dict[str, ReActAgent] = {}
-    def _owner_for(subtask_name: str, idx: int) -> Dict[str, Any]:
-        low = (subtask_name or "").lower()
+    def _owner_for(line: str, idx: int) -> Dict[str, Any]:
+        low = (line or "").lower()
         for p in participants:
             nm = (p.get("name") or p.get("slug") or "").lower()
             if nm and nm.split()[0] in low:
                 return p
         return participants[idx % len(participants)]
 
+    # 2. OWNERS execute their subtask with single-arg tools (recall + connectors —
+    #    reliable on gpt-oss), in a MsgHub so each result is observed by peers.
+    owner_agents: Dict[str, ReActAgent] = {}
     contributions: List[Dict[str, Any]] = []
-    if subtasks:
+    if subtasks_raw:
         async with MsgHub(participants=[]) as hub:
-            for idx, st in enumerate(subtasks[:_EXECUTE_MAX_OWNERS]):
-                owner = _owner_for(getattr(st, "name", ""), idx)
+            for idx, line in enumerate(subtasks_raw):
+                owner = _owner_for(line, idx)
                 slug = owner.get("slug") or str(idx)
                 if slug not in owner_agents:
-                    owner_agents[slug] = _mk(owner, with_plan=True)
+                    owner_agents[slug] = _mk(owner, _EXECUTE_MAX_ITERS)
                     try:
                         hub.add(owner_agents[slug])
                     except Exception:  # noqa: BLE001
                         pass
-                agent = owner_agents[slug]
+                task = line.split("—", 1)[1].strip() if "—" in line else line
                 prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
                 task_prompt = (
-                    f"Your SUBTASK ({idx}): {getattr(st, 'name', '')} — {getattr(st, 'description', '')}\n"
-                    f"Expected: {getattr(st, 'expected_outcome', '')}\n"
-                    f"Teammates so far:\n{prior}\n\n"
-                    "DO it now with your tools. If you need a fact / person / email / contact, "
-                    "RECALL HIVEMIND by name first (it may be in a past email/doc/note); search "
-                    "Gmail/Docs for documents. Ground every specific in a tool result; mark anything "
-                    "you genuinely can't find as UNVERIFIED (never invent). When done, call "
-                    f"`finish_subtask` with subtask_idx={idx} and your concrete outcome."
+                    f"Your SUBTASK: {task}\nTeammates so far:\n{prior}\n\n"
+                    "DO it now with your tools. For any fact / person / email / contact, RECALL "
+                    "HIVEMIND by name first (it may be in a past email/doc/note); search Gmail/Docs "
+                    "for documents. Ground every specific in a tool result; mark anything you "
+                    "genuinely can't find as UNVERIFIED (never invent). Report your concrete "
+                    "grounded result in 3–6 sentences."
                 )
                 if contributions:
                     await asyncio.sleep(0.3)  # anti-429
-                text = await _agent_reply_resilient(agent, task_prompt)
+                text = await _agent_reply_resilient(owner_agents[slug], task_prompt)
                 cost_tokens += max(60, len(text) // 4)
                 if text:
-                    contributions.append({"owner": owner.get("name") or slug, "subtask": getattr(st, "name", ""), "text": text})
+                    contributions.append({"owner": owner.get("name") or slug, "subtask": task, "text": text})
                     await _emit_event(req.callback_url, req.turn_id, {
                         "t": "execute", "owner": slug, "name": owner.get("name") or slug,
-                        "subtask": getattr(st, "name", "")[:300], "contribution": text[:700],
+                        "subtask": task[:300], "contribution": text[:700],
                     })
 
     # 3. LEAD synthesizes the deliverable from the executed work.
@@ -4657,7 +4659,7 @@ async def _orchestrate_agentic(
 
     # 4. GROUNDING GATE + VERIFY (reuse). Stash a minimal plan for the verifier.
     _PLAN_BY_TURN[req.turn_id] = {
-        "intended_output": "answer", "done_criterion": getattr(plan, "expected_outcome", "") or req.user_message,
+        "intended_output": "answer", "done_criterion": done_txt or req.user_message,
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
         "verified_contacts": [],
@@ -4691,7 +4693,7 @@ async def _orchestrate_agentic(
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
     if isinstance(_gv, dict) and _gv:
         resp.verification = _gv
-    log.info("[agentic] room=%s subtasks=%d status=%s cost=%d", req.room_id, len(subtasks), status, cost_tokens)
+    log.info("[agentic] room=%s subtasks=%d status=%s cost=%d", req.room_id, len(subtasks_raw), status, cost_tokens)
     return resp
 
 

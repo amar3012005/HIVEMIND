@@ -17,6 +17,15 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Agent-driven personified HIVEMIND recall for contacts (incremental)
+- **commits:** `0ed615a3`
+- **what:** EXECUTE owners now recall HIVEMIND by name for any person/recipient their slice needs (only report "missing" after recall returns nothing); producer prefers an owner-recalled grounded recipient over the deterministic org/Gmail resolver; one retry on gpt-oss's flaky harmony tool-name leak.
+- **why:** User: room never searched HIVEMIND for the Solvis CEO — only org_directory+Gmail. Chose incremental (agent-driven recall) over the full MsgHub/PlanNotebook refactor.
+- **files:** `api_hyper_rooms.py` (`_execute_assignments` recall steer + retry, `_produce_output` recipient from execution).
+- **verified:** "who is CEO of solvis" → recalls memory, grounds to REAL MD **Gabriele Münzer**, honest that email isn't on file; not fabricated Schröder. grounded_ok=true.
+- **gotchas:** gpt-oss-20b intermittently leaks `<|channel|>commentary` into the tool NAME → Groq 400 (server-side, can't intercept pre-validation; retry recovers the flaky case). A non-gpt-oss tool-reliable model would remove it entirely.
+- **scorecard:** recon ✓ (AgentScope orchestrator primitives verified: MsgHub/PlanNotebook/structured-output). User redirected me OFF deterministic intent branches → switched to agent-driven recall. verify NOT first-try — surfaced the harmony-leak 400 (added retry). RESIDUAL (deferred by user): "create doc AND email" still escalates + doesn't produce the doc when recipient is missing — that's the **full MsgHub + PlanNotebook agent-driven orchestration** refactor (TODO), where the agent itself drives recall→doc→draft via tools instead of the deterministic producer. → proposed: that refactor is the real next arc.
+
 ## 2026-06-19 — Tool-grounded execution + hard grounding gate (stop fabrication)
 - **commits:** `30d03725`
 - **what:** EXECUTE owners now run real tools (recall + connectors) in a bounded ReAct loop and ground every claim; a GROUNDING GATE verifies BEFORE save/seal so `grounded_ok=false` → not saved, not RESOLVED, UNVERIFIED banner.

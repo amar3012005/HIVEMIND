@@ -17,6 +17,14 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Multi-agent SIMULATION restored in the agentic loop (debate/skeptic/peer-review)
+- **commits:** `a183a4d7`
+- **what:** SIMULATE phase between EXECUTE and SYNTHESIZE: lead DRAFTs → reactors challenge/support/extend (skeptic lane opposes) via reused `_run_reactor` in a MsgHub → lead REVISES real challenges → converge → synth. Reactors are tool-less (`_mk(..., toolless=True)`) so gpt-oss returns clean react JSON instead of wrapping it in a fake `JSON` tool call (→400). Reuses REACTOR_INSTRUCTIONS + react/peer_review events (FE already renders).
+- **why:** The agentic rewrite went linear and dropped the swarm interaction the user values (debate, skepticism, support). This puts it back, grounded.
+- **verified (CNJE strategy, 120b):** maya-ortiz CHALLENGED the conversion-rate assumption (evidence: SOM Capture memory); lina-park stayed SILENT rather than fabricate ("can't fabricate, react false"); lead REVISED flagging UNVERIFIED. reactor failed: 0, complete, grounded=True. Grounded skepticism — no invented dissent.
+- **agentic loop now:** GATHER → PLAN → EXECUTE(owners) → DRAFT → SIMULATE(debate) → REVISE → SYNTHESIZE → PRODUCE → VERIFY → PERSIST. Flag default-on.
+- **next:** the only remaining gap is doc/email ARTIFACTS (Google OAuth read-only 403 → user re-auth with Docs/gmail.compose). Everything else (answer/decision/strategy + full simulation + grounding) works end-to-end.
+
 ## 2026-06-19 — Agentic orchestrator DEFAULT-ON: guaranteed gather + intent guard
 - **commits:** `08c56fc4` (flag now DEFAULT-ON; `HYPER_AGENTIC_ORCHESTRATOR=off` disables)
 - **what:** (1) Guaranteed recall GATHER up front, injected into lead/owners/synth context → fixes CEO-not-found recall variance. (2) Conservative intent guard: planning/strategy → answer (don't over-classify to doc/email needing OAuth). (3) Flipped flag default-on — the agentic swarm loop is now the live room behavior.

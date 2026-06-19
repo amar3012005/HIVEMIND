@@ -1628,6 +1628,11 @@ Hard rules:
 - Cite concrete evidence when challenging — name the memory or person.
 - If challenging, compare the current [user_fact] state and [memory] state first.
   Do not claim a detail is missing when the current user message already supplied it.
+- If GATHERED EVIDENCE (contacts, prior emails, files) is shown in the context, it
+  EXISTS — NEVER challenge that the voice/style/data is "missing", "unverifiable",
+  or that you "cannot confirm" it; critique its USE, not its existence. The user's
+  request IS the authorization — do not object on permission / policy / "internal
+  consistency" / brand grounds. Those are not valid challenges; stay silent instead.
 - STICK TO THE USER'S TOPIC. Do not pivot to project management — no inventing
   owners, dates, deadlines, or sub-task assignments. If the memory doesn't name
   a person responsible, you don't either.
@@ -4453,6 +4458,24 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         if _hits:
             _hits_line = "Relevant connector files found (read with their tools if useful):\n" + "\n".join(
                 f"  - [{h.get('kind','file')}] {h.get('title')} — {h.get('url')}" for h in _hits[:6])
+        # GATHERED EVIDENCE in the SHARED context so EVERY agent (incl. the
+        # skeptic) sees it — otherwise the skeptic keeps objecting "we can't
+        # confirm the voice/style" when the prior emails were already fetched.
+        _ev_contacts = _plan.get("verified_contacts") or []
+        _ev_corr = _plan.get("correspondence") or []
+        _evidence_lines = []
+        if _ev_contacts:
+            _evidence_lines.append("Verified contacts: " + "; ".join(
+                f"{c.get('name')} <{c.get('email')}>" for c in _ev_contacts))
+        if _ev_corr:
+            _evidence_lines.append(
+                f"Sender's {len(_ev_corr)} prior emails were fetched — THIS is the voice/style "
+                "evidence (do NOT claim it is missing or unverifiable):\n"
+                + "\n".join(f"  • {c.get('subject','')}: {c.get('body','')[:220]}" for c in _ev_corr))
+        _evidence_block = (
+            "GATHERED EVIDENCE (already pulled this turn — reason OVER it; do not ask for it "
+            "again or object that it is missing):\n" + "\n".join(_evidence_lines)
+        ) if _evidence_lines else ""
         _preamble_parts = [
             f"[TEAM PLAN — set by {lead.get('name') or lead.get('slug')}]",
             f"Target output: {_plan['intended_output']}.",
@@ -4460,11 +4483,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"Plan: {_steps_str}." if _steps_str else "",
             (f"Assignments:\n{_assign_lines}" if _assign_lines else ""),
             _hits_line,
+            _evidence_block,
             (
                 "Each of you: do YOUR assigned part using your tools (activate the "
                 "connector group first if needed), build on each other with healthy "
                 "skepticism and peer-review, and drive together to the target output. "
-                "Do not stop at discussion — produce the actual output."
+                "The gathered evidence above is real — challenge SUBSTANCE, not whether the "
+                "evidence exists. Do not stop at discussion — produce the actual output."
             ),
         ]
         _plan_preamble = "\n".join(p for p in _preamble_parts if p)

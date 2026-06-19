@@ -18,7 +18,7 @@ purple/violet, no dark surfaces, near-zero shadow).
 ## Queue — HIVEMIND app feature polish (from the 5-agent red-team, 2026-06-19)
 
 ### Shipping-blocker bugs (fix first)
-- [!] **Memories.jsx** — ✅ off-token badges fixed + `Invalid Date` guarded (24bcee5). NEEDS RUNTIME SESSION (risky, can't click-test in loop): remove the parent's duplicate listMemories+quickSearch fetch layer (~911-1147 → double network req; child is self-contained, but the 150-line cut needs a page run+click to verify no regression); drop redundant page bg/padding (1152 — needs AppShell-provides-bg check); fix/remove the dead `contradictions` tab link (1262 — needs a real destination).
+- [!] **Memories.jsx** — ✅ off-token badges + `Invalid Date` guard (24bcee5) + ✅ off-shell page bg removed (2f6446d, AppShell provides it — confirmed). NEEDS RUNTIME SESSION (can't click-test in loop): remove the parent's duplicate listMemories+quickSearch fetch layer (~911-1147; child is self-contained but the 150-line cut needs a page run+click to verify no regression); fix/remove the dead `contradictions` tab link (1262 — needs a real destination).
 - [~] **DigitalEmployees.jsx** — ✅ crash guard (450, 85f4f98) + ✅ renderInline link null/https guard (1561, 24bcee5). REMAINING: cap/stop the 2.5s transcript poll (545-569); flatten dark code-block surface (1575,1588) + blue gradient canvas (820).
 - [~] **Settings.jsx** — ✅ owner role-gate fixed (331, shipped 85f4f98). REMAINING: surface save/revoke errors (162-179 silent `catch{}`); fix dead docs domain `docs.hivemind.dev` → canonical (504,513).
 - [!] **Billing.jsx** — NEEDS USER DECISION: "Graph Queries" meter (540) uses the `searches` limit because no `graphQueries` quota exists in the PLANS data — what's the per-plan graph-query quota (or drop the meter)? Also: annual toggle is cosmetic (−20% label but checkout charges monthly) — wire `billingCycle` into `createBillingCheckout` or remove the toggle? Once decided: also replace alert()+console with inline errors (419-432) + numeric price in PLANS.
@@ -40,6 +40,9 @@ purple/violet, no dark surfaces, near-zero shadow).
 - [ ] **MemoryGraph.jsx** — remove the permanently-dead `{false && (...)}` temporal panel + its orphaned rAF/state (947-999, 1517-1664) OR re-enable it; remove eslint-disabled unused imports (14-21).
 
 ## Done (archive — newest first)
+- [x] **Theme: all purple/violet removed** (AgentSwarm, TaraConfig, WebStudio, KnowledgeBase, Engine) → blue/#117dff single-accent. Da-vinci `d09c667`.
+- [x] **Off-shell double-bg removed** (ApiKeys, McpServer, Memories) + ApiKeys revoke floating-promise guarded. Da-vinci `2f6446d`.
+- [x] **Overview** clock weight (hierarchy) · **MemoryGraph** dead onSelectMemory prop + dead console handler · **KnowledgeBase** dead console handler. Da-vinci `ba21f9e`.
 - [x] **MeetingNotes.jsx** — `MeetingIntelligencePanel` gated to the Summary tab (was rendering on Notes/Transcript too). Da-vinci `24bcee5`, CI build clean.
 - [x] **HyperAgents.jsx** — malformed Tailwind `rounded-none-[24px]`/`-[20px]` → `rounded-none` (sharp, matches the 41 sibling popup classes). Da-vinci `85f4f98`, CI build clean.
 <!-- the agent moves [x] goals here with their commit sha -->

@@ -404,6 +404,33 @@ export const GOOGLE_TOOLS = {
       return { spreadsheetId: a.spreadsheetId, appended: values.length, url: `https://docs.google.com/spreadsheets/d/${a.spreadsheetId}/edit` };
     },
   },
+  drive_search: {
+    provider: 'google-docs',
+    description: 'Search Google Drive (docs, sheets, slides, files) by name/content. args: { query, max (default 8) }. Returns id/name/type/url per file.',
+    run: async (token, a) => {
+      const max = Math.min(Math.max(parseInt(a.max, 10) || 8, 1), 20);
+      const raw = String(a.query || '').replace(/['\\]/g, ' ').trim();
+      if (!raw) return { count: 0, files: [] };
+      // OR over individual terms (>3 chars) — a single `contains '<phrase>'` is an
+      // exact-phrase match and misses everything. Cap at 6 terms.
+      const terms = [...new Set(raw.split(/\s+/).filter(w => w.length > 3))].slice(0, 6);
+      const list = terms.length ? terms : [raw];
+      const clause = list.map(t => `name contains '${t}' or fullText contains '${t}'`).join(' or ');
+      const q = encodeURIComponent(`(${clause}) and trashed = false`);
+      const r = await g(`https://www.googleapis.com/drive/v3/files?q=${q}&pageSize=${max}&fields=files(id,name,mimeType,webViewLink,modifiedTime)&orderBy=modifiedTime desc`, token);
+      const TYPE = {
+        'application/vnd.google-apps.document': 'doc',
+        'application/vnd.google-apps.spreadsheet': 'sheet',
+        'application/vnd.google-apps.presentation': 'slides',
+      };
+      const files = (r.files || []).map(f => ({
+        id: f.id, name: f.name, type: TYPE[f.mimeType] || 'file',
+        url: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+        modified: f.modifiedTime || '',
+      }));
+      return { count: files.length, files };
+    },
+  },
 };
 
 export function listGoogleTools() {
@@ -420,7 +447,7 @@ export function listGoogleTools() {
 // still 403s if that *API* is disabled in GCP — an ops step, not a token issue).
 const GOOGLE_PROVIDER_FALLBACKS = {
   'google-sheets': ['google-sheets', 'google-docs', 'gmail'],
-  'google-docs': ['google-docs', 'gmail'],
+  'google-docs': ['google-docs', 'google-sheets', 'gmail'],
   'gmail': ['gmail'],
 };
 

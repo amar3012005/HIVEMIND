@@ -3988,23 +3988,34 @@ _STYLE_SIGNALS = (
 )
 
 
+def _gather_query(msg: str) -> str:
+    """Concise search query from the user message — drop the command verbs so the
+    connector search hits the subject, not 'write/draft/email'."""
+    cleaned = re.sub(
+        r"\b(write|draft|compose|create|make|send|email|e-?mail|mail|prepare|another|please|the|a|an|to|for|about|on|behalf|of)\b",
+        " ", msg or "", flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()[:80]
+
+
 async def _gather_evidence(
-    req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: str
+    req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: str,
+    enabled_connectors: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """GATHER phase — pull read-only connector evidence the team reasons OVER,
-    before it acts. (1) Resolve any named people to REAL contacts (org directory
-    + Gmail). (2) Fetch relevant prior correspondence when the task references a
-    person, their style, or past communication. HIVEMIND recall + web are
-    gathered elsewhere. Stashes the pack on the plan (contacts/correspondence
-    consumed by the production directives) and emits a `gather` event. Generalizes
-    the old email-only bolt-on to every output type."""
+    """GATHER phase — pull read-only evidence from ALL enabled connectors the team
+    reasons OVER, before it acts. (1) Resolve named people → REAL contacts (org +
+    Gmail). (2) Prior correspondence for voice/style. (3) Search Google Drive
+    (docs/sheets/slides) when those connectors are enabled. (4) [MCP search — next].
+    HIVEMIND recall + web are gathered elsewhere. Stashes the pack on the plan and
+    emits a `gather` event."""
     out = plan.get("intended_output")
     msg = clean_msg or ""
-    sources = ["hivemind"]  # recall (blackboard) always runs
+    conns = [str(c) for c in (enabled_connectors or [])]
+    sources = ["hivemind"]
     contacts: List[Dict[str, Any]] = []
     correspondence: List[Dict[str, Any]] = []
+    connector_hits: List[Dict[str, Any]] = []
 
-    # Resolve named people for any output that addresses/▸references someone.
+    # Resolve named people for any output that addresses/references someone.
     if out in ("email", "slack") or _RECIPIENT_RE.search(msg):
         contacts = await _resolve_recipients(req, msg)
         if contacts:
@@ -4013,23 +4024,39 @@ async def _gather_evidence(
     # Prior correspondence for voice/style or person-referencing tasks.
     target = contacts[0] if contacts else {}
     style_signal = any(t in msg.lower() for t in _STYLE_SIGNALS)
-    if (out == "email" or style_signal) and (target.get("name") or target.get("email")):
+    if ("gmail" in conns) and (out == "email" or style_signal) and (target.get("name") or target.get("email")):
         correspondence = await _fetch_correspondence(
             req, target.get("name", ""), target.get("email", ""))
         if correspondence:
             sources.append("gmail")
 
+    # Search Google Drive (docs + sheets + slides) when those connectors are on —
+    # the relevant context for many tasks lives in a doc/sheet, not mail.
+    if any(c in conns for c in ("google_docs", "google_sheets")):
+        q = _gather_query(msg)
+        if q:
+            res = await google_exec_emulated(
+                "drive_search", {"query": q, "max": 6}, user_id=req.user_id, org_id=req.org_id)
+            for f in (res or {}).get("files", []):
+                connector_hits.append({"connector": f"google-{f.get('type','file')}",
+                                       "title": f.get("name"), "url": f.get("url"), "kind": f.get("type")})
+            if connector_hits:
+                sources.append("google_drive")
+
     plan["verified_contacts"] = contacts          # consumed by production directives
     plan["correspondence"] = correspondence
-    plan["evidence"] = {"contacts": contacts, "correspondence": correspondence, "sources": sources}
+    plan["connector_hits"] = connector_hits
+    plan["evidence"] = {"contacts": contacts, "correspondence": correspondence,
+                        "connector_hits": connector_hits, "sources": sources}
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "gather",
         "sources": sources,
         "contacts": len(contacts),
         "correspondence": len(correspondence),
+        "connector_hits": connector_hits[:8],
     })
-    log.info("[gather] room=%s sources=%s contacts=%d corr=%d",
-             req.room_id, ",".join(sources), len(contacts), len(correspondence))
+    log.info("[gather] room=%s sources=%s contacts=%d corr=%d drive=%d",
+             req.room_id, ",".join(sources), len(contacts), len(correspondence), len(connector_hits))
     return plan["evidence"]
 
 
@@ -4381,7 +4408,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # bolt-on; generalizes to any output). HIVEMIND recall + web are gathered
         # elsewhere (blackboard / web worker); this adds connector evidence.
         try:
-            await _gather_evidence(req, _plan, _clean_user_request)
+            await _gather_evidence(req, _plan, _clean_user_request, _plan_conns)
         except Exception as exc:  # noqa: BLE001 — never fail a turn over gathering
             log.warning("[gather] failed: %s", exc)
         # ── RECON-PRE phase ── verify the evidence is sufficient BEFORE writing;
@@ -4400,12 +4427,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"  - {k}: {v}" for k, v in _plan["assignments"].items()
         )
         _steps_str = " → ".join(str(s) for s in _plan["steps"]) if _plan["steps"] else ""
+        _hits = _plan.get("connector_hits") or []
+        _hits_line = ""
+        if _hits:
+            _hits_line = "Relevant connector files found (read with their tools if useful):\n" + "\n".join(
+                f"  - [{h.get('kind','file')}] {h.get('title')} — {h.get('url')}" for h in _hits[:6])
         _preamble_parts = [
             f"[TEAM PLAN — set by {lead.get('name') or lead.get('slug')}]",
             f"Target output: {_plan['intended_output']}.",
             f"Done when: {_plan['done_criterion']}." if _plan.get("done_criterion") else "",
             f"Plan: {_steps_str}." if _steps_str else "",
             (f"Assignments:\n{_assign_lines}" if _assign_lines else ""),
+            _hits_line,
             (
                 "Each of you: do YOUR assigned part using your tools (activate the "
                 "connector group first if needed), build on each other with healthy "

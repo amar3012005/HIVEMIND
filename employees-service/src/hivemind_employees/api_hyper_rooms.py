@@ -4582,18 +4582,21 @@ async def _orchestrate_agentic(
     # reliably than 20b (the 400s/harmony leaks were a 20b-capability ceiling).
     _agentic_model = os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
 
-    def _mk(emp: Dict[str, Any], iters: int) -> ReActAgent:
+    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False) -> ReActAgent:
         # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).
         # NO connector WRITE tools (docs_create/gmail_send): gpt-oss owners kept
         # calling them with placeholder args → google/exec 400s + no artifact. The
         # single reliable producer (_produce_output via google_exec_emulated) does
         # ALL connector writes from the clean synth content.
+        # toolless=True for reactors: they react to the draft from context and must
+        # return clean JSON — with tools, gpt-oss wraps the JSON in a fake `JSON`
+        # tool call → 400. A tool-less agent returns the JSON as text (reliable).
         be = boot.get(emp.get("id"), {}) or {}
         merged = {
-            **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": [],
+            **emp, "tools": (["_react_noop"] if toolless else DEFAULT_HYPER_TOOLS), "connectors": [],
             "llm_provider": "groq", "model": _agentic_model,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
-            "max_iters": iters,
+            "max_iters": (1 if toolless else iters),
         }
         return build_react_agent(
             merged, be.get("api_key") or "", user_id=req.user_id, org_id=req.org_id,
@@ -4728,29 +4731,66 @@ async def _orchestrate_agentic(
                         "subtask": task[:300], "contribution": text[:700],
                     })
 
-    # 3. LEAD synthesizes the deliverable from the executed work.
     exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
-    synth_prompt = (
-        f"{gathered_block}"
-        f"USER TASK: {req.user_message}\n\n"
-        f"The team gathered (grounded in tools):\n{exec_block}\n\n"
-        f"Write the COMPLETE FINAL DELIVERABLE itself now — intended output is '{intended_output}'. "
-        "Output ONLY the deliverable content, ready to publish — NO process narration, NO placeholders, "
-        "NO '(insert ...)', NO 'I will/created/requested'. The room turns your text directly into the "
-        "real artifact:\n"
-        "  • doc → the FULL document in MARKDOWN (headings, the actual complete feature list / content).\n"
-        "  • sheet → a MARKDOWN TABLE (header row, '|---|' rule, real data rows).\n"
-        "  • email → 'Subject: …' then the full body to the recipient.\n"
-        "  • answer → the direct grounded answer.\n"
-        "Use ONLY facts the team grounded; flag any UNVERIFIED item inline; never fabricate. If a "
-        "required fact is missing, write what you have and mark the gap — do not invent."
+    _deliver_spec = (
+        "Output ONLY the deliverable content, ready to publish — NO process narration, NO placeholders. "
+        "doc → FULL markdown document; sheet → markdown TABLE (header, '|---|', data rows); "
+        "email → 'Subject: …' then the body; answer → the direct grounded answer. Use ONLY facts the "
+        "team grounded; flag any UNVERIFIED item inline; never fabricate."
     )
-    final_text = await _agent_reply_resilient(lead_agent, synth_prompt)
-    cost_tokens += max(80, len(final_text) // 4)
+
+    # 3. DRAFT — the lead writes a first-pass deliverable from the gathered work.
+    draft = await _agent_reply_resilient(lead_agent, (
+        f"{gathered_block}USER TASK: {req.user_message}\n\n"
+        f"Team gathered (grounded):\n{exec_block}\n\n"
+        f"Write a first-pass FINAL DELIVERABLE (intended output '{intended_output}'). {_deliver_spec}"))
+    cost_tokens += max(80, len(draft) // 4)
+    if draft:
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "line", "agent": lead.get("slug"), "kind": "lead", "content": draft})
+
+    # 3b. SIMULATE — the swarm pressure-tests the draft: each reactor challenges /
+    #     supports / extends (skeptic lane opposes), peer-review broadcast via the
+    #     MsgHub. This is the MiroFish multi-agent simulation (debate + skepticism
+    #     + support), reusing _run_reactor + the react/peer_review events the FE
+    #     already renders.
+    lead_name = lead.get("name") or lead.get("slug") or "Lead"
+    reactors = [p for p in participants if (p.get("slug") or "") != (lead.get("slug") or "")][:3]
+    challenges: List[Dict[str, Any]] = []
+    if draft and reactors:
+        ragents = [_mk(p, 6, toolless=True) for p in reactors]  # tool-less → clean react JSON
+        async with MsgHub(participants=ragents):
+            for p, ra in zip(reactors, ragents):
+                lane = p.get("_lane") or p.get("role_archetype") or "Communicator"
+                is_opp = "skeptic" in str(lane).lower() or "skeptic" in str(p.get("role_archetype") or "").lower()
+                rr = await _run_reactor(ra, req.user_message, draft, lead_name, str(lane),
+                                        is_opp, blackboard_context=gathered_block)
+                cost_tokens += 60
+                if rr.get("react"):
+                    await _emit_event(req.callback_url, req.turn_id, {
+                        "t": "react", "agent": p.get("slug"), "agreement": rr.get("agreement"),
+                        "line": rr.get("line"), "confidence": rr.get("confidence"), "gap": rr.get("gap"),
+                    })
+                    if rr.get("agreement") == "challenge" and float(rr.get("confidence") or 0) >= 0.5:
+                        challenges.append(rr)
+
+    # 3c. REVISE — if the skeptic/peers raised real challenges, the lead revises to
+    #     address them (one bounded round). Convergence, not one-shot.
+    final_text = draft
+    if challenges:
+        ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
+                             + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)
+        final_text = await _agent_reply_resilient(lead_agent, (
+            f"{gathered_block}USER TASK: {req.user_message}\n\n"
+            f"Your draft:\n{draft}\n\nThe team CHALLENGED it:\n{ch_block}\n\n"
+            f"REVISE the deliverable to address every challenge with grounded evidence (or honestly "
+            f"flag what can't be resolved). {_deliver_spec}")) or draft
+        cost_tokens += max(80, len(final_text) // 4)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "line", "agent": lead.get("slug"), "kind": "revise", "content": final_text})
     if final_text:
         await _emit_event(req.callback_url, req.turn_id, {
-            "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text,
-        })
+            "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text})
 
     # Stash the plan for produce + verify.
     _PLAN_BY_TURN[req.turn_id] = {

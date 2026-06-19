@@ -4792,12 +4792,20 @@ async def _orchestrate_agentic(
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text})
 
+    # Resolve the recipient for an email (trusts a literal address the user typed,
+    # else org_directory/Gmail/HIVEMIND) so the producer has a verified 'to'.
+    _vc: List[Dict[str, Any]] = []
+    if intended_output == "email":
+        try:
+            _vc = await _resolve_recipients(req, req.user_message)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[agentic] resolve recipients failed: %s", exc)
     # Stash the plan for produce + verify.
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output, "done_criterion": done_txt or req.user_message,
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
-        "verified_contacts": [],
+        "verified_contacts": _vc,
     }
 
     # 4. PRODUCE FIRST — turn the synth content into the REAL artifact (doc/sheet/

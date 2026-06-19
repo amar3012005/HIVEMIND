@@ -110,3 +110,8 @@ Entry format:
 - **verified:** Singapore room → 3 rework rounds tightened grounding (met=F grounded=F → F → met=T grounded=T gaps=0) + real Gmail draft + approval.
 
 <!-- next entry goes ABOVE this line -->
+
+## 2026-06-19 — Agentic doc body was plan-JSON → fixed (separate plan/synth agents)
+- **commit:** `a3d145fe`
+- Doc content came out as the raw plan JSON because ONE lead agent did both the STRICT-JSON plan and the prose synth (JSON-mode memory contamination). Now plan_agent (JSON) is separate from a fresh lead_agent (prose draft/synth/revise).
+- Verified: real Google Doc with prose markdown + correct title (Solvis Product Feature Catalogue), not JSON, not the room goal.

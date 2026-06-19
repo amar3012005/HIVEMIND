@@ -3913,6 +3913,26 @@ def _derive_title(plan: Dict[str, Any], final_text: str, fallback: str) -> str:
     return (fallback or "Untitled")[:120]
 
 
+async def _surface_produce_error(req: "RoomTurnRequest", plan: Dict[str, Any],
+                                 what: str, raw_error: Any) -> None:
+    """The connector write failed (e.g. Google 403 insufficient scopes). Surface a
+    clear, actionable message + stash it on the plan so the verifier/FE report the
+    real blocker (re-authorize the connector) instead of a silent no-artifact +
+    opaque escalation. A scope error is NOT retryable — don't thrash on it."""
+    err = str(raw_error or "")
+    low = err.lower()
+    if "insufficient authentication scopes" in low or "permission_denied" in low or "403" in low:
+        msg = (f"Could not create the {what}: the Google connector is authorized read-only "
+               f"(insufficient scopes). Re-authorize Google with Docs/Gmail write access, then retry.")
+    else:
+        msg = f"Could not create the {what}: {err[:160]}"
+    plan["artifact_error"] = msg
+    log.warning("[produce] %s failed: %s", what, err[:200])
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "warning", "code": "artifact_production_failed", "message": msg,
+    })
+
+
 async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
     """UNIFIED PRODUCE phase — the SINGLE place a turn's artifact is created.
     Deterministic, post-consensus, idempotent. Agents write the *content* in
@@ -3940,6 +3960,8 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
             if url:
                 record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
                 log.info("[produce] doc → %s", url)
+            elif isinstance(res, dict) and res.get("error"):
+                await _surface_produce_error(req, plan, "Google Doc", res.get("error"))
         elif out == "sheet":
             title = _derive_title(plan, body, req.room_goal or "Spreadsheet")
             rows = _md_table_to_rows(body)
@@ -3978,6 +4000,8 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
             if draft_id:
                 queue_email_approval(to, subject, draft_id, url)
                 log.info("[produce] email draft → %s", to)
+            elif isinstance(res, dict) and res.get("error"):
+                await _surface_produce_error(req, plan, "Gmail draft", res.get("error"))
     except Exception as exc:  # noqa: BLE001 — never fail a turn over production
         log.warning("[produce] failed (%s): %s", out, exc)
 
@@ -4557,9 +4581,14 @@ async def _orchestrate_agentic(
     _agentic_model = os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
 
     def _mk(emp: Dict[str, Any], iters: int) -> ReActAgent:
+        # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).
+        # NO connector WRITE tools (docs_create/gmail_send): gpt-oss owners kept
+        # calling them with placeholder args → google/exec 400s + no artifact. The
+        # single reliable producer (_produce_output via google_exec_emulated) does
+        # ALL connector writes from the clean synth content.
         be = boot.get(emp.get("id"), {}) or {}
         merged = {
-            **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": conns,
+            **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": [],
             "llm_provider": "groq", "model": _agentic_model,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
             "max_iters": iters,
@@ -4633,11 +4662,13 @@ async def _orchestrate_agentic(
                 prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
                 task_prompt = (
                     f"Your SUBTASK: {task}\nTeammates so far:\n{prior}\n\n"
-                    "DO it now with your tools. For any fact / person / email / contact, RECALL "
-                    "HIVEMIND by name first (it may be in a past email/doc/note); search Gmail/Docs "
-                    "for documents. Ground every specific in a tool result; mark anything you "
-                    "genuinely can't find as UNVERIFIED (never invent). Report your concrete "
-                    "grounded result in 3–6 sentences."
+                    "GATHER from HIVEMIND with your tools — call `recall` (and `org_directory` for a "
+                    "person/email) by name for any fact/person/contact your subtask needs; it may be in "
+                    "a past email/doc/note. The room produces the final artifact ONCE from the whole "
+                    "team's work — your job is to GATHER the real content + facts, not to create it. "
+                    "Ground every specific in a tool result; mark anything you genuinely can't find as "
+                    "UNVERIFIED (never invent). Report the ACTUAL CONTENT you gathered (the real "
+                    "facts/list/text — not a description of what you did) so the room can use it directly."
                 )
                 if contributions:
                     await asyncio.sleep(0.3)  # anti-429
@@ -4654,11 +4685,17 @@ async def _orchestrate_agentic(
     exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
     synth_prompt = (
         f"USER TASK: {req.user_message}\n\n"
-        f"The team executed (grounded in tools):\n{exec_block}\n\n"
-        "Produce the FINAL deliverable now, integrating the team's grounded work. If the task is "
-        "an email, write it as 'Subject: …' then the body to the verified recipient. If a document, "
-        "write the full content. If a question/decision, give the grounded answer. Use ONLY facts "
-        "the team grounded — keep any UNVERIFIED item explicitly flagged, never fabricate."
+        f"The team gathered (grounded in tools):\n{exec_block}\n\n"
+        f"Write the COMPLETE FINAL DELIVERABLE itself now — intended output is '{intended_output}'. "
+        "Output ONLY the deliverable content, ready to publish — NO process narration, NO placeholders, "
+        "NO '(insert ...)', NO 'I will/created/requested'. The room turns your text directly into the "
+        "real artifact:\n"
+        "  • doc → the FULL document in MARKDOWN (headings, the actual complete feature list / content).\n"
+        "  • sheet → a MARKDOWN TABLE (header row, '|---|' rule, real data rows).\n"
+        "  • email → 'Subject: …' then the full body to the recipient.\n"
+        "  • answer → the direct grounded answer.\n"
+        "Use ONLY facts the team grounded; flag any UNVERIFIED item inline; never fabricate. If a "
+        "required fact is missing, write what you have and mark the gap — do not invent."
     )
     final_text = await _agent_reply_resilient(lead_agent, synth_prompt)
     cost_tokens += max(80, len(final_text) // 4)
@@ -4667,13 +4704,33 @@ async def _orchestrate_agentic(
             "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text,
         })
 
-    # 4. GROUNDING GATE + VERIFY (reuse). Stash a minimal plan for the verifier.
+    # Stash the plan for produce + verify.
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output, "done_criterion": done_txt or req.user_message,
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
         "verified_contacts": [],
     }
+
+    # 4. PRODUCE FIRST — turn the synth content into the REAL artifact (doc/sheet/
+    #    email draft) via the single reliable producer. MUST run BEFORE verify so
+    #    the verifier sees produced_artifacts (else artifact_ok is always false).
+    try:
+        await _produce_output(req, final_text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic] produce failed: %s", exc)
+    artifacts = drain_artifacts()
+    for art in artifacts:
+        if art.get("url"):
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "connector_logo", "connector": art.get("connector"),
+                "url": art.get("url"), "title": art.get("title"), "label": art.get("label") or "Open",
+            })
+    pending = drain_pending_writes()
+    if pending:
+        await _register_and_emit_approvals(req, pending)
+
+    # 5. VERIFY + GROUNDING GATE — now the verifier sees the produced artifact.
     try:
         await _verify_and_emit(req, lead, final_text=final_text, blackboard={"hit_count": len(contributions)})
     except Exception as exc:  # noqa: BLE001
@@ -4682,17 +4739,6 @@ async def _orchestrate_agentic(
     status = "complete"
     if _gv and not _gv.get("grounded_ok"):
         status = "escalated"
-        _gg = "; ".join(_gv.get("gaps") or []) or "claims could not be grounded"
-        final_text = f"⚠ UNVERIFIED — not grounded in memory/tools: {_gg}\n\n{final_text}"
-
-    # 5. PRODUCE (reuse the deterministic producer for now — P2 makes it agent-driven).
-    try:
-        await _produce_output(req, final_text)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[agentic] produce failed: %s", exc)
-    pending = drain_pending_writes()
-    if pending:
-        await _register_and_emit_approvals(req, pending)
 
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal", "cost_tokens": cost_tokens, "status": status,
@@ -4701,9 +4747,12 @@ async def _orchestrate_agentic(
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
+    if artifacts:
+        resp.artifacts = [a for a in artifacts if a.get("url")]
     if isinstance(_gv, dict) and _gv:
         resp.verification = _gv
-    log.info("[agentic] room=%s subtasks=%d status=%s cost=%d", req.room_id, len(subtasks_raw), status, cost_tokens)
+    log.info("[agentic] room=%s out=%s subtasks=%d artifacts=%d status=%s cost=%d",
+             req.room_id, intended_output, len(subtasks_raw), len(artifacts), status, cost_tokens)
     return resp
 
 

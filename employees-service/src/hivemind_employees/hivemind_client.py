@@ -100,11 +100,20 @@ async def google_exec_emulated(
             headers=headers,
         ) as c:
             r = await c.post("/api/connectors/google/exec", json={"tool": tool, "arguments": arguments})
-            r.raise_for_status()
+            if r.status_code >= 400:
+                # Surface the failure (e.g. Google 403 insufficient scopes) so the
+                # producer can report "re-authorize the connector" instead of a
+                # silent no-artifact + opaque escalation.
+                body = ""
+                try:
+                    body = (r.json() or {}).get("error") or r.text
+                except Exception:  # noqa: BLE001
+                    body = r.text
+                return {"error": str(body)[:300], "status": r.status_code}
             j = r.json()
             return j.get("result") if isinstance(j.get("result"), dict) else j
-    except Exception:  # noqa: BLE001
-        return {}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
 
 
 class HivemindClient:

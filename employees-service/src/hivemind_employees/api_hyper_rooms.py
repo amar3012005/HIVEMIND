@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Optional, Set
 import httpx
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
+from agentscope.plan import PlanNotebook  # agentic orchestrator (flagged)
+from agentscope.pipeline import MsgHub    # agentic orchestrator (flagged)
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -4490,6 +4492,209 @@ def _output_production_directive(turn_id: str) -> str:
     return ""
 
 
+def _agentic_enabled() -> bool:
+    """Flag — the AgentScope PlanNotebook+MsgHub agentic orchestrator. OFF by
+    default; the deterministic pipeline stays live until this reaches parity."""
+    return os.environ.get("HYPER_AGENTIC_ORCHESTRATOR", "").lower() in ("1", "true", "yes", "on")
+
+
+async def _agent_reply_resilient(agent, content: str) -> str:
+    """Invoke an agent once, with a single retry on gpt-oss's flaky harmony
+    tool-name leak (`recall<|channel|>commentary` → Groq 400). Returns its text."""
+    try:
+        r = await agent(Msg(name="user", content=content, role="user"))
+        return (_msg_to_text(r) or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        es = str(exc)
+        if "tool_use_failed" in es or "not in request.tools" in es or "tool call validation" in es.lower():
+            try:
+                r = await agent(Msg(
+                    name="user",
+                    content=("Your last tool call was malformed (extra characters in the tool NAME). "
+                             "Call tools using ONLY their exact registered name, no suffix/channel "
+                             "marker. Retry and finish."),
+                    role="user"))
+                return (_msg_to_text(r) or "").strip()
+            except Exception as exc2:  # noqa: BLE001
+                log.warning("[agentic] agent failed after retry: %s", exc2)
+                return ""
+        log.warning("[agentic] agent failed: %s", exc)
+        return ""
+
+
+async def _orchestrate_agentic(
+    req: "RoomTurnRequest",
+    participants: List[Dict[str, Any]],
+    lead: Dict[str, Any],
+    enabled_connectors: List[str],
+    started: float,
+) -> RoomTurnResponse:
+    """Agentic orchestrator (flagged) — AgentScope PlanNotebook + MsgHub.
+
+    The lead decomposes the task into SubTasks via `create_plan`; each owner runs
+    its OWN ReAct loop with real tools (personified recall + connectors) to finish
+    its SubTask; MsgHub broadcasts each result to peers; the lead synthesizes. No
+    deterministic intent/produce/resolve branches — agents accomplish the task
+    through their own tool calls. Reuses the grounding gate + verify + produce +
+    approval drain + seal. Works for ANY task shape (nothing is task-coded)."""
+    cost_tokens = 0
+    conns = [str(c) for c in (enabled_connectors or [])]
+    notebook = PlanNotebook()
+
+    async def _on_plan_change(_nb, plan):  # FE: surface plan + subtask states
+        try:
+            if not plan:
+                return
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "plan", "agent": lead.get("slug"), "intended_output": "agentic",
+                "done_criterion": getattr(plan, "expected_outcome", "") or "",
+                "steps": [st.name for st in plan.subtasks],
+                "assignments": {st.name: st.description for st in plan.subtasks},
+            })
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        notebook.register_plan_change_hook("fe", _on_plan_change)
+    except Exception:  # noqa: BLE001
+        pass
+
+    boot = {b["id"]: b for b in await fetch_bootstrap()}
+
+    def _mk(emp: Dict[str, Any], with_plan: bool) -> ReActAgent:
+        be = boot.get(emp.get("id"), {}) or {}
+        merged = {
+            **emp, "tools": DEFAULT_HYPER_TOOLS, "connectors": conns,
+            "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
+            "max_iters": 12 if with_plan else 8,
+        }
+        return build_react_agent(
+            merged, be.get("api_key") or "", user_id=req.user_id, org_id=req.org_id,
+            project_id=req.project_id, plan_notebook=notebook if with_plan else None)
+
+    roster = ", ".join(f"{p.get('name') or p.get('slug')}" for p in participants)
+
+    # 1. LEAD decomposes the task into SubTasks (calls create_plan itself).
+    lead_agent = _mk(lead, with_plan=True)
+    plan_prompt = (
+        f"You lead this room. Team: {roster}. "
+        f"Connectors available: {', '.join(conns) or 'none'}.\n"
+        f"USER TASK: {req.user_message}\n\n"
+        "Break this into 2–5 concrete SUBTASKS and call the `create_plan` tool "
+        "(name, description, expected_outcome, subtasks). Start each subtask name with the "
+        "owning teammate, e.g. 'Lina Park — recall the recipient's email from HIVEMIND'. Each "
+        "subtask must be DOABLE with tools (recall HIVEMIND for facts/people/contacts, search "
+        "Gmail/Docs, create a doc, draft an email). Assign only real teammates. After "
+        "`create_plan`, STOP — the team executes next."
+    )
+    plan_text = await _agent_reply_resilient(lead_agent, plan_prompt)
+    cost_tokens += max(80, len(plan_text) // 4)
+    plan = getattr(notebook, "current_plan", None)
+    subtasks = list(getattr(plan, "subtasks", []) or []) if plan else []
+
+    # 2. OWNERS execute their SubTasks (own ReAct loop + tools), in a MsgHub so
+    #    each result is observed by peers. Owner picked by name match in the
+    #    subtask, else round-robin across the roster.
+    owner_agents: Dict[str, ReActAgent] = {}
+    def _owner_for(subtask_name: str, idx: int) -> Dict[str, Any]:
+        low = (subtask_name or "").lower()
+        for p in participants:
+            nm = (p.get("name") or p.get("slug") or "").lower()
+            if nm and nm.split()[0] in low:
+                return p
+        return participants[idx % len(participants)]
+
+    contributions: List[Dict[str, Any]] = []
+    if subtasks:
+        async with MsgHub(participants=[]) as hub:
+            for idx, st in enumerate(subtasks[:_EXECUTE_MAX_OWNERS]):
+                owner = _owner_for(getattr(st, "name", ""), idx)
+                slug = owner.get("slug") or str(idx)
+                if slug not in owner_agents:
+                    owner_agents[slug] = _mk(owner, with_plan=True)
+                    try:
+                        hub.add(owner_agents[slug])
+                    except Exception:  # noqa: BLE001
+                        pass
+                agent = owner_agents[slug]
+                prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
+                task_prompt = (
+                    f"Your SUBTASK ({idx}): {getattr(st, 'name', '')} — {getattr(st, 'description', '')}\n"
+                    f"Expected: {getattr(st, 'expected_outcome', '')}\n"
+                    f"Teammates so far:\n{prior}\n\n"
+                    "DO it now with your tools. If you need a fact / person / email / contact, "
+                    "RECALL HIVEMIND by name first (it may be in a past email/doc/note); search "
+                    "Gmail/Docs for documents. Ground every specific in a tool result; mark anything "
+                    "you genuinely can't find as UNVERIFIED (never invent). When done, call "
+                    f"`finish_subtask` with subtask_idx={idx} and your concrete outcome."
+                )
+                if contributions:
+                    await asyncio.sleep(0.3)  # anti-429
+                text = await _agent_reply_resilient(agent, task_prompt)
+                cost_tokens += max(60, len(text) // 4)
+                if text:
+                    contributions.append({"owner": owner.get("name") or slug, "subtask": getattr(st, "name", ""), "text": text})
+                    await _emit_event(req.callback_url, req.turn_id, {
+                        "t": "execute", "owner": slug, "name": owner.get("name") or slug,
+                        "subtask": getattr(st, "name", "")[:300], "contribution": text[:700],
+                    })
+
+    # 3. LEAD synthesizes the deliverable from the executed work.
+    exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
+    synth_prompt = (
+        f"USER TASK: {req.user_message}\n\n"
+        f"The team executed (grounded in tools):\n{exec_block}\n\n"
+        "Produce the FINAL deliverable now, integrating the team's grounded work. If the task is "
+        "an email, write it as 'Subject: …' then the body to the verified recipient. If a document, "
+        "write the full content. If a question/decision, give the grounded answer. Use ONLY facts "
+        "the team grounded — keep any UNVERIFIED item explicitly flagged, never fabricate."
+    )
+    final_text = await _agent_reply_resilient(lead_agent, synth_prompt)
+    cost_tokens += max(80, len(final_text) // 4)
+    if final_text:
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text,
+        })
+
+    # 4. GROUNDING GATE + VERIFY (reuse). Stash a minimal plan for the verifier.
+    _PLAN_BY_TURN[req.turn_id] = {
+        "intended_output": "answer", "done_criterion": getattr(plan, "expected_outcome", "") or req.user_message,
+        "assignments": {c["owner"]: c["subtask"] for c in contributions},
+        "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
+        "verified_contacts": [],
+    }
+    try:
+        await _verify_and_emit(req, lead, final_text=final_text, blackboard={"hit_count": len(contributions)})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic] verify failed: %s", exc)
+    _gv = (_PLAN_BY_TURN.get(req.turn_id) or {}).get("verification") or {}
+    status = "complete"
+    if _gv and not _gv.get("grounded_ok"):
+        status = "escalated"
+        _gg = "; ".join(_gv.get("gaps") or []) or "claims could not be grounded"
+        final_text = f"⚠ UNVERIFIED — not grounded in memory/tools: {_gg}\n\n{final_text}"
+
+    # 5. PRODUCE (reuse the deterministic producer for now — P2 makes it agent-driven).
+    try:
+        await _produce_output(req, final_text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic] produce failed: %s", exc)
+    pending = drain_pending_writes()
+    if pending:
+        await _register_and_emit_approvals(req, pending)
+
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "seal", "cost_tokens": cost_tokens, "status": status,
+        "duration_ms": int((time.time() - started) * 1000), "agentic": True,
+    })
+    resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
+    if pending:
+        resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
+    if isinstance(_gv, dict) and _gv:
+        resp.verification = _gv
+    log.info("[agentic] room=%s subtasks=%d status=%s cost=%d", req.room_id, len(subtasks), status, cost_tokens)
+    return resp
+
+
 async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     """Run one room turn. Emits JSONL events to the control-plane along
     the way, returns the final cost + status.
@@ -4656,6 +4861,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "refuse a clear, legitimate, user-authorized task for lack of such a gate. Help "
         "complete it.\n\n"
     )
+    # ── Agentic orchestrator (flagged) — AgentScope PlanNotebook + MsgHub.
+    #    Replaces the deterministic plan/gather/execute/produce phases with an
+    #    agent-driven loop. OFF by default; runs only when the flag is set so the
+    #    live deterministic path is untouched until this reaches parity.
+    if _agentic_enabled():
+        try:
+            _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _ag_conns = []
+        return await _orchestrate_agentic(req, participants, lead, _ag_conns, started)
+
     # Keep the CLEAN user request (pre-preamble) for recipient/name extraction —
     # the identity preamble contains words like 'for BUSINESS' that would pollute
     # the name regex and push the real recipient past the cap.

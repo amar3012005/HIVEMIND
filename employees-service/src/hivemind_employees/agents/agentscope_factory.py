@@ -316,6 +316,7 @@ def build_react_agent(
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    plan_notebook: Optional[object] = None,
 ) -> ReActAgent:
     """Construct an AgentScope ReActAgent for one DigitalEmployee.
 
@@ -439,7 +440,7 @@ def build_react_agent(
     except Exception:
         max_iters = 25
 
-    agent = ReActAgent(
+    _ra_kwargs = dict(
         name=name,
         sys_prompt=persona,
         model=model,
@@ -457,6 +458,21 @@ def build_react_agent(
         parallel_tool_calls=False,
         print_hint_msg=False,
     )
+    # Agentic orchestrator (flagged): attach a PlanNotebook so this agent gets
+    # the native create_plan / update_subtask_state / finish_subtask tools and
+    # auto-hints — the lead decomposes + the team drives subtasks themselves.
+    if plan_notebook is not None:
+        _ra_kwargs["plan_notebook"] = plan_notebook
+    agent = ReActAgent(**_ra_kwargs)
+    # When the agent has connectors, enable_meta_tool=True puts the PlanNotebook
+    # tools (create_plan / update_subtask_state / finish_subtask) into the gated
+    # 'plan_related' group — inactive by default → the LLM's create_plan call 400s
+    # ("not in request.tools"). Activate that group so the plan tools are usable.
+    if plan_notebook is not None:
+        try:
+            agent.toolkit.update_tool_groups(["plan_related"], True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("activate plan_related group failed: %s", exc)
     setattr(agent, "hivemind_enabled_tools", list(requested_tools))
     setattr(agent, "hivemind_use_simulation_actions", _uses_groq_fallback(provider))
     setattr(agent, "tool_call_count", 0)

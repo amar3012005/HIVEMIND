@@ -3622,6 +3622,15 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 # Phase 1 — output types the lead may pick from user intent.
 _PLAN_OUTPUTS = {"email", "doc", "sheet", "slack", "ticket", "crm", "decision", "answer"}
 
+# Explicit "send a message" intent — only THESE phrasings justify an `email`
+# output. A planning/strategy question that merely names a person does not.
+_SEND_INTENT_RE = re.compile(
+    r"\b(e-?mail|send|sent|sending|reply|replies|replying|respond|responding|"
+    r"forward|cc\b|draft(?:ing)?\s+(?:an?\s+)?(?:e-?mail|mail|message|note|reply)|"
+    r"write\s+(?:back|to|an?\s+(?:e-?mail|mail|note|message)))\b",
+    re.IGNORECASE,
+)
+
 
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Extract the FIRST balanced {...} object and json.loads it. Robust to a
@@ -3680,9 +3689,14 @@ async def _plan_turn(
         '  "assignments": {"<agent name or slug from the team>": "<their concrete sub-task>"},\n'
         '  "connectors_needed": ["<subset of the enabled connectors actually needed, [] if none>"]\n'
         '}\n'
-        'Intent → output examples: "email them"→email, "message/ping in slack"→slack, '
+        'Intent → output examples: "email/send/reply to them"→email, "message/ping in slack"→slack, '
         '"write a report/brief"→doc, "build a tracker/table"→sheet, "should we…/which option"→decision, '
-        'a plain question→answer. Only assign agents that are on the team. Output JSON only.'
+        'a plain question→answer.\n'
+        'CRITICAL — a PLANNING / STRATEGY / ADVICE question ("what should be the plan", "how should we '
+        'approach", "what\'s our strategy/next move", "what should we do about X with <person>") is '
+        '"decision" or "answer" — NOT email. Naming a person does NOT make it an email. Choose '
+        '"email" ONLY when the user explicitly asks to email / send / reply / draft a message to '
+        'someone. Only assign agents that are on the team. Output JSON only.'
     )
     # Build a TOOL-LESS in-persona planner: no tools in the action space means
     # the model can't emit a fake `JSON` tool-call (the llama-3.3 quirk that 400s)
@@ -3713,6 +3727,14 @@ async def _plan_turn(
         plan = {}
     out = str(plan.get("intended_output") or "answer").strip().lower()
     if out not in _PLAN_OUTPUTS:
+        out = "answer"
+    # Deterministic intent guard (independent of the LLM): a question that names a
+    # person but carries NO explicit send/email/reply verb and NO literal address
+    # is NOT an email task — it's an answer. Stops planning/strategy prompts
+    # ("what should be the plan with Ethan…") from becoming an undeliverable email
+    # that escalates on a missing recipient.
+    if out == "email" and not _SEND_INTENT_RE.search(req.user_message or "") \
+            and not re.search(r"[\w.+-]+@[\w.-]+\.\w+", req.user_message or ""):
         out = "answer"
     valid_names = {(p.get("slug") or "") for p in participants} | {(p.get("name") or "") for p in participants}
     raw_assign = plan.get("assignments") if isinstance(plan.get("assignments"), dict) else {}
@@ -3793,12 +3815,21 @@ async def _verify_turn(
         '  "note": "<one sentence>"\n'
         '}\n'
         "Rules:\n"
-        "- artifact_ok is true ONLY with OBJECTIVE evidence the output was produced or queued: "
-        "produced_artifacts is non-empty, OR writes_pending_approval lists a write matching the "
-        "intended_output, OR tools_used shows the relevant WRITE tool fired (e.g. gmail_send for "
-        "an email, docs_create for a doc). Content merely drafted, quoted, or described in the "
-        "discussion does NOT count — e.g. a fully written-out email body with no actual send is "
-        "artifact_ok=false. When artifact_ok is false, say so in gaps.\n"
+        "- FIRST, branch on intended_output. If it is \"answer\" or \"decision\", the DELIVERABLE IS "
+        "THE TEXT itself — there is NO external artifact to produce. Set artifact_ok=true whenever "
+        "final_excerpt contains a substantive, on-topic answer/recommendation (steps, reasoning, a "
+        "clear position). Do NOT require produced_artifacts / a write / a doc / an email for these — "
+        "demanding one is a verifier error. For answer/decision, proposed next-steps and suggested "
+        "owners are RECOMMENDATIONS, not claims-of-fact: do NOT mark them ungrounded merely because "
+        "they haven't happened yet. grounded_ok here means the RECOMMENDATION rests on the gathered "
+        "evidence and names only real team members — not that every step is already done.\n"
+        "- For a PRODUCED output (email/doc/sheet/slack/ticket/crm), artifact_ok is true ONLY with "
+        "OBJECTIVE evidence it was produced or queued: produced_artifacts is non-empty, OR "
+        "writes_pending_approval lists a write matching the intended_output, OR tools_used shows the "
+        "relevant WRITE tool fired (e.g. gmail_send for an email, docs_create for a doc). Content "
+        "merely drafted, quoted, or described in the discussion does NOT count — e.g. a fully "
+        "written-out email body with no actual send/draft is artifact_ok=false. When artifact_ok is "
+        "false, say so in gaps.\n"
         "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true. BUT met=true "
         "ONLY if grounded_ok is also true AND gaps is empty. A queued draft that asserts UNGROUNDED "
         "or INVENTED facts (names, roles, commitments, numbers not backed by memory/tools), or that "
@@ -4067,33 +4098,74 @@ async def _gather_evidence(
     correspondence: List[Dict[str, Any]] = []
     connector_hits: List[Dict[str, Any]] = []
 
-    # Resolve named people for any output that addresses/references someone.
-    if out in ("email", "slack") or _RECIPIENT_RE.search(msg):
-        contacts = await _resolve_recipients(req, msg)
-        if contacts:
-            sources.append("org_directory")
+    q = _gather_query(msg)
+    # Seed evidence from EVERY enabled source in PARALLEL (MiroFish-style "gather
+    # all info first"), regardless of output type — not gmail-only. Three
+    # independent reads fan out at once: (1) resolve named people → real contacts,
+    # (2) a TOPICAL gmail sweep (mail searched for subject-matter, not just a
+    # person's voice), (3) a Drive (docs/sheets/slides) sweep. HIVEMIND recall +
+    # web are gathered elsewhere. [MCP connectors plug in here the moment a room
+    # enables one — none do today; all enabled connectors are Google-native.]
+    want_contacts = out in ("email", "slack") or bool(_RECIPIENT_RE.search(msg))
 
-    # Prior correspondence for voice/style or person-referencing tasks.
+    async def _do_contacts() -> List[Dict[str, Any]]:
+        return await _resolve_recipients(req, msg) if want_contacts else []
+
+    async def _do_gmail() -> Optional[Dict[str, Any]]:
+        if "gmail" not in conns or not q:
+            return None
+        return await google_exec_emulated(
+            "gmail_search", {"query": q, "max": 6}, user_id=req.user_id, org_id=req.org_id)
+
+    async def _do_drive() -> Optional[Dict[str, Any]]:
+        if not any(c in conns for c in ("google_docs", "google_sheets")) or not q:
+            return None
+        return await google_exec_emulated(
+            "drive_search", {"query": q, "max": 6}, user_id=req.user_id, org_id=req.org_id)
+
+    contacts_r, gmail_r, drive_r = await asyncio.gather(
+        _do_contacts(), _do_gmail(), _do_drive(), return_exceptions=True)
+
+    if isinstance(contacts_r, list) and contacts_r:
+        contacts = contacts_r
+        sources.append("org_directory")
+    # Topical mail hits — subject-matter evidence, distinct from voice samples.
+    if isinstance(gmail_r, dict) and gmail_r.get("messages"):
+        for m in gmail_r["messages"][:6]:
+            connector_hits.append({
+                "connector": "gmail", "kind": "email",
+                "title": m.get("subject") or (m.get("snippet") or "")[:80],
+                "url": (f"https://mail.google.com/mail/u/0/#all/{m.get('threadId')}"
+                        if m.get("threadId") else ""),
+                "snippet": (m.get("snippet") or "")[:200],
+            })
+        sources.append("gmail")
+    if isinstance(drive_r, dict) and drive_r.get("files"):
+        for f in drive_r["files"]:
+            connector_hits.append({"connector": f"google-{f.get('type','file')}",
+                                   "title": f.get("name"), "url": f.get("url"), "kind": f.get("type")})
+        sources.append("google_drive")
+
+    # Prior correspondence for VOICE/style — needs a resolved person, so it runs
+    # after contact resolution (it depends on the result above).
     target = contacts[0] if contacts else {}
     style_signal = any(t in msg.lower() for t in _STYLE_SIGNALS)
     if ("gmail" in conns) and (out == "email" or style_signal) and (target.get("name") or target.get("email")):
         correspondence = await _fetch_correspondence(
             req, target.get("name", ""), target.get("email", ""))
-        if correspondence:
+        if correspondence and "gmail" not in sources:
             sources.append("gmail")
 
-    # Search Google Drive (docs + sheets + slides) when those connectors are on —
-    # the relevant context for many tasks lives in a doc/sheet, not mail.
-    if any(c in conns for c in ("google_docs", "google_sheets")):
-        q = _gather_query(msg)
-        if q:
-            res = await google_exec_emulated(
-                "drive_search", {"query": q, "max": 6}, user_id=req.user_id, org_id=req.org_id)
-            for f in (res or {}).get("files", []):
-                connector_hits.append({"connector": f"google-{f.get('type','file')}",
-                                       "title": f.get("name"), "url": f.get("url"), "kind": f.get("type")})
-            if connector_hits:
-                sources.append("google_drive")
+    # Recipient-gap fallback: an email with NO resolvable recipient (none in
+    # org/Gmail, none typed literally) must NOT loop or escalate — demote to a
+    # grounded ANSWER that delivers the plan and asks for the address. (Was: the
+    # skeptic escalated "the recipient is missing" for 4 rounds, producing
+    # nothing.) The intent guard in _plan_turn catches most; this catches the
+    # case where a send-verb WAS present but the named person didn't resolve.
+    if out == "email" and not contacts:
+        plan["intended_output"] = "answer"
+        plan["output_demoted"] = "email→answer: no recipient resolved (none in org/Gmail, none typed)"
+        out = "answer"
 
     plan["verified_contacts"] = contacts          # consumed by production directives
     plan["correspondence"] = correspondence
@@ -4242,6 +4314,19 @@ def _output_production_directive(turn_id: str) -> str:
             "addresses for yourself or colleagues. The room saves it as a Gmail DRAFT to the "
             "verified recipient and surfaces it for the user's one-click approval — it is NOT "
             "sent until they approve, so don't claim it was sent." + _no_tools
+        )
+    if out == "answer" and plan.get("output_demoted"):
+        # Was an email but no recipient resolved → answer that delivers the plan
+        # AND asks for the address. Never escalate over the missing recipient.
+        return (
+            _gap_prefix +
+            "\n\n── DELIVER THE ANSWER ──\n"
+            "Give the COMPLETE plan/recommendation grounded in the gathered evidence — concrete steps "
+            "and a realistic sequence; reference real team members by their role where an owner makes "
+            "sense, but do NOT fabricate commitments, dates, or facts not in the evidence. This is NOT "
+            "an email (no recipient could be resolved). Close with ONE "
+            "short line offering to draft the email once the user shares the recipient's address. Do NOT "
+            "treat the missing address as a blocker, and do NOT escalate over it." + _no_tools
         )
     return ""
 

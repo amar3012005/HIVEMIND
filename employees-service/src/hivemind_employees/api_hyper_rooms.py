@@ -4642,7 +4642,7 @@ async def _orchestrate_agentic(
     #    not call a tool". The deterministic _plan_turn already uses this
     #    JSON-content + _first_json_object pattern reliably on Groq — mirror it.
     #    The DECOMPOSITION + output-type are the model's (agent-driven).
-    lead_agent = _mk(lead, 8)
+    plan_agent = _mk(lead, 8)
     plan_prompt = (
         f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
         f"{gathered_block}"
@@ -4659,7 +4659,7 @@ async def _orchestrate_agentic(
         "question→answer. Do NOT add consent / policy / GDPR / approval subtasks the user did not "
         "ask for — the user's request IS the authorization; plan only the real work."
     )
-    plan_text = await _agent_reply_resilient(lead_agent, plan_prompt)
+    plan_text = await _agent_reply_resilient(plan_agent, plan_prompt)
     cost_tokens += max(80, len(plan_text) // 4)
     plan_obj = _first_json_object(plan_text) or {}
     subtasks_raw = [str(s) for s in (plan_obj.get("subtasks") or []) if str(s).strip()][:_EXECUTE_MAX_OWNERS]
@@ -4742,7 +4742,11 @@ async def _orchestrate_agentic(
         "gates the user did not ask for — the user's request IS the authorization; just produce it."
     )
 
-    # 3. DRAFT — the lead writes a first-pass deliverable from the gathered work.
+    # 3. DRAFT — a FRESH lead agent writes the deliverable. Must be separate from
+    #    plan_agent: that one was told "reply STRICT JSON" and its memory keeps it
+    #    in JSON mode → the draft (and the produced doc) would be the plan JSON blob,
+    #    not the prose deliverable. Fresh agent = clean prose.
+    lead_agent = _mk(lead, 6)
     draft = await _agent_reply_resilient(lead_agent, (
         f"{gathered_block}USER TASK: {req.user_message}\n\n"
         f"Team gathered (grounded):\n{exec_block}\n\n"

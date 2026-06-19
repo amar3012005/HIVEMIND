@@ -17,6 +17,16 @@ Entry format:
 
 ---
 
+## 2026-06-19 — FULL VISION COMPLETE: real artifacts (Google re-auth) + email recipient
+- **commits:** `ec4ae0d2`
+- **what:** User re-authorized Google with write scopes. Verified docs_create + gmail_create_draft bridge probes → 200 with real URLs (was 403). Fixed the agentic email path to resolve recipients (`_resolve_recipients` → verified_contacts; the stash hardcoded []).
+- **verified e2e (agentic, default-on, 120b):**
+  - doc turn → REAL Google Doc produced (docs.google.com/document/d/18zr1h4G3yK…), grounded.
+  - email turn → REAL Gmail draft + approval card to amarsai2005@gmail.com.
+  - strategy/answer → grounded + full simulation (challenge/silent-when-ungrounded/revise).
+- **THE VISION IS LIVE:** GATHER → PLAN → EXECUTE(owners, tool-grounded) → DRAFT → SIMULATE(debate/skeptic/peer-review) → REVISE → PRODUCE(real doc/sheet/email draft) → VERIFY(grounding gate) → PERSIST. Multi-agent simulation + robust recall + real artifacts + zero fabrication, all on AgentScope (ReActAgent/MsgHub/structured JSON plan) + gpt-oss-120b. Flag default-on.
+- **note:** grounding gate may escalate an email/doc whose claims aren't fully grounded (honest — draft still surfaced with the UNVERIFIED flag, never fabricated-sealed). Connector-cert + renewal-cron also fixed this session (expired-cert outage on the connect-UI).
+
 ## 2026-06-19 — Multi-agent SIMULATION restored in the agentic loop (debate/skeptic/peer-review)
 - **commits:** `a183a4d7`
 - **what:** SIMULATE phase between EXECUTE and SYNTHESIZE: lead DRAFTs → reactors challenge/support/extend (skeptic lane opposes) via reused `_run_reactor` in a MsgHub → lead REVISES real challenges → converge → synth. Reactors are tool-less (`_mk(..., toolless=True)`) so gpt-oss returns clean react JSON instead of wrapping it in a fake `JSON` tool call (→400). Reuses REACTOR_INSTRUCTIONS + react/peer_review events (FE already renders).

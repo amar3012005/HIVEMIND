@@ -17,6 +17,14 @@ Entry format:
 
 ---
 
+## 2026-06-19 — Agentic orchestrator P1 (structured flat plan + MsgHub) — flag OFF
+- **commits:** scaffold `ffee9849`, working `77004cd8` (flag `HYPER_AGENTIC_ORCHESTRATOR`, default OFF)
+- **what:** New `_orchestrate_agentic`: lead decomposes the task via STRUCTURED OUTPUT (`_AgenticPlan` = goal/done_criterion/subtasks:list[str], one forced generate_response) → owners each execute their 'Owner — task' with single-arg tools (recall + connectors) in a MsgHub → lead synthesizes → reuse grounding gate + verify + produce + seal. `build_react_agent` gained optional `plan_notebook` (+ activates the gated `plan_related` group). `_agent_reply_resilient` retries the harmony tool-name leak.
+- **why:** User wants a non-deterministic autonomous loop (gather→subtasks→execute) for ANY task. AgentScope = the substrate.
+- **gotchas:** gpt-oss-20b CANNOT emit the nested PlanNotebook `create_plan` schema (omits required `expected_outcome`, invents params, malforms JSON → 400). FLAT structured output (list[str]) + Python-built plan is the reliable path on gpt-oss. `enable_meta_tool=True` (connectors present) gates plan tools in `plan_related` — must activate. The deterministic path stays live; flag OFF until parity.
+- **verified:** smoke (flag forced on, JEE room): first attempt structured plan empty→goalkeeper rework→`subtasks=4 status=COMPLETE met=true grounded_ok=true`, verifier "CEO claim fully supported by the documented source". Grounds to real Münzer, no fabrication.
+- **scorecard:** recon ✓ (AgentScope API verified twice). 2 smoke iterations caught the real ceiling (nested-schema 400 → flat structured plan) — the AskUserQuestion fork ("structured flat plan") was right. verify-on-box was essential (would've shipped a broken nested-plan path otherwise). Residual: P2 agent-driven produce, multi-task-shape verify (doc/email), P4 FE subtask rendering — all before default-on.
+
 ## 2026-06-19 — Agent-driven personified HIVEMIND recall for contacts (incremental)
 - **commits:** `0ed615a3`
 - **what:** EXECUTE owners now recall HIVEMIND by name for any person/recipient their slice needs (only report "missing" after recall returns nothing); producer prefers an owner-recalled grounded recipient over the deterministic org/Gmail resolver; one retry on gpt-oss's flaky harmony tool-name leak.

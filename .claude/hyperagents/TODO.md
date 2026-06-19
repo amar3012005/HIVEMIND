@@ -8,7 +8,21 @@ When all phases ship → move a summary line to [JOURNAL.md](./JOURNAL.md) and c
 
 ---
 
-## Current feature: _(none — idle)_
+## Current feature: Agentic orchestrator (AgentScope PlanNotebook + MsgHub) — started 2026-06-19
+**Goal:** Replace the deterministic phase machine with an autonomous agent-driven loop that works for ANY task: lead decomposes → each owner gets a SubTask → each runs its own ReAct loop (personified recall + connectors) → MsgHub broadcasts → synthesize → structured verify. No `if intended_output==…`, no `_resolve_recipients`/`_produce_output` branches.
+**Recon-redteam verdict:** AgentScope 1.0.19 natively supports it (API verified): `PlanNotebook`(create_plan/finish_subtask + plan-change hook), `MsgHub`(auto-broadcast), `ReActAgent(plan_notebook=, structured_model=)`, `Toolkit` groups. Build behind a flag (safe/reversible); risk = gpt-oss harmony tool-name leak (retry) + token/429 (cap) + FE event parity.
+**Feature-recon:** Extends `build_react_agent` (add optional `plan_notebook`) + new `_orchestrate_agentic`; reuses existing grounding gate, `_verify_and_emit`, approval queue, event types. Does NOT touch the live deterministic path until parity.
+
+### Phases
+- [x] P1 — DONE (77004cd8): `_orchestrate_agentic` via STRUCTURED flat plan (gpt-oss can't do nested create_plan) → owners execute with tools in MsgHub → synthesis → grounding gate/verify/produce/seal. Smoke: subtasks=4, complete, grounded to real Münzer. Flag OFF.
+- [ ] P2 — Agent-driven PRODUCE: synthesizer/owner calls `docs_create`/`gmail_create_draft` itself (approval card still surfaces); drop the deterministic producer for this path.
+- [ ] P3 — Robustness: harmony/429 retry per owner, cost cap, max rounds, reuse the hard grounding gate + structured verify, idempotent seal.
+- [ ] P4 — FE: render live SubTask states from the plan event; turn the flag ON after parity with the deterministic path.
+- [ ] Verify — e2e on JEE/Solvis room for several task shapes (doc, email, answer, doc+email); CEO grounds to real Münzer, doc+email produces the doc + drafts when recipient known.
+- [ ] Ship — per phase: commit (author amarsai3012005) + push + JOURNAL.
+- [ ] Retrospective — scorecard → JOURNAL; delegate to hivemind-skill-evolver.
+
+> _(template for future features below)_
 
 > When a new feature starts, replace this block with:
 >

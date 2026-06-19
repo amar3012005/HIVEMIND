@@ -4528,9 +4528,11 @@ class _AgenticPlan(BaseModel):
 
 
 def _agentic_enabled() -> bool:
-    """Flag — the AgentScope structured-plan + MsgHub agentic orchestrator. OFF by
-    default; the deterministic pipeline stays live until this reaches parity."""
-    return os.environ.get("HYPER_AGENTIC_ORCHESTRATOR", "").lower() in ("1", "true", "yes", "on")
+    """Flag — the AgentScope structured-plan + MsgHub agentic orchestrator. ON by
+    default (the visioned swarm loop: guaranteed gather → decompose → per-owner
+    tool-grounded execution → synthesize → verify → persist). Set
+    HYPER_AGENTIC_ORCHESTRATOR=off to fall back to the deterministic pipeline."""
+    return os.environ.get("HYPER_AGENTIC_ORCHESTRATOR", "on").lower() not in ("0", "false", "no", "off")
 
 
 async def _agent_reply_resilient(agent, content: str) -> str:
@@ -4599,6 +4601,38 @@ async def _orchestrate_agentic(
 
     roster = ", ".join(f"{p.get('name') or p.get('slug')}" for p in participants)
 
+    # 0. GATHER — a GUARANTEED recall sweep so the team always has the org's facts
+    #    (don't depend on each owner choosing to recall → the CEO-not-found
+    #    variance). Robust gather/recon: the org brain is queried up front and the
+    #    facts are injected into every agent's context.
+    gathered_block = ""
+    try:
+        rc = await recall_emulated(req.user_message, user_id=req.user_id, org_id=req.org_id,
+                                   project_id=req.project_id, max_memories=10)
+        _mems = []
+        if isinstance(rc, dict):
+            _mems = rc.get("memories") or rc.get("results") or rc.get("context") or []
+        _glines = []
+        for m in (_mems if isinstance(_mems, list) else [])[:8]:
+            if isinstance(m, dict):
+                t = str(m.get("title") or m.get("name") or "")
+                c = str(m.get("content") or m.get("summary") or m.get("text") or "")[:220]
+                if t or c:
+                    _glines.append(f"- {t}: {c}".strip(" -:"))
+            elif isinstance(m, str):
+                _glines.append(f"- {m[:220]}")
+        if _glines:
+            gathered_block = ("KNOWN FROM HIVEMIND MEMORY (ground your work in these real facts; "
+                              "cite them; do NOT contradict or fabricate around them):\n"
+                              + "\n".join(_glines) + "\n\n")
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "gather", "sources": ["hivemind"], "contacts": 0, "correspondence": 0,
+            "connector_hits": [], "memory_hits": len(_glines),
+        })
+        log.info("[agentic] gather room=%s mem_hits=%d", req.room_id, len(_glines))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic] gather failed: %s", exc)
+
     # 1. LEAD decomposes — asks for JSON, we parse it. gpt-oss on Groq emits the
     #    plan as clean JSON CONTENT (not a tool call), so AgentScope's
     #    structured_model (which forces a generate_response tool) 400s with "did
@@ -4608,6 +4642,7 @@ async def _orchestrate_agentic(
     lead_agent = _mk(lead, 8)
     plan_prompt = (
         f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
+        f"{gathered_block}"
         f"USER TASK: {req.user_message}\n\n"
         "Reply with STRICT JSON only (no prose, no markdown):\n"
         '{\n'
@@ -4627,6 +4662,17 @@ async def _orchestrate_agentic(
     done_txt = str(plan_obj.get("done_criterion") or "")
     intended_output = str(plan_obj.get("intended_output") or "answer").strip().lower()
     if intended_output not in ("doc", "sheet", "email", "answer"):
+        intended_output = "answer"
+    # Conservative intent guard (mirror the deterministic path): a planning/
+    # strategy/"what should be" question is an ANSWER, not an artifact — don't
+    # over-classify it to doc/email (which then needs a connector write + OAuth).
+    # Only keep doc/sheet/email when the user EXPLICITLY asked to create/send one.
+    _umsg = req.user_message or ""
+    if intended_output == "email" and not _SEND_INTENT_RE.search(_umsg) \
+            and not re.search(r"[\w.+-]+@[\w.-]+\.\w+", _umsg):
+        intended_output = "answer"
+    if intended_output in ("doc", "sheet") and not re.search(
+            r"\b(create|writ|draft|build|make|generat|compil|prepare|doc|document|report|sheet|spreadsheet|table|catalog|catalogue|inventory)\w*", _umsg, re.IGNORECASE):
         intended_output = "answer"
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "plan", "agent": lead.get("slug"), "intended_output": intended_output,
@@ -4661,6 +4707,7 @@ async def _orchestrate_agentic(
                 task = line.split("—", 1)[1].strip() if "—" in line else line
                 prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
                 task_prompt = (
+                    f"{gathered_block}"
                     f"Your SUBTASK: {task}\nTeammates so far:\n{prior}\n\n"
                     "GATHER from HIVEMIND with your tools — call `recall` (and `org_directory` for a "
                     "person/email) by name for any fact/person/contact your subtask needs; it may be in "
@@ -4684,6 +4731,7 @@ async def _orchestrate_agentic(
     # 3. LEAD synthesizes the deliverable from the executed work.
     exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
     synth_prompt = (
+        f"{gathered_block}"
         f"USER TASK: {req.user_message}\n\n"
         f"The team gathered (grounded in tools):\n{exec_block}\n\n"
         f"Write the COMPLETE FINAL DELIVERABLE itself now — intended output is '{intended_output}'. "

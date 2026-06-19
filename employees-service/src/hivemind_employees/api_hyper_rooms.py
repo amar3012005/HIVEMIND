@@ -3840,7 +3840,14 @@ async def _verify_turn(
         "slice in the EXECUTE phase this turn) AND the final text reflects that work. Do NOT require "
         "more than the plan assigned.\n"
         "- grounded_ok=false if the result asserts specific facts with memory_hits=0 and no tools "
-        "used, or invents a person/role/commitment that the gathered evidence does not support. "
+        "used, or invents a person/role/commitment that the gathered evidence does not support.\n"
+        "- grounded_ok=false on ANY of these fabrication tells (be strict — this prevents shipping "
+        "misinformation): a named source/citation/document/date that does not correspond to a real "
+        "memory_hit or tool result (e.g. 'Confluence page X, 23-APR-24', 'investor-relations release', "
+        "an invented file name); a person/CEO/email address asserted without a matching tool/memory "
+        "result; OR a website / press release / LinkedIn / public-filing citation when no web tool was "
+        "used (the room has NO web access — any such citation is fabricated). A claim marked UNVERIFIED "
+        "in the text is honest and does NOT lower grounded_ok; a confident claim with a fake backing does.\n"
         "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
@@ -4215,28 +4222,35 @@ async def _recon_pre(req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: st
 
 # Cap on how many assigned owners actually execute their slice in the EXECUTE
 # phase (cost/latency bound — one LLM call each, sequential for handoff).
-_EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "5"))
+# Cap on owners that EXECUTE with tools. Lower than before because each is now a
+# bounded ReAct loop with real recall/connector calls (token-heavier) — turn-1 of
+# the Solvis transcript hit a 429 with 5 tool-less narrators; tool-grounded costs
+# more, so cap tighter + stagger.
+_EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "4"))
+_EXECUTE_MAX_ITERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_ITERS", "4"))
 
 
 async def _execute_assignments(
     req: "RoomTurnRequest", plan: Dict[str, Any],
     participants: List[Dict[str, Any]],
+    enabled_connectors: Optional[List[str]] = None,
 ) -> None:
     """EXECUTE phase — make the plan REAL, irrespective of room type. Walk the
     lead's per-owner assignments and have EACH owner agent (in persona) actually
-    DO their slice — grounded in the gathered evidence and BUILDING ON the prior
-    owners' contributions (sequential handoff = the deep, phased interaction the
-    flat single-pass synthesis never produced). Stashes plan['execution'] and
-    emits one `execute` event per owner so the FE shows the phases. Tool-less +
-    single-shot per owner (reliable, no fake-JSON-tool-call quirk); the team's
-    debate/swarm template then challenges and integrates this real work, instead
-    of the lead writing a solo plan that seals in one round.
+    DO their slice WITH ITS TOOLS — recall HIVEMIND + use the room's connectors to
+    GATHER and GROUND, building on the prior owners (sequential handoff = the deep,
+    phased interaction). Each runs a BOUNDED ReAct loop (max_iters≈4) so it really
+    queries instead of narrating from imagination (the fabrication failure). Stashes
+    plan['execution'] and emits one `execute` event per owner.
 
-    This runs for ANY template (debate / swarm / deep_sim) — it executes BEFORE
-    the template, so all of them synthesize over genuine per-owner output."""
+    Tool-GROUNDED (not tool-less) is the whole point: a tool-less owner invents
+    specs/CEOs/addresses; a tool-equipped owner recalls the real fact or honestly
+    reports UNVERIFIED. The team's template then integrates/challenges this real
+    work. Runs for ANY template, BEFORE the template dispatch."""
     assignments = plan.get("assignments") or {}
     if not assignments:
         return
+    conns = [str(c) for c in (enabled_connectors or [])]
     by_name: Dict[str, Dict[str, Any]] = {}
     for p in participants:
         for k in (p.get("slug"), p.get("name")):
@@ -4270,21 +4284,35 @@ async def _execute_assignments(
             f"Target output for the team: {out}\n\n"
             f"GATHERED EVIDENCE (reason over it; do not claim it is missing):\n{ev_block}\n\n"
             f"TEAMMATES' WORK SO FAR (build ON it, don't repeat it):\n{prior}\n\n"
-            f"YOUR ASSIGNED PART: {subtask}\n"
-            "Do your part NOW, in your own voice. Deliver your concrete contribution — real "
-            "findings, numbers, a drafted section, or a decision for your slice — in 4–8 "
-            "sentences. Ground every specific in the evidence or your recall; if something is "
-            "genuinely unknown, say so plainly rather than inventing it. Reply as prose (no JSON)."
+            f"YOUR ASSIGNED PART: {subtask}\n\n"
+            "DO the work — don't narrate a plan. USE YOUR AVAILABLE TOOLS to ground it: your "
+            "memory-recall tool for any fact/number/name/spec, and your connector tools "
+            "(Gmail / Docs / Sheets search) for documents or addresses. Call the tools by the "
+            "exact names in your tool list. Work toward your slice until you have a grounded result.\n"
+            "STRICT GROUNDING — this is enforced downstream:\n"
+            "  • Every specific claim (number, spec, name, date, email, citation) MUST come "
+            "from a recall hit or a tool result. After each, cite it inline like "
+            "`[src: <memory title or tool>]`.\n"
+            "  • If recall/tools do NOT return a fact, write `UNVERIFIED` — do NOT invent it, "
+            "do NOT fabricate a source, date, or document name.\n"
+            "  • You have NO web access — never cite a website, press release, or LinkedIn.\n"
+            "Deliver your concrete grounded contribution in 4–8 sentences."
         )
         exec_emp = {
             **emp,
-            "tools": ["_exec_noop"],   # truthy → empty toolkit (no fake JSON tool-call 400s)
-            "connectors": [],
+            # Real tools (recall + the room's connectors) so the owner actually
+            # gathers/grounds — the fix for "agents don't execute, they fabricate".
+            "tools": DEFAULT_HYPER_TOOLS,
+            "connectors": conns,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
-            "max_iters": 1,
+            "max_iters": _EXECUTE_MAX_ITERS,
         }
         try:
+            # Anti-429 stagger — tool-grounded owners are token-heavy (turn-1 hit
+            # the TPM limit); space them out.
+            if contributions:
+                await asyncio.sleep(0.3)
             agent = build_react_agent(
                 exec_emp, boot_emp.get("api_key") or "",
                 user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
@@ -4650,7 +4678,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # a solo plan and the turn seals in one pass; with it the debate/swarm
         # integrates genuine per-owner work.
         try:
-            await _execute_assignments(req, _plan, participants)
+            await _execute_assignments(req, _plan, participants, _plan_conns)
         except Exception as exc:  # noqa: BLE001 — never fail a turn over execution
             log.warning("[execute] failed: %s", exc)
         # Phase 3 — drive execution from the plan. The lead's plan is folded
@@ -5469,6 +5497,53 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         except Exception as exc:  # noqa: BLE001
             log.warning("rescue retry failed: %s", exc)
 
+    # Collect per-agent tool-call counts (the verifier reads this to judge whether
+    # claims were tool-grounded). Computed here — BEFORE the grounding gate's
+    # verify — and resets each agent's counter.
+    tool_call_counts: Dict[str, int] = {}
+    try:
+        for p in participants:
+            cache_key = f"{req.room_id}:{p['id']}"
+            cached_agent = _ROOM_AGENTS.get(cache_key)
+            if cached_agent is not None:
+                count = int(getattr(cached_agent, "tool_call_count", 0) or 0)
+                tool_call_counts[p.get("slug")] = count
+                try:
+                    setattr(cached_agent, "tool_call_count", 0)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tool_call_count reset failed slug=%s: %s", p.get("slug"), exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[room] tool_call_count collection failed: %s", exc)
+
+    # ── GROUNDING GATE ── verify BEFORE the save/seal decision. A turn whose
+    # claims aren't grounded in memory/tools must NEVER be saved (it would poison
+    # future recall) nor sealed RESOLVED (the user would ship fabrication). Run
+    # the recon verdict here, and if grounded_ok is false, flip to escalate +
+    # quality_low and prepend an UNVERIFIED banner so only honest, grounded
+    # content surfaces. (Solvis transcript: fake CEO "Schröder", fake specs, fake
+    # doc link all sealed RESOLVED — this stops that class entirely.)
+    try:
+        await _verify_and_emit(
+            req, lead, final_text=final_text,
+            tool_call_counts=tool_call_counts, blackboard=blackboard,
+        )
+        _verified = True
+    except Exception as exc:  # noqa: BLE001 — never fail a turn over verification
+        log.warning("[verify] pre-seal failed: %s", exc)
+        _verified = False
+    _gverdict = (_PLAN_BY_TURN.get(req.turn_id) or {}).get("verification") or {}
+    if _gverdict and not _gverdict.get("grounded_ok"):
+        quality_low = True
+        final_verdict = "escalate"
+        _gg = "; ".join(_gverdict.get("gaps") or []) or "key claims could not be grounded in HIVEMIND memory or connector results"
+        final_text = (
+            "⚠ UNVERIFIED — the team could not ground the following in memory or tools, "
+            f"so they are NOT confirmed (do not act on them as fact): {_gg}\n\n"
+            + (final_text or "")
+        )
+        log.info("[grounding-gate] room=%s BLOCKED — grounded_ok=false, not saved/not RESOLVED",
+                 req.room_id)
+
     # ── A3 tool-exec proof (measure only, don't block) ───────────────
     if memory_context and final_text and not re.search(r'["“][^"”]{6,}["”]', final_text):
         log.info("low-grounding flag turn=%s — memory_context present but lead cited no title", req.turn_id)
@@ -5536,21 +5611,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("trust update failed: %s", exc)
 
-    tool_call_counts: Dict[str, int] = {}
-    try:
-        for p in participants:
-            cache_key = f"{req.room_id}:{p['id']}"
-            cached_agent = _ROOM_AGENTS.get(cache_key)
-            if cached_agent is not None:
-                count = int(getattr(cached_agent, "tool_call_count", 0) or 0)
-                tool_call_counts[p.get("slug")] = count
-                try:
-                    setattr(cached_agent, "tool_call_count", 0)
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("tool_call_count reset failed slug=%s: %s", p.get("slug"), exc)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[room] tool_call_count collection failed: %s", exc)
-
     # ── Seal ─────────────────────────────────────────────────────────
     _mark("seal_ms")
     log.info(
@@ -5580,11 +5640,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         votes_count=0,
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
     ))
-    # Phase 5 — recon/verify the result against the lead's done-criterion.
-    await _verify_and_emit(
-        req, lead, final_text=final_text,
-        tool_call_counts=tool_call_counts, blackboard=blackboard,
-    )
+    # Phase 5 — recon/verify already ran in the GROUNDING GATE above (before the
+    # save/seal decision) so fabrication can't be persisted or sealed RESOLVED.
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,

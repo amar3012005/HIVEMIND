@@ -4656,7 +4656,8 @@ async def _orchestrate_agentic(
         "2–5 subtasks; each starts with a real teammate then ' — ' then an action doable with "
         "tools (recall HIVEMIND, search Gmail/Docs). Pick intended_output from the user's intent: "
         "'create/write a doc/report'→doc, 'tracker/table'→sheet, 'email/send to X'→email, a "
-        "question→answer."
+        "question→answer. Do NOT add consent / policy / GDPR / approval subtasks the user did not "
+        "ask for — the user's request IS the authorization; plan only the real work."
     )
     plan_text = await _agent_reply_resilient(lead_agent, plan_prompt)
     cost_tokens += max(80, len(plan_text) // 4)
@@ -4734,9 +4735,11 @@ async def _orchestrate_agentic(
     exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
     _deliver_spec = (
         "Output ONLY the deliverable content, ready to publish — NO process narration, NO placeholders. "
-        "doc → FULL markdown document; sheet → markdown TABLE (header, '|---|', data rows); "
-        "email → 'Subject: …' then the body; answer → the direct grounded answer. Use ONLY facts the "
-        "team grounded; flag any UNVERIFIED item inline; never fabricate."
+        "doc → begin with '# <a specific descriptive Title>' (NOT the room goal) then the FULL markdown "
+        "document; sheet → markdown TABLE (header, '|---|', data rows); email → 'Subject: …' then the "
+        "body; answer → the direct grounded answer. Use ONLY facts the team grounded; flag any "
+        "UNVERIFIED item inline; never fabricate. Do NOT invent consent / policy / GDPR / approval "
+        "gates the user did not ask for — the user's request IS the authorization; just produce it."
     )
 
     # 3. DRAFT — the lead writes a first-pass deliverable from the gathered work.

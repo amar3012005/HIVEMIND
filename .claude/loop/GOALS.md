@@ -32,7 +32,13 @@ purple/violet, no dark surfaces, near-zero shadow).
 - [~] **Profile.jsx** — ✅ avatar gradient+shadow → flat solid #117dff (135, 24bcee5). REMAINING: surface fact edit/delete errors + remove console.error (747,759); fix "Edit Profile Facts" collapsing the open editor (1256,1315).
 - [~] **Engine.jsx** — ✅ renamed `t`-shadow map params (365,372 → 24bcee5). REMAINING: drive the "all features active" status bar from real state or label it a static legend (614-630, currently lies); inline error states instead of console.error-only (71-331); confirm step on destructive synthesize-now "Run now" (443).
 
-### Polish / cleanup / smaller bugs
+### Remaining (genuinely blocked — runtime / product / prop-thread)
+- [!] **Connectors alert→toast** — needs `setToastMessage` threaded into 3 child modals (GmailSyncSettings, oauth-clients, revoke); can't verify modal flow without running. Alerts currently FUNCTION (inform user), just unthemed. Destructive confirms (Gmail flush, OAuth revoke) stay as confirms.
+- [!] **Engine** confirm-on-`synthesize-now` (destructive on real orgs) — needs a styled confirm modal.
+- [!] **MemoryGraph `{false}` panel delete** — attempted; cascades into live temporal-state (setters orphaned, getters still read). Inert dead code, low value, high regression risk → left as-is.
+- Smaller polish left: DigitalEmployees transcript poll cap + dark code-block surface; WebStudio fonts-scope to new-tab report; KnowledgeBase radii normalization (marginal); WebIntelligence radii/H1; AgentSwarm emoji→lucide + poll-interval cleanup.
+
+### (superseded) Polish / cleanup / smaller bugs
 - [ ] **Connectors.jsx** — fix Nango-only scope-change dead path (803-820 gate `oauthProvider||nangoProvider` but onChangeScope wired only on oauthProvider → Settings save silently no-ops for Salesforce/Linear); alert()/confirm → themed toast/modal (esp. destructive Gmail flush 1146); env-source hardcoded URLs (360,2376,2910); remove console.* (1096-3760); off-token badges (436-446) → #117dff/amber-600; delete dead exports (StatsRow/CopyButton/CONNECTOR_CATEGORIES).
 - [ ] **MemoryMoss.jsx** — wire `onSelectMemory` (MemoryGraph passes it 1418 but Moss ignores → leaf-node click does nothing); render or remove dead `subtitle`/`hubLeaves` props (224-235).
 - [ ] **ApiKeys.jsx + McpServer.jsx** — drop off-shell `min-h-screen bg-… p-…` double-bg (ApiKeys 332, McpServer 1171); normalize radii to design system; wrap `handleRevoke` in try/catch (ApiKeys 324, floating promise); remove McpServer 200-line `display:none` dead Quick-Setup block (1305-1501).
@@ -40,6 +46,11 @@ purple/violet, no dark surfaces, near-zero shadow).
 - [ ] **MemoryGraph.jsx** — remove the permanently-dead `{false && (...)}` temporal panel + its orphaned rAF/state (947-999, 1517-1664) OR re-enable it; remove eslint-disabled unused imports (14-21).
 
 ## Done (archive — newest first)
+- [x] **TaraConfig** date guards (Invalid-Date) + **Engine** feature badge `active`→`built-in` (honest static legend). `b69d6a2`.
+- [x] **Profile** edit-toggle (was collapsing open editor) + fact update/delete error surfacing; **KnowledgeBase** a11y labels (checkbox + delete btn). `e522931`.
+- [x] **Settings** dead docs domain → live; **WebStudio** LiveResearchPanel auto-scroll no-op fixed. `69b98c1`.
+- [x] **AgentSwarm** result alerts → themed toast (confirms kept on destructive). `9eaa4c4`.
+- [x] **Dead-code deletes:** McpServer 200-line hidden Quick-Setup grid + TaraConfig ~470-line dead components (+orphaned imports). `16c57d9`.
 - [x] **Theme: all purple/violet removed** (AgentSwarm, TaraConfig, WebStudio, KnowledgeBase, Engine) → blue/#117dff single-accent. Da-vinci `d09c667`.
 - [x] **Off-shell double-bg removed** (ApiKeys, McpServer, Memories) + ApiKeys revoke floating-promise guarded. Da-vinci `2f6446d`.
 - [x] **Overview** clock weight (hierarchy) · **MemoryGraph** dead onSelectMemory prop + dead console handler · **KnowledgeBase** dead console handler. Da-vinci `ba21f9e`.

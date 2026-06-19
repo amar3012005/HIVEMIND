@@ -53,6 +53,7 @@ from .agents.agentscope_tools import (
     execute_pending_write,
     queue_email_approval,
     record_artifact,
+    reset_turn_outputs,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
@@ -3798,10 +3799,14 @@ async def _verify_turn(
         "an email, docs_create for a doc). Content merely drafted, quoted, or described in the "
         "discussion does NOT count — e.g. a fully written-out email body with no actual send is "
         "artifact_ok=false. When artifact_ok is false, say so in gaps.\n"
-        "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true, and met may "
-        "be true (work is complete, awaiting the human).\n"
+        "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true. BUT met=true "
+        "ONLY if grounded_ok is also true AND gaps is empty. A queued draft that asserts UNGROUNDED "
+        "or INVENTED facts (names, roles, commitments, numbers not backed by memory/tools), or that "
+        "omits required content, is NOT done — set met=false and list the offending claim(s) in gaps "
+        "so it is reworked BEFORE the user approves it. Do not pass a known-flawed draft.\n"
         "- grounded_ok=false if the result asserts specific facts with memory_hits=0 and no tools "
-        "used. If nothing is missing, gaps must be []. Output JSON only."
+        "used, or invents a person/role/commitment that the gathered evidence does not support. "
+        "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
         boot = {b["id"]: b for b in await fetch_bootstrap()}
@@ -4138,13 +4143,24 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
     Hands the agents verified addresses so they never fabricate one. `message`
     should be the CLEAN user request (no injected preambles)."""
     msg = message or req.user_message or ""
+    resolved: List[Dict[str, Any]] = []
+    # An email address the user typed LITERALLY is trusted as-is — the explicit
+    # address IS the authorization, so it needs no org/Gmail lookup and must
+    # never be rejected. (Without this, "send to <new address>" yields no
+    # verified recipient → the producer skips → the goalkeeper reworks to the
+    # cap and never drafts. The user-given address is ground truth.)
+    for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", msg):
+        low = addr.lower()
+        if "noreply" in low or "no-reply" in low:
+            continue
+        if not any(r["email"].lower() == low for r in resolved):
+            resolved.append({"name": addr.split("@")[0], "email": addr, "source": "explicit"})
     cands: List[str] = []
     for m in _RECIPIENT_RE.finditer(msg):
         nm = re.sub(r"^(Dr|Mr|Ms|Mrs)\.?\s+", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
         # Drop generic words that capitalize after "to/for" (e.g. "European").
         if nm and nm.lower() not in ("the", "european", "summit", "team", "everyone", "all") and nm not in cands:
             cands.append(nm)
-    resolved: List[Dict[str, Any]] = []
     seen_names = set()
     for name in cands[:5]:
         if name.lower() in seen_names:
@@ -5435,8 +5451,12 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
         return False
     if verdict.get("met"):
         return False
-    # Awaiting human approval — artifact is done-pending, not the loop's job.
-    if verdict.get("pending_writes") and verdict.get("artifact_ok"):
+    # A write awaiting approval is terminal ONLY when the draft is also sound —
+    # produced AND grounded. If recon flagged the draft as ungrounded or
+    # incomplete, a pending approval is NOT a free pass: rework it first so the
+    # user approves a CORRECT draft, not a flawed one. (Claude `/goal` keeps
+    # working toward the goal — it doesn't surface a known-bad result.)
+    if verdict.get("pending_writes") and verdict.get("artifact_ok") and verdict.get("grounded_ok"):
         return False
     # Re-plannable iff the actual output is missing or the claims aren't grounded.
     return (not verdict.get("artifact_ok")) or (not verdict.get("grounded_ok"))
@@ -5467,13 +5487,17 @@ async def post_room_turn(
         total_cost += int(resp.cost_tokens or 0)
         plan = _PLAN_BY_TURN.get(req.turn_id)
         verdict = plan.get("verification") if isinstance(plan, dict) else None
-        # If the swarm already produced the deliverable — an artifact (doc/sheet)
-        # or an outward send queued for approval — stop. Don't re-loop on nitpick
-        # gaps and pile up near-duplicate drafts.
-        if drain_artifacts() or drain_pending_writes():
-            break
+        # Recon-driven rework: a produced deliverable is NOT an automatic stop.
+        # Loop only stops when the verdict is met (or a pending draft is both
+        # produced AND grounded), or the round cap is hit. A recon-rejected
+        # draft (ungrounded / incomplete) gets reworked — we don't surface a
+        # known-bad result. Same shape as Claude `/goal`: keep going to success.
         if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
             break
+        # Discard the rejected round's draft/artifacts so the rework round
+        # produces a FRESH deliverable (else `_produce_output`'s idempotency
+        # guard would short-circuit on the stale draft).
+        reset_turn_outputs()
         gaps = list((verdict or {}).get("gaps") or [])
         gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
         await _emit_event(req.callback_url, req.turn_id, {

@@ -109,6 +109,16 @@ def unlock_output() -> None:
     _OUTPUT_UNLOCKED.set(True)
 
 
+def reset_turn_outputs() -> None:
+    """Goalkeeper rework — discard the prior round's queued writes + produced
+    artifacts and re-lock output, so the NEXT round produces a fresh deliverable
+    instead of `_produce_output`'s idempotency guard short-circuiting on the
+    stale (recon-rejected) draft. Does NOT touch the write/consensus policy."""
+    _PENDING_WRITES.set([])
+    _TURN_ARTIFACTS.set([])
+    _OUTPUT_UNLOCKED.set(False)
+
+
 def drain_pending_writes() -> List[Dict[str, Any]]:
     """Return (a copy of) the writes queued for approval this turn."""
     pend = _PENDING_WRITES.get()

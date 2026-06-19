@@ -85,3 +85,7 @@ core/src/tara/hivemind-agent/
 
 # ship-feature pipeline scratch bus (durable record = HIVEMIND memory + JOURNAL)
 .pipeline/
+
+# autonomous goal-loop runtime sentinels (transient)
+.claude/loop/ACTIVE
+.claude/loop/PAUSE

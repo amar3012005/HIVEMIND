@@ -99,6 +99,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/amar/HIVE-MIND/.claude/hooks/goal-loop-stop.py",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

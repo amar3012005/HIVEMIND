@@ -394,8 +394,9 @@ class Director:
         for c in r1:
             self.transcript.append({"round": 1, "agent": c["name"], "text": c["text"]})
             await self.emit({"t": "react", "round": self._round_seq, "agent": c["slug"],
+                             "name": c["name"], "lane": c["lane"],
                              "agreement": "challenge" if c["is_skeptic"] else "contribute",
-                             "line": c["text"], "confidence": 0.7})
+                             "content": c["text"], "line": c["text"], "confidence": 0.7})
 
         # Round 2 — react/challenge each other on the shared board
         if rounds >= 2:
@@ -410,8 +411,9 @@ class Director:
             for c in r2:
                 self.transcript.append({"round": 2, "agent": c["name"], "text": c["text"]})
                 await self.emit({"t": "react", "round": self._round_seq, "agent": c["slug"],
+                                 "name": c["name"], "lane": c["lane"],
                                  "agreement": "challenge" if c["is_skeptic"] else "support",
-                                 "line": c["text"], "confidence": 0.7})
+                                 "content": c["text"], "line": c["text"], "confidence": 0.7})
 
         await self.emit({"t": "swarm_verdict", "round": self._round_seq, "converged": True})
         return json.dumps({

@@ -88,17 +88,32 @@ const adversarial = tier === 'RISK' || surf.security || surf.recall || surf.infr
 log(`tier=${tier} · surfaces=${Object.entries(surf).filter(([, v]) => v).map(([k]) => k).join(',') || 'none'} · slug=${slug}`)
 
 // ============================ STAGE 1 — RECON (blocking) ============================
+const RECON_SCHEMA = {
+  type: 'object', additionalProperties: true,
+  properties: {
+    status: { type: 'string', enum: ['exists', 'partial', 'missing'] },
+    evidence: { type: 'array', items: { type: 'string' } },
+    wired: { type: 'string' },
+    reuse_or_gap: { type: 'string' },
+  },
+  required: ['status'],
+}
 let recon = null
 if (tier !== 'TRIVIAL') {
   phase('Recon')
-  // reuse feature-recon verbatim as a sub-workflow (graph + git-pickaxe + memory/recall_bugs).
-  // .claude/workflows/*.js are NOT name-registered — invoke by scriptPath.
-  recon = await workflow({ scriptPath: `${REPO}/.claude/workflows/feature-recon.js` }, intent).catch((e) => { log(`feature-recon failed: ${e.message}`); return null })
-  const v = recon?.verdict
+  recon = await agent(
+    `Repo: ${REPO}. Feature recon for: "${intent}". Answer: does this already exist, fully or partially?\n`
+    + `1. code-review-graph MCP first: semantic_search_nodes with 2–3 phrasings (verb+noun). For each promising hit: query_graph callers_of to check wired-live vs dead stub.\n`
+    + `2. git log --oneline --grep "..." -i + git log -S "<key symbol>" --oneline — check branches too.\n`
+    + `3. hivemind_recall({ tags: [], mode: "panorama", limit: 10 }) to surface any prior-session build of this feature.\n`
+    + `4. Targeted grep ONLY to confirm a specific graph/git hit.\n`
+    + `Return status: "exists"|"partial"|"missing", evidence[], wired (callers or "no"), reuse_or_gap. ${scribe(slug, '01-recon.json', '01')}`,
+    { label: 'recon', phase: 'Recon', model: 'sonnet', agentType: 'cartographer', schema: RECON_SCHEMA },
+  ).catch((e) => { log(`recon agent failed: ${e.message}`); return null })
   // GATE A — already shipped & wired-live → do not rebuild
-  const wiredLive = v && /live/i.test(JSON.stringify(v.wired || v))
-  if (v && /^exists$/i.test(v.status || '') && wiredLive) {
-    return halt(slug, `recon says this ALREADY EXISTS and is wired-live — reuse/extend instead of rebuild. Evidence: ${JSON.stringify(v).slice(0, 400)}`, { recon })
+  const wiredLive = recon && /live/i.test(JSON.stringify(recon.wired || ''))
+  if (recon && /^exists$/i.test(recon.status || '') && wiredLive) {
+    return halt(slug, `recon: ALREADY EXISTS and wired-live — reuse/extend instead of rebuild. Evidence: ${JSON.stringify(recon.evidence || []).slice(0, 400)}`, { recon })
   }
 }
 
@@ -108,7 +123,7 @@ if (tier !== 'TRIVIAL') {
   phase('Design')
   const designP = agent(
     `Repo: ${REPO}. Design the implementation for: "${intent}".\n`
-    + `Recon verdict (you MUST honor its reuse target or explicitly justify net-new): ${JSON.stringify(recon?.verdict || 'n/a').slice(0, 800)}\n`
+    + `Recon verdict (you MUST honor its reuse target or explicitly justify net-new): ${JSON.stringify(recon || 'n/a').slice(0, 800)}\n`
     + `Produce interfaces, module boundaries, the schema delta, and the UP+DOWN migration shape if the DB is touched. Keep it surgical (this repo's server.js is a 20k-line monolith — extend, don't rewrite). Write the human-readable design to ${REPO}/${PIPE(slug)}/02-design.md AND log the decision via hivemind_log_decision. ${scribe(slug, '02-design.json', '02')}`,
     { label: 'design', phase: 'Design', model: 'opus', agentType: 'architect', schema: DESIGN },
   )
@@ -178,8 +193,36 @@ await implement(null)
 phase('Review')
 let review = null, round = 0
 const sevRank = (s) => ({ critical: 0, high: 1, medium: 2, low: 3 }[s] ?? 3)
+const REVIEW_DIMS = [
+  { key: 'bugs', prompt: 'Find code bugs, logic errors, off-by-ones, unhandled edge cases, and floating promises.' },
+  { key: 'security', prompt: 'Find security issues: tenant isolation (EVERY new query must be scoped by org_id/user_id — the recurring leak class here), SQL injection, secrets, OWASP top 10. IMPORTANT: the memories table has NO json metadata column — metadata lives in source_metadata/code_metadata tables; querying metadata->> throws.' },
+  { key: 'perf', prompt: 'Find N+1 queries, missing indexes, synchronous blocking in async paths, memory leaks, missing connection-pool limits.' },
+  { key: 'db', prompt: 'Find missing DOWN migrations (every schema change needs a rollback), missing FK/index declarations, unscoped tenant queries, SELECT * in production queries.' },
+  { key: 'standards', prompt: 'Find console.log in production code, dead imports, eslint-disable without comment, unhandled promises, any TypeScript any.' },
+]
+const FINDING_SCHEMA = {
+  type: 'object',
+  properties: { findings: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { title: { type: 'string' }, file: { type: 'string' }, line: { type: 'number' }, severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] }, detail: { type: 'string' }, dimension: { type: 'string' } }, required: ['title', 'severity', 'dimension'] } } },
+  required: ['findings'],
+}
+const VERDICT_SCHEMA = { type: 'object', properties: { refuted: { type: 'boolean' }, reason: { type: 'string' } }, required: ['refuted'] }
+
+async function runReview() {
+  const dimResults = await parallel(REVIEW_DIMS.map((d) => () => agent(
+    `Repo: ${REPO}. Run \`git diff HEAD\` to see the current uncommitted changes. Review dimension: ${d.key}. ${d.prompt}\nReport ONLY real findings in the DIFF (not pre-existing issues elsewhere). Include file path + approximate line number. Set dimension="${d.key}".`,
+    { label: `review:${d.key}`, phase: 'Review', model: 'sonnet', agentType: 'code-reviewer', schema: FINDING_SCHEMA },
+  )))
+  const allFindings = dimResults.filter(Boolean).flatMap((r) => r.findings || [])
+  if (!allFindings.length) return { confirmed: [] }
+  const verdicts = await parallel(allFindings.map((f) => () => agent(
+    `Adversarially verify this finding — try to REFUTE it.\nFinding: ${JSON.stringify(f).slice(0, 600)}\nRepo: ${REPO}. Read the actual file at the cited location. If the code truly has this issue at that exact spot, set refuted=false. If it is a false positive (wrong line, pre-existing, already handled), set refuted=true. Default to refuted=true when genuinely uncertain.`,
+    { label: `verify:${String(f.title).slice(0, 28)}`, phase: 'Review', model: 'sonnet', agentType: 'code-reviewer', schema: VERDICT_SCHEMA },
+  ).then((v) => (v && !v.refuted ? f : null))))
+  return { confirmed: verdicts.filter(Boolean) }
+}
+
 while (round < 3) {
-  review = await workflow({ scriptPath: `${REPO}/.claude/workflows/review-changes.js` }).catch((e) => { log(`review-changes failed: ${e.message}`); return { confirmed: [] } })
+  review = await runReview().catch((e) => { log(`review failed: ${e.message}`); return { confirmed: [] } })
   const confirmed = review?.confirmed || []
   const tenant = confirmed.find((f) => /tenant|isolation|authz|cross-?org|leak/i.test(`${f.title} ${f.dimension} ${f.detail}`))
   if (tenant) return halt(slug, `CONFIRMED tenant-isolation/authz finding — automatic NO-GO, bypasses retry budget: ${tenant.title} (${tenant.file}:${tenant.line})`, { review })
@@ -214,7 +257,7 @@ const filesChanged = Array.from(new Set([
 ])).filter(Boolean)
 const dossier = {
   slug, intent, tier,
-  recon_verdict: recon?.verdict || 'skipped (trivial)',
+  recon_verdict: recon || 'skipped (trivial)',
   design_summary: design?.summary || 'skipped (trivial)',
   threats: (threats?.threats || []),
   files_changed: filesChanged,

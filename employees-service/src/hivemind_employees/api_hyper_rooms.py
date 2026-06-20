@@ -2629,6 +2629,7 @@ async def _orchestrate_agentic(
     lead: Dict[str, Any],
     enabled_connectors: List[str],
     started: float,
+    room_template: str = "debate",
 ) -> RoomTurnResponse:
     """Agentic orchestrator (flagged) — AgentScope PlanNotebook + MsgHub.
 
@@ -2640,6 +2641,13 @@ async def _orchestrate_agentic(
     approval drain + seal. Works for ANY task shape (nothing is task-coded)."""
     cost_tokens = 0
     conns = [str(c) for c in (enabled_connectors or [])]
+    # Room TEMPLATE shapes behavior: lead_hint frames how the team approaches the
+    # task; synth_hint sets the OUTPUT structure (debate vs DACI-decision vs
+    # lean-coffee vs council-vote vs retrospective vs standup vs review). Applied
+    # to the draft + the deliverable spec so the room type is real, not cosmetic.
+    _overlay = get_template_overlay(room_template)
+    _lead_hint = (_overlay.get("lead_hint") or "").strip()
+    _synth_hint = (_overlay.get("synth_hint") or "").strip()
     boot = {b["id"]: b for b in await fetch_bootstrap()}
 
     # Default = llama-3.3-70b-versatile: Phase-0 eval (docs/.../2026-06-20-phase0-
@@ -2832,7 +2840,14 @@ async def _orchestrate_agentic(
         "body; answer → the direct grounded answer. Use ONLY facts the team grounded; flag any "
         "UNVERIFIED item inline; never fabricate. Do NOT invent consent / policy / GDPR / approval "
         "gates the user did not ask for — the user's request IS the authorization; just produce it."
+        # Room-template OUTPUT shape (e.g. DACI 'DECISION:' line, retrospective
+        # WORKED/DIDN'T/CHANGE, lean-coffee per-topic + 'Carry forward', council
+        # APPROVED/CONDITIONAL/REJECTED, standup YESTERDAY/TODAY/BLOCKERS).
+        + (f" TEMPLATE OUTPUT RULE: {_synth_hint}" if _synth_hint else "")
     )
+    # Room-template framing for how the lead approaches the task (debate / decision
+    # / brainstorm / council / lean_coffee / retrospective / standup / review).
+    _mode_pre = f"{_lead_hint}\n\n" if _lead_hint else ""
 
     # 3. DRAFT — a FRESH lead agent writes the deliverable. Must be separate from
     #    plan_agent: that one was told "reply STRICT JSON" and its memory keeps it
@@ -2840,7 +2855,7 @@ async def _orchestrate_agentic(
     #    not the prose deliverable. Fresh agent = clean prose.
     lead_agent = _mk(lead, 6)
     draft = await _agent_reply_resilient(lead_agent, (
-        f"{gathered_block}USER TASK: {req.user_message}\n\n"
+        f"{_mode_pre}{gathered_block}USER TASK: {req.user_message}\n\n"
         f"Team gathered (grounded):\n{exec_block}\n\n"
         f"Write a first-pass FINAL DELIVERABLE (intended output '{intended_output}'). {_deliver_spec}"))
     cost_tokens += max(80, len(draft) // 4)
@@ -2894,7 +2909,7 @@ async def _orchestrate_agentic(
             ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
                                  + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)
             final_text = await _agent_reply_resilient(lead_agent, (
-                f"{gathered_block}USER TASK: {req.user_message}\n\n"
+                f"{_mode_pre}{gathered_block}USER TASK: {req.user_message}\n\n"
                 f"Your draft:\n{final_text}\n\nThe team CHALLENGED it (round {rnd}):\n{ch_block}\n\n"
                 f"REVISE the deliverable to address every challenge with grounded evidence (or honestly "
                 f"flag what can't be resolved). {_deliver_spec}")) or final_text
@@ -3121,7 +3136,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _ag_conns = []
-    return await _orchestrate_agentic(req, participants, lead, _ag_conns, started)
+    return await _orchestrate_agentic(req, participants, lead, _ag_conns, started, room_template)
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     """Phase 4 — pick the write-approval policy for this turn. Explicit

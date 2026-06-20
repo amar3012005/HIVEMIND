@@ -2649,18 +2649,27 @@ async def _orchestrate_agentic(
     # or globally via HYPER_AGENTIC_MODEL.
     _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "llama-3.3-70b-versatile")
 
-    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False) -> ReActAgent:
+    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False, searcher: bool = False) -> ReActAgent:
         # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).
         # NO connector WRITE tools (docs_create/gmail_send): gpt-oss owners kept
         # calling them with placeholder args → google/exec 400s + no artifact. The
         # single reliable producer (_produce_output via google_exec_emulated) does
         # ALL connector writes from the clean synth content.
+        # searcher=True (OWNERS): + hivemind_web_search so an owner can pull EXTERNAL
+        # facts its subtask needs when HIVEMIND (the company brain) doesn't have them.
+        # (Connector context-search lands in Phase 3 via the unified read/act registry.)
         # toolless=True for reactors: they react to the draft from context and must
         # return clean JSON — with tools, gpt-oss wraps the JSON in a fake `JSON`
         # tool call → 400. A tool-less agent returns the JSON as text (reliable).
         be = boot.get(emp.get("id"), {}) or {}
+        if toolless:
+            _tools = ["_react_noop"]
+        elif searcher:
+            _tools = DEFAULT_HYPER_TOOLS + ["hivemind_web_search"]
+        else:
+            _tools = DEFAULT_HYPER_TOOLS
         merged = {
-            **emp, "tools": (["_react_noop"] if toolless else DEFAULT_HYPER_TOOLS), "connectors": [],
+            **emp, "tools": _tools, "connectors": [],
             "llm_provider": "groq", "model": _agentic_model,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
             "max_iters": (1 if toolless else iters),
@@ -2776,7 +2785,7 @@ async def _orchestrate_agentic(
                 owner = _owner_for(line, idx)
                 slug = owner.get("slug") or str(idx)
                 if slug not in owner_agents:
-                    owner_agents[slug] = _mk(owner, _EXECUTE_MAX_ITERS)
+                    owner_agents[slug] = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
                     try:
                         hub.add(owner_agents[slug])
                     except Exception:  # noqa: BLE001
@@ -2785,14 +2794,17 @@ async def _orchestrate_agentic(
                 prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
                 task_prompt = (
                     f"{gathered_block}"
-                    f"Your SUBTASK: {task}\nTeammates so far:\n{prior}\n\n"
-                    "GATHER from HIVEMIND with your tools — call `recall` (and `org_directory` for a "
-                    "person/email) by name for any fact/person/contact your subtask needs; it may be in "
-                    "a past email/doc/note. The room produces the final artifact ONCE from the whole "
-                    "team's work — your job is to GATHER the real content + facts, not to create it. "
-                    "Ground every specific in a tool result; mark anything you genuinely can't find as "
-                    "UNVERIFIED (never invent). Report the ACTUAL CONTENT you gathered (the real "
-                    "facts/list/text — not a description of what you did) so the room can use it directly."
+                    f"Your SUBTASK: {task}\nAlready gathered by teammates (do NOT re-fetch these):\n{prior}\n\n"
+                    "HIVEMIND is the COMPANY BRAIN — it holds the org's knowledge. SEARCH IT FIRST and "
+                    "as many times as your subtask needs (NOT once): call `recall` per fact/topic, "
+                    "`org_directory` for a person/email, `traverse_graph` to follow a thread. Only if a "
+                    "fact your subtask needs is genuinely EXTERNAL (public/industry info the company "
+                    "wouldn't store) AND not already gathered, call `hivemind_web_search` for it. Skip "
+                    "anything a teammate already pulled above. The room produces the final artifact ONCE "
+                    "from the whole team's work — your job is to GATHER the real content + facts, not to "
+                    "create or send anything. Ground every specific in a tool result; mark anything you "
+                    "genuinely can't find as UNVERIFIED (never invent). Report the ACTUAL CONTENT you "
+                    "gathered (the real facts/list/text — not a description of what you did)."
                 )
                 if contributions:
                     await asyncio.sleep(0.3)  # anti-429

@@ -90,7 +90,21 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
   (−49%, −3201).** Zero prod behavior change. Verified: AST + in-container import reload + live
   smoke turn (Solvis room → gmail draft + approval + grounded). Template/skeptic/trust kept as
   router-event display metadata.
-- **NEXT: Phase 2 — make the agentic swarm truly MULTI-ROUND.** Today `_orchestrate_agentic` does
+- **2026-06-20 — PHASE 2 DONE** (commits 7f2dee9c=2a, e1ec4232=2b; deployed+verified live).
+  **2a multi-round swarm:** single debate→revise replaced with a bounded R1-Rn loop (reactors
+  challenge the current draft each round; lead revises; stop on no-high-conf-challenge or
+  HYPER_SWARM_MAX_ROUNDS=3). Verified: round=1/3 c=2 → 2/3 c=1 → 3/3 c=1, revising each round.
+  **2b iterative gather:** owners are 'searchers' — +hivemind_web_search + a HIVEMIND-as-company-
+  brain prompt (recall FIRST & repeatedly, skip what teammates gathered, web ONLY if external).
+  Verified: owner recalled internal → none → fired web_search → real Tavily competitor results.
+  Connector context-search deferred INTO Phase 3. Pre-existing tool noise flagged: query_with_ai
+  /api/query 404 (task_c8563b0c); occasional gpt-oss-20b Groq 400 (absorbed by retry wrapper).
+- **NEXT: Phase 3 — connectors = ONE unified read/act registry** (give owners connector READ
+  context-search cleanly — separate read tools from the write/consensus-gated ones so the small
+  owner model can't queue spurious write-approvals; new connector registers once → agent-callable
+  read + producible write). Then Phase 4 (agent-owned actions, gated) + Phase 5 (harden + CI gate).
+
+- **(superseded) NEXT: Phase 2 — make the agentic swarm truly MULTI-ROUND.** Today `_orchestrate_agentic` does
   ONE debate pass (reactors challenge the draft once → one revise). Turn it into a bounded R1-Rn
   loop with convergence (port MiroFish `csi_quality`/`csi_policy` scoring as the verdict signal),
   reusing `_run_reactor` + the react/peer_review events the FE already renders. Then Phase 3

@@ -148,13 +148,20 @@ class Director:
         elif tools and force_text:
             body["tools"] = tools
             body["tool_choice"] = "none"  # force a text synthesis, never null content
-        for attempt in range(2):
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0)) as c:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
                     r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
-                if r.status_code == 400 and attempt == 0:
-                    body["temperature"] = max(0.1, temp - 0.2)
+                if r.status_code == 400 and attempt < max_attempts - 1:
+                    body["temperature"] = max(0.1, float(body.get("temperature", temp)) - 0.2)
                     log.warning("[hyper-engine] groq 400, retrying lower temp: %s", r.text[:200])
+                    continue
+                if r.status_code in (429, 500, 502, 503) and attempt < max_attempts - 1:
+                    ra = (r.headers.get("retry-after") or "").strip()
+                    delay = float(ra) if ra.replace(".", "", 1).isdigit() else float(min(2 ** attempt, 8))
+                    log.warning("[hyper-engine] groq %s — backoff %.1fs (attempt %d)", r.status_code, delay, attempt)
+                    await asyncio.sleep(min(delay, 10.0))
                     continue
                 if r.status_code != 200:
                     log.warning("[hyper-engine] groq %s: %s", r.status_code, r.text[:200])
@@ -162,8 +169,15 @@ class Director:
                 j = r.json()
                 self.tokens += int((j.get("usage") or {}).get("total_tokens", 0) or 0)
                 return j["choices"][0]["message"]
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                log.warning("[hyper-engine] groq transport error (attempt %d): %s", attempt, exc)
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(float(min(2 ** attempt, 8)))
+                    continue
+                return None
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] groq call failed (attempt %d): %s", attempt, exc)
+                return None
         return None
 
     # ── tools ─────────────────────────────────────────────────────────
@@ -249,8 +263,8 @@ class Director:
                 f"You are {name}, a {lane} on this team.{bias} {sysp}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
-            {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n{prompt}"},
-        ], model=self.persona_model, temp=0.5)
+            {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
+        ], model=self.persona_model, temp=min(0.7, 0.45 + 0.1 * round_no))
         text = (msg or {}).get("content") or "(no reply)"
         return {"slug": emp.get("slug") or emp.get("id"), "name": name, "lane": lane,
                 "is_skeptic": is_skeptic, "text": text}
@@ -361,6 +375,12 @@ class Director:
                 {"role": "user", "content": f"Task: {self.user_message}\n\nNotes:\n{board}"},
             ], temp=0.4)
             final_text = (msg or {}).get("content") or ""
+        if not final_text:
+            # Every LLM call (incl. the defensive synth) failed — honor "never return
+            # empty" at the actual emit/return boundary so the FE never shows a blank
+            # synthesis line and the verifier gets honest feedback, not "".
+            final_text = ("(The room could not produce a grounded answer this turn — "
+                          "the model was unreachable. Please retry, or add more context.)")
 
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})

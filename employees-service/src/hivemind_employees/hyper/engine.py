@@ -120,6 +120,10 @@ class Director:
         self.emit = emit
         self.director_model = director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
         self.persona_model = persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
+        # Live public-web search uses Groq's built-in web search (only on the
+        # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
+        # cheaper/faster and fine for in-room gathering; env-tunable.
+        self.web_model = os.environ.get("HYPER_WEB_MODEL", "groq/compound-mini")
         self.max_iters = max_iters
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)
@@ -128,6 +132,8 @@ class Director:
         self.tokens = 0
         self.gather_count = 0
         self._round_seq = 0
+        self._web_calls = 0
+        self._web_budget = max(0, int(os.environ.get("HYPER_WEB_BUDGET", "3") or "3"))
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -196,6 +202,14 @@ class Director:
                   "Available: polished-doc, polished-email, decision-brief.",
                   {"skill_name": {"type": "string"}}, ["skill_name"]),
         ]
+        if self._web_budget > 0:
+            tools.append(_tool(
+                "web_search",
+                "Search the LIVE PUBLIC WEB (news, market/industry data, public companies, "
+                "current events, competitor info) via Groq's built-in web search. Use ONLY for "
+                "facts that are genuinely EXTERNAL — public info the company brain (recall) would "
+                "NOT hold. Returns a synthesized answer + real source links.",
+                {"query": {"type": "string"}}, ["query"]))
         if self.has_google:
             tools.append(_tool("drive_search", "Find Google Drive files (docs/sheets) by name/content.",
                                {"query": {"type": "string"}}, ["query"]))
@@ -240,6 +254,9 @@ class Director:
                     self.gather_count += 1
                 return json.dumps(res)[:1500]
 
+            if name == "web_search":
+                return await self._web_search(str(args.get("query", "")))
+
             if name == "debate":
                 return await self._debate(str(args.get("topic", "")), int(args.get("rounds", self.debate_max_rounds) or self.debate_max_rounds))
 
@@ -249,6 +266,54 @@ class Director:
             return json.dumps({"error": f"unknown tool {name}"})
         except Exception as exc:  # noqa: BLE001 — surface as a tool error so the director adapts
             log.warning("[hyper-engine] tool %s failed: %s", name, exc)
+            return json.dumps({"error": str(exc)[:200], "is_error": True})
+
+    # ── live web search (Groq built-in, via a compound sub-call) ───────
+    async def _web_search(self, query: str) -> str:
+        """Search the live public web using Groq's BUILT-IN web search. The built-in
+        runs only on the `groq/compound*` systems (not gpt-oss), so we make a separate
+        sub-call (same pattern as the debate persona calls) and fold the result back
+        onto the shared board — keeping the director's local tool-loop clean and
+        avoiding the undocumented built-in×custom-tool mixing. Bounded per turn."""
+        query = (query or "").strip()
+        if not query:
+            return json.dumps({"error": "empty query"})
+        if self._web_calls >= self._web_budget:
+            return json.dumps({"error": "web-search budget for this turn is used — rely on what you already gathered."})
+        key = _groq_key()
+        if not key:
+            return json.dumps({"error": "web search unavailable (no key)"})
+        self._web_calls += 1
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"},
+                                 json={"model": self.web_model,
+                                       "messages": [{"role": "user", "content": query}]})
+            if r.status_code != 200:
+                log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
+                return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
+            j = r.json()
+            self.tokens += int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            msg = j["choices"][0]["message"]
+            answer = str(msg.get("content") or "")[:1500]
+            sources: List[Dict[str, str]] = []
+            for et in (msg.get("executed_tools") or []):
+                sr = et.get("search_results")
+                # compound returns either a list, or a dict like {"results": [...]}.
+                if isinstance(sr, dict):
+                    sr = sr.get("results") or sr.get("search_results") or []
+                if not isinstance(sr, list):
+                    sr = []
+                for s in sr[:5]:
+                    if isinstance(s, dict) and s.get("url"):
+                        sources.append({"title": str(s.get("title") or "")[:120], "url": str(s.get("url"))})
+            self.blackboard.append(f"- WEB[{query[:60]}]: {answer[:300]}")
+            self.gather_count += 1
+            await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
+                             "sources": sources[:5], "summary": answer[:400]})
+            return json.dumps({"answer": answer, "sources": sources[:5]})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] web_search failed: %s", exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
 
     # ── debate (the room) ─────────────────────────────────────────────
@@ -321,7 +386,10 @@ class Director:
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
             "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
             "GATHER grounded facts first (recall the company brain as many times as needed; org_directory "
-            "for people; drive_search→docs_get for live files). When the task needs a decision or genuine "
+            "for people; drive_search→docs_get for live files). Use web_search for genuinely EXTERNAL/"
+            "public facts the company brain would not hold (industry/market data, news, public companies, "
+            "current events) — never for internal facts; and if the user EXPLICITLY asks to search the web / "
+            "for the latest / current / public data, you MUST call web_search. When the task needs a decision or genuine "
             "discussion, call debate(topic) — the room's personas will argue it with real skepticism. "
             "Load a skill (load_skill) before writing the final output. Ground EVERYTHING in tool results; "
             "flag anything you cannot verify as UNVERIFIED; never invent facts, names, numbers, or links. "

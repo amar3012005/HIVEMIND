@@ -2460,6 +2460,10 @@ _RECIPIENT_RE = re.compile(
 # more, so cap tighter + stagger.
 _EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "4"))
 _EXECUTE_MAX_ITERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_ITERS", "4"))
+# Phase 2 — bounded MULTI-ROUND swarm: debate→revise repeats until a round
+# produces no high-confidence challenge (converged) or the cap is hit.
+_SWARM_MAX_ROUNDS = max(1, min(5, int(os.environ.get("HYPER_SWARM_MAX_ROUNDS", "3"))))
+_SWARM_CHALLENGE_CONF = float(os.environ.get("HYPER_SWARM_CHALLENGE_CONF", "0.5") or "0.5")
 
 
 async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
@@ -2825,45 +2829,63 @@ async def _orchestrate_agentic(
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "line", "agent": lead.get("slug"), "kind": "lead", "content": draft})
 
-    # 3b. SIMULATE — the swarm pressure-tests the draft: each reactor challenges /
-    #     supports / extends (skeptic lane opposes), peer-review broadcast via the
-    #     MsgHub. This is the MiroFish multi-agent simulation (debate + skepticism
-    #     + support), reusing _run_reactor + the react/peer_review events the FE
-    #     already renders.
+    # 3b/3c. SWARM — bounded MULTI-ROUND debate→revise until convergence. Each
+    #     round the reactors (skeptic lane opposes) challenge/support/extend the
+    #     CURRENT draft via _run_reactor (peer-review broadcast in a MsgHub); if any
+    #     high-confidence challenge stands, the lead REVISES and the next round
+    #     re-examines the revision. The loop stops when a round raises no
+    #     high-confidence challenge (converged) or the round cap is hit. This is the
+    #     MiroFish multi-agent simulation — real R1-Rn convergence, not one pass.
+    #     Reuses _run_reactor + the react/revise events the FE already renders;
+    #     adds round / round_start / swarm_verdict markers (extra fields are
+    #     ignored by older FE).
     lead_name = lead.get("name") or lead.get("slug") or "Lead"
     reactors = [p for p in participants if (p.get("slug") or "") != (lead.get("slug") or "")][:3]
-    challenges: List[Dict[str, Any]] = []
+    final_text = draft
+    converged = False
     if draft and reactors:
         ragents = [_mk(p, 6, toolless=True) for p in reactors]  # tool-less → clean react JSON
-        async with MsgHub(participants=ragents):
-            for p, ra in zip(reactors, ragents):
-                lane = p.get("_lane") or p.get("role_archetype") or "Communicator"
-                is_opp = "skeptic" in str(lane).lower() or "skeptic" in str(p.get("role_archetype") or "").lower()
-                rr = await _run_reactor(ra, req.user_message, draft, lead_name, str(lane),
-                                        is_opp, blackboard_context=gathered_block)
-                cost_tokens += 60
-                if rr.get("react"):
-                    await _emit_event(req.callback_url, req.turn_id, {
-                        "t": "react", "agent": p.get("slug"), "agreement": rr.get("agreement"),
-                        "line": rr.get("line"), "confidence": rr.get("confidence"), "gap": rr.get("gap"),
-                    })
-                    if rr.get("agreement") == "challenge" and float(rr.get("confidence") or 0) >= 0.5:
-                        challenges.append(rr)
-
-    # 3c. REVISE — if the skeptic/peers raised real challenges, the lead revises to
-    #     address them (one bounded round). Convergence, not one-shot.
-    final_text = draft
-    if challenges:
-        ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
-                             + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)
-        final_text = await _agent_reply_resilient(lead_agent, (
-            f"{gathered_block}USER TASK: {req.user_message}\n\n"
-            f"Your draft:\n{draft}\n\nThe team CHALLENGED it:\n{ch_block}\n\n"
-            f"REVISE the deliverable to address every challenge with grounded evidence (or honestly "
-            f"flag what can't be resolved). {_deliver_spec}")) or draft
-        cost_tokens += max(80, len(final_text) // 4)
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "line", "agent": lead.get("slug"), "kind": "revise", "content": final_text})
+        for rnd in range(1, _SWARM_MAX_ROUNDS + 1):
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "round_start", "round": rnd, "max_rounds": _SWARM_MAX_ROUNDS})
+            challenges: List[Dict[str, Any]] = []
+            async with MsgHub(participants=ragents):
+                for p, ra in zip(reactors, ragents):
+                    lane = p.get("_lane") or p.get("role_archetype") or "Communicator"
+                    is_opp = "skeptic" in str(lane).lower() or "skeptic" in str(p.get("role_archetype") or "").lower()
+                    rr = await _run_reactor(ra, req.user_message, final_text, lead_name, str(lane),
+                                            is_opp, blackboard_context=gathered_block)
+                    cost_tokens += 60
+                    if rr.get("react"):
+                        await _emit_event(req.callback_url, req.turn_id, {
+                            "t": "react", "round": rnd, "agent": p.get("slug"),
+                            "agreement": rr.get("agreement"), "line": rr.get("line"),
+                            "confidence": rr.get("confidence"), "gap": rr.get("gap"),
+                        })
+                        if rr.get("agreement") == "challenge" and float(rr.get("confidence") or 0) >= _SWARM_CHALLENGE_CONF:
+                            challenges.append(rr)
+            log.info("[swarm] room=%s round=%d/%d challenges=%d",
+                     req.room_id, rnd, _SWARM_MAX_ROUNDS, len(challenges))
+            if not challenges:
+                converged = True
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "swarm_verdict", "round": rnd, "converged": True})
+                break
+            # REVISE addressing THIS round's challenges; next round re-examines it.
+            ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
+                                 + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)
+            final_text = await _agent_reply_resilient(lead_agent, (
+                f"{gathered_block}USER TASK: {req.user_message}\n\n"
+                f"Your draft:\n{final_text}\n\nThe team CHALLENGED it (round {rnd}):\n{ch_block}\n\n"
+                f"REVISE the deliverable to address every challenge with grounded evidence (or honestly "
+                f"flag what can't be resolved). {_deliver_spec}")) or final_text
+            cost_tokens += max(80, len(final_text) // 4)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "line", "round": rnd, "agent": lead.get("slug"), "kind": "revise", "content": final_text})
+        if not converged:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "swarm_verdict", "converged": False, "rounds": _SWARM_MAX_ROUNDS,
+                "note": "round cap reached with open challenges"})
     if final_text:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text})

@@ -1468,6 +1468,9 @@ model HyperRoom {
   /// during the run (lead or anyone, decided at runtime). Values are connector
   /// ids: github/notion/slack/hubspot/airtable/linear/gmail/google_docs.
   enabledConnectors  String[]     @default([]) @map("enabled_connectors")
+  /// LLM quality mode: 'auto' (multi-model — cheap gather+debate, strong 120b synthesis)
+  /// or 'best' (all gpt-oss-120b). Read by the sidecar to pick the model combo.
+  qualityMode        String       @default("auto") @map("quality_mode") @db.VarChar(16)
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

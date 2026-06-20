@@ -116,6 +116,58 @@ async def google_exec_emulated(
         return {"error": str(exc)[:200]}
 
 
+async def connector_inspect_emulated(
+    name: str, *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """List a Nango/MCP connector's available tools (names + inputSchema) via the
+    core bridge, scoped to the tenant. Used to dynamically build the room
+    director's connector toolkit. Returns {} on failure (never raises)."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(20.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.post("/api/connectors/mcp/inspect", json={"name": name})
+            if r.status_code >= 400:
+                return {}
+            return r.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def connector_exec_emulated(
+    name: str, tool: str, arguments: Dict[str, Any], *,
+    user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Execute one tool call on a granted Nango/MCP connector via the core bridge
+    (token resolved server-side, never exposed). Tenant-scoped. Returns
+    {"error": ...} on failure so the director can adapt rather than crash."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    payload = {"name": name, "operation": {"type": "execute", "arguments": {"tool": tool, **(arguments or {})}}}
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.post("/api/connectors/mcp/exec", json=payload)
+            if r.status_code >= 400:
+                body = ""
+                try:
+                    body = (r.json() or {}).get("error") or r.text
+                except Exception:  # noqa: BLE001
+                    body = r.text
+                return {"error": str(body)[:300], "status": r.status_code}
+            j = r.json()
+            return j.get("result") if isinstance(j.get("result"), dict) else j
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
+
+
 class HivemindClient:
     """Per-employee HTTP client. One instance per WorkflowAgent.
     Carries the employee's scoped API key."""

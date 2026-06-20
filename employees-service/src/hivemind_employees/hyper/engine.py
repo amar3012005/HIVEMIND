@@ -30,6 +30,8 @@ import httpx
 
 from ..config import get_settings
 from ..hivemind_client import (
+    connector_exec_emulated,
+    connector_inspect_emulated,
     google_exec_emulated,
     org_members_emulated,
     recall_emulated,
@@ -102,6 +104,48 @@ _SKILLS: Dict[str, str] = {
 }
 
 _GOOGLE_CONNECTORS = ("google-docs", "google_docs", "googledrive", "google-drive", "gmail", "google")
+
+# Curated READ tools per Google connector (the native google bridge has no param
+# schemas, so we hand-spec the read surface). Writes (docs_create/gmail_send/…)
+# are intentionally excluded — the centralized producer + HITL own those.
+_GOOGLE_READ_TOOLS: Dict[str, List[tuple]] = {
+    "gmail": [
+        ("gmail_search", "Search the room owner's live Gmail. Gmail query syntax (e.g. 'from:rama after:2026/01/01').",
+         {"query": {"type": "string"}, "max": {"type": "integer"}}, ["query"]),
+        ("gmail_get", "Read one Gmail message (full body + headers) by its id.", {"id": {"type": "string"}}, ["id"]),
+        ("gmail_get_thread", "Read a full Gmail thread by threadId.", {"threadId": {"type": "string"}}, ["threadId"]),
+    ],
+    "google-docs": [
+        ("drive_search", "Find Google Drive files (docs/sheets) by name or content.", {"query": {"type": "string"}}, ["query"]),
+        ("docs_get", "Read an existing Google Doc's text by documentId.", {"documentId": {"type": "string"}}, ["documentId"]),
+    ],
+    "google-drive": [
+        ("drive_search", "Find Google Drive files (docs/sheets) by name or content.", {"query": {"type": "string"}}, ["query"]),
+        ("docs_get", "Read an existing Google Doc's text by documentId.", {"documentId": {"type": "string"}}, ["documentId"]),
+    ],
+    "google-sheets": [
+        ("sheets_get", "Read a Google Sheet's cell values by spreadsheetId (optional A1 range).",
+         {"spreadsheetId": {"type": "string"}, "range": {"type": "string"}}, ["spreadsheetId"]),
+    ],
+    "google-calendar": [
+        ("calendar_search", "Search the room owner's Google Calendar events.", {"query": {"type": "string"}}, ["query"]),
+    ],
+}
+_GOOGLE_TOOL_NAMES = {n for tools in _GOOGLE_READ_TOOLS.values() for (n, *_rest) in tools}
+# Tool-count discipline (Groq best-practice: keep the action space small). Total
+# connector tools exposed to the director, and per-connector cap for MCP discovery.
+_CONNECTOR_TOOL_CAP = max(0, int(os.environ.get("HYPER_CONNECTOR_TOOL_CAP", "8") or "8"))
+_MCP_TOOLS_PER_CONNECTOR = max(1, int(os.environ.get("HYPER_MCP_TOOLS_PER_CONNECTOR", "4") or "4"))
+_READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "lookup", "describe", "recent", "view")
+
+
+def _norm_connector(cid: str) -> str:
+    return str(cid or "").strip().lower().replace("_", "-")
+
+
+def _is_read_tool(name: str) -> bool:
+    n = (name or "").lower()
+    return any(h in n for h in _READ_TOOL_HINTS)
 
 
 def _groq_key() -> str:
@@ -176,6 +220,10 @@ class Director:
         self._round_seq = 0
         self._web_calls = 0
         self._web_budget = max(0, int(os.environ.get("HYPER_WEB_BUDGET", "3") or "3"))
+        # Connector tools (toggled on the room) registered dynamically at run() start:
+        # JSON schemas the director sees + a route map name -> (bridge, provider, tool).
+        self._connector_tools: List[Dict[str, Any]] = []
+        self._connector_routes: Dict[str, tuple] = {}
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -253,12 +301,86 @@ class Director:
                 "facts that are genuinely EXTERNAL — public info the company brain (recall) would "
                 "NOT hold. Returns a synthesized answer + real source links.",
                 {"query": {"type": "string"}}, ["query"]))
-        if self.has_google:
-            tools.append(_tool("drive_search", "Find Google Drive files (docs/sheets) by name/content.",
-                               {"query": {"type": "string"}}, ["query"]))
-            tools.append(_tool("docs_get", "Read an existing Google Doc's text by documentId.",
-                               {"documentId": {"type": "string"}}, ["documentId"]))
+        # Connector tools toggled on the room (read-only, registered at run() start).
+        tools.extend(self._connector_tools)
         return tools
+
+    async def _init_connector_tools(self) -> None:
+        """Register the room's toggled connectors as READ-only director tools (the
+        local-tool-calling pattern: schema → bridge exec → loop). Google connectors
+        use a curated read surface; other Nango/MCP connectors are discovered via the
+        bridge inspect (best-effort, only tools with a real input schema). Capped +
+        read-only — writes stay with the centralized producer + HITL. Never raises."""
+        registered: List[Dict[str, Any]] = []
+        routes: Dict[str, tuple] = {}
+        seen: set = set()
+
+        def _add(tname: str, tdesc: str, props: Dict[str, Any], req: List[str], bridge: str, provider: str, real_tool: str) -> None:
+            if tname in seen or len(registered) >= _CONNECTOR_TOOL_CAP:
+                return
+            seen.add(tname)
+            registered.append(_tool(tname, tdesc, props, req))
+            routes[tname] = (bridge, provider, real_tool)
+
+        for cid in self.connectors:
+            if len(registered) >= _CONNECTOR_TOOL_CAP:
+                break
+            norm = _norm_connector(cid)
+            google = _GOOGLE_READ_TOOLS.get(norm)
+            if google:
+                for (n, d, p, rq) in google:
+                    _add(n, d, p, rq, "google", norm, n)
+                continue
+            # Non-Google → discover the connector's read tools via the bridge.
+            try:
+                insp = await connector_inspect_emulated(norm, user_id=self.user_id, org_id=self.org_id)
+            except Exception:  # noqa: BLE001
+                insp = {}
+            raw = (((insp or {}).get("inspection") or {}).get("tools")
+                   or (insp or {}).get("tools") or [])
+            count = 0
+            for tspec in (raw if isinstance(raw, list) else []):
+                if count >= _MCP_TOOLS_PER_CONNECTOR or len(registered) >= _CONNECTOR_TOOL_CAP:
+                    break
+                tname = str((tspec or {}).get("name") or "")
+                if not tname or not _is_read_tool(tname):
+                    continue
+                schema = (tspec or {}).get("inputSchema") or (tspec or {}).get("input_schema") or {}
+                if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
+                    continue  # need a real schema to call the tool safely
+                props = schema.get("properties") or {}
+                req = schema.get("required") if isinstance(schema.get("required"), list) else []
+                public = f"{norm.replace('-', '_')}__{tname}"
+                desc = (str((tspec or {}).get("description") or tname)[:180]
+                        + f" (live read from the {norm} connector).")
+                _add(public, desc, props, req, "mcp", norm, tname)
+                count += 1
+        self._connector_tools = registered
+        self._connector_routes = routes
+        if registered:
+            log.info("[hyper-engine] connector tools registered: %s",
+                     [t["function"]["name"] for t in registered])
+
+    async def _connector_read(self, name: str, args: Dict[str, Any]) -> str:
+        bridge, provider, tool = self._connector_routes[name]
+        try:
+            if bridge == "google":
+                r = await google_exec_emulated(tool, args or {}, user_id=self.user_id, org_id=self.org_id)
+            else:
+                r = await connector_exec_emulated(provider, tool, args or {}, user_id=self.user_id, org_id=self.org_id)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"error": str(exc)[:200], "is_error": True})
+        res = r.get("result") if isinstance(r, dict) and isinstance(r.get("result"), dict) else (r or {})
+        out = json.dumps(res)[:1500] if isinstance(res, (dict, list)) else str(res)[:1500]
+        self.blackboard.append(f"- {provider}/{tool}: {out[:300]}")
+        self.gather_count += 1
+        q = ""
+        for k in ("query", "id", "documentId", "spreadsheetId", "threadId"):
+            if (args or {}).get(k):
+                q = str(args[k]); break
+        await self.emit({"t": "gather", "sources": [provider], "tool": tool, "query": q[:160],
+                         "connector_hits": [tool], "memory_hits": 0})
+        return out
 
     async def _exec(self, name: str, args: Dict[str, Any]) -> str:
         try:
@@ -287,15 +409,8 @@ class Director:
                     self.blackboard.append(f"- ORG MEMBERS: {json.dumps(trimmed)[:400]}")
                 return json.dumps({"org_name": (r or {}).get("org_name"), "members": trimmed})
 
-            if name in ("drive_search", "docs_get"):
-                ga = ({"query": str(args.get("query", "")), "max": 6} if name == "drive_search"
-                      else {"documentId": str(args.get("documentId", ""))})
-                r = await google_exec_emulated(name, ga, user_id=self.user_id, org_id=self.org_id)
-                res = r.get("result") if isinstance(r, dict) and isinstance(r.get("result"), dict) else (r or {})
-                if name == "docs_get" and isinstance(res, dict):
-                    self.blackboard.append(f"- DOC {res.get('title')}: {str(res.get('text') or '')[:300]}")
-                    self.gather_count += 1
-                return json.dumps(res)[:1500]
+            if name in self._connector_routes:
+                return await self._connector_read(name, args or {})
 
             if name == "web_search":
                 return await self._web_search(str(args.get("query", "")))
@@ -428,11 +543,15 @@ class Director:
         tmpl = (f"\nThis is a '{self.room_template}' room — frame the discussion and the final output to "
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
+        conn_names = [t["function"]["name"] for t in self._connector_tools]
+        conn_line = (" Connected systems you can READ live via tools: " + ", ".join(conn_names)
+                     + " — use them for live company data (these are reads; the room produces any"
+                     " output once at the end).") if conn_names else ""
         return (
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
             "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
             "GATHER grounded facts first (recall the company brain as many times as needed; org_directory "
-            "for people; drive_search→docs_get for live files). Use web_search for genuinely EXTERNAL/"
+            "for people)." + conn_line + " Use web_search for genuinely EXTERNAL/"
             "public facts the company brain would not hold (industry/market data, news, public companies, "
             "current events) — never for internal facts; and if the user EXPLICITLY asks to search the web / "
             "for the latest / current / public data, you MUST call web_search. When the task needs a decision or genuine "
@@ -448,6 +567,7 @@ class Director:
 
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
+        await self._init_connector_tools()  # register toggled connectors as read tools
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
             {"role": "user", "content": self.user_message},

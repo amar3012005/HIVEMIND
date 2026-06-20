@@ -304,6 +304,7 @@ def _register_connector_tools(
     api_key: str,
     user_id: Optional[str],
     org_id: Optional[str],
+    read_only: bool = False,
 ) -> None:
     """Register each granted 3rd-party connector as an INACTIVE tool GROUP
     (Phase 2). The connector's tools are NOT in the action space until the
@@ -314,7 +315,7 @@ def _register_connector_tools(
     connector when its task actually needs it. All calls POST the core bridge,
     which resolves the room owner's Nango token server-side.
     """
-    def _register_google(kind: str):
+    def _register_google(kind: str, read_only: bool = False):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
             return _tool_response(_google_json(tool_name, arguments))
         def _google_json(tool_name: str, arguments: Optional[dict] = None) -> dict:
@@ -323,18 +324,26 @@ def _register_connector_tools(
                 r.raise_for_status()
                 return r.json()
         if kind == "gmail":
+            _gmail_notes_read = (
+                "READ (free): gmail_search(query,max), gmail_get(id), gmail_get_thread(threadId), "
+                "gmail_list_drafts(max), gmail_list_labels(). Use these to pull live context from "
+                "the owner's mailbox; you do NOT have send/draft tools — the room produces any output once."
+            )
+            _gmail_notes_full = (
+                "READ (free): gmail_search(query,max), gmail_get(id), gmail_get_thread(threadId), "
+                "gmail_list_drafts(max), gmail_list_labels(). "
+                "DRAFT (no approval): gmail_create_draft(to,subject,body,cc,threadId). "
+                "ORGANIZE (no approval): gmail_modify(id, addLabelIds, removeLabelIds) — mark read = remove 'UNREAD', archive = remove 'INBOX'. "
+                "OUTWARD (always saved as a draft, then needs the user's approval to actually go): "
+                "gmail_send(to,subject,body,cc), gmail_reply(threadId,to,subject,body), gmail_trash(id)."
+            )
             tk.create_tool_group(
                 group_name="gmail",
-                description="Full Gmail for the room owner: search/read/threads (free), drafts + labels, and send/reply (saved as a draft, then user-approved).",
+                description=("Gmail READ for the room owner: search/read/threads (free)."
+                             if read_only else
+                             "Full Gmail for the room owner: search/read/threads (free), drafts + labels, and send/reply (saved as a draft, then user-approved)."),
                 active=False,
-                notes=(
-                    "READ (free): gmail_search(query,max), gmail_get(id), gmail_get_thread(threadId), "
-                    "gmail_list_drafts(max), gmail_list_labels(). "
-                    "DRAFT (no approval): gmail_create_draft(to,subject,body,cc,threadId). "
-                    "ORGANIZE (no approval): gmail_modify(id, addLabelIds, removeLabelIds) — mark read = remove 'UNREAD', archive = remove 'INBOX'. "
-                    "OUTWARD (always saved as a draft, then needs the user's approval to actually go): "
-                    "gmail_send(to,subject,body,cc), gmail_reply(threadId,to,subject,body), gmail_trash(id)."
-                ),
+                notes=(_gmail_notes_read if read_only else _gmail_notes_full),
             )
 
             def _recipient_verified(to: str) -> bool:
@@ -456,8 +465,13 @@ def _register_connector_tools(
                     return gated
                 return _google("gmail_trash", {"id": id})
             gmail_trash.__doc__ = "Move a message to Trash (reversible). id. Needs the user's approval."
-            for _fn in (gmail_search, gmail_get, gmail_get_thread, gmail_list_drafts, gmail_list_labels,
-                        gmail_create_draft, gmail_modify, gmail_send, gmail_reply, gmail_trash):
+            _gmail_read = (gmail_search, gmail_get, gmail_get_thread, gmail_list_drafts, gmail_list_labels)
+            # read_only (searcher agents): register ONLY the read tools — no
+            # drafts/send/modify/trash → the small owner model cannot queue a
+            # spurious write-approval while gathering context. The centralized
+            # producer still owns all writes.
+            _gmail_write = () if read_only else (gmail_create_draft, gmail_modify, gmail_send, gmail_reply, gmail_trash)
+            for _fn in (*_gmail_read, *_gmail_write):
                 tk.register_tool_function(_fn, group_name="gmail")
         elif kind == "google_docs":
             tk.create_tool_group(
@@ -523,7 +537,12 @@ def _register_connector_tools(
         if not conn:
             continue
         if conn in ("gmail", "google_docs", "google_sheets"):
-            _register_google(conn)
+            # read_only searcher agents: docs/sheets are WRITE-only producers — no
+            # read value for context-gathering, so skip them (only the producer
+            # creates docs/sheets). gmail keeps its read tools.
+            if read_only and conn in ("google_docs", "google_sheets"):
+                continue
+            _register_google(conn, read_only)
             continue
         safe = conn.replace("-", "_")
         tk.create_tool_group(
@@ -589,6 +608,7 @@ def build_hivemind_toolkit(
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
     connectors: Optional[List[str]] = None,
+    connectors_read_only: bool = False,
 ) -> Toolkit:
     """Return an AgentScope Toolkit populated with HIVEMIND tools.
 
@@ -843,7 +863,7 @@ def build_hivemind_toolkit(
 
     # Per-connector live-MCP toolkits (granted to this agent for this room).
     if connectors:
-        _register_connector_tools(tk, connectors, api_key, user_id, org_id)
+        _register_connector_tools(tk, connectors, api_key, user_id, org_id, read_only=connectors_read_only)
 
     if "hivemind_at" in enabled_tool_names:
         def hivemind_at(transaction_time: Optional[str] = None, valid_time: Optional[str] = None, memory_query: Optional[str] = None) -> ToolResponse:

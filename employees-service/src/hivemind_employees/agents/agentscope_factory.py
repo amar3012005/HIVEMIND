@@ -411,6 +411,10 @@ def build_react_agent(
             project_id=project_id,
             # Per-character connector grants for this room (P3 HyperAgents×Connectors).
             connectors=employee_row.get("connectors") or [],
+            # read_only=True (searcher owners): register connector READ tools only
+            # (gmail search/get; skip docs/sheets producers) so the small owner model
+            # gets context-search without write tools that queue spurious approvals.
+            connectors_read_only=bool(employee_row.get("connectors_read_only")),
         )
         # Phase 2: connectors are registered as INACTIVE groups. Pre-equip the
         # ones this agent should have so tool use is reliable (llama doesn't

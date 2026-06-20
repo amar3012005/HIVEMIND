@@ -2669,7 +2669,12 @@ async def _orchestrate_agentic(
         else:
             _tools = DEFAULT_HYPER_TOOLS
         merged = {
-            **emp, "tools": _tools, "connectors": [],
+            **emp, "tools": _tools,
+            # searcher OWNERS get the room's connectors as READ-ONLY groups (gmail
+            # search/read; docs/sheets skipped — they're producers). No write tools →
+            # no spurious approvals from the small owner model. Reactors/plan/lead: none.
+            "connectors": (conns if searcher else []),
+            "connectors_read_only": searcher,
             "llm_provider": "groq", "model": _agentic_model,
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
             "max_iters": (1 if toolless else iters),
@@ -2797,8 +2802,10 @@ async def _orchestrate_agentic(
                     f"Your SUBTASK: {task}\nAlready gathered by teammates (do NOT re-fetch these):\n{prior}\n\n"
                     "HIVEMIND is the COMPANY BRAIN — it holds the org's knowledge. SEARCH IT FIRST and "
                     "as many times as your subtask needs (NOT once): call `recall` per fact/topic, "
-                    "`org_directory` for a person/email, `traverse_graph` to follow a thread. Only if a "
-                    "fact your subtask needs is genuinely EXTERNAL (public/industry info the company "
+                    "`org_directory` for a person/email, `traverse_graph` to follow a thread. When the "
+                    "room has a connector enabled (e.g. Gmail), use its READ tools (gmail_search / "
+                    "gmail_get / gmail_get_thread) to pull live context from the owner's real data. Only "
+                    "if a fact your subtask needs is genuinely EXTERNAL (public/industry info the company "
                     "wouldn't store) AND not already gathered, call `hivemind_web_search` for it. Skip "
                     "anything a teammate already pulled above. The room produces the final artifact ONCE "
                     "from the whole team's work — your job is to GATHER the real content + facts, not to "

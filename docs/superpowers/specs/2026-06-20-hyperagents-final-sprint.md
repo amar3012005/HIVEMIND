@@ -83,8 +83,20 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
   chain task → sheet+email+grounded. Commits: c51ed972 (harness), chain-fix, default-flip.
   NEW Phase-1.5 items found: grounding-judge flips complete↔escalated on prose (tighten rubric);
   semantic dead-end (impossible data → seal blocked vs draft a useless email).
-- **NEXT: Phase 1 — collapse to ONE orchestrator** (delete/demote the deterministic `_orchestrate`
-  path; keep the agentic spine). Then Phase 2/3/4 per below.
+- **2026-06-20 — PHASE 1 DONE** (commit a4d6b2a5, deployed+verified). The deterministic path was
+  UNREACHABLE (agentic returned unconditionally). Deleted it + `_plan_turn`/`_gather_evidence`/
+  `_recon_pre`/`_execute_assignments`/`_orchestrate_swarm`(R1-R5)/`_orchestrate_deep_sim` + cascade
+  + the orphaned `_agentic_enabled` flag (agentic return now unconditional). **6486 → 3277 lines
+  (−49%, −3201).** Zero prod behavior change. Verified: AST + in-container import reload + live
+  smoke turn (Solvis room → gmail draft + approval + grounded). Template/skeptic/trust kept as
+  router-event display metadata.
+- **NEXT: Phase 2 — make the agentic swarm truly MULTI-ROUND.** Today `_orchestrate_agentic` does
+  ONE debate pass (reactors challenge the draft once → one revise). Turn it into a bounded R1-Rn
+  loop with convergence (port MiroFish `csi_quality`/`csi_policy` scoring as the verdict signal),
+  reusing `_run_reactor` + the react/peer_review events the FE already renders. Then Phase 3
+  (connectors = one agent+producer registry), Phase 4 (agent-owned actions, gated on a model that
+  tool-calls reliably — note: llama can't on Groq strict mode, owners route to gpt-oss-20b), Phase 5
+  (harden + CI gate).
 
 - **2026-06-20:** Phase-0 harness BUILT + committed `c51ed972` (offline — prod box
   unreachable, SSH timeout). Added `RoomTurnRequest.agentic_model` per-turn override

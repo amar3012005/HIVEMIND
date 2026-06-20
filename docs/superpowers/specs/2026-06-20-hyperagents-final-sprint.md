@@ -118,6 +118,22 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
   the live room before shipping orchestrator changes). A hard token kill-switch + wiring the battery
   into CI are optional future hardening.
 
+## POST-SPRINT FITTER IMPROVEMENTS (2026-06-20, all live)
+- **Template differentiation** (5f5e956a): room type (debate/decision/swarm/lean_coffee/council/
+  retrospective/standup/review/brainstorm) now drives the agentic flow via TEMPLATE_OVERLAYS
+  (lead_hint frames approach, synth_hint sets output structure). Was cosmetic; now real. Verified.
+- **Drive/Docs READ for owners** (committed): core bridge gained `docs_get` (reads a Doc's text);
+  owners get read-only `drive_search`+`docs_get` → they mine the company's existing Google Docs, not
+  just HIVEMIND+gmail. Verified: drive_search ×4 + docs_get ×4 on real Solvis docs.
+- **Grounding verdict = fabrication-only** (committed): stopped false escalations on honest
+  UNVERIFIED items (count is a completeness gap, not ungrounded) + fixed stale 'no web access' rule.
+  Verified: same task that escalated twice now seals complete/grounded in 1 round, 35s (was 132s+2
+  rounds+double-doc).
+- **NOT done (by design / non-code):** parallel owner gather — CONFLICTS with the sequential shared-
+  blackboard (later owners must see earlier findings to skip re-fetch); kept sequential on purpose.
+  Goalkeeper orphan-doc on a GENUINE rerun — now rare after the grounding fix; minor. Deeper KB
+  coverage — ingest the Solvis product docs (content task, not pipeline).
+
 ## SPRINT STATUS: shippable phases COMPLETE
 0 (model) · 1 (collapse −3201) · 2a (multi-round swarm) · 2b (HIVEMIND-first + web gather) · 3
 (connector read-search) — all shipped + verified live. Phase 4 (agent actions) blocked on model;

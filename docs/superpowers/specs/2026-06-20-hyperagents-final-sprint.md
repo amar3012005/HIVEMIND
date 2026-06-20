@@ -99,6 +99,32 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
   Verified: owner recalled internal → none → fired web_search → real Tavily competitor results.
   Connector context-search deferred INTO Phase 3. Pre-existing tool noise flagged: query_with_ai
   /api/query 404 (task_c8563b0c); occasional gpt-oss-20b Groq 400 (absorbed by retry wrapper).
+- **2026-06-20 — PHASE 3 DONE** (commit pending-hash; deployed+verified live). Connectors are now
+  READ-ONLY agent context-search tools: `build_hivemind_toolkit(connectors_read_only=)` registers
+  gmail READ tools only (search/get/thread/list), skips docs/sheets (write-only producers), MCP
+  `_call` self-gates writes; searcher owners get `connectors=conns + connectors_read_only=True`;
+  read-only gmail notes trimmed. Verified: owner fired gmail_search/get/get_thread to summarise real
+  customer threads, no write calls, read-only notes confirmed, status=complete. Writes stay in the
+  centralized producer.
+- **PHASE 4 — BLOCKED (recon'd 2026-06-20), needs a reliable tool-calling model.** Agent-owned WRITE
+  actions can't be built on the current stack: OPENROUTER_API_KEY unset → Groq-only; Groq llama-3.x
+  can't tool-call under strict mode (swaps to gpt-oss-20b); gpt-oss-20b harmony-400s even with READ
+  tools (observed). Agent writes would 400 like the original placeholder-arg failure that forced
+  centralization. UNBLOCK PATH: set OPENROUTER_API_KEY + route owners to a function-calling-reliable
+  model (Claude/GPT) — a provider/cost decision. Until then the centralized producer (Phase 1) is the
+  correct action path; agents SEARCH (read) but do not ACT.
+- **PHASE 5 — bounds in place.** Per-turn cost is structurally bounded: _SWARM_MAX_ROUNDS=3 ×
+  goalkeeper max 3 × _EXECUTE_MAX_OWNERS=4. `scripts/phase0/` battery = the regression gate (run on
+  the live room before shipping orchestrator changes). A hard token kill-switch + wiring the battery
+  into CI are optional future hardening.
+
+## SPRINT STATUS: shippable phases COMPLETE
+0 (model) · 1 (collapse −3201) · 2a (multi-round swarm) · 2b (HIVEMIND-first + web gather) · 3
+(connector read-search) — all shipped + verified live. Phase 4 (agent actions) blocked on model;
+Phase 5 bounds in place. The user's vision is LIVE: HIVEMIND-as-company-brain mined per-agent +
+web-if-external + multi-round swarm debate + connector context-search, one clean orchestrator.
+
+## (archive) Earlier NEXT pointers
 - **NEXT: Phase 3 — connectors = ONE unified read/act registry** (give owners connector READ
   context-search cleanly — separate read tools from the write/consensus-gated ones so the small
   owner model can't queue spurious write-approvals; new connector registers once → agent-callable

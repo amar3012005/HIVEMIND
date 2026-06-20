@@ -42,8 +42,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 import httpx
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
-from agentscope.plan import PlanNotebook  # agentic orchestrator (flagged)
-from agentscope.pipeline import MsgHub    # agentic orchestrator (flagged)
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -62,14 +60,11 @@ from .config import get_settings
 from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
-    get_room_connector_grants,
     get_room_enabled_connectors,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
     list_employees_by_ids,
-    list_running_employees,
-    update_trust,
 )
 from .hivemind_client import google_exec_emulated, org_members_emulated, recall_emulated
 from .hyper.engine import run_director
@@ -1609,59 +1604,6 @@ Hard rules:
 """
 
 
-async def _run_reactor(
-    agent: ReActAgent,
-    user_message: str,
-    lead_line: str,
-    lead_name: str,
-    reactor_lane: str,
-    is_opposing: bool,
-    blackboard_context: str = "",
-    current_turn_state: str = "",
-) -> Dict[str, Any]:
-    """Returns a dict like
-        {"react": bool, "agreement": str|None, "confidence": float, "line": str}
-    """
-    bias = " (Your lane is opposing the Lead's — speak up if you have a real challenge.)" if is_opposing else ""
-    prompt = (
-        f"{REACTOR_INSTRUCTIONS}\n"
-        + (
-            "SHARED BLACKBOARD — already recalled for this turn. Use this before tools; "
-            "only call tools for one targeted missing fact.\n"
-            f"{blackboard_context}\n"
-            if blackboard_context else ""
-        )
-        + (current_turn_state + "\n" if current_turn_state else "")
-        + f"User asked: {user_message}\n\n"
-        + f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
-        + f"{lead_line}\n\n"
-        + f"Your lane: {reactor_lane}.{bias}\n"
-        + f"Reply with the JSON now."
-    )
-    try:
-        reply = await agent(Msg(name="user", content=prompt, role="user"))
-        text = _msg_to_text(reply)
-        # Strip code fences
-        m = re.search(r"\{[\s\S]+\}", text)
-        if not m:
-            return {"react": False}
-        parsed = json.loads(m.group(0))
-        if not parsed.get("react"):
-            return {"react": False}
-        line = (parsed.get("line") or "").strip()
-        if not line:
-            return {"react": False}
-        return {
-            "react": True,
-            "agreement": parsed.get("agreement") or "extend",
-            "confidence": float(parsed.get("confidence") or 0.5),
-            "line": line[:2000],
-            "gap": str(parsed.get("gap") or "")[:500],
-            "evidence": [str(x)[:160] for x in (parsed.get("evidence") or [])[:6]] if isinstance(parsed.get("evidence"), list) else [],
-        }
-    except Exception as exc:  # noqa: BLE001
-        log.warning("reactor failed: %s", exc)
-        return {"react": False}
 
 
 # ─── Pydantic ──────────────────────────────────────────────────────────
@@ -1718,102 +1660,6 @@ class ApprovalDecisionRequest(BaseModel):
 # topic-appropriate behaviour (e.g. retrospective wants "what worked / what
 # didn't / actions", standup wants status report, etc.). Phase-machine
 # stays the SAME — only the framing differs. Avoids 8 forked orchestrators.
-TEMPLATE_OVERLAYS: Dict[str, Dict[str, str]] = {
-    "debate": {
-        "label": "Debate",
-        "lead_hint": "",
-        "synth_hint": "",
-    },
-    "decision": {
-        "label": "Decision (DACI)",
-        "lead_hint": (
-            "MEETING MODE: DACI Decision. Lead is Driver. Bias toward committing "
-            "to one path with explicit Approver / Consulted / Informed if memory "
-            "names them. Output must end with a clear COMMITMENT line."
-        ),
-        "synth_hint": "End with: 'DECISION: ...' on its own line.",
-    },
-    "swarm": {
-        "label": "Swarm (R1-R5)",
-        "lead_hint": "",
-        "synth_hint": "",
-    },
-    "brainstorm": {
-        "label": "Brainstorm",
-        "lead_hint": (
-            "MEETING MODE: Brainstorm. Generative-only. Suspend criticism. "
-            "Encourage volume + variety. Skeptic challenges still allowed but "
-            "should propose NEW options rather than kill existing ones."
-        ),
-        "synth_hint": (
-            "Output: top 5-8 ideas as a bulleted list, sorted by novelty + "
-            "feasibility. No premature pick. No 'best option'."
-        ),
-    },
-    "council": {
-        "label": "Council (majority vote)",
-        "lead_hint": (
-            "MEETING MODE: Council. Each participant is an expert peer. Lead is "
-            "facilitator, not decision-maker. Final outcome requires majority "
-            "APPROVE (3/5 or higher)."
-        ),
-        "synth_hint": (
-            "Output: APPROVED / CONDITIONAL / REJECTED based on vote count. "
-            "List the conditions explicitly when CONDITIONAL."
-        ),
-    },
-    "lean_coffee": {
-        "label": "Lean Coffee",
-        "lead_hint": (
-            "MEETING MODE: Lean Coffee. Rotate through 2-3 sub-topics in the "
-            "user's question. Time-box each. Light, exploratory. No deep dive."
-        ),
-        "synth_hint": "Output: per-topic 2-3 sentences. End with 'Carry forward: …'.",
-    },
-    "retrospective": {
-        "label": "Retrospective",
-        "lead_hint": (
-            "MEETING MODE: Retrospective. Frame answer as: WHAT WORKED / WHAT "
-            "DIDN'T / WHAT TO CHANGE. Pull memory evidence for each bucket. "
-            "Skeptic emphasises what didn't work."
-        ),
-        "synth_hint": (
-            "Output STRICT structure:\n"
-            "WHAT WORKED:\n- ...\nWHAT DIDN'T:\n- ...\nWHAT TO CHANGE:\n- ..."
-        ),
-    },
-    "review": {
-        "label": "Review (checklist)",
-        "lead_hint": (
-            "MEETING MODE: Review. Treat the user's question as something to "
-            "evaluate against a checklist. Each reactor scores one dimension. "
-            "Skeptic surfaces missed criteria."
-        ),
-        "synth_hint": (
-            "Output: dimension-by-dimension verdict + overall PASS / NEEDS_WORK / FAIL."
-        ),
-    },
-    "standup": {
-        "label": "Standup",
-        "lead_hint": (
-            "MEETING MODE: Standup. Status report. Brief. Each participant: "
-            "YESTERDAY / TODAY / BLOCKERS based on memory. No deep deliberation."
-        ),
-        "synth_hint": (
-            "Output STRICT structure per participant if relevant, or merged:\n"
-            "YESTERDAY: ...\nTODAY: ...\nBLOCKERS: ..."
-        ),
-    },
-    "deep_sim": {
-        "label": "Deep Simulation",
-        "lead_hint": (
-            "MEETING MODE: Deep Simulation. Build a live Slack-style simulation: "
-            "ontology/capability check, specialist flyby if needed, then propose, "
-            "peer-review, revise, vote, and conclude."
-        ),
-        "synth_hint": "Output a decisive conclusion with assumptions, risks, and next decisions.",
-    },
-}
 
 
 # Auto-pick template from user message via keyword scoring (no LLM, cheap).
@@ -1847,8 +1693,6 @@ def recommend_template(user_message: str, default: str = "debate") -> str:
     return best
 
 
-def get_template_overlay(template: str) -> Dict[str, str]:
-    return TEMPLATE_OVERLAYS.get(template, TEMPLATE_OVERLAYS.get("debate", {}))
 
 
 def _is_deep_sim_prompt(user_message: str) -> bool:
@@ -2314,9 +2158,6 @@ _SHEET_CREATE_RE = re.compile(
 # Planner-invented governance noise the user did not ask for — dropped from the
 # subtask list unless the user's own message raised it. Send-approval is the
 # write-gate's job, NOT an owner subtask.
-_NOISE_SUBTASK_RE = re.compile(
-    r"\b(complianc|consent|gdpr|opt[\s-]?in|unsubscrib|sign[\s-]?off|signature|legal\s+review|"
-    r"policy\s+review|data[\s-]?protection|approve\s+(?:the\s+)?(?:email|draft|message))\w*", re.IGNORECASE)
 
 
 def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str, Any]]:
@@ -2473,22 +2314,6 @@ async def _verify_and_emit(
 # is the functional equivalent of a skill: a structured authoring contract). It
 # teaches the markdown the in-tool renderer understands + a quality bar, so the
 # produced Google Doc is well-structured and uses DRAWN tables where they help.
-_DOC_AUTHORING_GUIDE = (
-    "  • Open with '# <Title>' then a one-paragraph executive summary.\n"
-    "  • Use '## <Section>' for each major section, '### ' for sub-sections.\n"
-    "  • **Bold** key terms, names, figures, and decisions.\n"
-    "  • Use '- ' bullets for lists and '1. ' for ordered steps/timelines.\n"
-    "  • For ANY numeric, comparative, schedule, cost, or option data, USE A "
-    "TABLE — it is drawn as a real Google Docs table. Markdown table syntax:\n"
-    "        | Column A | Column B | Column C |\n"
-    "        |---|---|---|\n"
-    "        | val | val | val |\n"
-    "    (first row = header, then a '|---|' rule line, then data rows). Prefer a "
-    "table over prose whenever you'd otherwise list figures inline.\n"
-    "  • Be specific and grounded: real numbers/dates from recall, not placeholders. "
-    "If a figure is uncertain, give the range and add a short 'Gaps to confirm' section.\n"
-    "  • End with a concrete next-step checklist."
-)
 
 
 # Recipient-name patterns: "to Ceyda", "email Rama", "cc Maya", "for Dr. Park".
@@ -2508,15 +2333,11 @@ _RECIPIENT_RE = re.compile(
 # the Solvis transcript hit a 429 with 5 tool-less narrators; tool-grounded costs
 # more, so cap tighter + stagger.
 _EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "8"))
-_EXECUTE_MAX_ITERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_ITERS", "4"))
 # EVERY assigned owner runs its subtask IN PARALLEL (no sequential threading);
 # concurrency is bounded only to avoid Groq 429s. Per-task recon then verifies
 # each owner's output before the debate.
-_EXECUTE_CONCURRENCY = max(1, int(os.environ.get("HYPER_ROOM_EXECUTE_CONCURRENCY", "5")))
 # Phase 2 — bounded MULTI-ROUND swarm: debate→revise repeats until a round
 # produces no high-confidence challenge (converged) or the cap is hit.
-_SWARM_MAX_ROUNDS = max(1, min(5, int(os.environ.get("HYPER_SWARM_MAX_ROUNDS", "3"))))
-_SWARM_CHALLENGE_CONF = float(os.environ.get("HYPER_SWARM_CHALLENGE_CONF", "0.5") or "0.5")
 
 
 async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
@@ -2561,629 +2382,12 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
     return resolved
 
 
-def _output_production_directive(turn_id: str) -> str:
-    """CONTENT directive for the synthesis. The agents do NOT call connector tools
-    to produce the artifact — they write the deliverable AS their synthesis text,
-    and the room's single PRODUCE step (_produce_output) turns it into the real
-    Google Doc / Sheet / email draft. This keeps ONE deterministic produce path."""
-    plan = _PLAN_BY_TURN.get(turn_id)
-    if not isinstance(plan, dict):
-        return ""
-    out = plan.get("intended_output")
-    _gaps = plan.get("evidence_gaps") or []
-    _gap_prefix = (
-        ("\n\n⚠ EVIDENCE GAPS (resolve these in your synthesis, or flag them — do NOT "
-         "fabricate to fill them):\n" + "\n".join(f"  - {g}" for g in _gaps))
-        if _gaps else ""
-    )
-    _no_tools = ("\nDo NOT call any connector tool to send/create the artifact — just "
-                 "WRITE the content; the room produces and surfaces it for you.")
-    if out == "doc":
-        return (
-            _gap_prefix +
-            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
-            "Write the COMPLETE document AS your synthesis, in MARKDOWN — it renders into a "
-            "polished Google Doc (real headings, bold, lists, DRAWN tables):\n" + _DOC_AUTHORING_GUIDE +
-            "\nFull substance grounded in recalled facts, not a summary." + _no_tools
-        )
-    if out == "sheet":
-        return (
-            _gap_prefix +
-            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
-            "Present the data AS your synthesis in a MARKDOWN TABLE — first row = headers, "
-            "then a '|---|' rule, then data rows (real numbers from recall):\n"
-            "    | Year | ARR (€) | Customers |\n    |---|---|---|\n    | 2026 | 120000 | 3 |\n"
-            "The room builds the Google Sheet from your table." + _no_tools
-        )
-    if out == "email":
-        contacts = plan.get("verified_contacts") or []
-        if contacts:
-            contact_block = (
-                "\nRECIPIENT (the room sends to this VERIFIED address — do not guess another):\n"
-                + "\n".join(f"  - {c['name']} → {c['email']}" for c in contacts) + "\n"
-            )
-        else:
-            contact_block = ("\n(No recipient pre-resolved — if you name one, the room resolves it "
-                             "via org_directory/Gmail; never invent an address.)\n")
-        corr = plan.get("correspondence") or []
-        if corr:
-            style_block = (
-                "\nPRIOR EMAILS — the REAL voice & facts. MATCH this tone/phrasing/patterns:\n"
-                + "\n---\n".join(f"From {c.get('from','')} | {c.get('subject','')}\n{c.get('body','')}" for c in corr)
-                + "\nWrite in THIS voice, not a generic template.\n"
-            )
-        else:
-            style_block = "\n(Match the sender's real voice from recalled mail; no generic template.)\n"
-        return (
-            _gap_prefix +
-            "\n\n── WRITE THE DELIVERABLE (the room will produce it) ──\n"
-            "Write the final email AS your synthesis: a 'Subject: ...' line then the body.\n"
-            "VOICE/STYLE: " + style_block +
-            "RECIPIENT: " + contact_block +
-            "Sign with your name + YOUR organisation/brand only — never invent personal "
-            "addresses for yourself or colleagues. The room saves it as a Gmail DRAFT to the "
-            "verified recipient and surfaces it for the user's one-click approval — it is NOT "
-            "sent until they approve, so don't claim it was sent." + _no_tools
-        )
-    if out == "answer" and plan.get("output_demoted"):
-        # Was an email but no recipient resolved → answer that delivers the plan
-        # AND asks for the address. Never escalate over the missing recipient.
-        return (
-            _gap_prefix +
-            "\n\n── DELIVER THE ANSWER ──\n"
-            "Give the COMPLETE plan/recommendation grounded in the gathered evidence — concrete steps "
-            "and a realistic sequence; reference real team members by their role where an owner makes "
-            "sense, but do NOT fabricate commitments, dates, or facts not in the evidence. This is NOT "
-            "an email (no recipient could be resolved). Close with ONE "
-            "short line offering to draft the email once the user shares the recipient's address. Do NOT "
-            "treat the missing address as a blocker, and do NOT escalate over it." + _no_tools
-        )
-    return ""
 
 
-class _AgenticPlan(BaseModel):
-    """FLAT plan the lead emits via structured output. Flat on purpose — gpt-oss
-    handles a list[str] in one forced generate_response, but chokes on the nested
-    PlanNotebook create_plan schema. We build/drive the plan in Python from this."""
-    goal: str = Field(description="One line: what the team must accomplish.")
-    done_criterion: str = Field(description="One line: how we know it's fully done.")
-    subtasks: list[str] = Field(
-        description="2-5 items, each 'Owner Name — concrete tool-doable action', "
-                    "e.g. 'Lina Park — recall the recipient email from HIVEMIND'.")
 
 
-async def _agent_reply_resilient(agent, content: str) -> str:
-    """Invoke an agent once, with a single retry on gpt-oss's flaky harmony
-    tool-name leak (`recall<|channel|>commentary` → Groq 400). Returns its text."""
-    try:
-        r = await agent(Msg(name="user", content=content, role="user"))
-        return (_msg_to_text(r) or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        es = str(exc)
-        if "tool_use_failed" in es or "not in request.tools" in es or "tool call validation" in es.lower():
-            try:
-                r = await agent(Msg(
-                    name="user",
-                    content=("Your last tool call was malformed (extra characters in the tool NAME). "
-                             "Call tools using ONLY their exact registered name, no suffix/channel "
-                             "marker. Retry and finish."),
-                    role="user"))
-                return (_msg_to_text(r) or "").strip()
-            except Exception as exc2:  # noqa: BLE001
-                log.warning("[agentic] agent failed after retry: %s", exc2)
-                return ""
-        log.warning("[agentic] agent failed: %s", exc)
-        return ""
 
 
-async def _recon_tasks(req: "RoomTurnRequest", contributions: List[Dict[str, Any]],
-                       reviewer: "ReActAgent") -> Dict[int, Dict[str, Any]]:
-    """Per-task recon — a tool-less reviewer checks EACH owner's gathered output
-    against its subtask: grounded + on-task, not empty / a mere description / a
-    fabrication. Returns {index: {ok: bool, gap: str}}. Best-effort; the caller
-    guards. This is the 'recon on tasks' gate before the team debates."""
-    items = "\n\n".join(
-        f"[{i}] {c.get('owner')} — SUBTASK: {c.get('subtask')}\nGATHERED:\n{(c.get('text') or '')[:700]}"
-        for i, c in enumerate(contributions))
-    prompt = (
-        f"USER TASK: {req.user_message}\n\nReview each teammate's gathered output below. For EACH "
-        "index decide ok=true if it addresses its SUBTASK with concrete GROUNDED facts (real "
-        "content — not empty, not merely a description of what they did, not fabricated). Set "
-        "ok=false with a one-line `gap` if it is empty, off-task, or ungrounded.\n\n" + items +
-        '\n\nReply STRICT JSON only: {"verdicts":[{"i":<index>,"ok":<bool>,"gap":"<gap or empty>"}]}')
-    txt = await _agent_reply_resilient(reviewer, prompt)
-    obj = _first_json_object(txt) or {}
-    out: Dict[int, Dict[str, Any]] = {}
-    for v in (obj.get("verdicts") or []):
-        if isinstance(v, dict) and isinstance(v.get("i"), int):
-            out[v["i"]] = {"ok": bool(v.get("ok")), "gap": str(v.get("gap") or "")}
-    return out
-
-
-async def _orchestrate_agentic(
-    req: "RoomTurnRequest",
-    participants: List[Dict[str, Any]],
-    lead: Dict[str, Any],
-    enabled_connectors: List[str],
-    started: float,
-    room_template: str = "debate",
-) -> RoomTurnResponse:
-    """Agentic orchestrator (flagged) — AgentScope PlanNotebook + MsgHub.
-
-    The lead decomposes the task into SubTasks via `create_plan`; each owner runs
-    its OWN ReAct loop with real tools (personified recall + connectors) to finish
-    its SubTask; MsgHub broadcasts each result to peers; the lead synthesizes. No
-    deterministic intent/produce/resolve branches — agents accomplish the task
-    through their own tool calls. Reuses the grounding gate + verify + produce +
-    approval drain + seal. Works for ANY task shape (nothing is task-coded)."""
-    cost_tokens = 0
-    conns = [str(c) for c in (enabled_connectors or [])]
-    # Room TEMPLATE shapes behavior: lead_hint frames how the team approaches the
-    # task; synth_hint sets the OUTPUT structure (debate vs DACI-decision vs
-    # lean-coffee vs council-vote vs retrospective vs standup vs review). Applied
-    # to the draft + the deliverable spec so the room type is real, not cosmetic.
-    _overlay = get_template_overlay(room_template)
-    _lead_hint = (_overlay.get("lead_hint") or "").strip()
-    _synth_hint = (_overlay.get("synth_hint") or "").strip()
-    boot = {b["id"]: b for b in await fetch_bootstrap()}
-
-    # Default = llama-3.3-70b-versatile: Phase-0 eval (docs/.../2026-06-20-phase0-
-    # model-eval-result.md) showed it matches gpt-oss-120b on action/artifact quality
-    # while ~40% faster + ~45% cheaper per turn with ~0 tool-call failures (gpt-oss's
-    # harmony/400 leaks are the patchwork tax). Override per-turn via req.agentic_model
-    # or globally via HYPER_AGENTIC_MODEL.
-    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-20b")
-
-    # PER-PHASE model policy — match the model to the call's job (see the call-type
-    # map). req.agentic_model (eval) forces ONE model for ALL phases; else each
-    # phase uses HYPER_MODEL_<PHASE> or the default. Routing (agentscope_factory)
-    # sends gpt-oss/llama → Groq direct, deepseek/* → OpenRouter.
-    #   plan    : structured decompose (fast, clean JSON)     → gpt-oss-120b (Groq)
-    #   execute : TOOL-CALLING owner gather (high volume)     → gpt-oss-20b  (Groq, reliable tools)
-    #   reactor : tool-less debate react (highest volume)     → llama-3.1-8b-instant (Groq, cheap+fast)
-    #   synth   : prose deliverable (few calls)               → gpt-oss-120b (Groq)
-    #   recon   : task/grounding JUDGE (reliability-critical) → deepseek-v4-flash (OpenRouter)
-    def _model_for(phase: str, default: str) -> str:
-        return (getattr(req, "agentic_model", None)
-                or os.environ.get(f"HYPER_MODEL_{phase.upper()}") or default)
-    _M_PLAN = _model_for("plan", "openai/gpt-oss-120b")
-    _M_EXECUTE = _model_for("execute", "openai/gpt-oss-20b")
-    _M_REACTOR = _model_for("reactor", "llama-3.1-8b-instant")
-    _M_SYNTH = _model_for("synth", "openai/gpt-oss-120b")
-    _M_RECON = _model_for("recon", "deepseek/deepseek-v4-flash")
-
-    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False, searcher: bool = False,
-            model: Optional[str] = None) -> ReActAgent:
-        # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).
-        # NO connector WRITE tools (docs_create/gmail_send): gpt-oss owners kept
-        # calling them with placeholder args → google/exec 400s + no artifact. The
-        # single reliable producer (_produce_output via google_exec_emulated) does
-        # ALL connector writes from the clean synth content.
-        # searcher=True (OWNERS): + hivemind_web_search so an owner can pull EXTERNAL
-        # facts its subtask needs when HIVEMIND (the company brain) doesn't have them.
-        # (Connector context-search lands in Phase 3 via the unified read/act registry.)
-        # toolless=True for reactors: they react to the draft from context and must
-        # return clean JSON — with tools, gpt-oss wraps the JSON in a fake `JSON`
-        # tool call → 400. A tool-less agent returns the JSON as text (reliable).
-        be = boot.get(emp.get("id"), {}) or {}
-        if toolless:
-            _tools = ["_react_noop"]
-        elif searcher:
-            _tools = DEFAULT_HYPER_TOOLS + ["hivemind_web_search"]
-        else:
-            _tools = DEFAULT_HYPER_TOOLS
-        merged = {
-            **emp, "tools": _tools,
-            # searcher OWNERS get the room's connectors as READ-ONLY groups (gmail
-            # search/read; docs/sheets skipped — they're producers). No write tools →
-            # no spurious approvals from the small owner model. Reactors/plan/lead: none.
-            "connectors": (conns if searcher else []),
-            "connectors_read_only": searcher,
-            "llm_provider": "groq", "model": (model or _agentic_model),
-            "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
-            "max_iters": (1 if toolless else iters),
-        }
-        return build_react_agent(
-            merged, be.get("api_key") or "", user_id=req.user_id, org_id=req.org_id,
-            project_id=req.project_id)
-
-    roster = ", ".join(f"{p.get('name') or p.get('slug')}" for p in participants)
-
-    # 0. GATHER — a GUARANTEED recall sweep so the team always has the org's facts
-    #    (don't depend on each owner choosing to recall → the CEO-not-found
-    #    variance). Robust gather/recon: the org brain is queried up front and the
-    #    facts are injected into every agent's context.
-    gathered_block = ""
-    try:
-        rc = await recall_emulated(req.user_message, user_id=req.user_id, org_id=req.org_id,
-                                   project_id=req.project_id, max_memories=10)
-        _mems = []
-        if isinstance(rc, dict):
-            _mems = rc.get("memories") or rc.get("results") or rc.get("context") or []
-        _glines = []
-        for m in (_mems if isinstance(_mems, list) else [])[:8]:
-            if isinstance(m, dict):
-                t = str(m.get("title") or m.get("name") or "")
-                c = str(m.get("content") or m.get("summary") or m.get("text") or "")[:220]
-                if t or c:
-                    _glines.append(f"- {t}: {c}".strip(" -:"))
-            elif isinstance(m, str):
-                _glines.append(f"- {m[:220]}")
-        if _glines:
-            gathered_block = ("KNOWN FROM HIVEMIND MEMORY (ground your work in these real facts; "
-                              "cite them; do NOT contradict or fabricate around them):\n"
-                              + "\n".join(_glines) + "\n\n")
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "gather", "sources": ["hivemind"], "contacts": 0, "correspondence": 0,
-            "connector_hits": [], "memory_hits": len(_glines),
-        })
-        log.info("[agentic] gather room=%s mem_hits=%d", req.room_id, len(_glines))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[agentic] gather failed: %s", exc)
-
-    # 1. LEAD decomposes — asks for JSON, we parse it. gpt-oss on Groq emits the
-    #    plan as clean JSON CONTENT (not a tool call), so AgentScope's
-    #    structured_model (which forces a generate_response tool) 400s with "did
-    #    not call a tool". JSON-content + _first_json_object pattern mirrors the
-    #    Groq-reliable approach used here.
-    #    The DECOMPOSITION + output-type are the model's (agent-driven).
-    plan_agent = _mk(lead, 8, model=_M_PLAN)
-    plan_prompt = (
-        f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
-        f"{gathered_block}"
-        f"USER TASK: {req.user_message}\n\n"
-        "Reply with STRICT JSON only (no prose, no markdown):\n"
-        '{\n'
-        '  "intended_output": one of ["doc","sheet","email","answer"],\n'
-        '  "done_criterion": "<one sentence: how we know it is fully, functionally done>",\n'
-        '  "subtasks": ["<Owner Name — concrete tool-doable action>", ...]\n'
-        '}\n'
-        "2–5 subtasks; each starts with a real teammate then ' — ' then an action doable with "
-        "tools (recall HIVEMIND, search Gmail/Docs). Pick intended_output from the user's intent: "
-        "'create/write a doc/report'→doc, 'tracker/table'→sheet, 'email/send to X'→email, a "
-        "question→answer. Do NOT add consent / policy / GDPR / approval subtasks the user did not "
-        "ask for — the user's request IS the authorization; plan only the real work.\n"
-        f"CAPABILITIES (what this room can actually PRODUCE): {', '.join(producible_kinds())} "
-        "(plus reading HIVEMIND memory + the enabled connectors). The done_criterion must only "
-        "assert end-states reachable with THESE — e.g. there is no file-sharing / permissions tool, "
-        "so do NOT make 'shared with <person>' or 'permissions set' part of done_criterion; if the "
-        "user asked for something unsupported, plan the part you CAN do and let the deliverable note "
-        "the rest as a limitation."
-    )
-    plan_text = await _agent_reply_resilient(plan_agent, plan_prompt)
-    cost_tokens += max(80, len(plan_text) // 4)
-    plan_obj = _first_json_object(plan_text) or {}
-    subtasks_raw = [str(s) for s in (plan_obj.get("subtasks") or []) if str(s).strip()]
-    # Deterministic guard: the planner keeps inventing compliance / consent / GDPR /
-    # opt-in / sign-off / "approve the draft" subtasks the user never asked for (the
-    # model ignores the prompt rule). Drop them UNLESS the user actually mentioned
-    # compliance/consent. Send-approval is handled by the write-gate, not an owner.
-    if not _NOISE_SUBTASK_RE.search(req.user_message or ""):
-        _filtered = [s for s in subtasks_raw if not _NOISE_SUBTASK_RE.search(s)]
-        if _filtered:  # never strip to empty
-            subtasks_raw = _filtered
-    subtasks_raw = subtasks_raw[:_EXECUTE_MAX_OWNERS]
-    done_txt = str(plan_obj.get("done_criterion") or "")
-    intended_output = str(plan_obj.get("intended_output") or "answer").strip().lower()
-    if intended_output not in ("doc", "sheet", "email", "answer"):
-        intended_output = "answer"
-    # Conservative intent guard (mirror the deterministic path): a planning/
-    # strategy/"what should be" question is an ANSWER, not an artifact — don't
-    # over-classify it to doc/email (which then needs a connector write + OAuth).
-    # Only keep doc/sheet/email when the user EXPLICITLY asked to create/send one.
-    _umsg = req.user_message or ""
-    if intended_output == "email" and not _SEND_INTENT_RE.search(_umsg) \
-            and not re.search(r"[\w.+-]+@[\w.-]+\.\w+", _umsg):
-        intended_output = "answer"
-    if intended_output in ("doc", "sheet") and not re.search(
-            r"\b(create|writ|draft|build|make|generat|compil|prepare|doc|document|report|sheet|spreadsheet|table|catalog|catalogue|inventory)\w*", _umsg, re.IGNORECASE):
-        intended_output = "answer"
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "plan", "agent": lead.get("slug"), "intended_output": intended_output,
-        "done_criterion": done_txt, "steps": subtasks_raw,
-        "assignments": {s: s for s in subtasks_raw},
-    })
-    log.info("[agentic] plan room=%s out=%s subtasks=%d", req.room_id, intended_output, len(subtasks_raw))
-
-    def _owner_for(line: str, idx: int) -> Dict[str, Any]:
-        low = (line or "").lower()
-        for p in participants:
-            nm = (p.get("name") or p.get("slug") or "").lower()
-            if nm and nm.split()[0] in low:
-                return p
-        return participants[idx % len(participants)]
-
-    # ── ASSIGN — EVERY participant gets a subtask. Planner subtasks map to owners;
-    #    any teammate the planner left out (or if it emitted none) still gets a
-    #    gather subtask for the user's task. No agent sits idle.
-    assignments: List[Dict[str, Any]] = []
-    _seen: set = set()
-    for idx, line in enumerate(subtasks_raw):
-        owner = _owner_for(line, idx)
-        assignments.append({"owner": owner, "task": (line.split("—", 1)[1].strip() if "—" in line else line)})
-        _seen.add(owner.get("slug"))
-    for p in participants:
-        if p.get("slug") not in _seen:
-            assignments.append({"owner": p, "task":
-                f"From your area of expertise, gather and verify the specific facts the room needs to answer: {req.user_message}"})
-            _seen.add(p.get("slug"))
-    assignments = assignments[:_EXECUTE_MAX_OWNERS]
-
-    _gather_instructions = (
-        "HIVEMIND is the COMPANY BRAIN — search it FIRST and as many times as your subtask needs "
-        "(NOT once): `recall` per fact/topic, `org_directory` for a person/email, `traverse_graph` "
-        "to follow a thread. When the room has connectors enabled, use their READ tools for live "
-        "company data: Gmail → gmail_search/gmail_get/gmail_get_thread; Docs/Drive → drive_search "
-        "then docs_get; Sheets → sheets_get. Only if a needed fact is genuinely EXTERNAL "
-        "(public/industry info the company wouldn't store) call `hivemind_web_search`. The room "
-        "produces the final artifact ONCE from the whole team's work — your job is to GATHER the "
-        "real content + facts, not to create or send anything. Ground every specific in a tool "
-        "result; mark anything you genuinely can't find as UNVERIFIED (never invent). Report the "
-        "ACTUAL CONTENT you gathered (real facts/list/text — not a description of what you did)."
-    )
-
-    # 2. EXECUTE — ALL owners run their subtask IN PARALLEL (bounded concurrency for
-    #    anti-429). No sequential prior-threading: each independently mines HIVEMIND
-    #    + connectors + web and dumps grounded content; the team debates the union.
-    _exec_sem = asyncio.Semaphore(_EXECUTE_CONCURRENCY)
-
-    async def _run_owner(owner: Dict[str, Any], task: str, idx: int) -> Optional[Dict[str, Any]]:
-        slug = owner.get("slug") or str(idx)
-        try:
-            async with _exec_sem:
-                await asyncio.sleep(0.12 * (idx % _EXECUTE_CONCURRENCY))  # stagger anti-429
-                agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True, model=_M_EXECUTE)
-                text = await _agent_reply_resilient(agent, f"{gathered_block}Your SUBTASK: {task}\n\n{_gather_instructions}")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[agentic] owner %s failed: %s", slug, exc)
-            return None
-        return {"owner": owner.get("name") or slug, "slug": slug, "subtask": task, "text": text} if text else None
-
-    contributions: List[Dict[str, Any]] = []
-    if assignments:
-        for c in await asyncio.gather(*[_run_owner(a["owner"], a["task"], i) for i, a in enumerate(assignments)]):
-            if c:
-                contributions.append(c)
-                cost_tokens += max(60, len(c["text"]) // 4)
-                await _emit_event(req.callback_url, req.turn_id, {
-                    "t": "execute", "owner": c["slug"], "name": c["owner"],
-                    "subtask": c["subtask"][:300], "contribution": c["text"][:700]})
-        log.info("[agentic] execute room=%s owners=%d (parallel)", req.room_id, len(contributions))
-
-    # 3. RECON-ON-TASKS — verify EACH owner's output addresses its subtask with
-    #    grounded facts; re-run the gapped ones ONCE (in parallel) with the gap fed
-    #    back, BEFORE the team debates. A thin/empty/fabricated contribution is
-    #    caught here, not carried into the synthesis.
-    if contributions:
-        try:
-            _verdicts = await _recon_tasks(req, contributions, _mk(lead, 1, toolless=True, model=_M_RECON))
-            _redo = [i for i, c in enumerate(contributions)
-                     if _verdicts.get(i) and not _verdicts[i]["ok"] and _verdicts[i]["gap"]]
-            for i in _redo:
-                await _emit_event(req.callback_url, req.turn_id, {
-                    "t": "recon", "owner": contributions[i]["slug"], "ok": False,
-                    "gap": _verdicts[i]["gap"][:200]})
-
-            async def _redo_owner(i: int) -> Optional[Dict[str, Any]]:
-                c = contributions[i]
-                owner = next((p for p in participants if p.get("slug") == c["slug"]), participants[i % len(participants)])
-                # SHARED-BLACKBOARD (partial): the re-running owner now SEES what the
-                # other owners already gathered (trimmed) — so it builds on peers'
-                # facts + fills the gap instead of re-fetching what's already on the
-                # board. (Parallel owners can't see each other live; this 2nd pass can.)
-                _peers = "\n".join(f"- {x['owner']}: {(x.get('text') or '')[:300]}"
-                                   for j, x in enumerate(contributions) if j != i)[:2000]
-                try:
-                    async with _exec_sem:
-                        agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True, model=_M_EXECUTE)
-                        txt = await _agent_reply_resilient(agent, (
-                            f"{gathered_block}Your SUBTASK: {c['subtask']}\n\n"
-                            f"Already on the room's board (teammates — do NOT re-fetch these):\n{_peers}\n\n"
-                            f"Your earlier attempt had a GAP: {_verdicts[i]['gap']}\nClose ONLY that gap with "
-                            f"grounded facts (use the board above for anything already found). {_gather_instructions}"))
-                    return {"i": i, "text": txt} if txt else None
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("[agentic] recon-redo %s failed: %s", c["slug"], exc)
-                    return None
-            if _redo:
-                for r in await asyncio.gather(*[_redo_owner(i) for i in _redo]):
-                    if r:
-                        contributions[r["i"]]["text"] = r["text"]
-                        cost_tokens += max(60, len(r["text"]) // 4)
-                        await _emit_event(req.callback_url, req.turn_id, {
-                            "t": "execute", "owner": contributions[r["i"]]["slug"], "name": contributions[r["i"]]["owner"],
-                            "subtask": contributions[r["i"]]["subtask"][:300], "contribution": r["text"][:700], "reconned": True})
-                log.info("[agentic] task-recon room=%s reran=%d/%d", req.room_id, len(_redo), len(contributions))
-        except Exception as exc:  # noqa: BLE001 — recon best-effort, never fail the turn
-            log.warning("[agentic] task-recon failed: %s", exc)
-
-    exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
-    _deliver_spec = (
-        "Output ONLY the deliverable content, ready to publish — NO process narration, NO placeholders. "
-        "doc → begin with '# <a specific descriptive Title>' (NOT the room goal) then the FULL markdown "
-        "document; sheet → markdown TABLE (header, '|---|', data rows); email → 'Subject: …' then the "
-        "body; answer → the direct grounded answer. Use ONLY facts the team grounded; flag any "
-        "UNVERIFIED item inline; never fabricate. Do NOT invent consent / policy / GDPR / approval "
-        "gates the user did not ask for — the user's request IS the authorization; just produce it."
-        # Room-template OUTPUT shape (e.g. DACI 'DECISION:' line, retrospective
-        # WORKED/DIDN'T/CHANGE, lean-coffee per-topic + 'Carry forward', council
-        # APPROVED/CONDITIONAL/REJECTED, standup YESTERDAY/TODAY/BLOCKERS).
-        + (f" TEMPLATE OUTPUT RULE: {_synth_hint}" if _synth_hint else "")
-    )
-    # Room-template framing for how the lead approaches the task (debate / decision
-    # / brainstorm / council / lean_coffee / retrospective / standup / review).
-    _mode_pre = f"{_lead_hint}\n\n" if _lead_hint else ""
-
-    # 3. DRAFT — a FRESH lead agent writes the deliverable. Must be separate from
-    #    plan_agent: that one was told "reply STRICT JSON" and its memory keeps it
-    #    in JSON mode → the draft (and the produced doc) would be the plan JSON blob,
-    #    not the prose deliverable. Fresh agent = clean prose.
-    lead_agent = _mk(lead, 6, model=_M_SYNTH)
-    draft = await _agent_reply_resilient(lead_agent, (
-        f"{_mode_pre}{gathered_block}USER TASK: {req.user_message}\n\n"
-        f"Team gathered (grounded):\n{exec_block}\n\n"
-        f"Write a first-pass FINAL DELIVERABLE (intended output '{intended_output}'). {_deliver_spec}"))
-    cost_tokens += max(80, len(draft) // 4)
-    if draft:
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "line", "agent": lead.get("slug"), "kind": "lead", "content": draft})
-
-    # 3b/3c. SWARM — bounded MULTI-ROUND debate→revise until convergence. Each
-    #     round the reactors (skeptic lane opposes) challenge/support/extend the
-    #     CURRENT draft via _run_reactor (peer-review broadcast in a MsgHub); if any
-    #     high-confidence challenge stands, the lead REVISES and the next round
-    #     re-examines the revision. The loop stops when a round raises no
-    #     high-confidence challenge (converged) or the round cap is hit. This is the
-    #     MiroFish multi-agent simulation — real R1-Rn convergence, not one pass.
-    #     Reuses _run_reactor + the react/revise events the FE already renders;
-    #     adds round / round_start / swarm_verdict markers (extra fields are
-    #     ignored by older FE).
-    lead_name = lead.get("name") or lead.get("slug") or "Lead"
-    reactors = [p for p in participants if (p.get("slug") or "") != (lead.get("slug") or "")][:3]
-    final_text = draft
-    converged = False
-    # Convergence by NOVELTY: skeptics keep re-raising the SAME unverifiable gap
-    # (e.g. "still no 2026 margins") every round → that's not progress, it's the
-    # same known gap. Track challenge "signatures" (significant-word sets); a round
-    # that raises no NOVEL challenge (≥60% token overlap with a prior one) converges
-    # — the open issues are already on the record. Stops burning rounds 2-3.
-    _seen_sigs: List[set] = []
-
-    def _novel_challenge(line: str) -> bool:
-        w = {t for t in re.sub(r"[^a-z0-9 ]", " ", (line or "").lower()).split() if len(t) > 4}
-        if not w:
-            return False
-        for s in _seen_sigs:
-            inter = len(w & s)
-            if inter and inter / max(1, min(len(w), len(s))) >= 0.6:
-                return False
-        _seen_sigs.append(w)
-        return True
-
-    if draft and reactors:
-        ragents = [_mk(p, 6, toolless=True, model=_M_REACTOR) for p in reactors]  # tool-less → clean react JSON
-        for rnd in range(1, _SWARM_MAX_ROUNDS + 1):
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "round_start", "round": rnd, "max_rounds": _SWARM_MAX_ROUNDS})
-            challenges: List[Dict[str, Any]] = []
-            async with MsgHub(participants=ragents):
-                for p, ra in zip(reactors, ragents):
-                    lane = p.get("_lane") or p.get("role_archetype") or "Communicator"
-                    is_opp = "skeptic" in str(lane).lower() or "skeptic" in str(p.get("role_archetype") or "").lower()
-                    rr = await _run_reactor(ra, req.user_message, final_text, lead_name, str(lane),
-                                            is_opp, blackboard_context=gathered_block)
-                    cost_tokens += 60
-                    if rr.get("react"):
-                        await _emit_event(req.callback_url, req.turn_id, {
-                            "t": "react", "round": rnd, "agent": p.get("slug"),
-                            "agreement": rr.get("agreement"), "line": rr.get("line"),
-                            "confidence": rr.get("confidence"), "gap": rr.get("gap"),
-                        })
-                        if rr.get("agreement") == "challenge" and float(rr.get("confidence") or 0) >= _SWARM_CHALLENGE_CONF:
-                            challenges.append(rr)
-            new_challenges = [c for c in challenges if _novel_challenge(c.get("line", ""))]
-            log.info("[swarm] room=%s round=%d/%d challenges=%d novel=%d",
-                     req.room_id, rnd, _SWARM_MAX_ROUNDS, len(challenges), len(new_challenges))
-            if not challenges:
-                converged = True
-                await _emit_event(req.callback_url, req.turn_id, {
-                    "t": "swarm_verdict", "round": rnd, "converged": True})
-                break
-            if not new_challenges:
-                # Only repeats of already-recorded gaps → no progress; converge.
-                converged = True
-                await _emit_event(req.callback_url, req.turn_id, {
-                    "t": "swarm_verdict", "round": rnd, "converged": True, "reason": "no new challenges"})
-                break
-            challenges = new_challenges  # revise against the FRESH issues only
-            # REVISE addressing THIS round's challenges; next round re-examines it.
-            ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
-                                 + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)
-            final_text = await _agent_reply_resilient(lead_agent, (
-                f"{_mode_pre}{gathered_block}USER TASK: {req.user_message}\n\n"
-                f"Your draft:\n{final_text}\n\nThe team CHALLENGED it (round {rnd}):\n{ch_block}\n\n"
-                f"REVISE the deliverable to address every challenge with grounded evidence (or honestly "
-                f"flag what can't be resolved). {_deliver_spec}")) or final_text
-            cost_tokens += max(80, len(final_text) // 4)
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "line", "round": rnd, "agent": lead.get("slug"), "kind": "revise", "content": final_text})
-        if not converged:
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "swarm_verdict", "converged": False, "rounds": _SWARM_MAX_ROUNDS,
-                "note": "round cap reached with open challenges"})
-    if final_text:
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "line", "agent": lead.get("slug"), "kind": "synthesis", "content": final_text})
-
-    # Resolve the recipient for an email (trusts a literal address the user typed,
-    # else org_directory/Gmail/HIVEMIND) so the producer has a verified 'to'.
-    _vc: List[Dict[str, Any]] = []
-    if intended_output == "email":
-        try:
-            _vc = await _resolve_recipients(req, req.user_message)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[agentic] resolve recipients failed: %s", exc)
-    # Stash the plan for produce + verify.
-    _PLAN_BY_TURN[req.turn_id] = {
-        "intended_output": intended_output, "done_criterion": done_txt or req.user_message,
-        "assignments": {c["owner"]: c["subtask"] for c in contributions},
-        "execution": [{"owner": c["owner"], "subtask": c["subtask"], "contribution": c["text"]} for c in contributions],
-        "verified_contacts": _vc,
-    }
-
-    # 4. PRODUCE FIRST — turn the synth content into the REAL artifact (doc/sheet/
-    #    email draft) via the single reliable producer. MUST run BEFORE verify so
-    #    the verifier sees produced_artifacts (else artifact_ok is always false).
-    try:
-        await _produce_output(req, final_text)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[agentic] produce failed: %s", exc)
-    artifacts = drain_artifacts()
-    for art in artifacts:
-        if art.get("url"):
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "connector_logo", "connector": art.get("connector"),
-                "url": art.get("url"), "title": art.get("title"), "label": art.get("label") or "Open",
-            })
-    pending = drain_pending_writes()
-    if pending:
-        await _register_and_emit_approvals(req, pending)
-
-    # 5. VERIFY + GROUNDING GATE — now the verifier sees the produced artifact.
-    try:
-        await _verify_and_emit(req, lead, final_text=final_text,
-                               blackboard={"hit_count": len(contributions)}, model=_M_RECON)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[agentic] verify failed: %s", exc)
-    _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
-    _gv = _vp.get("verification") or {}
-    status = "complete"
-    if _vp.get("dead_end"):
-        status = "blocked"  # un-reachable goal — surfaced honestly by post_room_turn
-    elif _gv and not _gv.get("grounded_ok"):
-        status = "escalated"
-
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "seal", "cost_tokens": cost_tokens, "status": status,
-        "duration_ms": int((time.time() - started) * 1000), "agentic": True,
-    })
-    resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
-    if pending:
-        resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
-    if artifacts:
-        resp.artifacts = [a for a in artifacts if a.get("url")]
-    if isinstance(_gv, dict) and _gv:
-        resp.verification = _gv
-    log.info("[agentic] room=%s out=%s subtasks=%d artifacts=%d status=%s cost=%d",
-             req.room_id, intended_output, len(subtasks_raw), len(artifacts), status, cost_tokens)
-    return resp
-
-
-def _hyper_engine() -> str:
-    """Which room executor runs the turn. 'single' = the Groq native-tool-calling
-    director (default); 'swarm' = the legacy AgentScope multi-agent pipeline
-    (kept callable for rollback / A-B until cutover)."""
-    return (os.environ.get("HYPER_ENGINE", "single") or "single").strip().lower()
 
 
 def _derive_intended_output(user_message: str) -> str:
@@ -3456,21 +2660,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
     _mark("router_ms")
 
-    # ── Single orchestrator — the agentic spine is the ONLY path. The
-    #    deterministic plan/gather/execute/template pipeline was deleted (it was
-    #    dead behind this once-conditional return). Room template + skeptic + trust
-    #    above are display metadata on the router event; multi-round swarm behavior
-    #    lives INSIDE _orchestrate_agentic (Phase 2 makes its debate truly R1-Rn).
+    # ── Single executor — the Groq native-tool-calling director is the ONLY path.
+    #    Room template + skeptic + trust above are display metadata on the router
+    #    event; the multi-round debate now happens INSIDE the director's `debate`
+    #    tool (independent persona sub-calls), not a separate swarm pipeline.
     try:
         _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _ag_conns = []
-    # Executor swap point: 'single' = Groq native-tool-calling director (default),
-    # 'swarm' = legacy AgentScope pipeline (rollback). Everything above this line
-    # (tenant scope, participants, router/template/skeptic) is shared + unchanged.
-    if _hyper_engine() == "single":
-        return await _orchestrate_single_agent(req, participants, lead, _ag_conns, started, room_template)
-    return await _orchestrate_agentic(req, participants, lead, _ag_conns, started, room_template)
+    # The room executor: a single Groq native-tool-calling director. Everything above
+    # this line (tenant scope, participant resolution, router/template/skeptic/trust) is
+    # shared. The legacy AgentScope swarm orchestrator was removed — git history + the
+    # box api_hyper_rooms.py.pre-single backup are the rollback; this is the only path.
+    return await _orchestrate_single_agent(req, participants, lead, _ag_conns, started, room_template)
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     """Phase 4 — pick the write-approval policy for this turn. Explicit

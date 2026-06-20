@@ -1983,6 +1983,7 @@ async def _verify_turn(
     final_text: str,
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Phase 5 — recon/verify pass. Before the turn seals, cross-check the
     produced evidence against the lead's `done_criterion`: artifact exists (or
@@ -2076,6 +2077,12 @@ async def _verify_turn(
             "active_prompt_version": boot_emp.get("active_prompt_version"),
             "max_iters": 1,
         }
+        # Put the final grounding/recon JUDGE on the reliable recon model (the
+        # caller passes _M_RECON, e.g. deepseek) instead of the room's default —
+        # judgment reliability is what this gate is FOR. tool-less → no routing swap.
+        if model:
+            verifier_emp["model"] = model
+            verifier_emp["llm_provider"] = "groq"
         agent = build_react_agent(
             verifier_emp, boot_emp.get("api_key") or "",
             user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
@@ -2433,6 +2440,7 @@ async def _verify_and_emit(
     final_text: str,
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Run the verify pass, emit a `verify` event, stash the verdict on the
     plan (so the handler/P6 goalkeeper can read it), and return it."""
@@ -2441,7 +2449,7 @@ async def _verify_and_emit(
     await _produce_output(req, final_text)
     verdict = await _verify_turn(
         req, lead, final_text=final_text,
-        tool_call_counts=tool_call_counts, blackboard=blackboard,
+        tool_call_counts=tool_call_counts, blackboard=blackboard, model=model,
     )
     if verdict is None:
         return None
@@ -3104,7 +3112,8 @@ async def _orchestrate_agentic(
 
     # 5. VERIFY + GROUNDING GATE — now the verifier sees the produced artifact.
     try:
-        await _verify_and_emit(req, lead, final_text=final_text, blackboard={"hit_count": len(contributions)})
+        await _verify_and_emit(req, lead, final_text=final_text,
+                               blackboard={"hit_count": len(contributions)}, model=_M_RECON)
     except Exception as exc:  # noqa: BLE001
         log.warning("[agentic] verify failed: %s", exc)
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}

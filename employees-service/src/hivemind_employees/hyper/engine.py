@@ -258,9 +258,9 @@ class Director:
         if tools and not force_text:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        elif tools and force_text:
-            body["tools"] = tools
-            body["tool_choice"] = "none"  # force a text synthesis, never null content
+        # force_text: OMIT tools entirely → the model writes text and physically
+        # cannot emit a tool call. (Sending tools + tool_choice="none" makes gpt-oss
+        # call a tool anyway → 400 "Tool choice is none, but model called a tool".)
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
@@ -632,17 +632,33 @@ class Director:
             msg = await self._groq(messages, tools=tools, force_text=True)
             final_text = (msg or {}).get("content") or final_text
 
-        # Multi-model: gather/debate ran on the (cheaper) director model; write the
-        # FINAL deliverable on the stronger synth_model from the full accumulated
-        # context. One extra call — the deliverable stays top-quality while the loop
-        # (the token bulk) ran cheap. No-op when synth_model == director_model.
-        if self.synth_model != self.director_model and final_text:
+        # FORCE the room to actually debate. The debate tool is the multi-agent
+        # product, but the director (esp. the cheap gather model) often skips it. If
+        # this is a multi-agent room (≥2 participants) on a substantive task and no
+        # debate ran, convene it now so the deliverable reflects the team, not one voice.
+        forced_debate = False
+        if (self._round_seq == 0 and len(self.participants) >= 2
+                and len((self.user_message or "").split()) >= 6):
+            try:
+                topic = (self.room_goal or self.user_message or "")[:400]
+                transcript_json = await self._debate(topic, self.debate_max_rounds)
+                messages.append({"role": "user", "content": (
+                    "The room just debated this — transcript:\n" + str(transcript_json) + "\n\n"
+                    "Now write the FINAL DELIVERABLE incorporating the debate; cite who argued what.")})
+                forced_debate = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[hyper-engine] forced debate failed: %s", exc)
+
+        # Strong-model synthesis. Runs when (a) multi-model 'auto' (synth != director),
+        # or (b) we just forced a debate that must be folded in. Writes the FINAL
+        # deliverable from the full accumulated context. No tools (force_text) → no 400.
+        if final_text and (self.synth_model != self.director_model or forced_debate):
             synth_msg = await self._groq(
                 messages + [{"role": "user", "content": (
                     "Write the FINAL DELIVERABLE now — the publish-ready content only, FULLY grounded "
                     "in the tool results and debate above, with real markdown tables where they help. "
                     "No tool calls, no process narration, no placeholders.")}],
-                tools=tools, force_text=True, model=self.synth_model, bucket="director")
+                force_text=True, model=self.synth_model, bucket="director")
             if synth_msg and (synth_msg.get("content") or "").strip():
                 final_text = synth_msg["content"]
 

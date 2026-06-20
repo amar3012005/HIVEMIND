@@ -1975,12 +1975,16 @@ def _md_table_to_rows(text: str) -> List[List[str]]:
 
 
 def _derive_title(plan: Dict[str, Any], final_text: str, fallback: str) -> str:
-    m = re.search(r"^\s*#\s+(.+)$", final_text or "", re.MULTILINE) or \
+    m = re.search(r"^\s*#+\s+(.+)$", final_text or "", re.MULTILINE) or \
         re.search(r"subject\s*:\s*(.+)", final_text or "", re.IGNORECASE) or \
         re.search(r"title\s*:\s*(.+)", final_text or "", re.IGNORECASE)
-    if m:
-        return m.group(1).splitlines()[0].strip()[:120]
-    return (fallback or "Untitled")[:120]
+    raw = m.group(1).splitlines()[0] if m else (fallback or "Untitled")
+    # Strip leaked markdown (#, **, __, _) + any leftover "Subject:/Title:" prefix so the
+    # artifact title is clean (was showing "** A Note…").
+    raw = re.sub(r"^[#*_\s]+", "", raw)
+    raw = re.sub(r"^(subject|title)\s*:\s*", "", raw, flags=re.IGNORECASE)
+    raw = raw.replace("**", "").replace("__", "").strip(" *_#")
+    return (raw or fallback or "Untitled")[:120]
 
 
 async def _surface_produce_error(req: "RoomTurnRequest", plan: Dict[str, Any],
@@ -2517,20 +2521,16 @@ async def _orchestrate_single_agent(
         "verified_contacts": _vc,
     }
 
-    # 3. PRODUCE (centralized, idempotent) → connector_logo + approval cards.
+    # 3. PRODUCE (centralized, idempotent).
     try:
         await _produce_output(req, final_text)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] produce failed: %s", exc)
+    # Artifacts + approvals are drained + emitted ONCE by post_room_turn (the goalkeeper
+    # wrapper). Do NOT emit them here too — that double-posted the approval card. These
+    # drains are non-destructive snapshots, only for this turn's response + verify.
     artifacts = drain_artifacts()
-    for art in artifacts:
-        if art.get("url"):
-            await _emit({"t": "connector_logo", "connector": art.get("connector"),
-                         "url": art.get("url"), "title": art.get("title"),
-                         "label": art.get("label") or "Open"})
     pending = drain_pending_writes()
-    if pending:
-        await _register_and_emit_approvals(req, pending)
 
     # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent).
     try:

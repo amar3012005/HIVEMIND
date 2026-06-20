@@ -431,6 +431,33 @@ export const GOOGLE_TOOLS = {
       return { count: files.length, files };
     },
   },
+  docs_get: {
+    provider: 'google-docs',
+    description: "Read an existing Google Doc's text by id. args: { documentId } (or { id }). Returns { documentId, title, text } — the plain-text body for grounding/context. READ-only.",
+    run: async (token, a) => {
+      const id = String(a.documentId || a.id || '').trim();
+      if (!id) return { error: 'documentId required' };
+      const doc = await g(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}`, token);
+      const out = [];
+      const walk = (elements) => {
+        for (const el of (elements || [])) {
+          if (el.paragraph) {
+            for (const pe of (el.paragraph.elements || [])) {
+              if (pe.textRun && pe.textRun.content) out.push(pe.textRun.content);
+            }
+          } else if (el.table) {
+            for (const row of (el.table.tableRows || [])) {
+              for (const cell of (row.tableCells || [])) walk(cell.content);
+            }
+          }
+        }
+      };
+      walk(((doc || {}).body || {}).content);
+      // Cap the body so a huge doc can't blow the agent's context window.
+      const text = out.join('').trim().slice(0, 12000);
+      return { documentId: id, title: doc.title || '', text };
+    },
+  },
 };
 
 export function listGoogleTools() {

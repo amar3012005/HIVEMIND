@@ -473,6 +473,26 @@ def _register_connector_tools(
             _gmail_write = () if read_only else (gmail_create_draft, gmail_modify, gmail_send, gmail_reply, gmail_trash)
             for _fn in (*_gmail_read, *_gmail_write):
                 tk.register_tool_function(_fn, group_name="gmail")
+        elif kind == "google_docs" and read_only:
+            # Searcher agents: READ Drive/Docs for context — find files + read doc
+            # text. No create/append (the producer owns writes).
+            tk.create_tool_group(
+                group_name="google_docs",
+                description="Read Google Drive/Docs for context: search files, read a doc's text.",
+                active=False,
+                notes=("drive_search(query, max) finds Drive files (docs/sheets/slides) by name/content "
+                       "→ id/name/type/url. docs_get(documentId) reads a Google Doc's full text. Use these "
+                       "to pull context from the company's existing documents; you cannot create/edit docs "
+                       "— the room produces any output once."),
+            )
+            def drive_search(query: str = "", max: int = 8) -> ToolResponse:
+                return _google("drive_search", {"query": query, "max": max})
+            drive_search.__doc__ = "Search Google Drive for files (docs/sheets/slides) by name/content. query = keywords; max ≤ 20. Returns id/name/type/url per file. Then call docs_get(id) to read a doc's text."
+            def docs_get(documentId: str) -> ToolResponse:
+                return _google("docs_get", {"documentId": documentId})
+            docs_get.__doc__ = "Read the full text of an existing Google Doc by documentId (from drive_search). Returns the document's plain text — use it to ground your subtask in the company's real documents."
+            tk.register_tool_function(drive_search, group_name="google_docs")
+            tk.register_tool_function(docs_get, group_name="google_docs")
         elif kind == "google_docs":
             tk.create_tool_group(
                 group_name="google_docs",
@@ -537,10 +557,10 @@ def _register_connector_tools(
         if not conn:
             continue
         if conn in ("gmail", "google_docs", "google_sheets"):
-            # read_only searcher agents: docs/sheets are WRITE-only producers — no
-            # read value for context-gathering, so skip them (only the producer
-            # creates docs/sheets). gmail keeps its read tools.
-            if read_only and conn in ("google_docs", "google_sheets"):
+            # read_only searcher agents: google_sheets is a WRITE-only producer in
+            # the bridge (no sheets read tool) → skip. google_docs DOES have reads
+            # (drive_search + docs_get) → register those (handled in _register_google).
+            if read_only and conn == "google_sheets":
                 continue
             _register_google(conn, read_only)
             continue

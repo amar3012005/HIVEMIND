@@ -2719,9 +2719,28 @@ async def _orchestrate_agentic(
     # while ~40% faster + ~45% cheaper per turn with ~0 tool-call failures (gpt-oss's
     # harmony/400 leaks are the patchwork tax). Override per-turn via req.agentic_model
     # or globally via HYPER_AGENTIC_MODEL.
-    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "llama-3.3-70b-versatile")
+    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-20b")
 
-    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False, searcher: bool = False) -> ReActAgent:
+    # PER-PHASE model policy — match the model to the call's job (see the call-type
+    # map). req.agentic_model (eval) forces ONE model for ALL phases; else each
+    # phase uses HYPER_MODEL_<PHASE> or the default. Routing (agentscope_factory)
+    # sends gpt-oss/llama → Groq direct, deepseek/* → OpenRouter.
+    #   plan    : structured decompose (fast, clean JSON)     → gpt-oss-120b (Groq)
+    #   execute : TOOL-CALLING owner gather (high volume)     → gpt-oss-20b  (Groq, reliable tools)
+    #   reactor : tool-less debate react (highest volume)     → llama-3.1-8b-instant (Groq, cheap+fast)
+    #   synth   : prose deliverable (few calls)               → gpt-oss-120b (Groq)
+    #   recon   : task/grounding JUDGE (reliability-critical) → deepseek-v4-flash (OpenRouter)
+    def _model_for(phase: str, default: str) -> str:
+        return (getattr(req, "agentic_model", None)
+                or os.environ.get(f"HYPER_MODEL_{phase.upper()}") or default)
+    _M_PLAN = _model_for("plan", "openai/gpt-oss-120b")
+    _M_EXECUTE = _model_for("execute", "openai/gpt-oss-20b")
+    _M_REACTOR = _model_for("reactor", "llama-3.1-8b-instant")
+    _M_SYNTH = _model_for("synth", "openai/gpt-oss-120b")
+    _M_RECON = _model_for("recon", "deepseek/deepseek-v4-flash")
+
+    def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False, searcher: bool = False,
+            model: Optional[str] = None) -> ReActAgent:
         # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).
         # NO connector WRITE tools (docs_create/gmail_send): gpt-oss owners kept
         # calling them with placeholder args → google/exec 400s + no artifact. The
@@ -2747,7 +2766,7 @@ async def _orchestrate_agentic(
             # no spurious approvals from the small owner model. Reactors/plan/lead: none.
             "connectors": (conns if searcher else []),
             "connectors_read_only": searcher,
-            "llm_provider": "groq", "model": _agentic_model,
+            "llm_provider": "groq", "model": (model or _agentic_model),
             "hyper": be.get("hyper"), "active_prompt_version": be.get("active_prompt_version"),
             "max_iters": (1 if toolless else iters),
         }
@@ -2795,7 +2814,7 @@ async def _orchestrate_agentic(
     #    not call a tool". JSON-content + _first_json_object pattern mirrors the
     #    Groq-reliable approach used here.
     #    The DECOMPOSITION + output-type are the model's (agent-driven).
-    plan_agent = _mk(lead, 8)
+    plan_agent = _mk(lead, 8, model=_M_PLAN)
     plan_prompt = (
         f"You lead this room. Team: {roster}. Connectors: {', '.join(conns) or 'none'}.\n"
         f"{gathered_block}"
@@ -2900,7 +2919,7 @@ async def _orchestrate_agentic(
         try:
             async with _exec_sem:
                 await asyncio.sleep(0.12 * (idx % _EXECUTE_CONCURRENCY))  # stagger anti-429
-                agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
+                agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True, model=_M_EXECUTE)
                 text = await _agent_reply_resilient(agent, f"{gathered_block}Your SUBTASK: {task}\n\n{_gather_instructions}")
         except Exception as exc:  # noqa: BLE001
             log.warning("[agentic] owner %s failed: %s", slug, exc)
@@ -2924,7 +2943,7 @@ async def _orchestrate_agentic(
     #    caught here, not carried into the synthesis.
     if contributions:
         try:
-            _verdicts = await _recon_tasks(req, contributions, _mk(lead, 1, toolless=True))
+            _verdicts = await _recon_tasks(req, contributions, _mk(lead, 1, toolless=True, model=_M_RECON))
             _redo = [i for i, c in enumerate(contributions)
                      if _verdicts.get(i) and not _verdicts[i]["ok"] and _verdicts[i]["gap"]]
             for i in _redo:
@@ -2937,7 +2956,7 @@ async def _orchestrate_agentic(
                 owner = next((p for p in participants if p.get("slug") == c["slug"]), participants[i % len(participants)])
                 try:
                     async with _exec_sem:
-                        agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
+                        agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True, model=_M_EXECUTE)
                         txt = await _agent_reply_resilient(agent, (
                             f"{gathered_block}Your SUBTASK: {c['subtask']}\n\nYour earlier attempt had a GAP: "
                             f"{_verdicts[i]['gap']}\nClose it now with grounded facts. {_gather_instructions}"))
@@ -2978,7 +2997,7 @@ async def _orchestrate_agentic(
     #    plan_agent: that one was told "reply STRICT JSON" and its memory keeps it
     #    in JSON mode → the draft (and the produced doc) would be the plan JSON blob,
     #    not the prose deliverable. Fresh agent = clean prose.
-    lead_agent = _mk(lead, 6)
+    lead_agent = _mk(lead, 6, model=_M_SYNTH)
     draft = await _agent_reply_resilient(lead_agent, (
         f"{_mode_pre}{gathered_block}USER TASK: {req.user_message}\n\n"
         f"Team gathered (grounded):\n{exec_block}\n\n"
@@ -3003,7 +3022,7 @@ async def _orchestrate_agentic(
     final_text = draft
     converged = False
     if draft and reactors:
-        ragents = [_mk(p, 6, toolless=True) for p in reactors]  # tool-less → clean react JSON
+        ragents = [_mk(p, 6, toolless=True, model=_M_REACTOR) for p in reactors]  # tool-less → clean react JSON
         for rnd in range(1, _SWARM_MAX_ROUNDS + 1):
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "round_start", "round": rnd, "max_rounds": _SWARM_MAX_ROUNDS})

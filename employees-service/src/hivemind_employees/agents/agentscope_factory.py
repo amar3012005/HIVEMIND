@@ -196,45 +196,49 @@ def _format_persona_contract(contract: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Model-slug vendor prefixes OpenRouter serves natively. gpt-oss-* and llama-*
+# are GROQ models and must go to Groq DIRECT even when an OpenRouter key is set —
+# otherwise every Groq model gets mis-routed to OpenRouter (→ 400 / huge latency).
+_OPENROUTER_VENDORS = (
+    "deepseek/", "anthropic/", "meta-llama/", "mistralai/", "google/", "qwen/",
+    "x-ai/", "cohere/", "microsoft/", "nousresearch/", "perplexity/", "openrouter/",
+)
+
+
 def _resolve_openai_compatible_target(
     provider: str,
     model: str,
     llm_api_key: Optional[str] = None,
+    has_tools: bool = True,
 ) -> tuple[str, str, str]:
+    """Route a model to the right OpenAI-compatible endpoint, MODEL-AWARE:
+      • an OpenRouter-native vendor slug (deepseek/…, anthropic/…) or anthropic
+        provider → OpenRouter (when a key is present);
+      • gpt-oss-* / llama-* → GROQ DIRECT (even if an OpenRouter key is set).
+    The Groq llama→gpt-oss-20b swap (llama emits <function=> Llama-tag format → 400
+    under strict tool validation) fires ONLY for TOOL-USING agents — tool-less
+    agents (debate reactors, planner, verifier) keep llama / llama-3.1-8b-instant."""
+    ml = (model or "").lower()
     openrouter_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY")
-    if openrouter_key:
+    is_openrouter_model = any(ml.startswith(v) for v in _OPENROUTER_VENDORS) or provider == "anthropic"
+    if openrouter_key and is_openrouter_model:
         routed_model = model
         if provider == "anthropic" and "/" not in model:
             routed_model = f"anthropic/{model}"
-        elif provider == "groq" and "/" not in model:
-            routed_model = f"groq/{model}"
         base_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE)
         return routed_model, openrouter_key, base_url
 
-    groq_key = llm_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    # Groq direct. Never use an OpenRouter key here.
+    groq_key = (llm_api_key if not openrouter_key else None) or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
     groq_model = model
-    # Groq-hosted Llama-3.x models emit Llama-tag <function=NAME{...}> format
-    # under strict-mode tool validation → tool_use_failed (400). Force a
-    # tool-call-reliable model (openai/gpt-oss-20b by default, overridable
-    # via GROQ_INFERENCE_MODEL). Applies whenever we fall back to Groq AND
-    # the requested model is a known-broken Llama family.
-    env_default = os.environ.get("GROQ_INFERENCE_MODEL", "")
-    # If the env-provided default is itself a Llama-3 (known broken for
-    # OpenAI tool_calls under Groq strict validation), drop it.
-    if not env_default or "llama-3" in env_default.lower() or "llama3" in env_default.lower():
-        fallback_default = "openai/gpt-oss-20b"
-    else:
-        fallback_default = env_default
-    if "/" in model and model.lower().startswith("openai/gpt-oss"):
-        # Respect an explicitly-requested gpt-oss model (20b OR 120b). 120b is
-        # far stronger at nested tool schemas + structured output — used by the
-        # agentic orchestrator. Do NOT downgrade it to the fallback.
-        groq_model = model
-    elif provider != "groq" or "/" in model:
-        groq_model = fallback_default
-    elif "llama-3" in model.lower() or "llama3" in model.lower():
-        log.info("Swapping Groq tool-unreliable model %s -> %s", model, fallback_default)
-        groq_model = fallback_default
+    if ml.startswith("openai/gpt-oss") or ml.startswith("gpt-oss"):
+        groq_model = model  # respect explicit gpt-oss (20b / 120b)
+    elif ("llama-3" in ml or "llama3" in ml) and has_tools:
+        env_default = os.environ.get("GROQ_INFERENCE_MODEL", "")
+        fallback = env_default if (env_default and "llama-3" not in env_default.lower() and "llama3" not in env_default.lower()) else "openai/gpt-oss-20b"
+        log.info("Swapping Groq tool-USING llama %s -> %s (tool-call reliability)", model, fallback)
+        groq_model = fallback
+    # else: tool-less llama / 8b-instant kept as-is (no swap)
     base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE)
     return groq_model, groq_key, base_url
 
@@ -278,10 +282,15 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
 
     # OpenAI-compatible providers can route through OpenRouter when present,
     # otherwise fall back to the same Groq endpoint used by Talk to HIVE.
+    # has_tools = the agent has REAL tools (not just a *_noop placeholder) → the
+    # llama→gpt-oss swap applies only here; tool-less agents keep their model.
+    _tools = employee_row.get("tools") or []
+    _has_tools = any(str(t) and not str(t).endswith("_noop") for t in _tools)
     routed_model, api_key, base_url = _resolve_openai_compatible_target(
         provider,
         model,
         llm_api_key=llm_api_key,
+        has_tools=_has_tools,
     )
     # max_retries gives the OpenAI SDK its built-in exponential backoff with
     # jitter on 429 (Groq rate limits) and 5xx — without it a single 429
@@ -290,13 +299,19 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     # token budgets ("medium" default) → each swarm speaker takes seconds and a
     # full R1-R5 turn stacks ~15 calls → very slow first chat. Low effort keeps
     # the grounded answer quality while cutting per-call latency sharply.
-    return OpenAIChatModel(
+    _kwargs = dict(
         model_name=routed_model,
         api_key=api_key,
         stream=False,
-        reasoning_effort="low",
         client_kwargs={"base_url": base_url, "max_retries": 3, "timeout": 60.0},
     )
+    # reasoning_effort is a REASONING-model param: gpt-oss supports it (and "low"
+    # cuts Groq latency sharply). llama-3.x (8b-instant / 70b) and other models
+    # 400 with "`reasoning_effort` is not supported with this model" — so only
+    # send it for gpt-oss.
+    if "gpt-oss" in (routed_model or "").lower():
+        _kwargs["reasoning_effort"] = "low"
+    return OpenAIChatModel(**_kwargs)
 
 
 def _resolve_formatter(provider: str) -> FormatterBase:

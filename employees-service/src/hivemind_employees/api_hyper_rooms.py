@@ -2453,6 +2453,8 @@ async def _orchestrate_single_agent(
     final_text = str(result.get("final_text") or "")
     transcript = result.get("transcript") or []
     gather_count = int(result.get("gather_count") or 0)
+    _io = result.get("io") or {}
+    _tok_by = result.get("tok_by") or {}
 
     # 2. PLAN — derive output kind + a plan dict the producer + verifier consume.
     intended_output = _derive_intended_output(req.user_message)
@@ -2514,7 +2516,11 @@ async def _orchestrate_single_agent(
         status = "escalated"
 
     await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
-                 "duration_ms": int((time.time() - started) * 1000), "engine": "single"})
+                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+                 "tokens_in": int(_io.get("input", 0) or 0),
+                 "tokens_out": int(_io.get("output", 0) or 0),
+                 "tokens_cached": int(_io.get("cached", 0) or 0),
+                 "tok_by": {k: int(v) for k, v in _tok_by.items()}})
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

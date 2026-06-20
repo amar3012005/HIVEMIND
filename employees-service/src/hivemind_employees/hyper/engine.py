@@ -231,6 +231,9 @@ class Director:
         self.tok_by: Dict[str, int] = {"director": 0, "debate": 0, "web": 0}
         self.director_iters: List[int] = []
         self._last_tok = 0
+        # Input/output split + Groq prompt-cache hits. cached = the slice of input
+        # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
+        self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -271,10 +274,14 @@ class Director:
                     log.warning("[hyper-engine] groq %s: %s", r.status_code, r.text[:200])
                     return None
                 j = r.json()
-                t = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+                u = j.get("usage") or {}
+                t = int(u.get("total_tokens", 0) or 0)
                 self.tokens += t
                 self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
                 self._last_tok = t
+                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
                 return j["choices"][0]["message"]
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 log.warning("[hyper-engine] groq transport error (attempt %d): %s", attempt, exc)
@@ -463,9 +470,13 @@ class Director:
                 log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
                 return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
             j = r.json()
-            wt = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            uw = j.get("usage") or {}
+            wt = int(uw.get("total_tokens", 0) or 0)
             self.tokens += wt
             self.tok_by["web"] = self.tok_by.get("web", 0) + wt
+            self.io["input"] += int(uw.get("prompt_tokens", 0) or 0)
+            self.io["output"] += int(uw.get("completion_tokens", 0) or 0)
+            self.io["cached"] += int(((uw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
             msg = j["choices"][0]["message"]
             answer = str(msg.get("content") or "")[:1500]
             sources: List[Dict[str, str]] = []
@@ -645,6 +656,7 @@ class Director:
             "director_iters": list(self.director_iters),
             "debate_rounds": self._round_seq,
             "web_calls": self._web_calls,
+            "io": dict(self.io),
         }
 
 

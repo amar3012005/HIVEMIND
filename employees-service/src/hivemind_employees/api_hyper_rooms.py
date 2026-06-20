@@ -37,7 +37,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
 from agentscope.agent import ReActAgent
@@ -3698,7 +3698,12 @@ async def _plan_turn(
         'approach", "what\'s our strategy/next move", "what should we do about X with <person>") is '
         '"decision" or "answer" — NOT email. Naming a person does NOT make it an email. Choose '
         '"email" ONLY when the user explicitly asks to email / send / reply / draft a message to '
-        'someone. Only assign agents that are on the team. Output JSON only.'
+        'someone. Only assign agents that are on the team.\n'
+        f'CAPABILITIES (what this room can PRODUCE): {", ".join(producible_kinds())} (plus reading '
+        'HIVEMIND memory + the enabled connectors). done_criterion must only assert end-states '
+        'reachable with THESE — there is no file-sharing/permissions tool, so never make '
+        '"shared with <person>" or "permissions set" part of done_criterion; note any unsupported '
+        'ask as a limitation instead. Output JSON only.'
     )
     # Build a TOOL-LESS in-persona planner: no tools in the action space means
     # the model can't emit a fake `JSON` tool-call (the llama-3.3 quirk that 400s)
@@ -3933,77 +3938,247 @@ async def _surface_produce_error(req: "RoomTurnRequest", plan: Dict[str, Any],
     })
 
 
+# ── Producer registry ─────────────────────────────────────────────────────
+# kind → async producer(req, plan, step, ctx) -> dict. The produce loop is
+# TOOL-AGNOSTIC: a new connector registers a producer here and the spine
+# (plan → gather → debate → produce → verify → persist) never changes — the
+# toolkit grows horizontally. A producer does its connector write + records the
+# artifact / queues approval, and returns {"url","title"} on success,
+# {"skipped": <why>} when a prerequisite is missing (→ honest dead-end, NEVER a
+# fabricated draft), or {} for a no-op.
+_Producer = Callable[["RoomTurnRequest", Dict[str, Any], Dict[str, Any], Dict[str, Any]], Awaitable[Dict[str, Any]]]
+_PRODUCERS: Dict[str, _Producer] = {}
+
+
+def _register_producer(kind: str) -> Callable[[_Producer], _Producer]:
+    def _deco(fn: _Producer) -> _Producer:
+        _PRODUCERS[kind] = fn
+        return fn
+    return _deco
+
+
+def producible_kinds() -> List[str]:
+    """Artifact kinds the connected toolset can actually produce (capability set).
+    The capability-aware planner is told this so it never sets a done-criterion the
+    toolset can't reach."""
+    return sorted(_PRODUCERS.keys())
+
+
+@_register_producer("answer")
+@_register_producer("decision")
+async def _produce_answer(req: "RoomTurnRequest", plan: Dict[str, Any],
+                          step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    return {}  # the synthesis text IS the deliverable — nothing to create
+
+
+@_register_producer("doc")
+async def _produce_doc(req: "RoomTurnRequest", plan: Dict[str, Any],
+                       step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    body = ctx.get("body") or ""
+    title = step.get("title") or _derive_title(plan, body, req.room_goal or "Document")
+    res = await google_exec_emulated(
+        "docs_create", {"title": title, "content": body}, user_id=req.user_id, org_id=req.org_id)
+    url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
+    if url:
+        record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
+        log.info("[produce] doc → %s", url)
+        return {"url": url, "title": title}
+    if isinstance(res, dict) and res.get("error"):
+        await _surface_produce_error(req, plan, "Google Doc", res.get("error"))
+    return {"skipped": "the Google Doc could not be created"}
+
+
+@_register_producer("sheet")
+async def _produce_sheet(req: "RoomTurnRequest", plan: Dict[str, Any],
+                         step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    body = ctx.get("body") or ""
+    title = step.get("title") or _derive_title(plan, body, req.room_goal or "Spreadsheet")
+    rows = _md_table_to_rows(body)
+    res = await google_exec_emulated(
+        "sheets_create", {"title": title, "rows": rows}, user_id=req.user_id, org_id=req.org_id)
+    url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
+    if url:
+        record_artifact("google-sheets", url, title=title, label=f"Open “{title}”")
+        log.info("[produce] sheet (%d rows) → %s", len(rows), url)
+        return {"url": url, "title": title}
+    if isinstance(res, dict) and res.get("error"):
+        await _surface_produce_error(req, plan, "Google Sheet", res.get("error"))
+    return {"skipped": "the Google Sheet could not be created"}
+
+
+# Fabricated placeholder links agents emit when they couldn't get a real URL —
+# stripped/replaced before a draft is queued so we never send an UNVERIFIED link.
+_PLACEHOLDER_URL_RE = re.compile(
+    r"https?://\S*?(?:UNVERIFIED|PLACEHOLDER|EXAMPLE|TODO|XXXX|SHEET_ID|DOC_ID|YOUR_)\S*",
+    re.IGNORECASE)
+
+
+@_register_producer("email")
+async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
+                         step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    contacts = plan.get("verified_contacts") or []
+    to = (contacts[0].get("email") if contacts else "") or ""
+    # Agent-driven recipient fallback: an owner may have RECALLED the contact from
+    # HIVEMIND during EXECUTE — scan the executed work + synthesis for a real email.
+    if not to:
+        _pool = " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + (ctx.get("body") or "")
+        for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _pool):
+            low = addr.lower()
+            if "noreply" in low or "no-reply" in low or "example." in low:
+                continue
+            to = addr
+            break
+    if not to:
+        log.info("[produce] email skipped — no recipient")
+        return {"skipped": "no verified recipient (org directory / Gmail / HIVEMIND recall all empty)"}
+    # Dependency gate: if an EARLIER step was meant to create the artifact this
+    # email links but it was NOT produced, do NOT draft an email with a fabricated
+    # link — skip honestly so the seal reports the real blocker.
+    if ctx.get("expects_prior_artifact") and not ctx.get("last_artifact_url"):
+        return {"skipped": "the file this email was meant to link was never created, so no email was drafted"}
+    body = ctx.get("body") or ""
+    subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
+    email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
+                        flags=re.IGNORECASE | re.MULTILINE).strip() or body
+    # Thread the REAL upstream artifact URL in; strip any fabricated placeholder.
+    url_prior = ctx.get("last_artifact_url")
+    if url_prior:
+        email_body = _PLACEHOLDER_URL_RE.sub(url_prior, email_body)
+        if url_prior not in email_body:
+            email_body = f"{email_body}\n\nLink: {url_prior}"
+    else:
+        email_body = _PLACEHOLDER_URL_RE.sub("", email_body).strip()
+    res = await google_exec_emulated(
+        "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
+        user_id=req.user_id, org_id=req.org_id)
+    draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
+    url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
+    if draft_id:
+        queue_email_approval(to, subject, draft_id, url)
+        log.info("[produce] email draft → %s", to)
+        return {"draft_id": draft_id, "url": url, "to": to}
+    if isinstance(res, dict) and res.get("error"):
+        await _surface_produce_error(req, plan, "Gmail draft", res.get("error"))
+    return {"skipped": "the Gmail draft could not be created"}
+
+
+# "deliver X through/via/in a sheet|doc" → the artifact is a PREREQUISITE the
+# terminal deliverable (the email) references. Deterministic — no planner trust.
+_SHEET_VEHICLE_RE = re.compile(
+    r"\b(?:through|via|in|using|with|into|on|as)\s+(?:an?\s+|the\s+)?(?:google\s+|new\s+|shared\s+)*"
+    r"(sheet|spreadsheet|tracker|table)\b", re.IGNORECASE)
+_DOC_VEHICLE_RE = re.compile(
+    r"\b(?:through|via|in|using|with|into|as)\s+(?:an?\s+|the\s+)?(?:google\s+|new\s+|shared\s+)*"
+    r"(doc|document|report|brief|memo)\b", re.IGNORECASE)
+
+
+def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str, Any]]:
+    """Ordered artifact steps the producer executes. Backward-compatible: explicit
+    plan['artifact_steps'] wins; else ONE step from intended_output. Deterministic
+    enrichment: 'email … through a sheet/doc' → [{sheet|doc}, {email}] so a dependent
+    chain is built (the email references the real URL) WITHOUT trusting the planner.
+    Capability guard: drop steps whose kind has no registered producer (records the
+    dropped capability for the limitation note)."""
+    raw = plan.get("artifact_steps")
+    steps: List[Dict[str, Any]] = []
+    if isinstance(raw, list) and raw:
+        for s in raw:
+            if isinstance(s, dict) and s.get("kind"):
+                steps.append({**s, "kind": str(s["kind"]).strip().lower()})
+            elif isinstance(s, str) and s.strip():
+                steps.append({"kind": s.strip().lower()})
+    else:
+        out = str(plan.get("intended_output") or "answer").strip().lower()
+        if out == "email":
+            if _SHEET_VEHICLE_RE.search(user_msg or ""):
+                steps.append({"kind": "sheet"})
+            elif _DOC_VEHICLE_RE.search(user_msg or ""):
+                steps.append({"kind": "doc"})
+        steps.append({"kind": out})
+    kept: List[Dict[str, Any]] = []
+    dropped: List[str] = []
+    for s in steps[:_EXECUTE_MAX_OWNERS]:
+        k = s.get("kind")
+        if k in _PRODUCERS:
+            if not kept or kept[-1].get("kind") != k:  # dedupe consecutive
+                kept.append(s)
+        elif k:
+            dropped.append(k)
+    if dropped:
+        plan["dropped_capabilities"] = sorted(set(dropped))
+    return kept or [{"kind": "answer"}]
+
+
+def _dead_end_message(plan: Dict[str, Any]) -> str:
+    """Truthful, human stop message: what was created (if anything), what's not
+    possible with the connected tools, and what was searched — never a fabrication."""
+    de = plan.get("dead_end") or {}
+    parts: List[str] = [f"I couldn't fully finish this: {de.get('reason') or 'the task could not be completed'}."]
+    partial = [a for a in (de.get("partial") or []) if a.get("url")]
+    if partial:
+        parts.append("What I did create: " + ", ".join(f"{a.get('kind')} — {a.get('url')}" for a in partial) + ".")
+    dropped = de.get("dropped_capabilities") or []
+    if dropped:
+        parts.append(f"Not possible with the connected tools: {', '.join(dropped)}.")
+    hits = int((plan.get("verification") or {}).get("memory_hits") or plan.get("hit_count") or 0)
+    parts.append(
+        "I searched HIVEMIND memory and the connected sources"
+        + (f" ({hits} relevant memories found)" if hits else " and found nothing relevant")
+        + ", and did not invent any details to fill the gap.")
+    return " ".join(parts)
+
+
 async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
-    """UNIFIED PRODUCE phase — the SINGLE place a turn's artifact is created.
-    Deterministic, post-consensus, idempotent. Agents write the *content* in
-    synthesis (no tool calls); this turns `final_text` into the real artifact:
-      doc   → docs_create (markdown rendered)        → connector_logo
-      sheet → sheets_create (markdown table → rows)  → connector_logo
-      email → gmail_create_draft → queue approval    → approval card
-    Other outputs (answer/decision/slack) need no artifact. Replaces the three
-    racing paths (ambient tool / synthesis directive / fallback)."""
+    """UNIFIED PRODUCE phase — the SINGLE place a turn's artifacts are created.
+    Deterministic, post-consensus, idempotent. Iterates the plan's ORDERED artifact
+    steps through the producer registry, threading each step's output forward so a
+    later step references an earlier artifact (the email body gets the REAL sheet
+    URL). A step whose prerequisite is missing is SKIPPED honestly (never a
+    fabricated draft) and, if it was the terminal deliverable, recorded as a
+    dead-end the seal reports. Agents write the *content* in synthesis; this turns
+    it into the real artifacts."""
     plan = _PLAN_BY_TURN.get(req.turn_id)
     if not isinstance(plan, dict):
         return
-    out = plan.get("intended_output")
     body = (final_text or "").strip()
-    if out not in ("doc", "sheet", "email") or not body:
+    if not body:
         return
     if drain_artifacts() or drain_pending_writes():
         return  # already produced (idempotent)
+    steps = _derive_artifact_steps(plan, req.user_message or "")
+    # A non-terminal doc/sheet step is a prerequisite the terminal step references.
+    has_prereq_artifact = any(s.get("kind") in ("doc", "sheet") for s in steps[:-1])
+    ctx: Dict[str, Any] = {"body": body, "artifacts": [], "last_artifact_url": None,
+                           "expects_prior_artifact": has_prereq_artifact}
+    skips: List[str] = []
+    last_result: Dict[str, Any] = {}
     try:
-        if out == "doc":
-            title = _derive_title(plan, body, req.room_goal or "Document")
-            res = await google_exec_emulated(
-                "docs_create", {"title": title, "content": body}, user_id=req.user_id, org_id=req.org_id)
-            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
-            if url:
-                record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
-                log.info("[produce] doc → %s", url)
-            elif isinstance(res, dict) and res.get("error"):
-                await _surface_produce_error(req, plan, "Google Doc", res.get("error"))
-        elif out == "sheet":
-            title = _derive_title(plan, body, req.room_goal or "Spreadsheet")
-            rows = _md_table_to_rows(body)
-            res = await google_exec_emulated(
-                "sheets_create", {"title": title, "rows": rows}, user_id=req.user_id, org_id=req.org_id)
-            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
-            if url:
-                record_artifact("google-sheets", url, title=title, label=f"Open “{title}”")
-                log.info("[produce] sheet (%d rows) → %s", len(rows), url)
-        elif out == "email":
-            contacts = plan.get("verified_contacts") or []
-            to = (contacts[0].get("email") if contacts else "") or ""
-            # Agent-driven recipient: an owner may have RECALLED the contact from
-            # HIVEMIND (a past email/doc/note) during EXECUTE — prefer that grounded
-            # address over the deterministic org/Gmail resolver. Scan the executed
-            # work + the synthesis for a real email.
-            if not to:
-                _pool = " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + body
-                for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _pool):
-                    low = addr.lower()
-                    if "noreply" in low or "no-reply" in low or "example." in low:
-                        continue
-                    to = addr
-                    break
-            if not to:
-                log.info("[produce] email skipped — no recipient (org/Gmail + HIVEMIND recall all empty)")
-                return
-            subject = _derive_title(plan, body, req.room_goal or "A message")
-            email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
-                                flags=re.IGNORECASE | re.MULTILINE).strip() or body
-            res = await google_exec_emulated(
-                "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
-                user_id=req.user_id, org_id=req.org_id)
-            draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
-            url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
-            if draft_id:
-                queue_email_approval(to, subject, draft_id, url)
-                log.info("[produce] email draft → %s", to)
-            elif isinstance(res, dict) and res.get("error"):
-                await _surface_produce_error(req, plan, "Gmail draft", res.get("error"))
+        for step in steps:
+            producer = _PRODUCERS.get(step.get("kind"))
+            if producer is None:
+                continue
+            out = await producer(req, plan, step, ctx) or {}
+            last_result = out
+            if out.get("skipped"):
+                skips.append(out["skipped"])
+                continue
+            if out.get("url"):
+                ctx["artifacts"].append({"kind": step.get("kind"), "url": out["url"], "title": out.get("title")})
+                if step.get("kind") in ("doc", "sheet"):
+                    ctx["last_artifact_url"] = out["url"]
     except Exception as exc:  # noqa: BLE001 — never fail a turn over production
-        log.warning("[produce] failed (%s): %s", out, exc)
+        log.warning("[produce] failed: %s", exc)
+    # Honest dead-end: the TERMINAL deliverable could not be produced (missing
+    # prerequisite / recipient / data). The seal reports what was searched + why.
+    if last_result.get("skipped"):
+        plan["dead_end"] = {
+            "reason": last_result["skipped"],
+            "skips": skips,
+            "partial": ctx["artifacts"],
+            "dropped_capabilities": plan.get("dropped_capabilities") or [],
+        }
+    elif skips:
+        plan["produce_skips"] = skips
 
 
 async def _verify_and_emit(
@@ -4657,7 +4832,13 @@ async def _orchestrate_agentic(
         "tools (recall HIVEMIND, search Gmail/Docs). Pick intended_output from the user's intent: "
         "'create/write a doc/report'→doc, 'tracker/table'→sheet, 'email/send to X'→email, a "
         "question→answer. Do NOT add consent / policy / GDPR / approval subtasks the user did not "
-        "ask for — the user's request IS the authorization; plan only the real work."
+        "ask for — the user's request IS the authorization; plan only the real work.\n"
+        f"CAPABILITIES (what this room can actually PRODUCE): {', '.join(producible_kinds())} "
+        "(plus reading HIVEMIND memory + the enabled connectors). The done_criterion must only "
+        "assert end-states reachable with THESE — e.g. there is no file-sharing / permissions tool, "
+        "so do NOT make 'shared with <person>' or 'permissions set' part of done_criterion; if the "
+        "user asked for something unsupported, plan the part you CAN do and let the deliverable note "
+        "the rest as a limitation."
     )
     plan_text = await _agent_reply_resilient(plan_agent, plan_prompt)
     cost_tokens += max(80, len(plan_text) // 4)
@@ -4838,9 +5019,12 @@ async def _orchestrate_agentic(
         await _verify_and_emit(req, lead, final_text=final_text, blackboard={"hit_count": len(contributions)})
     except Exception as exc:  # noqa: BLE001
         log.warning("[agentic] verify failed: %s", exc)
-    _gv = (_PLAN_BY_TURN.get(req.turn_id) or {}).get("verification") or {}
+    _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
+    _gv = _vp.get("verification") or {}
     status = "complete"
-    if _gv and not _gv.get("grounded_ok"):
+    if _vp.get("dead_end"):
+        status = "blocked"  # un-reachable goal — surfaced honestly by post_room_turn
+    elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
 
     await _emit_event(req.callback_url, req.turn_id, {
@@ -6162,6 +6346,13 @@ async def post_room_turn(
         total_cost += int(resp.cost_tokens or 0)
         plan = _PLAN_BY_TURN.get(req.turn_id)
         verdict = plan.get("verification") if isinstance(plan, dict) else None
+        # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
+        # the source data genuinely doesn't exist) is NOT re-plannable — re-running
+        # would only re-discover the same wall and burn rounds. Stop and let the
+        # honest dead-end surface, rather than loop to the cap emitting placeholders.
+        if isinstance(plan, dict) and plan.get("dead_end"):
+            log.info("[goalkeeper] room=%s dead-end (un-fixable) → stop honestly", req.room_id)
+            break
         # Recon-driven rework: a produced deliverable is NOT an automatic stop.
         # Loop only stops when the verdict is met (or a pending draft is both
         # produced AND grounded), or the round cap is hit. A recon-rejected
@@ -6234,6 +6425,17 @@ async def post_room_turn(
     _vplan = _PLAN_BY_TURN.get(req.turn_id)
     if isinstance(_vplan, dict) and isinstance(_vplan.get("verification"), dict):
         resp.verification = _vplan["verification"]
+    # Honest dead-end — the goal was un-reachable with the connected toolset /
+    # available data. Surface WHY (so the user sees a truthful stop, not a looping
+    # spinner or a placeholder draft) and mark the turn blocked.
+    if isinstance(_vplan, dict) and _vplan.get("dead_end"):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "line", "agent": "system", "kind": "dead_end",
+            "content": _dead_end_message(_vplan),
+        })
+        resp.status = "blocked"
+        log.info("[dead-end] room=%s blocked honestly: %s",
+                 req.room_id, (_vplan.get("dead_end") or {}).get("reason"))
     return resp
 
 

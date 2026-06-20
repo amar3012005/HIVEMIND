@@ -4765,10 +4765,12 @@ async def _orchestrate_agentic(
     conns = [str(c) for c in (enabled_connectors or [])]
     boot = {b["id"]: b for b in await fetch_bootstrap()}
 
-    # gpt-oss-120b drives nested tool schemas + structured output far more
-    # reliably than 20b (the 400s/harmony leaks were a 20b-capability ceiling).
-    # Phase-0 eval may override per-turn (req.agentic_model) to A/B models.
-    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
+    # Default = llama-3.3-70b-versatile: Phase-0 eval (docs/.../2026-06-20-phase0-
+    # model-eval-result.md) showed it matches gpt-oss-120b on action/artifact quality
+    # while ~40% faster + ~45% cheaper per turn with ~0 tool-call failures (gpt-oss's
+    # harmony/400 leaks are the patchwork tax). Override per-turn via req.agentic_model
+    # or globally via HYPER_AGENTIC_MODEL.
+    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "llama-3.3-70b-versatile")
 
     def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False) -> ReActAgent:
         # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).

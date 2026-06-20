@@ -75,6 +75,17 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
 ---
 
 ## PROGRESS / RESUME (live)
+- **2026-06-20 — PHASE 0 DONE.** Eval harness built + run live (Solvis room, 3 gpt-oss + 2 llama
+  runs). Result (docs/.../2026-06-20-phase0-model-eval-result.md): action/artifact tasks 100% on
+  both models; variance is judge-side grounding on prose. **Decision shipped:** agentic default
+  `gpt-oss-120b → llama-3.3-70b-versatile` (resolves to llama-reasoning + gpt-oss-20b-tools via
+  the existing correct swap) — ~40% faster, ~45% cheaper, equal quality. Smoke (no override):
+  chain task → sheet+email+grounded. Commits: c51ed972 (harness), chain-fix, default-flip.
+  NEW Phase-1.5 items found: grounding-judge flips complete↔escalated on prose (tighten rubric);
+  semantic dead-end (impossible data → seal blocked vs draft a useless email).
+- **NEXT: Phase 1 — collapse to ONE orchestrator** (delete/demote the deterministic `_orchestrate`
+  path; keep the agentic spine). Then Phase 2/3/4 per below.
+
 - **2026-06-20:** Phase-0 harness BUILT + committed `c51ed972` (offline — prod box
   unreachable, SSH timeout). Added `RoomTurnRequest.agentic_model` per-turn override
   (api_hyper_rooms.py) + `employees-service/scripts/phase0/` (battery/run_battery/sweep/README).

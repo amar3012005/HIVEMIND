@@ -23,10 +23,19 @@ Equal action-quality, large cost+latency win, clean tool-calling. It is the mode
 already vouches for ("tool calling works on Groq llama-3.3-70b"). Reversible (one default +
 the env/`agentic_model` override still apply).
 
+## How the default actually resolves (important — log-verified)
+`_route_groq` (agentscope_factory.py:235) deems Groq-hosted **llama-3.x tool-UNRELIABLE**
+(emits `<function=NAME>` Llama-tag format under strict validation → `tool_use_failed` 400) and
+swaps **tool-using** agents to `openai/gpt-oss-20b`, while tool-less agents (planner / lead /
+reactors) keep llama-3.3-70b. So default `llama-3.3-70b-versatile` resolves to **llama for
+reasoning/prose + gpt-oss-20b for tool-owners** — the cheap+reliable combo. The ~40%/45% win vs
+gpt-oss-120b-everywhere is mostly gpt-oss-20b owners ≪ gpt-oss-120b owners. Smoke (no override):
+chain task → `['google-sheets','gmail']` + `gmail_send` queued + grounded=true. ✅
+
 ## Consequences for the sprint
-- **Phase 2 cleanup unblocked:** the gpt-oss-specific patchwork (harmony `<|channel|>` retry,
-  tool-less reactors, fake-`JSON` guards) is candidate for deletion on llama — VERIFY each with
-  the battery before removing.
+- **The llama→gpt-oss-20b swap is CORRECT, not patchwork** — llama genuinely can't tool-call on
+  Groq strict mode. Do NOT remove it. (Retracts an earlier wrong note.) The harmony/tool-less
+  hacks are gpt-oss-specific and stay until/unless a non-Groq (OpenRouter) provider path is used.
 - **New Phase-1.5 item (grounding-judge tuning):** the verifier flips complete↔escalated on
   prose tasks run-to-run. Tighten the rubric (escalate only on FABRICATION or a hard missing
   artifact, not on "could be more sourced" gaps for opinion/recommendation outputs). Also the

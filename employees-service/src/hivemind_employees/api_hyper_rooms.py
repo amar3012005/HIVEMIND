@@ -2494,8 +2494,12 @@ _RECIPIENT_RE = re.compile(
 # bounded ReAct loop with real recall/connector calls (token-heavier) — turn-1 of
 # the Solvis transcript hit a 429 with 5 tool-less narrators; tool-grounded costs
 # more, so cap tighter + stagger.
-_EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "4"))
+_EXECUTE_MAX_OWNERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_OWNERS", "8"))
 _EXECUTE_MAX_ITERS = int(os.environ.get("HYPER_ROOM_EXECUTE_MAX_ITERS", "4"))
+# EVERY assigned owner runs its subtask IN PARALLEL (no sequential threading);
+# concurrency is bounded only to avoid Groq 429s. Per-task recon then verifies
+# each owner's output before the debate.
+_EXECUTE_CONCURRENCY = max(1, int(os.environ.get("HYPER_ROOM_EXECUTE_CONCURRENCY", "5")))
 # Phase 2 — bounded MULTI-ROUND swarm: debate→revise repeats until a round
 # produces no high-confidence challenge (converged) or the cap is hit.
 _SWARM_MAX_ROUNDS = max(1, min(5, int(os.environ.get("HYPER_SWARM_MAX_ROUNDS", "3"))))
@@ -2657,6 +2661,30 @@ async def _agent_reply_resilient(agent, content: str) -> str:
                 return ""
         log.warning("[agentic] agent failed: %s", exc)
         return ""
+
+
+async def _recon_tasks(req: "RoomTurnRequest", contributions: List[Dict[str, Any]],
+                       reviewer: "ReActAgent") -> Dict[int, Dict[str, Any]]:
+    """Per-task recon — a tool-less reviewer checks EACH owner's gathered output
+    against its subtask: grounded + on-task, not empty / a mere description / a
+    fabrication. Returns {index: {ok: bool, gap: str}}. Best-effort; the caller
+    guards. This is the 'recon on tasks' gate before the team debates."""
+    items = "\n\n".join(
+        f"[{i}] {c.get('owner')} — SUBTASK: {c.get('subtask')}\nGATHERED:\n{(c.get('text') or '')[:700]}"
+        for i, c in enumerate(contributions))
+    prompt = (
+        f"USER TASK: {req.user_message}\n\nReview each teammate's gathered output below. For EACH "
+        "index decide ok=true if it addresses its SUBTASK with concrete GROUNDED facts (real "
+        "content — not empty, not merely a description of what they did, not fabricated). Set "
+        "ok=false with a one-line `gap` if it is empty, off-task, or ungrounded.\n\n" + items +
+        '\n\nReply STRICT JSON only: {"verdicts":[{"i":<index>,"ok":<bool>,"gap":"<gap or empty>"}]}')
+    txt = await _agent_reply_resilient(reviewer, prompt)
+    obj = _first_json_object(txt) or {}
+    out: Dict[int, Dict[str, Any]] = {}
+    for v in (obj.get("verdicts") or []):
+        if isinstance(v, dict) and isinstance(v.get("i"), int):
+            out[v["i"]] = {"ok": bool(v.get("ok")), "gap": str(v.get("gap") or "")}
+    return out
 
 
 async def _orchestrate_agentic(
@@ -2833,51 +2861,101 @@ async def _orchestrate_agentic(
                 return p
         return participants[idx % len(participants)]
 
-    # 2. OWNERS execute their subtask with single-arg tools (recall + connectors —
-    #    reliable on gpt-oss), in a MsgHub so each result is observed by peers.
-    owner_agents: Dict[str, ReActAgent] = {}
+    # ── ASSIGN — EVERY participant gets a subtask. Planner subtasks map to owners;
+    #    any teammate the planner left out (or if it emitted none) still gets a
+    #    gather subtask for the user's task. No agent sits idle.
+    assignments: List[Dict[str, Any]] = []
+    _seen: set = set()
+    for idx, line in enumerate(subtasks_raw):
+        owner = _owner_for(line, idx)
+        assignments.append({"owner": owner, "task": (line.split("—", 1)[1].strip() if "—" in line else line)})
+        _seen.add(owner.get("slug"))
+    for p in participants:
+        if p.get("slug") not in _seen:
+            assignments.append({"owner": p, "task":
+                f"From your area of expertise, gather and verify the specific facts the room needs to answer: {req.user_message}"})
+            _seen.add(p.get("slug"))
+    assignments = assignments[:_EXECUTE_MAX_OWNERS]
+
+    _gather_instructions = (
+        "HIVEMIND is the COMPANY BRAIN — search it FIRST and as many times as your subtask needs "
+        "(NOT once): `recall` per fact/topic, `org_directory` for a person/email, `traverse_graph` "
+        "to follow a thread. When the room has connectors enabled, use their READ tools for live "
+        "company data: Gmail → gmail_search/gmail_get/gmail_get_thread; Docs/Drive → drive_search "
+        "then docs_get; Sheets → sheets_get. Only if a needed fact is genuinely EXTERNAL "
+        "(public/industry info the company wouldn't store) call `hivemind_web_search`. The room "
+        "produces the final artifact ONCE from the whole team's work — your job is to GATHER the "
+        "real content + facts, not to create or send anything. Ground every specific in a tool "
+        "result; mark anything you genuinely can't find as UNVERIFIED (never invent). Report the "
+        "ACTUAL CONTENT you gathered (real facts/list/text — not a description of what you did)."
+    )
+
+    # 2. EXECUTE — ALL owners run their subtask IN PARALLEL (bounded concurrency for
+    #    anti-429). No sequential prior-threading: each independently mines HIVEMIND
+    #    + connectors + web and dumps grounded content; the team debates the union.
+    _exec_sem = asyncio.Semaphore(_EXECUTE_CONCURRENCY)
+
+    async def _run_owner(owner: Dict[str, Any], task: str, idx: int) -> Optional[Dict[str, Any]]:
+        slug = owner.get("slug") or str(idx)
+        try:
+            async with _exec_sem:
+                await asyncio.sleep(0.12 * (idx % _EXECUTE_CONCURRENCY))  # stagger anti-429
+                agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
+                text = await _agent_reply_resilient(agent, f"{gathered_block}Your SUBTASK: {task}\n\n{_gather_instructions}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[agentic] owner %s failed: %s", slug, exc)
+            return None
+        return {"owner": owner.get("name") or slug, "slug": slug, "subtask": task, "text": text} if text else None
+
     contributions: List[Dict[str, Any]] = []
-    if subtasks_raw:
-        async with MsgHub(participants=[]) as hub:
-            for idx, line in enumerate(subtasks_raw):
-                owner = _owner_for(line, idx)
-                slug = owner.get("slug") or str(idx)
-                if slug not in owner_agents:
-                    owner_agents[slug] = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
-                    try:
-                        hub.add(owner_agents[slug])
-                    except Exception:  # noqa: BLE001
-                        pass
-                task = line.split("—", 1)[1].strip() if "—" in line else line
-                prior = "\n".join(f"- {c['owner']}: {c['text'][:200]}" for c in contributions) or "(first)"
-                task_prompt = (
-                    f"{gathered_block}"
-                    f"Your SUBTASK: {task}\nAlready gathered by teammates (do NOT re-fetch these):\n{prior}\n\n"
-                    "HIVEMIND is the COMPANY BRAIN — it holds the org's knowledge. SEARCH IT FIRST and "
-                    "as many times as your subtask needs (NOT once): call `recall` per fact/topic, "
-                    "`org_directory` for a person/email, `traverse_graph` to follow a thread. When the "
-                    "room has connectors enabled, use their READ tools to pull live context from the "
-                    "company's real data: Gmail → gmail_search/gmail_get/gmail_get_thread; Docs/Drive → "
-                    "drive_search to find company documents then docs_get to read their text; Sheets → "
-                    "sheets_get to read a spreadsheet's values. Only "
-                    "if a fact your subtask needs is genuinely EXTERNAL (public/industry info the company "
-                    "wouldn't store) AND not already gathered, call `hivemind_web_search` for it. Skip "
-                    "anything a teammate already pulled above. The room produces the final artifact ONCE "
-                    "from the whole team's work — your job is to GATHER the real content + facts, not to "
-                    "create or send anything. Ground every specific in a tool result; mark anything you "
-                    "genuinely can't find as UNVERIFIED (never invent). Report the ACTUAL CONTENT you "
-                    "gathered (the real facts/list/text — not a description of what you did)."
-                )
-                if contributions:
-                    await asyncio.sleep(0.3)  # anti-429
-                text = await _agent_reply_resilient(owner_agents[slug], task_prompt)
-                cost_tokens += max(60, len(text) // 4)
-                if text:
-                    contributions.append({"owner": owner.get("name") or slug, "subtask": task, "text": text})
-                    await _emit_event(req.callback_url, req.turn_id, {
-                        "t": "execute", "owner": slug, "name": owner.get("name") or slug,
-                        "subtask": task[:300], "contribution": text[:700],
-                    })
+    if assignments:
+        for c in await asyncio.gather(*[_run_owner(a["owner"], a["task"], i) for i, a in enumerate(assignments)]):
+            if c:
+                contributions.append(c)
+                cost_tokens += max(60, len(c["text"]) // 4)
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "execute", "owner": c["slug"], "name": c["owner"],
+                    "subtask": c["subtask"][:300], "contribution": c["text"][:700]})
+        log.info("[agentic] execute room=%s owners=%d (parallel)", req.room_id, len(contributions))
+
+    # 3. RECON-ON-TASKS — verify EACH owner's output addresses its subtask with
+    #    grounded facts; re-run the gapped ones ONCE (in parallel) with the gap fed
+    #    back, BEFORE the team debates. A thin/empty/fabricated contribution is
+    #    caught here, not carried into the synthesis.
+    if contributions:
+        try:
+            _verdicts = await _recon_tasks(req, contributions, _mk(lead, 1, toolless=True))
+            _redo = [i for i, c in enumerate(contributions)
+                     if _verdicts.get(i) and not _verdicts[i]["ok"] and _verdicts[i]["gap"]]
+            for i in _redo:
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "recon", "owner": contributions[i]["slug"], "ok": False,
+                    "gap": _verdicts[i]["gap"][:200]})
+
+            async def _redo_owner(i: int) -> Optional[Dict[str, Any]]:
+                c = contributions[i]
+                owner = next((p for p in participants if p.get("slug") == c["slug"]), participants[i % len(participants)])
+                try:
+                    async with _exec_sem:
+                        agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True)
+                        txt = await _agent_reply_resilient(agent, (
+                            f"{gathered_block}Your SUBTASK: {c['subtask']}\n\nYour earlier attempt had a GAP: "
+                            f"{_verdicts[i]['gap']}\nClose it now with grounded facts. {_gather_instructions}"))
+                    return {"i": i, "text": txt} if txt else None
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[agentic] recon-redo %s failed: %s", c["slug"], exc)
+                    return None
+            if _redo:
+                for r in await asyncio.gather(*[_redo_owner(i) for i in _redo]):
+                    if r:
+                        contributions[r["i"]]["text"] = r["text"]
+                        cost_tokens += max(60, len(r["text"]) // 4)
+                        await _emit_event(req.callback_url, req.turn_id, {
+                            "t": "execute", "owner": contributions[r["i"]]["slug"], "name": contributions[r["i"]]["owner"],
+                            "subtask": contributions[r["i"]]["subtask"][:300], "contribution": r["text"][:700], "reconned": True})
+                log.info("[agentic] task-recon room=%s reran=%d/%d", req.room_id, len(_redo), len(contributions))
+        except Exception as exc:  # noqa: BLE001 — recon best-effort, never fail the turn
+            log.warning("[agentic] task-recon failed: %s", exc)
 
     exec_block = "\n\n".join(f"▸ {c['owner']} — {c['subtask']}:\n{c['text']}" for c in contributions) or "(no subtasks executed)"
     _deliver_spec = (

@@ -2219,6 +2219,11 @@ async def _produce_sheet(req: "RoomTurnRequest", plan: Dict[str, Any],
 _PLACEHOLDER_URL_RE = re.compile(
     r"https?://\S*?(?:UNVERIFIED|PLACEHOLDER|EXAMPLE|TODO|XXXX|SHEET_ID|DOC_ID|YOUR_)\S*",
     re.IGNORECASE)
+# ANY Google Docs/Drive/Sheets URL — when a real artifact was produced this turn,
+# every such link in the email body is rewritten to the REAL one (the model often
+# invents a plausible-looking doc id like /d/1aBcDeFg… that the placeholder regex
+# can't catch). Prevents emailing a fabricated link.
+_GDOCS_URL_RE = re.compile(r"https?://(?:docs|drive|sheets)\.google\.com/\S+", re.IGNORECASE)
 
 
 @_register_producer("email")
@@ -2248,14 +2253,20 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
     email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
                         flags=re.IGNORECASE | re.MULTILINE).strip() or body
-    # Thread the REAL upstream artifact URL in; strip any fabricated placeholder.
+    # Thread the REAL upstream artifact URL in; strip/replace any fabricated link.
     url_prior = ctx.get("last_artifact_url")
     if url_prior:
+        # Rewrite EVERY Google docs/drive/sheets link (incl. a model-fabricated id)
+        # + any placeholder token to the REAL produced URL.
+        email_body = _GDOCS_URL_RE.sub(url_prior, email_body)
         email_body = _PLACEHOLDER_URL_RE.sub(url_prior, email_body)
         if url_prior not in email_body:
             email_body = f"{email_body}\n\nLink: {url_prior}"
     else:
-        email_body = _PLACEHOLDER_URL_RE.sub("", email_body).strip()
+        # No real artifact this turn → strip BOTH placeholder tokens AND any
+        # fabricated Google link so we never send a fake doc URL.
+        email_body = _PLACEHOLDER_URL_RE.sub("", email_body)
+        email_body = _GDOCS_URL_RE.sub("", email_body).strip()
     res = await google_exec_emulated(
         "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
         user_id=req.user_id, org_id=req.org_id)
@@ -2278,6 +2289,22 @@ _SHEET_VEHICLE_RE = re.compile(
 _DOC_VEHICLE_RE = re.compile(
     r"\b(?:through|via|in|using|with|into|as)\s+(?:an?\s+|the\s+)?(?:google\s+|new\s+|shared\s+)*"
     r"(doc|document|report|brief|memo)\b", re.IGNORECASE)
+# "create/build/compile a doc|sheet" — the artifact is something to PRODUCE (then,
+# with a send intent, email it). Catches "create a dedicated doc … and send as an
+# email" which the 'via a doc' vehicle regex misses. Non-greedy, within one clause.
+_DOC_CREATE_RE = re.compile(
+    r"\b(?:creat|writ|mak|build|prepar|compil|draft|generat|assembl)\w*\b[^.]{0,40}?"
+    r"\b(?:dedicated\s+|new\s+|single\s+|one\s+|comprehensive\s+|detailed\s+)*"
+    r"(doc|document|report|brief|memo|overview|catalog\w*|one[\s-]?pager)\b", re.IGNORECASE)
+_SHEET_CREATE_RE = re.compile(
+    r"\b(?:creat|writ|mak|build|prepar|compil|draft|generat|assembl)\w*\b[^.]{0,40}?"
+    r"\b(?:dedicated\s+|new\s+|single\s+)*(sheet|spreadsheet|tracker|table)\b", re.IGNORECASE)
+# Planner-invented governance noise the user did not ask for — dropped from the
+# subtask list unless the user's own message raised it. Send-approval is the
+# write-gate's job, NOT an owner subtask.
+_NOISE_SUBTASK_RE = re.compile(
+    r"\b(complianc|consent|gdpr|opt[\s-]?in|unsubscrib|sign[\s-]?off|signature|legal\s+review|"
+    r"policy\s+review|data[\s-]?protection|approve\s+(?:the\s+)?(?:email|draft|message))\w*", re.IGNORECASE)
 
 
 def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str, Any]]:
@@ -2305,7 +2332,10 @@ def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str
         # names a sheet/doc vehicle, build the dependent chain [vehicle, email]
         # regardless of `out`.
         has_send = bool(_SEND_INTENT_RE.search(msg)) or bool(re.search(r"[\w.+-]+@[\w.-]+\.\w+", msg))
-        vehicle = "sheet" if _SHEET_VEHICLE_RE.search(msg) else ("doc" if _DOC_VEHICLE_RE.search(msg) else None)
+        # vehicle = an artifact the email should reference: either phrased as a
+        # delivery vehicle ("via a sheet") OR explicitly created ("create a doc …").
+        vehicle = ("sheet" if (_SHEET_VEHICLE_RE.search(msg) or _SHEET_CREATE_RE.search(msg))
+                   else ("doc" if (_DOC_VEHICLE_RE.search(msg) or _DOC_CREATE_RE.search(msg)) else None))
         if vehicle and (has_send or out == "email"):
             steps = [{"kind": vehicle}, {"kind": "email"}]
         else:
@@ -2763,7 +2793,16 @@ async def _orchestrate_agentic(
     plan_text = await _agent_reply_resilient(plan_agent, plan_prompt)
     cost_tokens += max(80, len(plan_text) // 4)
     plan_obj = _first_json_object(plan_text) or {}
-    subtasks_raw = [str(s) for s in (plan_obj.get("subtasks") or []) if str(s).strip()][:_EXECUTE_MAX_OWNERS]
+    subtasks_raw = [str(s) for s in (plan_obj.get("subtasks") or []) if str(s).strip()]
+    # Deterministic guard: the planner keeps inventing compliance / consent / GDPR /
+    # opt-in / sign-off / "approve the draft" subtasks the user never asked for (the
+    # model ignores the prompt rule). Drop them UNLESS the user actually mentioned
+    # compliance/consent. Send-approval is handled by the write-gate, not an owner.
+    if not _NOISE_SUBTASK_RE.search(req.user_message or ""):
+        _filtered = [s for s in subtasks_raw if not _NOISE_SUBTASK_RE.search(s)]
+        if _filtered:  # never strip to empty
+            subtasks_raw = _filtered
+    subtasks_raw = subtasks_raw[:_EXECUTE_MAX_OWNERS]
     done_txt = str(plan_obj.get("done_criterion") or "")
     intended_output = str(plan_obj.get("intended_output") or "answer").strip().lower()
     if intended_output not in ("doc", "sheet", "email", "answer"):

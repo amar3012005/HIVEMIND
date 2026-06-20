@@ -458,6 +458,18 @@ export const GOOGLE_TOOLS = {
       return { documentId: id, title: doc.title || '', text };
     },
   },
+  sheets_get: {
+    provider: 'google-sheets',
+    description: "Read an existing Google Sheet's cell values by id. args: { spreadsheetId } (or { id }), optional { range } (default 'A1:Z500', first sheet). Returns { spreadsheetId, range, rows }. READ-only.",
+    run: async (token, a) => {
+      const id = String(a.spreadsheetId || a.id || '').trim();
+      if (!id) return { error: 'spreadsheetId required' };
+      const range = String(a.range || 'A1:Z500').trim();
+      const r = await g(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(range)}`, token);
+      const rows = (r.values || []).slice(0, 500);
+      return { spreadsheetId: id, range: r.range || range, rows };
+    },
+  },
 };
 
 export function listGoogleTools() {

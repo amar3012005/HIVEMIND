@@ -518,6 +518,26 @@ def _register_connector_tools(
             docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create). No approval needed."
             tk.register_tool_function(docs_create, group_name="google_docs")
             tk.register_tool_function(docs_append, group_name="google_docs")
+        elif kind == "google_sheets" and read_only:
+            # Searcher agents: READ sheet values for context (find sheets via Drive,
+            # read their cells). No create/append (the producer owns writes).
+            tk.create_tool_group(
+                group_name="google_sheets",
+                description="Read Google Sheets for context: find sheets, read their cell values.",
+                active=False,
+                notes=("drive_search(query, max) finds Drive files incl. sheets → id/name/type/url. "
+                       "sheets_get(spreadsheetId, range) reads a sheet's cell values (default first sheet "
+                       "A1:Z500) → rows. Use to ground in the company's real spreadsheets; you cannot "
+                       "create/edit sheets — the room produces any output once."),
+            )
+            # Only sheets_get here — drive_search (which finds sheets too) is
+            # registered once in the google_docs group; registering it again would
+            # collide on the tool name. If a room has sheets but not docs, the agent
+            # finds sheet ids via recall/gmail and reads them with sheets_get.
+            def sheets_get(spreadsheetId: str, range: str = "") -> ToolResponse:
+                return _google("sheets_get", {"spreadsheetId": spreadsheetId, "range": range})
+            sheets_get.__doc__ = "Read an existing Google Sheet's cell values by spreadsheetId (from drive_search or a known id). Optional range (default first sheet A1:Z500). Returns rows for grounding."
+            tk.register_tool_function(sheets_get, group_name="google_sheets")
         elif kind == "google_sheets":
             tk.create_tool_group(
                 group_name="google_sheets",
@@ -557,11 +577,6 @@ def _register_connector_tools(
         if not conn:
             continue
         if conn in ("gmail", "google_docs", "google_sheets"):
-            # read_only searcher agents: google_sheets is a WRITE-only producer in
-            # the bridge (no sheets read tool) → skip. google_docs DOES have reads
-            # (drive_search + docs_get) → register those (handled in _register_google).
-            if read_only and conn == "google_sheets":
-                continue
             _register_google(conn, read_only)
             continue
         safe = conn.replace("-", "_")

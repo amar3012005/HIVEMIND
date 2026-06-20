@@ -93,7 +93,8 @@ DEFAULT_HYPER_TOOLS = [
     "hivemind_list_memories",
     "hivemind_get_memory",
     "hivemind_traverse_graph",
-    "hivemind_query_with_ai",
+    # query_with_ai removed: room agents use `recall` for context (query_with_ai
+    # hit a dead /api/query endpoint and is the wrong tool for in-room gathering).
     "hivemind_recall_bugs",
     "hivemind_why_code",
     "hivemind_at",
@@ -2818,7 +2819,8 @@ async def _orchestrate_agentic(
                     "`org_directory` for a person/email, `traverse_graph` to follow a thread. When the "
                     "room has connectors enabled, use their READ tools to pull live context from the "
                     "company's real data: Gmail → gmail_search/gmail_get/gmail_get_thread; Docs/Drive → "
-                    "drive_search to find company documents then docs_get to read their text. Only "
+                    "drive_search to find company documents then docs_get to read their text; Sheets → "
+                    "sheets_get to read a spreadsheet's values. Only "
                     "if a fact your subtask needs is genuinely EXTERNAL (public/industry info the company "
                     "wouldn't store) AND not already gathered, call `hivemind_web_search` for it. Skip "
                     "anything a teammate already pulled above. The room produces the final artifact ONCE "

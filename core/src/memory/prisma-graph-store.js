@@ -724,10 +724,10 @@ export class PrismaGraphStore {
             ? (ftsParams.push(is_latest), `AND m.is_latest = ${nextParam()}`)
             : '';
           const dateAfterWhere = created_after
-            ? (ftsParams.push(new Date(created_after).toISOString()), `AND m.created_at >= ${nextParam()}`)
+            ? (ftsParams.push(new Date(created_after).toISOString()), `AND m.created_at >= ${nextParam()}::timestamptz`)
             : '';
           const dateBeforeWhere = created_before
-            ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}`)
+            ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
             : '';
 
           const ftsResults = await this.client.$queryRawUnsafe(`

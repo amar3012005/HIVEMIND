@@ -136,8 +136,26 @@ Preserve whitespace.${hintBlock}`;
 Don't speculate on identities of unknown people — describe attributes. If user gave a hint about who is in the image, use those names.${hintBlock}`;
 }
 
-async function callGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens = 1500, signal }) {
-  const r = await fetch(GROQ_URL, {
+// Lenient JSON salvage: exact parse → first {...} block → truncated-JSON repair
+// (drop the trailing partial field + close the brace). Vision models under
+// max-token pressure emit valid-looking-but-truncated JSON; this recovers it.
+function lenientJsonParse(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch { /* try harder */ }
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch { /* truncated — repair below */ } }
+  const start = raw.indexOf('{');
+  if (start >= 0) {
+    const s = raw.slice(start);
+    const lastComma = s.lastIndexOf(',');
+    if (lastComma > 0) { try { return JSON.parse(s.slice(0, lastComma) + '}'); } catch { /* noop */ } }
+    try { return JSON.parse(s.replace(/,\s*$/, '') + '}'); } catch { /* noop */ }
+  }
+  return null;
+}
+
+function postGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens, signal, jsonMode }) {
+  return fetch(GROQ_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -149,25 +167,52 @@ async function callGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens 
           { type: 'image_url', image_url: { url: base64DataUrl } },
         ],
       }],
-      response_format: { type: 'json_object' },
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
       max_completion_tokens: maxTokens,
       temperature: 0.1,
     }),
     signal,
   });
-  if (!r.ok) {
-    const t = await r.text().catch(() => '');
-    throw new Error(`Groq vision ${r.status}: ${t.slice(0, 400)}`);
+}
+
+async function callGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens = 1500, signal }) {
+  // Strict json_object is the happy path, but llama-4-scout sometimes emits
+  // truncated/invalid JSON → Groq returns 400 `json_validate_failed` with the
+  // model's actual output in `error.failed_generation`. Image ingest must NEVER
+  // 500 just because the JSON was malformed: salvage failed_generation, then
+  // retry in plain-text mode + lenient-parse, then wrap prose as a description.
+  // Only throw if every path fails.
+  const r = await postGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens, signal, jsonMode: true });
+  if (r.ok) {
+    const data = await r.json();
+    const parsed = lenientJsonParse(data.choices?.[0]?.message?.content || '') || {};
+    return { parsed, usage: data.usage };
   }
-  const data = await r.json();
-  const raw = data.choices?.[0]?.message?.content || '{}';
-  let parsed = {};
-  try { parsed = JSON.parse(raw); }
-  catch {
-    const m = raw.match(/\{[\s\S]+\}/);
-    if (m) { try { parsed = JSON.parse(m[0]); } catch { parsed = {}; } }
-  }
-  return { parsed, usage: data.usage };
+  const errText = await r.text().catch(() => '');
+  // (1) Salvage the model output Groq returned inside the json_validate_failed error.
+  try {
+    const fg = JSON.parse(errText)?.error?.failed_generation;
+    if (fg) {
+      const salvaged = lenientJsonParse(fg);
+      if (salvaged && Object.keys(salvaged).length) {
+        console.warn('[image-ingest] salvaged failed_generation from Groq json_validate_failed');
+        return { parsed: salvaged, usage: null };
+      }
+    }
+  } catch { /* error body not JSON */ }
+  // (2) Retry once WITHOUT strict JSON — take the prose, lenient-parse or wrap it.
+  try {
+    const r2 = await postGroqVision({ apiKey, model, base64DataUrl, prompt: `${prompt}\n\nReturn ONLY the JSON object, no prose.`, maxTokens, signal, jsonMode: false });
+    if (r2.ok) {
+      const raw2 = (await r2.json()).choices?.[0]?.message?.content || '';
+      const parsed2 = lenientJsonParse(raw2);
+      if (parsed2 && Object.keys(parsed2).length) return { parsed: parsed2, usage: null };
+      if (raw2.trim()) {
+        return { parsed: { title: raw2.trim().split(/[.\n]/)[0].slice(0, 80), description: raw2.trim().slice(0, 1200) }, usage: null };
+      }
+    }
+  } catch { /* fall through to throw */ }
+  throw new Error(`Groq vision ${r.status}: ${errText.slice(0, 300)}`);
 }
 
 /**

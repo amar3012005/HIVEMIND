@@ -192,6 +192,7 @@ class Director:
         persona_model: Optional[str] = None,
         max_iters: int = 16,
         debate_max_rounds: int = 2,
+        synth_model: Optional[str] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -206,6 +207,11 @@ class Director:
         self.emit = emit
         self.director_model = director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
         self.persona_model = persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
+        # Dedicated model for the FINAL deliverable. The gather loop + debate can run
+        # on a cheap model (orchestration), but the synthesis is the product — so a
+        # strong model writes it. When equal to director_model, no extra call (the
+        # loop's own final IS the deliverable). Multi-model "Auto" = cheap gather + strong synth.
+        self.synth_model = synth_model or self.director_model
         # Live public-web search uses Groq's built-in web search (only on the
         # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
         # cheaper/faster and fine for in-room gathering; env-tunable.
@@ -626,6 +632,20 @@ class Director:
             msg = await self._groq(messages, tools=tools, force_text=True)
             final_text = (msg or {}).get("content") or final_text
 
+        # Multi-model: gather/debate ran on the (cheaper) director model; write the
+        # FINAL deliverable on the stronger synth_model from the full accumulated
+        # context. One extra call — the deliverable stays top-quality while the loop
+        # (the token bulk) ran cheap. No-op when synth_model == director_model.
+        if self.synth_model != self.director_model and final_text:
+            synth_msg = await self._groq(
+                messages + [{"role": "user", "content": (
+                    "Write the FINAL DELIVERABLE now — the publish-ready content only, FULLY grounded "
+                    "in the tool results and debate above, with real markdown tables where they help. "
+                    "No tool calls, no process narration, no placeholders.")}],
+                tools=tools, force_text=True, model=self.synth_model, bucket="director")
+            if synth_msg and (synth_msg.get("content") or "").strip():
+                final_text = synth_msg["content"]
+
         if not final_text:
             # Defensive: never return empty. Synthesize from the board.
             board = "\n".join(self.blackboard)[:3000]
@@ -673,6 +693,7 @@ async def run_director(
     emit: Callable[[Dict[str, Any]], Awaitable[None]],
     director_model: Optional[str] = None,
     persona_model: Optional[str] = None,
+    synth_model: Optional[str] = None,
     max_iters: int = 16,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
@@ -681,6 +702,7 @@ async def run_director(
         user_message=user_message, user_id=user_id, org_id=org_id, project_id=project_id,
         participants=participants, room_template=room_template, room_goal=room_goal,
         enabled_connectors=enabled_connectors, emit=emit,
-        director_model=director_model, persona_model=persona_model, max_iters=max_iters,
+        director_model=director_model, persona_model=persona_model, synth_model=synth_model,
+        max_iters=max_iters,
     )
     return await director.run()

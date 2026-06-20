@@ -61,6 +61,7 @@ from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_enabled_connectors,
+    get_room_quality_mode,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -2390,6 +2391,21 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
 
 
 
+def _quality_models(mode: str) -> tuple:
+    """(gather/director, debate/persona, synthesis) model triple per quality mode.
+    'best' → all gpt-oss-120b. 'auto' → cheap gather+debate + strong 120b synthesis
+    (the synth anchors deliverable quality; gather model barely matters — combo-tested:
+    8b-gather+120b-synth held quality at ~1/7 the cost). All env-tunable."""
+    best = os.environ.get("HYPER_MODEL_BEST", "openai/gpt-oss-120b")
+    if (mode or "auto").strip().lower() == "best":
+        return (best, best, best)
+    return (
+        os.environ.get("HYPER_AUTO_GATHER", "openai/gpt-oss-20b"),
+        os.environ.get("HYPER_AUTO_DEBATE", "openai/gpt-oss-20b"),
+        os.environ.get("HYPER_AUTO_SYNTH", "openai/gpt-oss-120b"),
+    )
+
+
 def _derive_intended_output(user_message: str) -> str:
     """Deterministic intent → output kind (same guards the agentic planner applies).
     Drives the centralized producer; the director writes the actual content. An
@@ -2433,6 +2449,21 @@ async def _orchestrate_single_agent(
     async def _emit(ev: Dict[str, Any]) -> None:
         await _emit_event(req.callback_url, req.turn_id, ev)
 
+    # Quality mode → model combo. 'best' = all gpt-oss-120b (max rigor). 'auto' =
+    # cheap gather + debate, strong 120b SYNTHESIS (the synth anchors quality; the
+    # gather model barely affects the deliverable — proven by the combo A/B). req.
+    # agentic_model (eval) overrides all. All models env-tunable.
+    _eval_model = getattr(req, "agentic_model", None)
+    if _eval_model:
+        _qmode, _dir_m, _per_m, _syn_m = "eval", _eval_model, _eval_model, _eval_model
+    else:
+        try:
+            _qmode = await get_room_quality_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _qmode = "auto"
+        _dir_m, _per_m, _syn_m = _quality_models(_qmode)
+    log.info("[single] room=%s quality=%s models=(%s, %s, %s)", req.room_id, _qmode, _dir_m, _per_m, _syn_m)
+
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2441,7 +2472,7 @@ async def _orchestrate_single_agent(
             user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
             participants=participants, room_template=room_template,
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
-            director_model=getattr(req, "agentic_model", None),
+            director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2520,7 +2551,8 @@ async def _orchestrate_single_agent(
                  "tokens_in": int(_io.get("input", 0) or 0),
                  "tokens_out": int(_io.get("output", 0) or 0),
                  "tokens_cached": int(_io.get("cached", 0) or 0),
-                 "tok_by": {k: int(v) for k, v in _tok_by.items()}})
+                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
+                 "quality_mode": _qmode})
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

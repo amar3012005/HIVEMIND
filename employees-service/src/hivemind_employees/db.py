@@ -292,6 +292,30 @@ async def get_room_template(room_id: str, org_id: Optional[str] = None) -> str:
     return "debate"
 
 
+async def get_room_quality_mode(room_id: str, org_id: Optional[str] = None) -> str:
+    """Return the room's quality mode ('auto' = multi-model cheap-gather+strong-synth,
+    or 'best' = all gpt-oss-120b). Defaults to 'auto' if row/column missing (graceful
+    pre-migration). org_id scopes the read so a foreign room_id can't leak config."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT quality_mode FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT quality_mode FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
+            if row and row["quality_mode"]:
+                return str(row["quality_mode"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_quality_mode fallback: %s", exc)
+    return "auto"
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

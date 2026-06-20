@@ -4094,12 +4094,19 @@ def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str
                 steps.append({"kind": s.strip().lower()})
     else:
         out = str(plan.get("intended_output") or "answer").strip().lower()
-        if out == "email":
-            if _SHEET_VEHICLE_RE.search(user_msg or ""):
-                steps.append({"kind": "sheet"})
-            elif _DOC_VEHICLE_RE.search(user_msg or ""):
-                steps.append({"kind": "doc"})
-        steps.append({"kind": out})
+        msg = user_msg or ""
+        # Chain detection is keyed on the USER's intent, NOT the planner's single
+        # intended_output pick: "write a mail to X through a sheet" is often
+        # classified intended_output=sheet, which would drop the email. If the
+        # message carries a SEND intent (mail/send/reply or a literal address) AND
+        # names a sheet/doc vehicle, build the dependent chain [vehicle, email]
+        # regardless of `out`.
+        has_send = bool(_SEND_INTENT_RE.search(msg)) or bool(re.search(r"[\w.+-]+@[\w.-]+\.\w+", msg))
+        vehicle = "sheet" if _SHEET_VEHICLE_RE.search(msg) else ("doc" if _DOC_VEHICLE_RE.search(msg) else None)
+        if vehicle and (has_send or out == "email"):
+            steps = [{"kind": vehicle}, {"kind": "email"}]
+        else:
+            steps.append({"kind": out})
     kept: List[Dict[str, Any]] = []
     dropped: List[str] = []
     for s in steps[:_EXECUTE_MAX_OWNERS]:

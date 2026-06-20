@@ -72,6 +72,7 @@ from .db import (
     update_trust,
 )
 from .hivemind_client import google_exec_emulated, org_members_emulated, recall_emulated
+from .hyper.engine import run_director
 
 log = logging.getLogger(__name__)
 
@@ -3178,6 +3179,143 @@ async def _orchestrate_agentic(
     return resp
 
 
+def _hyper_engine() -> str:
+    """Which room executor runs the turn. 'single' = the Groq native-tool-calling
+    director (default); 'swarm' = the legacy AgentScope multi-agent pipeline
+    (kept callable for rollback / A-B until cutover)."""
+    return (os.environ.get("HYPER_ENGINE", "single") or "single").strip().lower()
+
+
+def _derive_intended_output(user_message: str) -> str:
+    """Deterministic intent → output kind (same guards the agentic planner applies).
+    Drives the centralized producer; the director writes the actual content."""
+    m = user_message or ""
+    if _SEND_INTENT_RE.search(m) or re.search(r"[\w.+-]+@[\w.-]+\.\w+", m):
+        return "email"
+    if re.search(r"\b(spreadsheet|tracker|inventory|catalogue|catalog|sheet|table)\b", m, re.IGNORECASE):
+        return "sheet"
+    if re.search(r"\b(create|writ\w*|draft|build|make|generat\w*|compil\w*|prepare|document|report|doc)\b",
+                 m, re.IGNORECASE):
+        return "doc"
+    return "answer"
+
+
+async def _orchestrate_single_agent(
+    req: "RoomTurnRequest",
+    participants: List[Dict[str, Any]],
+    lead: Dict[str, Any],
+    enabled_connectors: List[str],
+    started: float,
+    room_template: str = "debate",
+) -> RoomTurnResponse:
+    """Single-director executor (HYPER_ENGINE=single). The Groq native-tool-calling
+    director gathers (recall/connectors) + debates (the room's personas) + writes the
+    synthesis; the EXISTING centralized producer + verify + approval-drain + seal turn
+    it into the real artifact. Same FE event contract + tenant scope as the legacy
+    swarm — only the executor changes. Reuses _produce_output / _verify_and_emit /
+    _register_and_emit_approvals so dead-end, recipient resolution and HITL are intact."""
+    conns = [str(c) for c in (enabled_connectors or [])]
+    _m_recon = (getattr(req, "agentic_model", None)
+                or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
+
+    async def _emit(ev: Dict[str, Any]) -> None:
+        await _emit_event(req.callback_url, req.turn_id, ev)
+
+    # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
+    #    react/swarm_verdict/line, the same events the FE already renders).
+    try:
+        result = await run_director(
+            user_message=req.user_message,
+            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+            participants=participants, room_template=room_template,
+            room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
+            director_model=getattr(req, "agentic_model", None),
+        )
+    except Exception as exc:  # noqa: BLE001 — never crash the turn
+        log.warning("[single] director failed: %s", exc)
+        await _emit({"t": "seal", "cost_tokens": 0, "status": "failed",
+                     "duration_ms": int((time.time() - started) * 1000)})
+        return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+
+    cost_tokens = int(result.get("cost_tokens") or 0)
+    final_text = str(result.get("final_text") or "")
+    transcript = result.get("transcript") or []
+    gather_count = int(result.get("gather_count") or 0)
+
+    # 2. PLAN — derive output kind + a plan dict the producer + verifier consume.
+    intended_output = _derive_intended_output(req.user_message)
+    done_txt = req.room_goal or req.user_message
+    contributions = [
+        {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",
+         "contribution": str(x.get("text") or "")}
+        for x in transcript if isinstance(x, dict)
+    ]
+    if not contributions:
+        contributions = [{"owner": lead.get("name") or lead.get("slug"),
+                          "subtask": (req.user_message or "")[:200], "contribution": final_text}]
+    await _emit({"t": "plan", "agent": lead.get("slug"), "intended_output": intended_output,
+                 "done_criterion": done_txt, "steps": [c["subtask"] for c in contributions],
+                 "assignments": {c["owner"]: c["subtask"] for c in contributions}})
+
+    _vc: List[Dict[str, Any]] = []
+    if intended_output == "email":
+        try:
+            _vc = await _resolve_recipients(req, req.user_message)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[single] resolve recipients failed: %s", exc)
+
+    _PLAN_BY_TURN[req.turn_id] = {
+        "intended_output": intended_output,
+        "done_criterion": done_txt,
+        "assignments": {c["owner"]: c["subtask"] for c in contributions},
+        "execution": contributions,
+        "verified_contacts": _vc,
+    }
+
+    # 3. PRODUCE (centralized, idempotent) → connector_logo + approval cards.
+    try:
+        await _produce_output(req, final_text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[single] produce failed: %s", exc)
+    artifacts = drain_artifacts()
+    for art in artifacts:
+        if art.get("url"):
+            await _emit({"t": "connector_logo", "connector": art.get("connector"),
+                         "url": art.get("url"), "title": art.get("title"),
+                         "label": art.get("label") or "Open"})
+    pending = drain_pending_writes()
+    if pending:
+        await _register_and_emit_approvals(req, pending)
+
+    # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent).
+    try:
+        await _verify_and_emit(req, lead, final_text=final_text,
+                               blackboard={"hit_count": gather_count}, model=_m_recon)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[single] verify failed: %s", exc)
+    _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
+    _gv = _vp.get("verification") or {}
+    status = "complete"
+    if _vp.get("dead_end"):
+        status = "blocked"
+    elif _gv and not _gv.get("grounded_ok"):
+        status = "escalated"
+
+    await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
+                 "duration_ms": int((time.time() - started) * 1000), "engine": "single"})
+    resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
+    if pending:
+        resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
+    if artifacts:
+        resp.artifacts = [a for a in artifacts if a.get("url")]
+    if isinstance(_gv, dict) and _gv:
+        resp.verification = _gv
+    log.info("[single] room=%s out=%s artifacts=%d status=%s cost=%d gather=%d tools=%d",
+             req.room_id, intended_output, len(artifacts), status, cost_tokens, gather_count,
+             int(result.get("tool_calls") or 0))
+    return resp
+
+
 async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     """Run one room turn. Emits JSONL events to the control-plane along
     the way, returns the final cost + status.
@@ -3327,6 +3465,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _ag_conns = []
+    # Executor swap point: 'single' = Groq native-tool-calling director (default),
+    # 'swarm' = legacy AgentScope pipeline (rollback). Everything above this line
+    # (tenant scope, participants, router/template/skeptic) is shared + unchanged.
+    if _hyper_engine() == "single":
+        return await _orchestrate_single_agent(req, participants, lead, _ag_conns, started, room_template)
     return await _orchestrate_agentic(req, participants, lead, _ag_conns, started, room_template)
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:

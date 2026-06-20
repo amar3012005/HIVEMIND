@@ -74,6 +74,18 @@ turn per phase on a throwaway tenant; deploy-verify after each ship.
 
 ---
 
+## PROGRESS / RESUME (live)
+- **2026-06-20:** Phase-0 harness BUILT + committed `c51ed972` (offline — prod box
+  unreachable, SSH timeout). Added `RoomTurnRequest.agentic_model` per-turn override
+  (api_hyper_rooms.py) + `employees-service/scripts/phase0/` (battery/run_battery/sweep/README).
+  Retry cron `e75ca678` (every 15 min) checks `ssh myserver`; resumes here on reconnect.
+- **NEXT (on reconnect), in order:**
+  1. Deploy: drift-check md5 → `scp api_hyper_rooms.py` → `docker restart hm-employees` → AST + health 200.
+  2. Get a real test room: `ROOM_ID`, `PARTICIPANT_IDS`, `USER_ID`, `ORG_ID` (Google connector enabled) — see scripts/phase0/README.
+  3. Run `scripts/phase0/sweep.sh "openai/gpt-oss-120b" "llama-3.3-70b-versatile" "anthropic/claude-haiku-4-5"` → read `/tmp/phase0/comparison.md`.
+  4. Decide action-path model from the table → then Phase 1 (collapse orchestrators), per phases below.
+  5. Delete retry cron `e75ca678` once an active session resumes.
+
 ## Non-negotiables (carried from prior decisions)
 - No owner re-arming UNTIL Phase-0 proves the model (Phase 4 is the earned version).
 - MiroFish = pattern to PORT, not a backend to bolt on (two Python backends = patchwork).

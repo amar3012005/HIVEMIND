@@ -2966,12 +2966,20 @@ async def _orchestrate_agentic(
             async def _redo_owner(i: int) -> Optional[Dict[str, Any]]:
                 c = contributions[i]
                 owner = next((p for p in participants if p.get("slug") == c["slug"]), participants[i % len(participants)])
+                # SHARED-BLACKBOARD (partial): the re-running owner now SEES what the
+                # other owners already gathered (trimmed) — so it builds on peers'
+                # facts + fills the gap instead of re-fetching what's already on the
+                # board. (Parallel owners can't see each other live; this 2nd pass can.)
+                _peers = "\n".join(f"- {x['owner']}: {(x.get('text') or '')[:300]}"
+                                   for j, x in enumerate(contributions) if j != i)[:2000]
                 try:
                     async with _exec_sem:
                         agent = _mk(owner, _EXECUTE_MAX_ITERS, searcher=True, model=_M_EXECUTE)
                         txt = await _agent_reply_resilient(agent, (
-                            f"{gathered_block}Your SUBTASK: {c['subtask']}\n\nYour earlier attempt had a GAP: "
-                            f"{_verdicts[i]['gap']}\nClose it now with grounded facts. {_gather_instructions}"))
+                            f"{gathered_block}Your SUBTASK: {c['subtask']}\n\n"
+                            f"Already on the room's board (teammates — do NOT re-fetch these):\n{_peers}\n\n"
+                            f"Your earlier attempt had a GAP: {_verdicts[i]['gap']}\nClose ONLY that gap with "
+                            f"grounded facts (use the board above for anything already found). {_gather_instructions}"))
                     return {"i": i, "text": txt} if txt else None
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[agentic] recon-redo %s failed: %s", c["slug"], exc)

@@ -1,0 +1,33 @@
+integrations:
+  personio-v2:
+    actions:
+      get-employees:
+        description: Fetch list of employees from Personio v2
+        output: Employee[]
+        input: GetEmployeesInput
+      get-employee:
+        description: Fetch a single employee by ID from Personio v2
+        output: Employee
+        input: GetEmployeeInput
+    syncs:
+      employees:
+        description: Sync all employees from Personio v2
+        output: Employee
+        sync_type: full
+        runs: every 1h
+
+models:
+  Employee:
+    id: integer
+    firstName: string
+    lastName: string
+    workEmail: string
+    role: string
+    department: string
+    managerId: integer
+  GetEmployeesInput:
+    updatedSince: string | undefined
+    limit: integer | undefined
+    offset: integer | undefined
+  GetEmployeeInput:
+    id: integer

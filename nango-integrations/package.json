@@ -1,0 +1,13 @@
+{
+  "name": "nango-integrations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nango action and sync functions for HIVEMIND connectors",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@nangohq/node": "^0.70.0",
+    "typescript": "^5.4.0"
+  }
+}

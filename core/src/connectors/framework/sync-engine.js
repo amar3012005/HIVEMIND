@@ -5,8 +5,11 @@
  * Handles checkpoint cursor persistence, retry/backoff, dead-letter, and telemetry.
  */
 
+import Redis from 'ioredis';
+
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 2000;
+
 
 export class SyncEngine {
   /**
@@ -30,7 +33,40 @@ export class SyncEngine {
     // when the lexical FTS path happens to match the query (poor recall for
     // exact-name lookups like "Vinil Audit AI" against rich synthesis rows).
     this.qdrantClient = qdrantClient || null;
-    this._dedupeCache = new Map(); // in-memory for now; can be Redis later
+    this._dedupeCache = new Map(); // in-memory dedup; Redis L1 added on top
+    // Instance-level Redis state — one client per SyncEngine instance for test isolation
+    this._dedupRedis = null;
+    this._dedupRedisInitTried = false;
+  }
+
+  /**
+   * Returns the Redis client used for L1 dedup caching, scoped to this instance.
+   * Returns null when REDIS_URL is unset or the connection cannot be established.
+   * All callers must treat null as "Redis unavailable" and degrade gracefully.
+   *
+   * @returns {import('ioredis').Redis|null}
+   */
+  _getDedupRedis() {
+    if (this._dedupRedis) return this._dedupRedis;
+    if (this._dedupRedisInitTried) return null;
+    this._dedupRedisInitTried = true;
+    const url = process.env.REDIS_URL;
+    if (!url) return null;
+    try {
+      this._dedupRedis = new Redis(url, {
+        lazyConnect: true,
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+      });
+      // TODO: migrate to structured logger once logger is imported in this file
+      this._dedupRedis.on('error', (err) => {
+        // structured warn — redis error does not block sync (graceful degrade to Map+Prisma)
+        console.warn('[sync-engine] Redis dedup unavailable:', err?.code || err?.message);
+      });
+      return this._dedupRedis;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -244,14 +280,14 @@ export class SyncEngine {
               }
 
               const sourceId = payload?.source_metadata?.source_id || adapter.dedupeKey(effectiveRecord);
-              if (await this._isDuplicate(sourceId, userId, provider)) {
+              if (await this._isDuplicate(sourceId, userId, provider, orgId)) {
                 telemetry.skipped++;
                 continue;
               }
 
               await this._ingestWithRetry(payload, sourceId, userId);
               telemetry.imported++;
-              this._markSeen(sourceId, userId, provider);
+              this._markSeen(sourceId, userId, provider, orgId);
 
               // Trigger decision capture asynchronously (non-blocking)
               this._triggerDecisionCapture(payload, provider, userId, orgId);
@@ -567,39 +603,67 @@ export class SyncEngine {
     });
   }
 
-  async _isDuplicate(dedupeKey, userId, provider) {
-    const cacheKey = `${userId}:${provider}:${dedupeKey}`;
-    if (this._dedupeCache.has(cacheKey)) return true;
+  async _isDuplicate(dedupeKey, userId, provider, orgId) {
+    const mapKey = `${orgId}:${userId}:${provider}:${dedupeKey}`;
 
-    // Check if a memory with this source_id already exists
+    // L0: in-process Map (fastest path, no I/O)
+    if (this._dedupeCache.has(mapKey)) return true;
+
+    // L1: Redis cache (shared across replicas, survives restarts)
+    const redis = this._getDedupRedis();
+    if (redis) {
+      try {
+        const redisKey = `dedup:${orgId}:${userId}:${provider}:${dedupeKey}`;
+        const hit = await redis.get(redisKey);
+        if (hit) return true;
+      } catch {
+        // Degrade to Prisma — Redis failure must never block sync
+      }
+    }
+
+    // L2: Prisma (source of truth for cross-restart dedup)
+    // Tenant-scoped via the Memory relation — SourceMetadata has no direct userId column.
     try {
       const existing = await this.prisma?.sourceMetadata?.findFirst({
         where: {
           sourceId: dedupeKey,
           sourcePlatform: provider,
+          memory: { userId, deletedAt: null }, // tenant scope via relation
         },
       });
       if (existing) {
-        this._dedupeCache.set(cacheKey, true);
+        this._dedupeCache.set(mapKey, true);
+        // Back-populate Redis from the confirmed scoped Prisma hit so subsequent replicas avoid the DB round-trip
+        if (redis) {
+          const redisKey = `dedup:${orgId}:${userId}:${provider}:${dedupeKey}`;
+          try { void Promise.resolve(redis.set(redisKey, '1', 'EX', 604800)).catch(() => {}); } catch { /* fire-and-forget, never block */ }
+        }
         return true;
       }
     } catch {
-      // If Prisma query fails, skip dedupe check
+      // If Prisma query fails, skip dedupe check rather than blocking import
     }
 
     return false;
   }
 
-  _markSeen(dedupeKey, userId, provider) {
-    const cacheKey = `${userId}:${provider}:${dedupeKey}`;
-    this._dedupeCache.set(cacheKey, true);
+  _markSeen(dedupeKey, userId, provider, orgId) {
+    const mapKey = `${orgId}:${userId}:${provider}:${dedupeKey}`;
+    this._dedupeCache.set(mapKey, true);
 
-    // Evict old entries if cache grows too large
+    // Evict old entries if the in-process Map grows too large (degraded-mode safety bound)
     if (this._dedupeCache.size > 50000) {
       const entries = [...this._dedupeCache.keys()];
       for (let i = 0; i < 10000; i++) {
         this._dedupeCache.delete(entries[i]);
       }
+    }
+
+    // Fire-and-forget Redis write — _markSeen stays synchronous
+    const redis = this._getDedupRedis();
+    if (redis) {
+      const redisKey = `dedup:${orgId}:${userId}:${provider}:${dedupeKey}`;
+      try { void Promise.resolve(redis.set(redisKey, '1', 'EX', 604800)).catch(() => {}); } catch { /* fire-and-forget, never block */ }
     }
   }
 

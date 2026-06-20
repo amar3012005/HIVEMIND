@@ -214,6 +214,8 @@ export class ConnectorStore {
         atlassian: 'atlassian', jira: 'atlassian', confluence: 'confluence',
         gmail: 'gmail', 'google-docs': 'google-docs', 'google-gemini': 'google-gemini',
         'google-drive': 'google-drive', 'google-calendar': 'google-calendar',
+        'personio-v2': 'personio-v2',
+        'personio': 'personio-v2',   // alias — Nango may send either key
       };
       const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
       try {
@@ -389,6 +391,8 @@ export class ConnectorStore {
       'google-gemini': 'google-gemini',
       'google-drive': 'google-drive',
       'google-calendar': 'google-calendar',
+      'personio-v2': 'personio-v2',
+      'personio': 'personio-v2',   // alias — Nango may send either key
     };
 
     // Nango-FIRST lookup. If user has a live Nango connection for this

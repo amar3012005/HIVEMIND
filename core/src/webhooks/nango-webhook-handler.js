@@ -39,13 +39,14 @@ const PROVIDER_ADAPTERS = {
   'notion-mcp': './connectors/providers/notion/adapter.js',
   github: './connectors/providers/github/adapter.js',
   linear: './connectors/providers/linear/adapter.js',
+  'personio-v2': './connectors/providers/personio-v2/adapter.js',
+  personio: './connectors/providers/personio-v2/adapter.js',
 };
 
 function verifyNangoSignature(rawBody, signatureHeader) {
   if (!NANGO_WEBHOOK_SECRET) {
-    // No secret configured — skip verification but log so it's obvious.
-    console.warn('[nango-webhook] NANGO_WEBHOOK_SECRET not set, accepting all');
-    return true;
+    // No secret configured — fail-close: reject all webhooks.
+    return false;
   }
   if (!signatureHeader || typeof signatureHeader !== 'string') return false;
   const expected = crypto

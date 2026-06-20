@@ -24,7 +24,25 @@ const MCP_ENDPOINTS = {
   linear: 'https://mcp.linear.app/mcp',
 };
 
-/** Nango provider_config_key per provider. */
+/**
+ * Nango provider_config_key per MCP live-tool provider.
+ *
+ * This dict covers providers that expose a live MCP HTTP endpoint and whose
+ * OAuth tokens are fetched from Nango at call time. Only add entries here
+ * when a provider has a real, reachable MCP endpoint (see MCP_ENDPOINTS above).
+ *
+ * Ingestion-only connectors — personio-v2, datev, sap-business-one — are
+ * intentionally NOT listed here. They have no live MCP endpoint; all token
+ * resolution for those connectors goes through connector-store.js (which reads
+ * nango_connection_id from the DB and calls the Nango proxy directly). Adding
+ * them here would be misleading and would silently break pool look-ups.
+ *
+ * To add a live Personio MCP tool endpoint in the future:
+ *   1. Confirm Personio publishes an MCP-compatible HTTP endpoint URL.
+ *   2. Add the URL to MCP_ENDPOINTS above: personio: '<endpoint-url>'.
+ *   3. Add the Nango config key here:       personio: 'personio-v2'.
+ *   4. Update getOrCreateClient() if the provider requires non-standard auth.
+ */
 const NANGO_KEY_BY_PROVIDER = {
   slack: 'slack',
   notion: 'notion',

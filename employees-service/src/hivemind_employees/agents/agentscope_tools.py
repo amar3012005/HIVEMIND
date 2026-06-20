@@ -298,6 +298,56 @@ def _post_slack_action(
         return r.json()
 
 
+# Static Personio v2 read-only tools — all reads, no writes; safe for agent use without approval
+PERSONIO_STATIC_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "personio_list_employees",
+        "description": (
+            "List employees from Personio HR. "
+            "Returns name, role, department, work email. Read-only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "updated_since": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime — only return employees updated after this date",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 50, max 200)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "personio_get_employee",
+        "description": (
+            "Get a single Personio employee by ID. "
+            "Returns name, role, department, work email. Read-only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Personio employee ID"},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "personio_list_departments",
+        "description": "List departments from Personio. Read-only.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "personio_list_positions",
+        "description": "List job positions/roles from Personio. Read-only.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+
 def _register_connector_tools(
     tk: Toolkit,
     connectors: List[str],
@@ -572,12 +622,64 @@ def _register_connector_tools(
             tk.register_tool_function(sheets_create, group_name="google_sheets")
             tk.register_tool_function(sheets_append, group_name="google_sheets")
 
+    def _register_nango_connector(provider_key: str, tools_list: List[Dict[str, Any]]) -> None:
+        """Generic Nango connector tool registrar. Routes all calls to /api/connectors/mcp/exec.
+        All tools are read-only by default; write tools MUST go through _gate_write().
+        Token is resolved server-side — never exposed to the agent process.
+        """
+        safe_group: str = provider_key.replace("-", "_")
+        tk.create_tool_group(
+            group_name=safe_group,
+            description=f"{provider_key} connector (Nango-backed, read-only).",
+            active=False,
+            notes=(
+                ", ".join(t["name"] for t in tools_list)
+                + " — all reads, no writes; safe for agent use without approval."
+            ),
+        )
+        for tool_spec in tools_list:
+            tool_name: str = tool_spec["name"]
+
+            def _make_nango_tool(name: str, spec: Dict[str, Any]) -> Any:
+                def tool_fn(**kwargs: Any) -> ToolResponse:
+                    payload = {
+                        "name": provider_key,
+                        "operation": {
+                            "type": "execute",
+                            "arguments": {"tool": name, **kwargs},
+                        },
+                    }
+                    try:
+                        with _client(api_key, user_id, org_id) as c:
+                            resp = c.post("/api/connectors/mcp/exec", json=payload)
+                            resp.raise_for_status()
+                            return _tool_response(resp.json().get("result", ""))
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Nango connector tool %s failed: %s", name, exc)
+                        return _tool_response_text(f"Error calling {name}: {exc}")
+
+                tool_fn.__name__ = name
+                tool_fn.__doc__ = spec.get("description", f"Nango connector tool: {name}")
+                return tool_fn
+
+            tk.register_tool_function(
+                _make_nango_tool(tool_name, tool_spec),
+                group_name=safe_group,
+            )
+
+    def _register_personio() -> None:
+        """Register Personio v2 HR tools for agent use. All tools are read-only."""
+        _register_nango_connector("personio-v2", PERSONIO_STATIC_TOOLS)
+
     for raw in connectors or []:
         conn = str(raw or "").strip()
         if not conn:
             continue
         if conn in ("gmail", "google_docs", "google_sheets"):
             _register_google(conn, read_only)
+            continue
+        if conn == "personio-v2":
+            _register_personio()
             continue
         safe = conn.replace("-", "_")
         tk.create_tool_group(

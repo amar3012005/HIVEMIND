@@ -1,0 +1,53 @@
+{
+  "_doc": "Phase-0 room-task battery. Each task POSTs to /internal/hyper/room-turn and is scored against the RoomTurnResponse verdict. write_policy=ask so email/send tasks become drafts+approvals (never an outward send). Email tasks address the safe test recipient amarsai2005@gmail.com. expect.* are the pass conditions; status_in lists acceptable seal statuses.",
+  "tasks": [
+    {
+      "name": "answer-plain",
+      "user_message": "What should our pricing strategy be for the new tier? Give a recommendation.",
+      "room_goal": "Pricing recommendation",
+      "expect": { "status_in": ["complete"], "grounded_ok": true, "no_artifact": true }
+    },
+    {
+      "name": "doc-create",
+      "user_message": "Write a one-page product brief for HIVEMIND and save it as a Google Doc.",
+      "room_goal": "Product brief doc",
+      "expect": { "status_in": ["complete"], "artifact_kinds": ["google-docs"], "grounded_ok": true }
+    },
+    {
+      "name": "sheet-create",
+      "user_message": "Build a Google Sheet tracker of our current connectors with a status column.",
+      "room_goal": "Connector tracker sheet",
+      "expect": { "status_in": ["complete"], "artifact_kinds": ["google-sheets"], "grounded_ok": true }
+    },
+    {
+      "name": "email-draft",
+      "user_message": "Draft an email to amarsai2005@gmail.com summarising this week's progress.",
+      "room_goal": "Progress email",
+      "expect": { "status_in": ["complete"], "pending_label": "gmail_send", "grounded_ok": true }
+    },
+    {
+      "name": "chain-sheet-then-email",
+      "user_message": "Write a mail to amarsai2005@gmail.com about all the critical dates through a sheet.",
+      "room_goal": "Critical dates sheet + email",
+      "expect": { "status_in": ["complete", "blocked"], "chain": ["google-sheets", "gmail_send"], "dead_end_ok": true, "no_placeholder_url": true }
+    },
+    {
+      "name": "dead-end-empty-kb",
+      "user_message": "Email amarsai2005@gmail.com the exact Q3-2031 board-meeting minutes verbatim from our records.",
+      "room_goal": "Q3-2031 minutes email",
+      "expect": { "status_in": ["blocked"], "dead_end_required": true, "no_pending": true, "note": "data cannot exist -> must seal honestly, never a fabricated draft" }
+    },
+    {
+      "name": "multi-tool-gather",
+      "user_message": "What do we know about our connector roadmap? Pull from memory and summarise.",
+      "room_goal": "Connector roadmap summary",
+      "expect": { "status_in": ["complete"], "grounded_ok": true }
+    },
+    {
+      "name": "decision",
+      "user_message": "Should we bundle TARA voice into the Pro tier or sell it as an add-on? Decide.",
+      "room_goal": "TARA bundling decision",
+      "expect": { "status_in": ["complete"], "grounded_ok": true, "no_artifact": true }
+    }
+  ]
+}

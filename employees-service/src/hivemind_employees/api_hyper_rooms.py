@@ -1729,6 +1729,11 @@ class RoomTurnRequest(BaseModel):
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
     write_policy: Optional[str] = None
+    # Phase-0 eval only: override the agentic orchestrator model for this turn
+    # (e.g. "openai/gpt-oss-120b", "llama-3.3-70b-versatile"). Master-key endpoint
+    # only; when unset the env default applies. Lets the model battery A/B without
+    # restarting the sidecar.
+    agentic_model: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -4755,7 +4760,8 @@ async def _orchestrate_agentic(
 
     # gpt-oss-120b drives nested tool schemas + structured output far more
     # reliably than 20b (the 400s/harmony leaks were a 20b-capability ceiling).
-    _agentic_model = os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
+    # Phase-0 eval may override per-turn (req.agentic_model) to A/B models.
+    _agentic_model = getattr(req, "agentic_model", None) or os.environ.get("HYPER_AGENTIC_MODEL", "openai/gpt-oss-120b")
 
     def _mk(emp: Dict[str, Any], iters: int, toolless: bool = False) -> ReActAgent:
         # Agents are READ/REASON only — recall + read tools (DEFAULT_HYPER_TOOLS).

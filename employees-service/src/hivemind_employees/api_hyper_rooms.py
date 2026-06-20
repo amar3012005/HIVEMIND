@@ -2019,7 +2019,7 @@ async def _verify_turn(
         f"EVIDENCE:\n{json.dumps(evidence, ensure_ascii=False)}\n\n"
         "Reply with STRICT JSON only (no prose, no markdown), exactly these keys:\n"
         '{\n'
-        '  "met": <true only if the done-criterion is fully satisfied by real evidence>,\n'
+        '  "met": <true when the deliverable SUBSTANTIVELY satisfies the user request — see the met rule (honest UNVERIFIED items do NOT block it)>,\n'
         '  "artifact_ok": <the intended output was actually produced or is queued for approval — see the strict rule below>,\n'
         '  "assignments_ok": <the assigned sub-tasks appear covered by the result>,\n'
         '  "grounded_ok": <specific factual claims are backed by tools/memory, not invented>,\n'
@@ -2042,11 +2042,15 @@ async def _verify_turn(
         "merely drafted, quoted, or described in the discussion does NOT count — e.g. a fully "
         "written-out email body with no actual send/draft is artifact_ok=false. When artifact_ok is "
         "false, say so in gaps.\n"
-        "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true. BUT met=true "
-        "ONLY if grounded_ok is also true AND gaps is empty. A queued draft that asserts UNGROUNDED "
-        "or INVENTED facts (names, roles, commitments, numbers not backed by memory/tools), or that "
-        "omits required content, is NOT done — set met=false and list the offending claim(s) in gaps "
-        "so it is reworked BEFORE the user approves it. Do not pass a known-flawed draft.\n"
+        "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true.\n"
+        "- met RULE (do NOT over-demand): met=true when the deliverable SUBSTANTIVELY satisfies the "
+        "user's ACTUAL request — i.e. grounded_ok=true AND artifact_ok=true AND assignments_ok=true "
+        "AND there is no BLOCKING gap. A BLOCKING gap is: a fabrication/invented fact, a MISSING "
+        "required artifact, or content the user EXPLICITLY demanded that is absent. UNVERIFIED items "
+        "and 'could be more complete / more sources / exhaustive' are COMPLETENESS gaps — list them "
+        "in gaps but they DO NOT block met, UNLESS the user's request explicitly required exhaustive / "
+        "ALL / complete / verbatim coverage. Honest UNVERIFIED labeling is a met-PASS, not a fail. Do "
+        "NOT set met=false merely because gaps is non-empty — only a BLOCKING gap makes met=false.\n"
         "- assignments_ok=true when assignments_executed covers the assigned owners (each ran their "
         "slice in the EXECUTE phase this turn) AND the final text reflects that work. Do NOT require "
         "more than the plan assigned.\n"
@@ -3029,6 +3033,24 @@ async def _orchestrate_agentic(
     reactors = [p for p in participants if (p.get("slug") or "") != (lead.get("slug") or "")][:3]
     final_text = draft
     converged = False
+    # Convergence by NOVELTY: skeptics keep re-raising the SAME unverifiable gap
+    # (e.g. "still no 2026 margins") every round → that's not progress, it's the
+    # same known gap. Track challenge "signatures" (significant-word sets); a round
+    # that raises no NOVEL challenge (≥60% token overlap with a prior one) converges
+    # — the open issues are already on the record. Stops burning rounds 2-3.
+    _seen_sigs: List[set] = []
+
+    def _novel_challenge(line: str) -> bool:
+        w = {t for t in re.sub(r"[^a-z0-9 ]", " ", (line or "").lower()).split() if len(t) > 4}
+        if not w:
+            return False
+        for s in _seen_sigs:
+            inter = len(w & s)
+            if inter and inter / max(1, min(len(w), len(s))) >= 0.6:
+                return False
+        _seen_sigs.append(w)
+        return True
+
     if draft and reactors:
         ragents = [_mk(p, 6, toolless=True, model=_M_REACTOR) for p in reactors]  # tool-less → clean react JSON
         for rnd in range(1, _SWARM_MAX_ROUNDS + 1):
@@ -3050,13 +3072,21 @@ async def _orchestrate_agentic(
                         })
                         if rr.get("agreement") == "challenge" and float(rr.get("confidence") or 0) >= _SWARM_CHALLENGE_CONF:
                             challenges.append(rr)
-            log.info("[swarm] room=%s round=%d/%d challenges=%d",
-                     req.room_id, rnd, _SWARM_MAX_ROUNDS, len(challenges))
+            new_challenges = [c for c in challenges if _novel_challenge(c.get("line", ""))]
+            log.info("[swarm] room=%s round=%d/%d challenges=%d novel=%d",
+                     req.room_id, rnd, _SWARM_MAX_ROUNDS, len(challenges), len(new_challenges))
             if not challenges:
                 converged = True
                 await _emit_event(req.callback_url, req.turn_id, {
                     "t": "swarm_verdict", "round": rnd, "converged": True})
                 break
+            if not new_challenges:
+                # Only repeats of already-recorded gaps → no progress; converge.
+                converged = True
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "swarm_verdict", "round": rnd, "converged": True, "reason": "no new challenges"})
+                break
+            challenges = new_challenges  # revise against the FRESH issues only
             # REVISE addressing THIS round's challenges; next round re-examines it.
             ch_block = "\n".join(f"- ({c.get('agreement')}, {c.get('confidence')}) {c.get('line')}"
                                  + (f" [gap: {c.get('gap')}]" if c.get("gap") else "") for c in challenges)

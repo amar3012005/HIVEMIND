@@ -2392,14 +2392,22 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
 
 def _derive_intended_output(user_message: str) -> str:
     """Deterministic intent → output kind (same guards the agentic planner applies).
-    Drives the centralized producer; the director writes the actual content."""
+    Drives the centralized producer; the director writes the actual content. An
+    explicit DOC word wins over an incidental 'table' (a doc may *contain* a table),
+    so 'a Google Doc with an options table' is a doc, not a sheet."""
     m = user_message or ""
     if _SEND_INTENT_RE.search(m) or re.search(r"[\w.+-]+@[\w.-]+\.\w+", m):
         return "email"
-    if re.search(r"\b(spreadsheet|tracker|inventory|catalogue|catalog|sheet|table)\b", m, re.IGNORECASE):
+    has_doc = re.search(r"\b(doc|document|brief|memo|report|write[\s-]?up|letter|one[\s-]?pager)\b",
+                        m, re.IGNORECASE)
+    has_sheet = re.search(r"\b(spreadsheet|sheet|tracker|inventory|catalogue|catalog)\b", m, re.IGNORECASE)
+    if has_doc and not has_sheet:
+        return "doc"
+    if has_sheet:
         return "sheet"
-    if re.search(r"\b(create|writ\w*|draft|build|make|generat\w*|compil\w*|prepare|document|report|doc)\b",
-                 m, re.IGNORECASE):
+    if re.search(r"\btable\b", m, re.IGNORECASE):  # bare 'table' with no doc word → a sheet
+        return "sheet"
+    if re.search(r"\b(create|writ\w*|draft|build|make|generat\w*|compil\w*|prepare)\b", m, re.IGNORECASE):
         return "doc"
     return "answer"
 

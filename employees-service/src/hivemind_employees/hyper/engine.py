@@ -40,22 +40,64 @@ log = logging.getLogger(__name__)
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Quality skills loaded WITHIN the call (model-driven, not pre-inserted) — the
-# functional equivalent of a Claude skill for the gpt-oss director.
+# functional equivalent of a Claude skill for the gpt-oss director. Each is a
+# concrete authoring CONTRACT the director writes to AFTER it calls load_skill;
+# the producer then renders the markdown into the real connector artifact (Google
+# Doc / Sheet / Gmail draft), so the markdown shape here drives the final quality.
 _SKILLS: Dict[str, str] = {
     "polished-doc": (
-        "POLISHED DOC: open with '# <specific Title>' + a 2-sentence executive summary; "
-        "'## Sections'; **bold** key figures/decisions; real markdown tables for any "
-        "comparative/numeric/schedule data; end with a 'Next steps' checklist. Flag "
-        "UNVERIFIED inline. No process narration."
+        "POLISHED DOC — write a publish-ready Google Doc in markdown:\n"
+        "• Open with '# <specific, descriptive Title>' (NOT the room goal), then a 2-3 sentence "
+        "executive summary that states the answer/recommendation up front.\n"
+        "• Structure with '## <Section>' (and '### ' sub-sections); lead each section with its point.\n"
+        "• **Bold** every key term, name, figure, date, and decision.\n"
+        "• For ANY numeric / comparative / cost / schedule / options data, USE A MARKDOWN TABLE — it "
+        "is drawn as a REAL Google Docs table. Syntax: a header row, then a '|---|---|' rule line, "
+        "then data rows. Prefer a table over inline figures.\n"
+        "• '- ' bullets for lists, '1. ' for ordered steps/timelines.\n"
+        "• Ground every specific in a recall/web/connector result; give a range if a figure is "
+        "uncertain; mark anything you could not confirm 'UNVERIFIED' inline and gather the open "
+        "items into a short '## Gaps to confirm' section.\n"
+        "• End with a concrete '## Next steps' checklist (owner + action). NO process narration, "
+        "NO placeholders, NO fabricated links — paste only REAL urls a tool returned."
     ),
     "polished-email": (
-        "POLISHED EMAIL: 'Subject:' line; one-line greeting by name; 2-4 tight sentences "
-        "(context → value → ask); one clear CTA; sign off. Put any REAL url inline; never "
-        "fabricate a link."
+        "POLISHED EMAIL — write a tight, professional email:\n"
+        "• 'Subject:' line — specific and informative (not generic like 'Update').\n"
+        "• One-line greeting addressing the recipient BY NAME.\n"
+        "• Body: 2-4 short sentences following context → value → the single ask. One clear CTA.\n"
+        "• Professional sign-off.\n"
+        "• Inline only REAL urls a tool returned — never invent a link, attachment, or 'see doc' "
+        "reference that does not exist.\n"
+        "• Do not state UNVERIFIED facts as certain; if a number is unconfirmed, soften or omit it. "
+        "Keep it skimmable — no walls of text, no process narration."
     ),
     "decision-brief": (
-        "DECISION BRIEF (DACI): 'DECISION:' one line; 'Why' (3-5 grounded bullets); "
-        "'Options considered' as a table; 'Risks / UNVERIFIED'; 'Owners & next steps'."
+        "DECISION BRIEF (DACI) — write a crisp decision memo in markdown:\n"
+        "• '# <Decision title>' then a one-line **DECISION:** statement up top.\n"
+        "• '## Context' — 1-2 sentences on why this decision, now.\n"
+        "• '## Options considered' — a markdown TABLE: | Option | Pros | Cons | Cost / risk | (one row "
+        "per real option, grounded).\n"
+        "• '## Rationale' — 3-5 grounded bullets citing the debate + recall/web evidence (name who "
+        "argued what when a debate happened).\n"
+        "• '## Risks & UNVERIFIED' — honest open items / assumptions, each flagged.\n"
+        "• '## Owners & next steps' — a TABLE: | Step | Owner | Timeline |. "
+        "No fabrication; ground or flag every figure."
+    ),
+    "polished-sheet": (
+        "POLISHED SHEET — output ONLY a single markdown table, nothing else:\n"
+        "• First row = column headers chosen to directly answer the ask; then a '|---|' rule line; "
+        "then one data row per item.\n"
+        "• One fact per cell; keep cells short; no prose, no commentary around the table.\n"
+        "• Ground every cell in a tool result; write '(UNVERIFIED)' in a cell you could not confirm "
+        "rather than inventing a value."
+    ),
+    "status-update": (
+        "STATUS UPDATE — concise, scannable, grounded:\n"
+        "• Group by area or by DONE / IN PROGRESS / BLOCKED (or YESTERDAY / TODAY / BLOCKERS for a "
+        "standup).\n"
+        "• One '- ' bullet per item, each with the concrete fact + owner where relevant.\n"
+        "• **Bold** blockers and dates. Flag anything UNVERIFIED. No filler, no narration."
     ),
 }
 
@@ -198,8 +240,9 @@ class Director:
                   "each other, with real skepticism) over 1-2 rounds and return the transcript. Call "
                   "this when the task needs a decision or genuine discussion before you conclude.",
                   {"topic": {"type": "string"}, "rounds": {"type": "integer"}}, ["topic"]),
-            _tool("load_skill", "Load a quality authoring skill before you write the final output. "
-                  "Available: polished-doc, polished-email, decision-brief.",
+            _tool("load_skill", "Load a quality authoring skill (a concrete format contract) right "
+                  "before you write the final output, then follow it exactly. Available: polished-doc, "
+                  "polished-email, decision-brief, polished-sheet, status-update.",
                   {"skill_name": {"type": "string"}}, ["skill_name"]),
         ]
         if self._web_budget > 0:
@@ -261,7 +304,8 @@ class Director:
                 return await self._debate(str(args.get("topic", "")), int(args.get("rounds", self.debate_max_rounds) or self.debate_max_rounds))
 
             if name == "load_skill":
-                return _SKILLS.get(str(args.get("skill_name", "")), "unknown skill — choose polished-doc, polished-email, or decision-brief")
+                return _SKILLS.get(str(args.get("skill_name", "")),
+                                   "unknown skill — choose one of: " + ", ".join(_SKILLS.keys()))
 
             return json.dumps({"error": f"unknown tool {name}"})
         except Exception as exc:  # noqa: BLE001 — surface as a tool error so the director adapts

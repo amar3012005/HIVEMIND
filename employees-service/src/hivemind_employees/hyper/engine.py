@@ -224,11 +224,19 @@ class Director:
         # JSON schemas the director sees + a route map name -> (bridge, provider, tool).
         self._connector_tools: List[Dict[str, Any]] = []
         self._connector_routes: Dict[str, tuple] = {}
+        # Token accounting by pipeline phase (for cost analysis). director = the
+        # gpt-oss-120b agentic loop (gather decisions + reading tool results +
+        # synthesis — grows as context accumulates); debate = persona sub-calls;
+        # web = compound web-search sub-calls. director_iters = per-loop-call totals.
+        self.tok_by: Dict[str, int] = {"director": 0, "debate": 0, "web": 0}
+        self.director_iters: List[int] = []
+        self._last_tok = 0
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
+        bucket: str = "director",
     ) -> Optional[Dict[str, Any]]:
         """One Groq chat call. Retries a 400 (malformed tool-call generation) once
         at a lower temperature per Groq's guidance. Returns the message dict or
@@ -263,7 +271,10 @@ class Director:
                     log.warning("[hyper-engine] groq %s: %s", r.status_code, r.text[:200])
                     return None
                 j = r.json()
-                self.tokens += int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+                t = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+                self.tokens += t
+                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+                self._last_tok = t
                 return j["choices"][0]["message"]
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 log.warning("[hyper-engine] groq transport error (attempt %d): %s", attempt, exc)
@@ -452,7 +463,9 @@ class Director:
                 log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
                 return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
             j = r.json()
-            self.tokens += int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            wt = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            self.tokens += wt
+            self.tok_by["web"] = self.tok_by.get("web", 0) + wt
             msg = j["choices"][0]["message"]
             answer = str(msg.get("content") or "")[:1500]
             sources: List[Dict[str, str]] = []
@@ -488,7 +501,7 @@ class Director:
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
-        ], model=self.persona_model, temp=min(0.7, 0.45 + 0.1 * round_no))
+        ], model=self.persona_model, temp=min(0.7, 0.45 + 0.1 * round_no), bucket="debate")
         text = (msg or {}).get("content") or "(no reply)"
         return {"slug": emp.get("slug") or emp.get("id"), "name": name, "lane": lane,
                 "is_skeptic": is_skeptic, "text": text}
@@ -578,6 +591,7 @@ class Director:
         for it in range(self.max_iters):
             force_text = it == self.max_iters - 1  # last turn: force a synthesis, never another tool round
             msg = await self._groq(messages, tools=tools, force_text=force_text)
+            self.director_iters.append(self._last_tok)
             if msg is None:
                 break
             messages.append(msg)
@@ -618,14 +632,19 @@ class Director:
 
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})
-        log.info("[hyper-engine] done calls=%d rounds=%d tokens=%d ms=%d gather=%d",
-                 tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000), self.gather_count)
+        log.info("[hyper-engine] done calls=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
+                 tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000),
+                 self.gather_count, self.tok_by, self.director_iters)
         return {
             "cost_tokens": self.tokens,
             "final_text": final_text,
             "transcript": self.transcript,
             "gather_count": self.gather_count,
             "tool_calls": tool_calls_made,
+            "tok_by": dict(self.tok_by),
+            "director_iters": list(self.director_iters),
+            "debate_rounds": self._round_seq,
+            "web_calls": self._web_calls,
         }
 
 

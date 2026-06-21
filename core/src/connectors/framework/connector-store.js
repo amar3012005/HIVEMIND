@@ -216,6 +216,13 @@ export class ConnectorStore {
         'google-drive': 'google-drive', 'google-calendar': 'google-calendar',
         'personio-v2': 'personio-v2',
         'personio': 'personio-v2',   // alias — Nango may send either key
+        'google-drive': 'google-drive',
+        gdrive: 'google-drive',
+        microsoft: 'microsoft',
+        'microsoft-365': 'microsoft',
+        microsoft365: 'microsoft',
+        salesforce: 'salesforce',
+        'salesforce-sandbox': 'salesforce-sandbox',
       };
       const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
       try {
@@ -393,6 +400,13 @@ export class ConnectorStore {
       'google-calendar': 'google-calendar',
       'personio-v2': 'personio-v2',
       'personio': 'personio-v2',   // alias — Nango may send either key
+      'google-drive': 'google-drive',
+      gdrive: 'google-drive',
+      microsoft: 'microsoft',
+      'microsoft-365': 'microsoft',
+      microsoft365: 'microsoft',
+      salesforce: 'salesforce',
+      'salesforce-sandbox': 'salesforce-sandbox',
     };
 
     // Nango-FIRST lookup. If user has a live Nango connection for this

@@ -41,6 +41,16 @@ const PROVIDER_ADAPTERS = {
   linear: './connectors/providers/linear/adapter.js',
   'personio-v2': './connectors/providers/personio-v2/adapter.js',
   personio: './connectors/providers/personio-v2/adapter.js',
+  atlassian: './connectors/providers/atlassian/adapter.js',
+  jira: './connectors/providers/atlassian/adapter.js',
+  confluence: './connectors/providers/atlassian/adapter.js',
+  'google-drive': './connectors/providers/gdrive/adapter.js',
+  gdrive: './connectors/providers/gdrive/adapter.js',
+  microsoft: './connectors/providers/microsoft/adapter.js',
+  'microsoft-365': './connectors/providers/microsoft/adapter.js',
+  microsoft365: './connectors/providers/microsoft/adapter.js',
+  salesforce: './connectors/providers/salesforce/adapter.js',
+  'salesforce-sandbox': './connectors/providers/salesforce/adapter.js',
 };
 
 function verifyNangoSignature(rawBody, signatureHeader) {

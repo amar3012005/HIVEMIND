@@ -347,6 +347,224 @@ PERSONIO_STATIC_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
+ATLASSIAN_STATIC_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "atlassian_list_issues",
+        "description": "List Jira issues matching a JQL query. Returns summary, status, priority, assignee. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "jql": {"type": "string", "description": "JQL query string (e.g. 'project=ENG AND status=Open')"},
+                "limit": {"type": "integer", "description": "Max results (default 50, max 100)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "atlassian_get_issue",
+        "description": "Get full details of a single Jira issue by key (e.g. ENG-123). Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "Jira issue key, e.g. ENG-123"},
+            },
+            "required": ["issue_key"],
+        },
+    },
+    {
+        "name": "atlassian_search_issues",
+        "description": "Full-text search across Jira issues. Returns matching issue keys and summaries. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Free-text search query"},
+                "limit": {"type": "integer", "description": "Max results (default 20)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "atlassian_list_pages",
+        "description": "List Confluence pages in a space. Returns title, url, last modified. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "space_key": {"type": "string", "description": "Confluence space key (e.g. ENG, MARKETING)"},
+                "limit": {"type": "integer", "description": "Max results (default 25)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "atlassian_get_page",
+        "description": "Get full content of a Confluence page by ID. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Confluence page ID"},
+            },
+            "required": ["page_id"],
+        },
+    },
+]
+
+GDRIVE_STATIC_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "gdrive_list_files",
+        "description": "List Google Drive files (Docs, Sheets, text). Returns name, mimeType, modifiedTime, webViewLink. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Drive query string (e.g. \"name contains 'budget'\")"},
+                "limit": {"type": "integer", "description": "Max results (default 25, max 100)"},
+                "page_token": {"type": "string", "description": "Pagination token from previous call"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "gdrive_get_file",
+        "description": "Get the text content of a Google Drive file by ID. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_id": {"type": "string", "description": "Google Drive file ID"},
+            },
+            "required": ["file_id"],
+        },
+    },
+    {
+        "name": "gdrive_search_files",
+        "description": "Full-text search across Google Drive files. Returns matching files with snippets. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "description": "Max results (default 20)"},
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+MICROSOFT_STATIC_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "microsoft_list_emails",
+        "description": "List recent Outlook emails. Returns subject, from, date, preview. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Folder name: inbox, sentItems, drafts (default: inbox)"},
+                "limit": {"type": "integer", "description": "Max results (default 25, max 100)"},
+                "since": {"type": "string", "description": "ISO 8601 datetime — only return emails after this date"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "microsoft_get_email",
+        "description": "Get full content of an Outlook email by message ID. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Outlook message ID"},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "microsoft_search_emails",
+        "description": "Full-text search across Outlook emails. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "description": "Max results (default 20)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "microsoft_list_calendar_events",
+        "description": "List upcoming Calendar events from Outlook. Returns title, start, end, attendees. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "description": "How many days ahead to fetch (default 14)"},
+                "limit": {"type": "integer", "description": "Max results (default 25)"},
+            },
+            "required": [],
+        },
+    },
+]
+
+SALESFORCE_STATIC_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "salesforce_list_accounts",
+        "description": "List Salesforce Accounts. Returns name, industry, type, website. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max results (default 25, max 100)"},
+                "query": {"type": "string", "description": "Optional name filter"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "salesforce_list_contacts",
+        "description": "List Salesforce Contacts. Returns name, email, title, account. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Filter by Salesforce Account ID"},
+                "limit": {"type": "integer", "description": "Max results (default 25, max 100)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "salesforce_list_opportunities",
+        "description": "List Salesforce Opportunities. Returns name, stage, amount, close date, account. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "stage": {"type": "string", "description": "Filter by stage name (e.g. Prospecting, Closed Won)"},
+                "limit": {"type": "integer", "description": "Max results (default 25, max 100)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "salesforce_search_records",
+        "description": "SOSL full-text search across Salesforce objects (Accounts, Contacts, Opportunities, Cases). Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search terms"},
+                "objects": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Object types to search (default: all). e.g. [\"Account\",\"Contact\"]",
+                },
+                "limit": {"type": "integer", "description": "Max results per object (default 10)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "salesforce_get_account",
+        "description": "Get full details of a single Salesforce Account by ID. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Salesforce Account ID"},
+            },
+            "required": ["account_id"],
+        },
+    },
+]
+
 
 def _register_connector_tools(
     tk: Toolkit,
@@ -680,6 +898,18 @@ def _register_connector_tools(
             continue
         if conn == "personio-v2":
             _register_personio()
+            continue
+        if conn in ("atlassian", "jira", "confluence"):
+            _register_nango_connector("atlassian", ATLASSIAN_STATIC_TOOLS)
+            continue
+        if conn in ("gdrive", "google-drive"):
+            _register_nango_connector("gdrive", GDRIVE_STATIC_TOOLS)
+            continue
+        if conn in ("microsoft", "microsoft365", "microsoft-365"):
+            _register_nango_connector("microsoft", MICROSOFT_STATIC_TOOLS)
+            continue
+        if conn in ("salesforce", "salesforce-sandbox"):
+            _register_nango_connector("salesforce", SALESFORCE_STATIC_TOOLS)
             continue
         safe = conn.replace("-", "_")
         tk.create_tool_group(

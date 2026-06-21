@@ -2311,6 +2311,11 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
         return
     if drain_artifacts() or drain_pending_writes():
         return  # already produced (idempotent)
+    # Re-evaluating from scratch: this call's outcome is authoritative. A PRIOR attempt
+    # that skipped (e.g. a cold connector-write that failed the first time, then this
+    # call succeeds) must NOT leave a stale dead-end that blocks a real deliverable.
+    plan.pop("dead_end", None)
+    plan.pop("produce_skips", None)
     steps = _derive_artifact_steps(plan, req.user_message or "")
     # A non-terminal doc/sheet step is a prerequisite the terminal step references.
     has_prereq_artifact = any(s.get("kind") in ("doc", "sheet") for s in steps[:-1])
@@ -2651,15 +2656,10 @@ async def _orchestrate_single_agent(
         await _produce_output(req, final_text)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] produce failed: %s", exc)
-    # Artifacts + approvals are drained + emitted ONCE by post_room_turn (the goalkeeper
-    # wrapper). Do NOT emit them here too — that double-posted the approval card. These
-    # drains are non-destructive snapshots, only for this turn's response + verify.
-    artifacts = drain_artifacts()
-    pending = drain_pending_writes()
 
-    # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent).
-    #    Pass the gathered facts (recall + connector/Gmail reads) so the verifier
-    #    doesn't flag connector-sourced claims as fabricated (it only saw memory_hits).
+    # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent — a cold
+    #    first produce that skipped is re-attempted here). Pass the gathered facts (recall +
+    #    connector/Gmail reads) so the verifier doesn't flag connector-sourced claims.
     try:
         await _verify_and_emit(req, lead, final_text=final_text,
                                blackboard={"hit_count": gather_count,
@@ -2667,6 +2667,10 @@ async def _orchestrate_single_agent(
                                model=_m_recon)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] verify failed: %s", exc)
+    # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
+    # idempotent retry is still counted. Non-destructive snapshots; post_room_turn emits.
+    artifacts = drain_artifacts()
+    pending = drain_pending_writes()
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
     _gv = _vp.get("verification") or {}
     status = "complete"

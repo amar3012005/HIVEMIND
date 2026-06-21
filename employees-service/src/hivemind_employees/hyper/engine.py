@@ -807,7 +807,7 @@ class Director:
         user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}\n\n"
                 "Write the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
-                               force_text=True, model=self.synth_model, bucket="director")
+                               force_text=True, model=self.synth_model, bucket="synth")
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
 

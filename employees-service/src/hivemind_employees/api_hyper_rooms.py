@@ -2263,13 +2263,20 @@ def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str
             steps.append({"kind": out})
     kept: List[Dict[str, Any]] = []
     dropped: List[str] = []
+    _enabled = plan.get("enabled_connectors")
     for s in steps[:_EXECUTE_MAX_OWNERS]:
         k = s.get("kind")
-        if k in _PRODUCERS:
-            if not kept or kept[-1].get("kind") != k:  # dedupe consecutive
-                kept.append(s)
-        elif k:
-            dropped.append(k)
+        if k not in _PRODUCERS:
+            if k:
+                dropped.append(k)
+            continue
+        # Capability gate: never keep a connector-backed step whose connector isn't
+        # toggled on for the room — calling it would hang on an absent/dead token.
+        if not _artifact_connector_enabled(k, _enabled):
+            dropped.append(f"{k} (connector not enabled)")
+            continue
+        if not kept or kept[-1].get("kind") != k:  # dedupe consecutive
+            kept.append(s)
     if dropped:
         plan["dropped_capabilities"] = sorted(set(dropped))
     return kept or [{"kind": "answer"}]
@@ -2508,6 +2515,28 @@ def _quality_models(mode: str) -> tuple:
     )
 
 
+# Each connector-backed artifact kind → the connector id(s) that can produce it. A doc/
+# sheet needs the Google bridge (any connected google* shares one token); email needs
+# Gmail; notion needs Notion. answer/decision need no connector. Used to gate production:
+# the room must NEVER call a connector it hasn't toggled on (it would hang on an absent/
+# dead token and block) — if the producing connector is off, deliver the text instead.
+_KIND_CONNECTOR: Dict[str, tuple] = {
+    "doc": ("google-docs", "google-drive", "gmail", "google"),
+    "sheet": ("google-docs", "google-drive", "gmail", "google"),
+    "email": ("gmail", "google"),
+    "notion": ("notion",),
+}
+
+
+def _artifact_connector_enabled(kind: str, enabled_connectors) -> bool:
+    """True if `kind` needs no connector, or its producing connector is toggled on."""
+    needed = _KIND_CONNECTOR.get(kind)
+    if not needed:
+        return True  # answer / decision — text deliverable, no connector required
+    en = {str(c).strip().lower().replace("_", "-") for c in (enabled_connectors or [])}
+    return any(rc in en for rc in needed)
+
+
 # Notion write-back: a create/save/publish verb pointed at Notion (within ~40 chars).
 # Requiring a WRITE verb keeps read intents — "summarize the Notion pages", "check if
 # Notion has X" — out (those stay 'answer'); only a create/save/publish → a Notion page.
@@ -2604,6 +2633,14 @@ async def _orchestrate_single_agent(
 
     # 2. PLAN — derive output kind + a plan dict the producer + verifier consume.
     intended_output = _derive_intended_output(req.user_message)
+    # Capability gate: a connector-backed artifact (doc/sheet→Google, email→Gmail,
+    # notion→Notion) can only be produced if that connector is TOGGLED ON for this room.
+    # If it isn't, downgrade to a TEXT answer — never call a connector the room didn't
+    # enable (it would hang on an absent/dead token and block a complete deliverable).
+    if not _artifact_connector_enabled(intended_output, conns):
+        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
+                 intended_output, req.room_id, conns)
+        intended_output = "answer"
     done_txt = req.room_goal or req.user_message
     contributions = [
         {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",
@@ -2649,6 +2686,7 @@ async def _orchestrate_single_agent(
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": contributions,
         "verified_contacts": _vc,
+        "enabled_connectors": conns,
     }
 
     # 3. PRODUCE (centralized, idempotent).

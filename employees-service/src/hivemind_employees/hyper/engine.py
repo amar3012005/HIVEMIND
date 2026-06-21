@@ -927,12 +927,21 @@ class Director:
             sysp = (f"You are {p['name']}, a {p['role']}. Background: {p['background']} Stance: {p['stance']}. "
                     f"Voice: {p['voice']}. Your prior take: {p['memory']}. Stay fully IN CHARACTER.")
             user = (f"TOPIC: {topic}\n\nSHARED CONTEXT (ground your take in it):\n{ctx[:2000]}\n\n"
-                    "Post your view in-character — one sharp, specific, grounded take (2-3 sentences). No preamble.")
+                    "Post your view in-character — one sharp, specific, grounded take (2-3 sentences), then on a "
+                    "NEW final line exactly: SENTIMENT: positive | negative | neutral (your overall sentiment "
+                    "toward the proposal/topic). No preamble.")
             async with sem:
                 msg = await self._groq_fb([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                           [_SIM_AGENT_MODEL] + _SIM_FALLBACKS, temp=0.7)
             txt = (msg or {}).get("content") or ""
-            return {"name": p["name"], "role": p["role"], "stance": p["stance"], "text": txt} if txt.strip() else None
+            if not txt.strip():
+                return None
+            m = re.search(r"sentiment:\s*(positive|negative|neutral)", txt, re.IGNORECASE)
+            sentiment = m.group(1).lower() if m else "neutral"
+            clean = re.sub(r"\n*\s*sentiment:\s*(positive|negative|neutral)\s*$", "", txt,
+                           flags=re.IGNORECASE).strip() or txt
+            return {"name": p["name"], "role": p["role"], "stance": p["stance"],
+                    "text": clean, "sentiment": sentiment}
 
         results = await asyncio.gather(*[one(p) for p in cast], return_exceptions=True)
         return [r for r in results if isinstance(r, dict) and r.get("text")]
@@ -977,9 +986,12 @@ class Director:
             payload = {"report": report, "ontology": [t["name"] for t in ontology],
                        "n_personas": len(cast), "n_posts": len(posts),
                        "role_mix": dict(Counter(p["role"] for p in posts).most_common(12)),
+                       # sentiment tally (positive/negative/neutral) → FE gauge + distribution.
+                       "sentiment_tally": dict(Counter(p.get("sentiment", "neutral") for p in posts)),
                        # ALL posts (capped) so the FE popup shows the whole simulation, not a teaser.
                        "posts": [{"name": p["name"], "role": p["role"], "stance": p.get("stance", ""),
-                                  "text": p["text"][:400]} for p in posts[:120]],
+                                  "sentiment": p.get("sentiment", "neutral"), "text": p["text"][:400]}
+                                 for p in posts[:120]],
                        "sample": [{"name": p["name"], "role": p["role"], "text": p["text"][:240]} for p in posts[:8]]}
             log.info("[hyper-engine] population-sim ok: %d personas, %d posts, report %d chars",
                      len(cast), len(posts), len(report))

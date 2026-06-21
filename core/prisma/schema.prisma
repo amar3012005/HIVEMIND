@@ -1476,6 +1476,14 @@ model HyperRoom {
   simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
   /// Population-Sim cast size (FE slider, 10-100). Default 24.
   simAgents          Int          @default(24) @map("sim_agents")
+  /// Self-evolving employees toggle (ADDITIONAL, opt-in). 'on' = after each turn the room
+  /// reflects each employee's contribution into its playbook and injects that playbook
+  /// before the employee speaks next turn (Loop 1: episodic playbook memory). 'off' (default)
+  /// leaves the turn untouched. Proven in scripts/swarm_spike/self_evolve_spike.py.
+  evoMode            String       @default("off") @map("evo_mode") @db.VarChar(16)
+  /// Per-employee learned playbooks: { "<slug>": ["lesson", ...] }. Outcome-distilled,
+  /// bounded, reversible. Stored here (NOT the vector KB) to avoid recall pollution.
+  evoPlaybooks       Json         @default("{}") @map("evo_playbooks")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

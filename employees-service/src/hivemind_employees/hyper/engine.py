@@ -164,6 +164,70 @@ _SIM_TYPES = max(3, min(20, int(os.environ.get("HYPER_SIM_TYPES", "8") or "8")))
 _SIM_CONCURRENCY = max(2, int(os.environ.get("HYPER_SIM_CONCURRENCY", "10") or "10"))
 _SIM_ON = {"on", "simulation", "additional", "true", "1", "yes"}
 
+# ── Self-evolving employees (Loop 1: episodic playbook memory) ──────────────
+# Proven before wiring (scripts/swarm_spike/self_evolve_spike.py): a weak 8B employee
+# that reflects each turn's outcome into a playbook and recalls it next turn lifted
+# UNSEEN held-out decisions from 0.354 → 0.669 (+0.315), closing 81% of the gap to being
+# told the rules outright. Fully ADDITIVE + flag-gated + wrapped: a failure is a no-op.
+_EVO_ON = {"on", "evolve", "true", "1", "yes"}
+_EVO_ENABLED = (os.environ.get("HYPER_EVOLVE_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+_EVO_REFLECT_MODEL = os.environ.get("HYPER_EVOLVE_REFLECT_MODEL", "openai/gpt-oss-20b")  # cheap coach call
+_EVO_RECALL_K = max(2, min(8, int(os.environ.get("HYPER_EVOLVE_RECALL_K", "5") or "5")))  # lessons injected
+_EVO_CAP = max(4, min(30, int(os.environ.get("HYPER_EVOLVE_CAP", "12") or "12")))          # max lessons/employee
+_EVO_CONCURRENCY = max(2, int(os.environ.get("HYPER_EVOLVE_CONCURRENCY", "5") or "5"))     # parallel reflections
+_EVO_WORD = re.compile(r"[a-z0-9]{4,}")
+
+
+def _evo_keywords(s: str) -> set:
+    return set(_EVO_WORD.findall((s or "").lower()))
+
+
+def _evo_recall(playbook: List[str], topic: str, k: int = _EVO_RECALL_K) -> List[str]:
+    """Lexical top-k playbook lessons for this topic + a recency floor (newest 2 always).
+    Mirror of the proven spike recall_playbook. Pure + safe — returns [] on empty."""
+    if not playbook:
+        return []
+    tk = _evo_keywords(topic)
+    scored = sorted(((len(tk & _evo_keywords(les)), -i, les) for i, les in enumerate(playbook)), reverse=True)
+    picked = [les for _, _, les in scored[:k]]
+    for les in playbook[-2:]:
+        if les not in picked:
+            picked.append(les)
+    return picked[:k + 2]
+
+
+def _evo_merge(playbook: List[str], new_lessons: List[str], cap: int = _EVO_CAP) -> List[str]:
+    """Append only non-duplicate lessons (Jaccard > 0.6 on keywords = dup → skip), bounded
+    by cap (drop oldest). Mirror of the proven spike dedupe_into. Returns the new list."""
+    out = list(playbook)
+    for les in new_lessons:
+        les = (les or "").strip()
+        if not les:
+            continue
+        lk = _evo_keywords(les)
+        if any(len(lk & _evo_keywords(ex)) / max(1, len(lk | _evo_keywords(ex))) > 0.6 for ex in out):
+            continue
+        out.append(les)
+    return out[-cap:]
+
+
+# Reflection output (the OUTCOME signal → distilled lessons). Generic, domain-agnostic
+# decision-quality dims (the same ones the synth prompt itself enforces) so it works in ANY
+# room, not just finance. Flat schema (no nested objects) → strict json_schema is happy.
+_EVO_REFLECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "grounded": {"type": "number"},     # used only context facts, flagged unverified
+        "specific": {"type": "number"},      # concrete + actionable, named a next step
+        "risk_aware": {"type": "number"},    # surfaced the key risk/unknown
+        "on_goal": {"type": "number"},       # addressed the actual question/goal
+        "concise": {"type": "number"},       # no filler
+        "lessons": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["grounded", "specific", "risk_aware", "on_goal", "concise", "lessons"],
+    "additionalProperties": False,
+}
+
 
 def _norm_connector(cid: str) -> str:
     return str(cid or "").strip().lower().replace("_", "-")
@@ -291,6 +355,8 @@ class Director:
         synth_model: Optional[str] = None,
         sim_mode: str = "off",
         sim_agents: int = 0,
+        evo_mode: str = "off",
+        evo_playbooks: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -341,6 +407,16 @@ class Director:
         self.sim_agents = max(10, min(100, int(sim_agents or _SIM_PERSONAS)))
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
+        # Self-evolving employees (Loop 1, additional + opt-in). evo_playbooks = the per-employee
+        # lessons learned in PRIOR turns of this room (injected before each speaks); _evo_updates =
+        # the merged playbooks this turn produces (the api layer persists them). Dormant unless
+        # the global env flag AND the room toggle are both on. Default off → turn untouched.
+        self.evo_mode = str(evo_mode or "off").strip().lower()
+        self.evo_active = _EVO_ENABLED and self.evo_mode in _EVO_ON
+        self.evo_playbooks: Dict[str, List[str]] = {
+            str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)
+        }
+        self._evo_updates: Optional[Dict[str, List[str]]] = None  # merged playbooks → returned for persist
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
         # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
         self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
@@ -667,9 +743,20 @@ class Director:
         bias = (" You are the SKEPTIC of this room — find the single weakest claim and challenge it hard "
                 "with specifics." if is_skeptic else "")
         ctx = "\n".join(self.blackboard)[:4000]
+        # Self-evolving (Loop 1): inject THIS employee's learned playbook — lessons distilled
+        # from its own past turns in this room — so it reflects them in this decision. Recall is
+        # lexical, scoped to the employee's slug, bounded. Dormant + empty unless evo is active.
+        evo_block = ""
+        if self.evo_active:
+            slug = emp.get("slug") or emp.get("id")
+            topic = f"{self.room_goal} {self.user_message} {prompt}"
+            lessons = _evo_recall(self.evo_playbooks.get(str(slug), []), topic)
+            if lessons:
+                evo_block = ("\nYOUR PLAYBOOK — lessons you learned from your past turns in this room. "
+                             "Apply every one:\n" + "\n".join(f"- {l}" for l in lessons))
         msg = await self._groq([
             {"role": "system", "content": (
-                f"You are {name}, a {lane} on this team.{bias} {sysp}\nRespond IN CHARACTER, CONCISELY "
+                f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
@@ -864,6 +951,91 @@ class Director:
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
 
+    # ── Self-evolving employees: Loop 1 reflection (ADDITIONAL, opt-in) ───
+    async def _evo_reflect(self, name: str, lane: str, contribution: str, final_text: str) -> List[str]:
+        """ONE cheap coach call = the outcome signal. Scores this employee's contribution on
+        generic decision-quality dims (vs the final deliverable as the bar) and distills 1-2
+        GENERAL, reusable lessons to apply next turn. Returns [] if the contribution was already
+        strong (don't write noise) or on any failure (never raises into the turn)."""
+        try:
+            sysp = (
+                "You are a performance coach for a team employee. Given the employee's contribution this turn "
+                "and the team's final deliverable, score the contribution 0.0-1.0 on each dimension (1.0=fully "
+                "met), then write 0-2 SHORT, GENERAL, reusable operating rules (imperative, <=18 words each) "
+                "that would make THIS employee more useful on FUTURE, DIFFERENT questions. Rules must be "
+                "transferable principles, never specific to this turn's facts. If the contribution is already "
+                "strong on every dimension, return an empty lessons list. Dimensions: grounded (used only given "
+                "context, flagged unverifiable), specific (concrete + named a next step), risk_aware (surfaced "
+                "the key risk/unknown), on_goal (addressed the actual question), concise (no filler).")
+            usr = (f"EMPLOYEE: {name} ({lane})\n\nTHEIR CONTRIBUTION THIS TURN:\n{contribution[:1800]}\n\n"
+                   f"THE TEAM'S FINAL DELIVERABLE (the quality bar):\n{final_text[:1800]}")
+            msg = await self._groq(
+                [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+                model=_EVO_REFLECT_MODEL, temp=0.3, bucket="evo", schema=_EVO_REFLECT_SCHEMA)
+            data = json.loads((msg or {}).get("content") or "{}")
+            dims = ["grounded", "specific", "risk_aware", "on_goal", "concise"]
+            scores = [float(data.get(d, 0.0) or 0.0) for d in dims]
+            # only learn when there's a real weakness (mirror the proven spike: no weak dim → no lesson)
+            if all(s >= 0.7 for s in scores):
+                return []
+            lessons = [str(x).strip() for x in (data.get("lessons") or []) if str(x).strip()]
+            return lessons[:2]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] evo reflect failed (non-fatal): %s", exc)
+            return []
+
+    async def _run_evo_reflection(self, final_text: str) -> None:
+        """After the turn seals: reflect each debating employee's contribution into its playbook.
+        Bounded-parallel, fully wrapped. Sets self._evo_updates = the merged playbooks (only the
+        slugs that changed) for the api layer to persist. A failure leaves _evo_updates None →
+        nothing persisted, turn unaffected."""
+        if not self.evo_active or not self.transcript:
+            return
+        try:
+            members = self.participants[:5]
+            # gather each employee's contributions this turn (joined across debate rounds)
+            def _contrib(nm: str) -> str:
+                return "\n".join(str(x.get("text") or "") for x in self.transcript
+                                 if isinstance(x, dict) and x.get("agent") == nm).strip()
+
+            targets = []
+            for emp in members:
+                name, lane, _ = _persona_fields(emp)
+                slug = str(emp.get("slug") or emp.get("id"))
+                contribution = _contrib(name)
+                if contribution:
+                    targets.append((slug, name, lane, contribution))
+            if not targets:
+                return
+
+            sem = asyncio.Semaphore(_EVO_CONCURRENCY)
+
+            async def _one(slug: str, name: str, lane: str, contribution: str):
+                async with sem:
+                    return slug, await self._evo_reflect(name, lane, contribution, final_text)
+
+            results = await asyncio.gather(*[_one(*t) for t in targets], return_exceptions=True)
+            updates: Dict[str, List[str]] = {}
+            learned = 0
+            for res in results:
+                if isinstance(res, Exception) or not res:
+                    continue
+                slug, lessons = res
+                if not lessons:
+                    continue
+                merged = _evo_merge(self.evo_playbooks.get(slug, []), lessons)
+                if merged != self.evo_playbooks.get(slug, []):
+                    updates[slug] = merged
+                    learned += len(lessons)
+            if updates:
+                # carry forward unchanged playbooks so the persisted map is complete
+                full = dict(self.evo_playbooks)
+                full.update(updates)
+                self._evo_updates = full
+                log.info("[hyper-engine] evo: %d lesson(s) learned across %d employee(s)", learned, len(updates))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)
+
     # ── Population-Sim (ADDITIONAL, opt-in) ───────────────────────────
     async def _groq_fb(self, messages: List[Dict[str, Any]], models: List[str], **kw: Any) -> Optional[Dict[str, Any]]:
         """Try each model until one returns usable content — the sim's rate-limit fallback
@@ -1044,6 +1216,11 @@ class Director:
 
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})
+        # PHASE 5 — SELF-EVOLVING REFLECTION (ADDITIONAL, opt-in). Runs AFTER the deliverable is
+        # emitted (never delays the user-visible answer). Reflects each employee's contribution into
+        # its playbook; the merged playbooks are returned for the api layer to persist. Fully wrapped.
+        if self.evo_active:
+            await self._run_evo_reflection(final_text)
         log.info("[hyper-engine] done plan+gather=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
                  tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000),
                  self.gather_count, self.tok_by, self.director_iters)
@@ -1061,6 +1238,7 @@ class Director:
             "gathered_emails": sorted(self.gathered_emails),
             "gather_facts": list(self.blackboard),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
+            "evo_updates": self._evo_updates,  # merged per-employee playbooks to persist (None unless learned)
         }
 
 
@@ -1081,14 +1259,17 @@ async def run_director(
     max_iters: int = 16,
     sim_mode: str = "off",
     sim_agents: int = 0,
+    evo_mode: str = "off",
+    evo_playbooks: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
-    {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
+    {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report, evo_updates}."""
     director = Director(
         user_message=user_message, user_id=user_id, org_id=org_id, project_id=project_id,
         participants=participants, room_template=room_template, room_goal=room_goal,
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
+        evo_mode=evo_mode, evo_playbooks=evo_playbooks,
     )
     return await director.run()

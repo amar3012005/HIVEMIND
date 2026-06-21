@@ -5820,6 +5820,7 @@ Write the persona now.`;
             quality_mode: r.qualityMode || 'auto',
             sim_mode: r.simMode || 'off',
             sim_agents: r.simAgents || 24,
+            evo_mode: r.evoMode || 'off',
             participant_ids: r.participantIds,
             participants: (r.participantIds || []).map(id => empById[id]).filter(Boolean),
             created_at: r.createdAt,
@@ -6056,13 +6057,14 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
         room.quality_mode = pr?.[0]?.quality_mode || 'auto';
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
+        room.evo_mode = pr?.[0]?.evo_mode || 'off';
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6216,6 +6218,16 @@ Write the persona now.`;
           );
           updated.sim_agents = n;
         } catch (e) { console.warn('[hyper-rooms] sim_agents update failed:', e.message); }
+      }
+      // Additive evo_mode column (self-evolving employees toggle). Same fail-safe raw-SQL pattern.
+      if (typeof body.evo_mode === 'string' && ['on', 'off'].includes(body.evo_mode)) {
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "evo_mode" = $1 WHERE "id" = $2::uuid',
+            body.evo_mode, roomId,
+          );
+          updated.evo_mode = body.evo_mode;
+        } catch (e) { console.warn('[hyper-rooms] evo_mode update failed:', e.message); }
       }
       return jsonResponse(res, { room: updated });
     }

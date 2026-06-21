@@ -361,6 +361,86 @@ async def get_room_sim_agents(room_id: str, org_id: Optional[str] = None) -> int
     return 24
 
 
+async def get_room_evo_mode(room_id: str, org_id: Optional[str] = None) -> str:
+    """Self-evolving employees toggle ('on' = reflect+inject per-employee playbooks,
+    else 'off'). Defaults to 'off' (graceful pre-migration: a missing column means the
+    additional feature is dormant and the turn runs untouched). org_id scopes the read."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT evo_mode FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT evo_mode FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["evo_mode"]:
+                return str(row["evo_mode"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_evo_mode fallback: %s", exc)
+    return "off"
+
+
+async def get_room_evo_playbooks(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
+    """Per-employee learned playbooks { "<slug>": ["lesson", ...] } for this room.
+    Empty dict if missing/pre-migration. org_id scopes the read so a foreign room_id
+    cannot leak another tenant's playbooks."""
+    import json as _json
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT evo_playbooks FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT evo_playbooks FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["evo_playbooks"]:
+                raw = row["evo_playbooks"]
+                pb = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+                if isinstance(pb, dict):
+                    return {str(k): [str(x) for x in v] for k, v in pb.items() if isinstance(v, list)}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_evo_playbooks fallback: %s", exc)
+    return {}
+
+
+async def update_room_evo_playbooks(
+    room_id: str, playbooks: Dict[str, list], org_id: Optional[str] = None
+) -> bool:
+    """Persist the merged per-employee playbooks for a room (Loop 1 write-back).
+    Best-effort: returns False (never raises) on any failure so a reflection write can
+    never break the turn that already sealed. org_id scopes the write."""
+    import json as _json
+    if not isinstance(playbooks, dict):
+        return False
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            payload = _json.dumps(playbooks)
+            if org_id is not None:
+                await conn.execute(
+                    "UPDATE hivemind.hyper_rooms SET evo_playbooks = $1::jsonb, updated_at = now() "
+                    "WHERE id = $2 AND org_id = $3::uuid",
+                    payload, room_id, org_id,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE hivemind.hyper_rooms SET evo_playbooks = $1::jsonb, updated_at = now() WHERE id = $2",
+                    payload, room_id,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update_room_evo_playbooks failed (non-fatal): %s", exc)
+    return False
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

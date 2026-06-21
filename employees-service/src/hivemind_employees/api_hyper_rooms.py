@@ -64,6 +64,9 @@ from .db import (
     get_room_quality_mode,
     get_room_sim_mode,
     get_room_sim_agents,
+    get_room_evo_mode,
+    get_room_evo_playbooks,
+    update_room_evo_playbooks,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -1635,6 +1638,9 @@ class RoomTurnRequest(BaseModel):
     # stored sim_mode is read. Optional so existing callers are unaffected (additive).
     sim_mode: Optional[str] = None
     sim_agents: Optional[int] = None  # population-sim cast size (10-100); per-turn override
+    # Self-evolving employees toggle ("on" reflects+injects per-employee playbooks). Per-turn
+    # override; else the room's stored evo_mode is read. Optional → existing callers unaffected.
+    evo_mode: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2626,8 +2632,23 @@ async def _orchestrate_single_agent(
             _sim_agents = await get_room_sim_agents(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _sim_agents = 24
-    log.info("[single] room=%s quality=%s sim=%s/%d models=(%s, %s, %s)",
-             req.room_id, _qmode, _sim_mode, _sim_agents, _dir_m, _per_m, _syn_m)
+    # Self-evolving employees (ADDITIONAL, opt-in) — req.evo_mode (eval override) wins, else the
+    # room's stored toggle. Defaults to 'off'. When on, load the room's per-employee playbooks so
+    # each employee gets its prior lessons injected this turn. Never raises (additive, dormant).
+    _evo_mode = str(getattr(req, "evo_mode", "") or "").strip().lower()
+    if not _evo_mode:
+        try:
+            _evo_mode = await get_room_evo_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _evo_mode = "off"
+    _evo_playbooks: Dict[str, list] = {}
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
+        try:
+            _evo_playbooks = await get_room_evo_playbooks(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _evo_playbooks = {}
+    log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks), _dir_m, _per_m, _syn_m)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2639,6 +2660,7 @@ async def _orchestrate_single_agent(
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
+            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2746,6 +2768,16 @@ async def _orchestrate_single_agent(
                  "tokens_cached": int(_io.get("cached", 0) or 0),
                  "tok_by": {k: int(v) for k, v in _tok_by.items()},
                  "quality_mode": _qmode})
+    # Self-evolving (Loop 1) write-back: persist the merged per-employee playbooks AFTER the seal
+    # (the user already has the answer — this never blocks the turn). Best-effort + scoped to org.
+    _evo_updates = result.get("evo_updates")
+    if isinstance(_evo_updates, dict) and _evo_updates:
+        try:
+            ok = await update_room_evo_playbooks(req.room_id, _evo_updates, org_id=req.org_id)
+            log.info("[single] room=%s evo playbooks persisted=%s employees=%d",
+                     req.room_id, ok, len(_evo_updates))
+        except Exception as exc:  # noqa: BLE001 — a learning write must never fail the turn
+            log.warning("[single] evo playbook persist failed (non-fatal): %s", exc)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

@@ -279,13 +279,32 @@ class Director:
         # cannot emit a tool call. (Sending tools + tool_choice="none" makes gpt-oss
         # call a tool anyway → 400 "Tool choice is none, but model called a tool".)
         max_attempts = 3
+        _nudged = False
         for attempt in range(max_attempts):
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
                     r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
                 if r.status_code == 400 and attempt < max_attempts - 1:
                     body["temperature"] = max(0.1, float(body.get("temperature", temp)) - 0.2)
-                    log.warning("[hyper-engine] groq 400, retrying lower temp: %s", r.text[:200])
+                    # gpt-oss harmony glitch: on a force_text (no-tools) call the decoder
+                    # can still emit a spurious tool-call token → 400 "Tool choice is none,
+                    # but model called a tool" / "tool_use_failed". Lowering temp alone often
+                    # doesn't stop it — inject a hard prose-only directive once so the model
+                    # writes the deliverable instead of (mis)calling a tool. (Only for
+                    # force_text: the gather loop WANTS tools, so it just retries cooler.)
+                    _txt = (r.text or "").lower()
+                    if (force_text and not _nudged and
+                            ("tool_use_failed" in _txt or "tool choice is none" in _txt
+                             or "was not in request.tools" in _txt)):
+                        body["messages"] = list(body["messages"]) + [{
+                            "role": "system",
+                            "content": ("Respond with the final deliverable as PLAIN TEXT only. "
+                                        "Do NOT call any tool or function and do NOT emit an "
+                                        "analysis/commentary channel — write the answer directly."),
+                        }]
+                        _nudged = True
+                    log.warning("[hyper-engine] groq 400, retrying lower temp%s: %s",
+                                " + prose-only nudge" if _nudged else "", r.text[:200])
                     continue
                 if r.status_code in (429, 500, 502, 503) and attempt < max_attempts - 1:
                     ra = (r.headers.get("retry-after") or "").strip()

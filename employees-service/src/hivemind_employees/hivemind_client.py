@@ -57,6 +57,12 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
     ) as c:
         body: Dict[str, Any] = {"query_context": query, "max_memories": max_memories}
         if project_id:
+            # project_id (snake) is the HARD scope: core forces the access context to this
+            # project and EXCLUDES other projects' memories (so a Solvis-project room never
+            # recalls SINGULANCE etc.). project/preferred_project alone were only a SOFT
+            # boost — they leaked cross-project. Keep them for container-tag mapping + intra-
+            # scope ranking, but project_id is what makes recall strictly project-scoped.
+            body["project_id"] = project_id
             body["project"] = project_id
             body["preferred_project"] = project_id
         r = await c.post("/api/recall", json=body)

@@ -177,6 +177,28 @@ def _tool(name: str, desc: str, props: Dict[str, Any], required: List[str]) -> D
     }
 
 
+def _flatten_for_text(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert tool-call STRUCTURE (assistant.tool_calls + role:tool) into plain text.
+    A force_text synthesis fed the raw tool-call transcript primes gpt-oss's harmony
+    decoder to keep emitting tool calls → repeated 400 'Tool choice is none, but model
+    called a tool', which no prose instruction overrides. Flattening keeps the
+    information (results as context) but removes the structure that triggers the tool
+    channel, so the model writes the deliverable as prose."""
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            out.append({"role": "user",
+                        "content": f"[tool result · {m.get('name') or 'tool'}] {str(m.get('content') or '')[:1600]}"})
+        elif role == "assistant" and m.get("tool_calls"):
+            names = ", ".join((tc.get("function") or {}).get("name", "?") for tc in (m.get("tool_calls") or []))
+            txt = (m.get("content") or "").strip()
+            out.append({"role": "assistant", "content": (txt + "\n" if txt else "") + f"[called: {names}]"})
+        else:
+            out.append(m)
+    return out
+
+
 def _persona_fields(emp: Dict[str, Any]) -> tuple[str, str, str]:
     name = emp.get("name") or emp.get("slug") or "Teammate"
     lane = emp.get("_lane") or emp.get("role_archetype") or "Communicator"
@@ -271,13 +293,16 @@ class Director:
         if not key:
             log.error("[hyper-engine] no Groq API key configured")
             return None
-        body: Dict[str, Any] = {"model": model or self.director_model, "messages": messages, "temperature": temp}
+        # force_text: OMIT tools AND flatten the tool-call transcript to plain text.
+        # gpt-oss's harmony decoder, primed by assistant.tool_calls/role:tool messages,
+        # keeps emitting tool calls on a no-tools call → repeated 400 "Tool choice is
+        # none, but model called a tool"; removing the structure (not just the tools) is
+        # what actually stops it.
+        msgs = _flatten_for_text(messages) if force_text else messages
+        body: Dict[str, Any] = {"model": model or self.director_model, "messages": msgs, "temperature": temp}
         if tools and not force_text:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        # force_text: OMIT tools entirely → the model writes text and physically
-        # cannot emit a tool call. (Sending tools + tool_choice="none" makes gpt-oss
-        # call a tool anyway → 400 "Tool choice is none, but model called a tool".)
         max_attempts = 3
         _nudged = False
         for attempt in range(max_attempts):

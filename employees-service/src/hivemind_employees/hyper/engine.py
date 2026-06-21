@@ -102,6 +102,18 @@ _SKILLS: Dict[str, str] = {
         "• One '- ' bullet per item, each with the concrete fact + owner where relevant.\n"
         "• **Bold** blockers and dates. Flag anything UNVERIFIED. No filler, no narration."
     ),
+    "notion-page": (
+        "NOTION PAGE — write publish-ready content the producer will create as a Notion page:\n"
+        "• Do NOT write a title line or '# Heading' first — the page title is set separately, so a "
+        "leading title would duplicate. Open with a 1-2 sentence summary that states the answer up front.\n"
+        "• Structure with '## <Section>' headings; lead each section with its point.\n"
+        "• '- ' bullets for lists, '1. ' for ordered steps; **bold** key terms, names, figures, dates.\n"
+        "• For ANY comparative / cost / options / schedule data, USE A MARKDOWN TABLE (header row, a "
+        "'|---|---|' rule, then data rows) — Notion renders it as a real table.\n"
+        "• Ground every specific in a recall/web/connector result; mark anything unconfirmed "
+        "'(UNVERIFIED)' inline and collect open items under a short '## Gaps to confirm'.\n"
+        "• NO process narration, NO placeholders, NO fabricated links — paste only REAL urls a tool returned."
+    ),
 }
 
 _GOOGLE_CONNECTORS = ("google-docs", "google_docs", "googledrive", "google-drive", "gmail", "google")
@@ -319,7 +331,7 @@ class Director:
                   {"topic": {"type": "string"}, "rounds": {"type": "integer"}}, ["topic"]),
             _tool("load_skill", "Load a quality authoring skill (a concrete format contract) right "
                   "before you write the final output, then follow it exactly. Available: polished-doc, "
-                  "polished-email, decision-brief, polished-sheet, status-update.",
+                  "polished-email, decision-brief, polished-sheet, status-update, notion-page.",
                   {"skill_name": {"type": "string"}}, ["skill_name"]),
         ]
         if self._web_budget > 0:

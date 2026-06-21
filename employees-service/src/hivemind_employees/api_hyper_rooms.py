@@ -67,7 +67,12 @@ from .db import (
     get_turn_seq,
     list_employees_by_ids,
 )
-from .hivemind_client import google_exec_emulated, org_members_emulated, recall_emulated
+from .hivemind_client import (
+    connector_exec_emulated,
+    google_exec_emulated,
+    org_members_emulated,
+    recall_emulated,
+)
 from .hyper.engine import run_director
 
 log = logging.getLogger(__name__)
@@ -2080,6 +2085,59 @@ async def _produce_sheet(req: "RoomTurnRequest", plan: Dict[str, Any],
     return {"skipped": "the Google Sheet could not be created"}
 
 
+def _extract_notion_url(res: Any) -> str:
+    """Pull the created-page URL out of an MCP exec result. The hosted Notion MCP
+    returns {result:{content:[{type:'text',text:'{"pages":[{"id","url",...}]}'}]}}.
+    Falls back to constructing the URL from the page id."""
+    try:
+        inner = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) else res
+        content = (inner or {}).get("content") if isinstance(inner, dict) else None
+        text = ""
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            text = content[0].get("text") or ""
+        else:
+            text = json.dumps(res) if isinstance(res, (dict, list)) else str(res or "")
+        m = re.search(r'"(?:public_url|url)"\s*:\s*"(https?://[^"]+)"', text)
+        if m:
+            return m.group(1)
+        m = re.search(r"https?://(?:www\.|app\.)?notion\.(?:so|com)/\S+", text)
+        if m:
+            return m.group(0).rstrip('".,)')
+        m = re.search(r'"id"\s*:\s*"([0-9a-fA-F-]{32,36})"', text)
+        if m:
+            return f"https://www.notion.so/{m.group(1).replace('-', '')}"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+@_register_producer("notion")
+async def _produce_notion(req: "RoomTurnRequest", plan: Dict[str, Any],
+                          step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Write the deliverable back to Notion as a new page (notion-create-pages via
+    the MCP bridge). New-page creation in the user's own workspace — same auto-produce
+    policy as docs_create/sheets_create (no HITL; outward SENDS are what HITL gates).
+    Honest-skips if Notion isn't connected (the bridge 401s)."""
+    body = ctx.get("body") or ""
+    title = step.get("title") or _derive_title(plan, body, req.room_goal or "Notion page")
+    # Drop a leading title line / '# Heading' so it isn't duplicated under the page title.
+    page_body = re.sub(r"^\s*(#\s+.*|(?:title|subject)\s*:.*)$", "", body, count=1,
+                       flags=re.IGNORECASE | re.MULTILINE).strip() or body
+    res = await connector_exec_emulated(
+        "notion", "notion-create-pages",
+        {"pages": [{"properties": {"title": title}, "content": page_body}]},
+        user_id=req.user_id, org_id=req.org_id)
+    url = _extract_notion_url(res)
+    if url:
+        record_artifact("notion", url, title=title, label=f"Open “{title}” in Notion")
+        log.info("[produce] notion page → %s", url)
+        return {"url": url, "title": title}
+    err = (res or {}).get("error") if isinstance(res, dict) else None
+    if err:
+        await _surface_produce_error(req, plan, "Notion page", err)
+    return {"skipped": "the Notion page could not be created (is Notion connected + the integration shared with a workspace?)"}
+
+
 # Fabricated placeholder links agents emit when they couldn't get a real URL —
 # stripped/replaced before a draft is queued so we never send an UNVERIFIED link.
 _PLACEHOLDER_URL_RE = re.compile(
@@ -2278,7 +2336,13 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
         log.warning("[produce] failed: %s", exc)
     # Honest dead-end: the TERMINAL deliverable could not be produced (missing
     # prerequisite / recipient / data). The seal reports what was searched + why.
-    if last_result.get("skipped"):
+    # BUT only when the terminal deliverable's artifact was genuinely NOT produced —
+    # a skip AFTER its artifact already exists (a duplicate/retry, or a trailing
+    # optional step) must never blank a real, delivered result (e.g. a created
+    # Notion page sealing as "blocked").
+    terminal_kind = steps[-1].get("kind") if steps else None
+    produced_kinds = {a.get("kind") for a in ctx["artifacts"]}
+    if last_result.get("skipped") and terminal_kind not in produced_kinds:
         plan["dead_end"] = {
             "reason": last_result["skipped"],
             "skips": skips,
@@ -2439,6 +2503,15 @@ def _quality_models(mode: str) -> tuple:
     )
 
 
+# Notion write-back: a create/save/publish verb pointed at Notion (within ~40 chars).
+# Requiring a WRITE verb keeps read intents — "summarize the Notion pages", "check if
+# Notion has X" — out (those stay 'answer'); only a create/save/publish → a Notion page.
+_NOTION_WRITE_RE = re.compile(
+    r"\b(?:writ\w*|creat\w*|mak\w*|sav\w*|add|adding|post\w*|publish\w*|put|push\w*|log\w*|"
+    r"record\w*|draft\w*|append\w*)\b[^.\n]{0,40}?\bnotion\b",
+    re.IGNORECASE)
+
+
 def _derive_intended_output(user_message: str) -> str:
     """Deterministic intent → output kind (same guards the agentic planner applies).
     Drives the centralized producer; the director writes the actual content. An
@@ -2447,6 +2520,10 @@ def _derive_intended_output(user_message: str) -> str:
     m = user_message or ""
     if _SEND_INTENT_RE.search(m) or re.search(r"[\w.+-]+@[\w.-]+\.\w+", m):
         return "email"
+    # Notion write-back: a create/save/publish intent aimed at Notion → a Notion
+    # page. A read intent ("check/search Notion") is NOT a write — it stays answer.
+    if _NOTION_WRITE_RE.search(m):
+        return "notion"
     has_doc = re.search(r"\b(doc|document|brief|memo|report|write[\s-]?up|letter|one[\s-]?pager)\b",
                         m, re.IGNORECASE)
     has_sheet = re.search(r"\b(spreadsheet|sheet|tracker|inventory|catalogue|catalog)\b", m, re.IGNORECASE)

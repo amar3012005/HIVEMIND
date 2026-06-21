@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
@@ -151,6 +152,18 @@ _CONNECTOR_TOOL_CAP = max(0, int(os.environ.get("HYPER_CONNECTOR_TOOL_CAP", "8")
 _MCP_TOOLS_PER_CONNECTOR = max(1, int(os.environ.get("HYPER_MCP_TOOLS_PER_CONNECTOR", "4") or "4"))
 _READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "lookup", "describe", "recent", "view")
 
+# ── Population-Sim (ADDITIONAL, opt-in) — a cheap many-voice social simulation that runs
+# AFTER gather and feeds its report into the synthesis. Modeled on MiroFish CSI. Bursts on
+# the cheap model with a fallback chain; the report on the strong synth model. All bounded +
+# wrapped so a failure NEVER breaks the main turn.
+_SIM_AGENT_MODEL = os.environ.get("HYPER_SIM_AGENT_MODEL", "llama-3.1-8b-instant")
+_SIM_FALLBACKS = [m.strip() for m in os.environ.get(
+    "HYPER_SIM_FALLBACKS", "openai/gpt-oss-20b,llama-3.3-70b-versatile").split(",") if m.strip()]
+_SIM_PERSONAS = max(4, min(150, int(os.environ.get("HYPER_SIM_PERSONAS", "24") or "24")))
+_SIM_TYPES = max(3, min(20, int(os.environ.get("HYPER_SIM_TYPES", "8") or "8")))
+_SIM_CONCURRENCY = max(2, int(os.environ.get("HYPER_SIM_CONCURRENCY", "10") or "10"))
+_SIM_ON = {"on", "simulation", "additional", "true", "1", "yes"}
+
 
 def _norm_connector(cid: str) -> str:
     return str(cid or "").strip().lower().replace("_", "-")
@@ -175,6 +188,26 @@ def _tool(name: str, desc: str, props: Dict[str, Any], required: List[str]) -> D
             "parameters": {"type": "object", "properties": props, "required": required},
         },
     }
+
+
+def _parse_json_loose(text: str) -> Any:
+    """Best-effort JSON from a model message (handles ```json fences + surrounding prose).
+    Used by the Population-Sim where 8b returns JSON without strict-schema enforcement."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(t)
+    except Exception:  # noqa: BLE001
+        m = re.search(r"(\{.*\}|\[.*\])", t, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:  # noqa: BLE001
+                return None
+    return None
 
 
 def _flatten_for_text(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -256,6 +289,7 @@ class Director:
         max_iters: int = 16,
         debate_max_rounds: int = 2,
         synth_model: Optional[str] = None,
+        sim_mode: str = "off",
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -300,6 +334,10 @@ class Director:
         self.tok_by: Dict[str, int] = {"director": 0, "debate": 0, "web": 0}
         self.director_iters: List[int] = []
         self._last_tok = 0
+        # Population-Sim (additional, opt-in). Default off — the main flow is untouched.
+        self.sim_mode = str(sim_mode or "off").strip().lower()
+        self._sim_report: Optional[str] = None       # folded into the synthesis when present
+        self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
         # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
         self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
@@ -800,16 +838,142 @@ class Director:
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")
+        # Additional: a population simulation's report (if it ran) is folded in so the final
+        # deliverable reflects the simulated stakeholder population — not just the room.
+        sim_ctx = (f"\n\nA POPULATION SIMULATION of synthetic stakeholder voices produced this report — "
+                   f"incorporate its consensus + fault lines where relevant:\n{self._sim_report[:2500]}"
+                   if self._sim_report else "")
         sysp = (self._system_prompt() + "\n\nYou are now WRITING THE FINAL DELIVERABLE from the gathered "
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED.")
-        user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}\n\n"
+        user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
                 "Write the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                force_text=True, model=self.synth_model, bucket="synth")
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
+
+    # ── Population-Sim (ADDITIONAL, opt-in) ───────────────────────────
+    async def _groq_fb(self, messages: List[Dict[str, Any]], models: List[str], **kw: Any) -> Optional[Dict[str, Any]]:
+        """Try each model until one returns usable content — the sim's rate-limit fallback
+        (8b → gpt-oss-20b → 70b). Metered under bucket 'sim'."""
+        msg = None
+        for m in models:
+            msg = await self._groq(messages, model=m, bucket="sim", **kw)
+            if msg and ((msg.get("content") or "").strip()):
+                return msg
+        return msg
+
+    async def _sim_ontology(self, topic: str, ctx: str) -> List[Dict[str, str]]:
+        sysp = ("Design the ONTOLOGY for a social-opinion simulation: the distinct TYPES of voices that "
+                "would realistically weigh in on the topic (stakeholders/archetypes — supporters, skeptics, "
+                "domain experts, investors, regulators, builders, journalists, affected end-users, "
+                "competitors). Maximize coverage of the opinion space; ground in the context. "
+                'Return ONLY JSON: {"entity_types":[{"name":str,"description":str,"typical_stance":str}]}')
+        user = f"TOPIC: {topic}\n\nCONTEXT:\n{ctx}\n\nDesign {_SIM_TYPES} distinct voice-types."
+        msg = await self._groq_fb([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                  [_SIM_AGENT_MODEL] + _SIM_FALLBACKS, temp=0.7)
+        data = _parse_json_loose((msg or {}).get("content") or "") or {}
+        raw = data.get("entity_types") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        types = [{"name": str(t.get("name"))[:50], "description": str(t.get("description") or "")[:160],
+                  "typical_stance": str(t.get("typical_stance") or "")[:120]}
+                 for t in (raw or []) if isinstance(t, dict) and t.get("name")]
+        return types[:_SIM_TYPES] or [{"name": "Stakeholder", "description": "a general participant", "typical_stance": "mixed"}]
+
+    async def _sim_cast(self, topic: str, ctx: str, ontology: List[Dict[str, str]], total: int) -> List[Dict[str, str]]:
+        n_types = max(1, len(ontology))
+        per, rem = divmod(total, n_types)
+
+        async def batch(etype: Dict[str, str], k: int) -> List[Dict[str, str]]:
+            if k <= 0:
+                return []
+            sysp = (f"Create {k} DISTINCT personas of the voice-type \"{etype['name']}\" "
+                    f"({etype['description']}; tends to: {etype['typical_stance']}) for a social simulation. "
+                    "They share the type but DIFFER (names, background, stance shade, voice). "
+                    'Return ONLY JSON: {"personas":[{"name":str,"stance":str,"background":str,"voice":str,'
+                    '"memory":str(prior take on this topic)}]}')
+            user = f"TOPIC: {topic}\n\nCONTEXT:\n{ctx[:1800]}\n\nCreate {k} distinct '{etype['name']}' personas."
+            msg = await self._groq_fb([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                      [_SIM_AGENT_MODEL] + _SIM_FALLBACKS, temp=0.9)
+            data = _parse_json_loose((msg or {}).get("content") or "") or {}
+            raw = data.get("personas") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            return [{"name": str(p["name"])[:40], "role": etype["name"], "stance": str(p.get("stance") or "")[:120],
+                     "background": str(p.get("background") or "")[:240], "voice": str(p.get("voice") or "")[:120],
+                     "memory": str(p.get("memory") or "")[:240]}
+                    for p in (raw or []) if isinstance(p, dict) and p.get("name")]
+
+        quotas = [per + (1 if i < rem else 0) for i in range(n_types)]
+        batches = await asyncio.gather(*[batch(t, q) for t, q in zip(ontology, quotas)], return_exceptions=True)
+        cast: List[Dict[str, str]] = []
+        for res in batches:
+            if isinstance(res, list):
+                cast.extend(res)
+        return cast
+
+    async def _sim_burst(self, topic: str, ctx: str, cast: List[Dict[str, str]], sem: asyncio.Semaphore
+                         ) -> List[Dict[str, Any]]:
+        async def one(p: Dict[str, str]) -> Optional[Dict[str, Any]]:
+            sysp = (f"You are {p['name']}, a {p['role']}. Background: {p['background']} Stance: {p['stance']}. "
+                    f"Voice: {p['voice']}. Your prior take: {p['memory']}. Stay fully IN CHARACTER.")
+            user = (f"TOPIC: {topic}\n\nSHARED CONTEXT (ground your take in it):\n{ctx[:2000]}\n\n"
+                    "Post your view in-character — one sharp, specific, grounded take (2-3 sentences). No preamble.")
+            async with sem:
+                msg = await self._groq_fb([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                          [_SIM_AGENT_MODEL] + _SIM_FALLBACKS, temp=0.7)
+            txt = (msg or {}).get("content") or ""
+            return {"name": p["name"], "role": p["role"], "stance": p["stance"], "text": txt} if txt.strip() else None
+
+        results = await asyncio.gather(*[one(p) for p in cast], return_exceptions=True)
+        return [r for r in results if isinstance(r, dict) and r.get("text")]
+
+    async def _sim_report_call(self, topic: str, ontology: List[Dict[str, str]], posts: List[Dict[str, Any]]) -> str:
+        roles = Counter(p["role"] for p in posts)
+        sample = "\n".join(f"- [{p['name']} · {p['role']} · {p['stance']}] {p['text'][:200]}" for p in posts[:50])
+        digest = {"n_voices": len(posts), "role_distribution": dict(roles.most_common(12)),
+                  "voice_types": [t["name"] for t in ontology]}
+        sysp = ("You are the lead analyst writing the report on a large-scale opinion simulation — a synthetic "
+                "population debated a question. Write a HIGH-LEVEL, decision-grade report:\n"
+                "1. **Executive read** — the net of what the population thinks.\n"
+                "2. **Consensus** — where they converge (+ which factions).\n"
+                "3. **Fault lines** — the real disagreements (a markdown table: faction vs position).\n"
+                "4. **Strongest argument per major faction.**\n"
+                "5. **Net signal + open gaps.**\nBe specific, no fluff, no process narration.")
+        user = (f"QUESTION: {topic}\n\nDIGEST: {json.dumps(digest, ensure_ascii=False)}\n\n"
+                f"REPRESENTATIVE VOICES ({min(50, len(posts))} of {len(posts)}):\n{sample}\n\nWrite the report.")
+        msg = await self._groq_fb([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                  [self.synth_model] + _SIM_FALLBACKS, temp=0.4, force_text=True)
+        return ((msg or {}).get("content") or "").strip()
+
+    async def _population_sim(self, topic: str) -> Optional[Dict[str, Any]]:
+        """ontology → population → parallel burst → strong-model report. Bounded + fully wrapped —
+        any failure returns None and the MAIN turn proceeds untouched (additive guarantee)."""
+        try:
+            ctx = "\n".join(self.blackboard)[:3000] or (self.room_goal or topic)
+            sem = asyncio.Semaphore(_SIM_CONCURRENCY)
+            await self.emit({"t": "typing", "agent": "swarm",
+                             "note": f"Simulating a population of ~{_SIM_PERSONAS} voices…"})
+            ontology = await self._sim_ontology(topic, ctx)
+            cast = await self._sim_cast(topic, ctx, ontology, _SIM_PERSONAS)
+            if len(cast) < 3:
+                log.warning("[hyper-engine] population-sim: too few personas (%d) — skipping", len(cast))
+                return None
+            posts = await self._sim_burst(topic, ctx, cast, sem)
+            if not posts:
+                return None
+            report = await self._sim_report_call(topic, ontology, posts)
+            if not report:
+                return None
+            payload = {"report": report, "ontology": [t["name"] for t in ontology],
+                       "n_personas": len(cast), "n_posts": len(posts),
+                       "role_mix": dict(Counter(p["role"] for p in posts).most_common(12)),
+                       "sample": [{"name": p["name"], "role": p["role"], "text": p["text"][:240]} for p in posts[:8]]}
+            log.info("[hyper-engine] population-sim ok: %d personas, %d posts, report %d chars",
+                     len(cast), len(posts), len(report))
+            return payload
+        except Exception as exc:  # noqa: BLE001 — additive: never break the main turn
+            log.warning("[hyper-engine] population-sim failed (skipped): %s", exc)
+            return None
 
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
@@ -826,6 +990,14 @@ class Director:
         plan = await self._plan_gather()
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
         tool_calls_made = await self._run_gather(plan)
+        # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
+        # report the FE shows as a hideable popup, and feeds that report into the synthesis. Fully
+        # wrapped — a failure just skips it; the main turn (debate + synth) is never affected.
+        if self.sim_mode in _SIM_ON:
+            self._sim_payload = await self._population_sim(self.room_goal or self.user_message or "")
+            if self._sim_payload:
+                self._sim_report = self._sim_payload.get("report")
+                await self.emit({"t": "sim_report", **self._sim_payload})
         # PHASE 3 — DEBATE (the multi-agent product). Convene only when the plan judges the
         # task needs a decision/judgment/discussion — a pure lookup skips it (faster, on-point).
         forced_debate = False
@@ -863,6 +1035,7 @@ class Director:
             "io": dict(self.io),
             "gathered_emails": sorted(self.gathered_emails),
             "gather_facts": list(self.blackboard),
+            "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
         }
 
 
@@ -881,14 +1054,15 @@ async def run_director(
     persona_model: Optional[str] = None,
     synth_model: Optional[str] = None,
     max_iters: int = 16,
+    sim_mode: str = "off",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
-    {cost_tokens, final_text, transcript, gather_count, tool_calls}."""
+    {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
     director = Director(
         user_message=user_message, user_id=user_id, org_id=org_id, project_id=project_id,
         participants=participants, room_template=room_template, room_goal=room_goal,
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
-        max_iters=max_iters,
+        max_iters=max_iters, sim_mode=sim_mode,
     )
     return await director.run()

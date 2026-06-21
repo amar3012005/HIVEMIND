@@ -5818,6 +5818,7 @@ Write the persona now.`;
             goal: r.goal || '',
             template: r.template,
             quality_mode: r.qualityMode || 'auto',
+            sim_mode: r.simMode || 'off',
             participant_ids: r.participantIds,
             participants: (r.participantIds || []).map(id => empById[id]).filter(Boolean),
             created_at: r.createdAt,
@@ -6054,11 +6055,12 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
         room.quality_mode = pr?.[0]?.quality_mode || 'auto';
+        room.sim_mode = pr?.[0]?.sim_mode || 'off';
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6190,6 +6192,17 @@ Write the persona now.`;
           );
           updated.quality_mode = body.quality_mode;
         } catch (e) { console.warn('[hyper-rooms] quality_mode update failed:', e.message); }
+      }
+      // Additive sim_mode column (Population-Sim toggle). Same raw-SQL pattern so a
+      // missing column / pre-migration never 500s the PATCH.
+      if (typeof body.sim_mode === 'string' && ['on', 'off'].includes(body.sim_mode)) {
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "sim_mode" = $1 WHERE "id" = $2::uuid',
+            body.sim_mode, roomId,
+          );
+          updated.sim_mode = body.sim_mode;
+        } catch (e) { console.warn('[hyper-rooms] sim_mode update failed:', e.message); }
       }
       return jsonResponse(res, { room: updated });
     }

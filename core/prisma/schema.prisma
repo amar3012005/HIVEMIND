@@ -1471,6 +1471,9 @@ model HyperRoom {
   /// LLM quality mode: 'auto' (multi-model — cheap gather+debate, strong 120b synthesis)
   /// or 'best' (all gpt-oss-120b). Read by the sidecar to pick the model combo.
   qualityMode        String       @default("auto") @map("quality_mode") @db.VarChar(16)
+  /// Additional Population-Sim toggle: 'on' runs an extra many-voice social simulation that
+  /// produces a popup report folded into the synthesis; 'off' (default) leaves the main flow untouched.
+  simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

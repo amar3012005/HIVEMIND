@@ -62,6 +62,7 @@ from .db import (
     get_permanent_skeptic_id,
     get_room_enabled_connectors,
     get_room_quality_mode,
+    get_room_sim_mode,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -1629,6 +1630,9 @@ class RoomTurnRequest(BaseModel):
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
     room_goal: Optional[str] = None
+    # Additional Population-Sim toggle ("on" runs it). Per-turn override; else the room's
+    # stored sim_mode is read. Optional so existing callers are unaffected (additive).
+    sim_mode: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2606,7 +2610,16 @@ async def _orchestrate_single_agent(
         except Exception:  # noqa: BLE001
             _qmode = "auto"
         _dir_m, _per_m, _syn_m = _quality_models(_qmode)
-    log.info("[single] room=%s quality=%s models=(%s, %s, %s)", req.room_id, _qmode, _dir_m, _per_m, _syn_m)
+    # Population-sim mode (ADDITIONAL, opt-in) — req.sim_mode (eval override) wins, else the
+    # room's stored toggle. Defaults to 'off' so the main flow is untouched. Never raises.
+    _sim_mode = str(getattr(req, "sim_mode", "") or "").strip().lower()
+    if not _sim_mode:
+        try:
+            _sim_mode = await get_room_sim_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _sim_mode = "off"
+    log.info("[single] room=%s quality=%s sim=%s models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _dir_m, _per_m, _syn_m)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2617,6 +2630,7 @@ async def _orchestrate_single_agent(
             participants=participants, room_template=room_template,
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
+            sim_mode=_sim_mode,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

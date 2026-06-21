@@ -316,6 +316,29 @@ async def get_room_quality_mode(room_id: str, org_id: Optional[str] = None) -> s
     return "auto"
 
 
+async def get_room_sim_mode(room_id: str, org_id: Optional[str] = None) -> str:
+    """Return the room's population-sim mode ('on' = run the additional population simulation,
+    else 'off'). Defaults to 'off' (graceful pre-migration: the additional feature is opt-in,
+    so a missing column simply means the main flow runs untouched). org_id scopes the read."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT sim_mode FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT sim_mode FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["sim_mode"]:
+                return str(row["sim_mode"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_sim_mode fallback: %s", exc)
+    return "off"
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

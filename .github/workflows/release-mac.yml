@@ -43,6 +43,7 @@ jobs:
         env:
           REACT_APP_CONTROL_PLANE_URL: https://api.hivemind.davinciai.eu:8040
           REACT_APP_CORE_API_URL: https://core.hivemind.davinciai.eu:8050
+          REACT_APP_HIVEMIND_SITE_HOST: electron
           CI: false
         run: npm run build
 

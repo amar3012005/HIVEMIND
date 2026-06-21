@@ -89,3 +89,4 @@ core/src/tara/hivemind-agent/
 # autonomous goal-loop runtime sentinels (transient)
 .claude/loop/ACTIVE
 .claude/loop/PAUSE
+.claude/worktrees/

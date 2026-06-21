@@ -18,8 +18,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Checkout Da-vinci submodule
+        run: |
+          git submodule update --init --recursive -- frontend/Da-vinci
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

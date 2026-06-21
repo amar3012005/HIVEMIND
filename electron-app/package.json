@@ -23,7 +23,7 @@
     "copyright": "Copyright © 2026 HIVEMIND",
     "mac": {
       "category": "public.app-category.productivity",
-      "icon": "assets/icon.icns",
+      "icon": "assets/icon.png",
       "target": [
         {
           "target": "dmg",
@@ -42,8 +42,6 @@
     },
     "dmg": {
       "title": "HIVEMIND",
-      "icon": "assets/icon.icns",
-      "background": "assets/dmg-background.png",
       "window": {
         "width": 540,
         "height": 380

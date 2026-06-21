@@ -147,7 +147,9 @@ async def connector_exec_emulated(
     {"error": ...} on failure so the director can adapt rather than crash."""
     settings = get_settings()
     headers = _emulated_headers(api_key, user_id, org_id)
-    payload = {"name": name, "operation": {"type": "execute", "arguments": {"tool": tool, **(arguments or {})}}}
+    # MCP runner expects operation.type "tool" (the tool name in operation.name, its
+    # args in operation.arguments). "execute" → 400 "Unsupported MCP operation type".
+    payload = {"name": name, "operation": {"type": "tool", "name": tool, "arguments": (arguments or {})}}
     try:
         async with httpx.AsyncClient(
             base_url=settings.hivemind_core_url,

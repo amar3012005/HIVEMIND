@@ -1,0 +1,88 @@
+{
+  "name": "hivemind",
+  "version": "1.0.0",
+  "description": "HIVEMIND — AI Memory & HyperAgent Platform",
+  "main": "src/main.js",
+  "author": "amarsai3012005",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "ELECTRON_IS_DEV=1 electron .",
+    "build:react": "cd ../frontend/Da-vinci && npm run build",
+    "copy:react": "rm -rf react-build && cp -r ../frontend/Da-vinci/build react-build",
+    "prebuild": "npm run build:react && npm run copy:react",
+    "build": "electron-builder build --mac",
+    "build:arm64": "electron-builder build --mac --arm64",
+    "build:x64": "electron-builder build --mac --x64",
+    "build:universal": "electron-builder build --mac --universal",
+    "dist": "npm run prebuild && electron-builder build --mac --publish=never"
+  },
+  "build": {
+    "appId": "eu.davinciai.hivemind",
+    "productName": "HIVEMIND",
+    "copyright": "Copyright © 2026 HIVEMIND",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["universal"]
+        },
+        {
+          "target": "zip",
+          "arch": ["universal"]
+        }
+      ],
+      "darkModeSupport": true,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "dmg": {
+      "title": "HIVEMIND",
+      "icon": "assets/icon.icns",
+      "background": "assets/dmg-background.png",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "files": [
+      "src/**/*",
+      "react-build/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "amar3012005",
+      "repo": "HIVEMIND"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.4"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

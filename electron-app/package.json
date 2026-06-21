@@ -1,6 +1,6 @@
 {
   "name": "hivemind",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "HIVEMIND — AI Memory & HyperAgent Platform",
   "main": "src/main.js",
   "author": "amarsai3012005",

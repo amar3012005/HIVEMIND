@@ -79,6 +79,7 @@ jobs:
           files: |
             electron-app/dist/*.dmg
             electron-app/dist/*.zip
+            electron-app/dist/*.yml
           draft: false
           prerelease: false
           generate_release_notes: true

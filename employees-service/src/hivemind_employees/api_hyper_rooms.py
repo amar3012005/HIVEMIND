@@ -1857,6 +1857,7 @@ async def _verify_turn(
         "writes_pending_approval": [p.get("label") for p in pending],
         "produced_artifacts": produced,
         "memory_hits": int((blackboard or {}).get("hit_count", 0) or 0),
+        "gathered_facts": [str(f)[:200] for f in ((blackboard or {}).get("facts") or [])][:24],
         "final_excerpt": (final_text or "")[:1600],
     }
     prompt = (
@@ -1901,8 +1902,12 @@ async def _verify_turn(
         "slice in the EXECUTE phase this turn) AND the final text reflects that work. Do NOT require "
         "more than the plan assigned.\n"
         "- grounded_ok is a FABRICATION check ONLY — it does NOT measure completeness or HOW MANY "
-        "items are unverified. DECISION RULE: grounded_ok=TRUE unless the text states a specific fact "
-        "AS TRUE that BOTH (a) has NO backing in a memory_hit / tool result AND (b) is NOT labeled "
+        "items are unverified. 'Backing' = a memory_hit OR a `gathered_facts` entry (what the team "
+        "actually READ this turn from memory AND connectors — Gmail/Docs/Sheets/Drive). A claim backed "
+        "by a gathered_fact (e.g. an email body, poem, thread, doc the team read) is GROUNDED even if "
+        "it is not a memory_hit — connector reads ARE evidence. DECISION RULE: grounded_ok=TRUE unless "
+        "the text states a specific fact AS TRUE that BOTH (a) has NO backing in a memory_hit / "
+        "gathered_fact / tool result AND (b) is NOT labeled "
         "UNVERIFIED / unknown / 'not found'. The COUNT of UNVERIFIED-labeled items is IRRELEVANT to "
         "grounded_ok — a deliverable that honestly labels even 20 items UNVERIFIED is grounded_ok=TRUE "
         "(those are completeness gaps → list in gaps + met=false, but NOT grounded_ok=false). When in "
@@ -2363,27 +2368,51 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
             continue
         if not any(r["email"].lower() == low for r in resolved):
             resolved.append({"name": addr.split("@")[0], "email": addr, "source": "explicit"})
+    _generic = ("the", "european", "summit", "team", "everyone", "all", "her", "him", "them", "us", "you")
     cands: List[str] = []
     for m in _RECIPIENT_RE.finditer(msg):
         nm = re.sub(r"^(Dr|Mr|Ms|Mrs)\.?\s+", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
         # Drop generic words that capitalize after "to/for" (e.g. "European").
-        if nm and nm.lower() not in ("the", "european", "summit", "team", "everyone", "all") and nm not in cands:
+        if nm and nm.lower() not in _generic and nm not in cands:
+            cands.append(nm)
+    # Also catch "write/tell/draft/message <Name>" — no to/email trigger word, e.g.
+    # "write Rama a document" (the original bug: this recipient was never extracted).
+    for m in re.finditer(r"\b(?:write|tell|draft|message|ping|notify)\s+([A-Z][a-z]{2,})", msg):
+        nm = m.group(1).strip()
+        if nm.lower() not in _generic and nm not in cands:
             cands.append(nm)
     seen_names = set()
     for name in cands[:5]:
         if name.lower() in seen_names:
             continue
         seen_names.add(name.lower())
+        low = name.lower()
         try:
             d = await org_members_emulated(name, user_id=req.user_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
-            continue
+            d = {}
         members = (d or {}).get("members") or []
         gmail_c = (d or {}).get("gmail_candidates") or []
         if members and members[0].get("email"):
             resolved.append({"name": name, "email": members[0]["email"], "source": "org"})
-        elif gmail_c and gmail_c[0].get("email"):
+            continue
+        if gmail_c and gmail_c[0].get("email"):
             resolved.append({"name": name, "email": gmail_c[0]["email"], "source": "gmail"})
+            continue
+        # Deterministic Gmail fallback: search the owner's mailbox for the name and
+        # match an address whose local-part matches it (Rama → ramasantoshi…@…). Runs
+        # every email turn, independent of whatever the director happened to gather.
+        try:
+            gr = await google_exec_emulated("gmail_search", {"query": name, "max": 6},
+                                            user_id=req.user_id, org_id=req.org_id)
+            addrs = [a.lower() for a in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", json.dumps(gr))]
+            pick = next((a for a in addrs
+                         if "noreply" not in a and "no-reply" not in a
+                         and (a.split("@")[0].startswith(low) or low in a.split("@")[0])), None)
+            if pick:
+                resolved.append({"name": name, "email": pick, "source": "gmail-search"})
+        except Exception:  # noqa: BLE001
+            pass
     return resolved
 
 
@@ -2512,6 +2541,25 @@ async def _orchestrate_single_agent(
             _vc = await _resolve_recipients(req, req.user_message)
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] resolve recipients failed: %s", exc)
+        # Fallback: the director already searched Gmail and found the recipient's
+        # address (e.g. "write Rama …" → it searched to:ramasantoshi1206@gmail.com).
+        # Match a named recipient (after a write/email/send/to verb) to a gathered
+        # address by local-part — so "Rama" resolves instead of blocking. The send
+        # still goes through HITL approval, so a wrong guess can't auto-fire.
+        if not _vc:
+            gathered = [a for a in (result.get("gathered_emails") or []) if "@" in a]
+            rec_names = [m.group(1).lower() for m in re.finditer(
+                r"\b(?:write|e-?mail|email|send|tell|draft|message|to|for|cc)\s+([A-Z][a-z]{2,})",
+                req.user_message or "")]
+            pick = None
+            for addr in gathered:
+                local = addr.split("@")[0].lower()
+                if any(n and (local.startswith(n) or n in local) for n in rec_names):
+                    pick = addr
+                    break
+            if pick:
+                _vc = [{"name": pick.split("@")[0], "email": pick, "source": "gmail-context"}]
+                log.info("[single] recipient resolved from gathered gmail: %s", pick)
 
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output,
@@ -2533,9 +2581,13 @@ async def _orchestrate_single_agent(
     pending = drain_pending_writes()
 
     # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent).
+    #    Pass the gathered facts (recall + connector/Gmail reads) so the verifier
+    #    doesn't flag connector-sourced claims as fabricated (it only saw memory_hits).
     try:
         await _verify_and_emit(req, lead, final_text=final_text,
-                               blackboard={"hit_count": gather_count}, model=_m_recon)
+                               blackboard={"hit_count": gather_count,
+                                           "facts": result.get("gather_facts") or []},
+                               model=_m_recon)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] verify failed: %s", exc)
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}

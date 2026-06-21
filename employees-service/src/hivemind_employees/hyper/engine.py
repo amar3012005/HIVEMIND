@@ -40,6 +40,7 @@ from ..hivemind_client import (
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 # Quality skills loaded WITHIN the call (model-driven, not pre-inserted) — the
 # functional equivalent of a Claude skill for the gpt-oss director. Each is a
@@ -240,6 +241,10 @@ class Director:
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
         # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
         self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
+        # Email addresses the director encountered in connector (Gmail) reads — used to
+        # resolve the recipient for a "send to <name>" task when the org/recall lookup
+        # is empty (the director already searched to:<addr>, so it knows it).
+        self.gathered_emails: set = set()
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -398,6 +403,14 @@ class Director:
         out = json.dumps(res)[:1500] if isinstance(res, (dict, list)) else str(res)[:1500]
         self.blackboard.append(f"- {provider}/{tool}: {out[:300]}")
         self.gather_count += 1
+        # Harvest email addresses from gmail reads (result + the search args) so a
+        # "send to <name>" task can resolve a real recipient the director already found.
+        if "gmail" in provider:
+            for blob in (out, json.dumps(args or {})):
+                for addr in _EMAIL_RE.findall(blob or ""):
+                    low = addr.lower()
+                    if "noreply" not in low and "no-reply" not in low:
+                        self.gathered_emails.add(low)
         q = ""
         for k in ("query", "id", "documentId", "spreadsheetId", "threadId"):
             if (args or {}).get(k):
@@ -693,6 +706,8 @@ class Director:
             "debate_rounds": self._round_seq,
             "web_calls": self._web_calls,
             "io": dict(self.io),
+            "gathered_emails": sorted(self.gathered_emails),
+            "gather_facts": list(self.blackboard),
         }
 
 

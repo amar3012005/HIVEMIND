@@ -174,6 +174,7 @@ async def run(label, query, tools, max_iters=12):
     print(f"\n{'='*70}\n{label}: {query}\n{'='*70}")
     messages = [{"role": "system", "content": SYS}, {"role": "user", "content": query}]
     calls = 0
+    tok_in = tok_out = tok_total = 0
     t0 = time.time()
     async with httpx.AsyncClient(timeout=90) as c:
         for it in range(max_iters):
@@ -183,12 +184,17 @@ async def run(label, query, tools, max_iters=12):
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code}: {resp.text[:300]}")
                 return
-            msg = resp.json()["choices"][0]["message"]
+            j = resp.json()
+            u = j.get("usage") or {}
+            tok_in += u.get("prompt_tokens", 0); tok_out += u.get("completion_tokens", 0); tok_total += u.get("total_tokens", 0)
+            msg = j["choices"][0]["message"]
             messages.append(msg)
             tcs = msg.get("tool_calls") or []
             if not tcs:
                 ms = int((time.time() - t0) * 1000)
-                print(f"\n--- FINAL ({calls} tool calls, {it} iters, {ms}ms) ---\n{msg.get('content')}\n")
+                print(f"\n--- FINAL ({calls} tool calls, {it} LLM rounds, {ms}ms) ---")
+                print(f"--- TOKENS: total={tok_total}  in={tok_in}  out={tok_out} ---\n")
+                print(msg.get("content"))
                 return
             for tc in tcs:
                 calls += 1
@@ -201,22 +207,18 @@ async def run(label, query, tools, max_iters=12):
                 result = await _exec(fn, a)
                 print(f"      ↩ {result[:160]}")
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "name": fn, "content": result})
-    print(f"  max_iters({max_iters}) hit — {calls} calls")
+    print(f"  max_iters({max_iters}) hit — {calls} calls | TOKENS total={tok_total} in={tok_in} out={tok_out} | {int((time.time()-t0)*1000)}ms")
 
 
 ALL_TOOLS = [RECALL_TOOL, GMAIL_TOOL, DRIVE_SEARCH, DOCS_GET, SHEETS_GET, DOCS_CREATE, SHEETS_CREATE, GMAIL_DRAFT]
 
 
 async def main():
-    # P2+P3 — the agent TAKES ACTION in one native session: gather (recall/drive/docs)
-    # → create a real Sheet → draft an email referencing the REAL sheet url it just got.
-    # The guard rejects placeholder args; the agent must thread the real url itself.
-    await run("P3 action: sheet→email (one session)",
-              "Create a Google Sheet titled 'Critical Dates' populated with whatever key project/"
-              "product/company dates you can find in HIVEMIND (mark any you can't verify), then draft "
-              "an email to amarsai2005@gmail.com with a short summary and a link to that sheet. Use "
-              "the real sheet URL the create call returns — never a placeholder.",
-              ALL_TOOLS, max_iters=22)
+    # User's exact test query — detailed product-specs DOC + email it to the CEO.
+    await run("USER QUERY: detailed product doc → email CEO",
+              "Write a detailed doc about all the product specs of Solvis and send it to the CEO "
+              "via email.",
+              ALL_TOOLS, max_iters=24)
 
 
 if __name__ == "__main__":

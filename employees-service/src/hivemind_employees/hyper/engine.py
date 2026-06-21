@@ -409,7 +409,10 @@ class Director:
         _status = res.get("status") if isinstance(res, dict) else None
         if _status in (401, 403) or any(k in _low for k in (
                 "unauthorized", "api token is invalid", "invalid_grant", "insufficient",
-                "\"status\":401", "\"status\":403", "not authorized")):
+                "\"status\":401", "\"status\":403", "not authorized",
+                "missing access token", "missing refresh token", "reconnect required",
+                "reconnect it", "reauthorize", "re-authorize", "re-authenticate",
+                "token expired", "token has expired")):
             await self.emit({"t": "warning", "code": "connector_reauth", "connector": provider,
                              "message": f"{provider} is not authorized — reconnect it in Connectors to use it here."})
             self.blackboard.append(
@@ -435,6 +438,31 @@ class Director:
         await self.emit({"t": "gather", "sources": [provider], "tool": tool, "query": q[:160],
                          "connector_hits": [tool], "memory_hits": 0})
         return out
+
+    async def _emit_tool_start(self, fn: str, args: Dict[str, Any]) -> None:
+        """Emit a 'what the room is doing right now' indicator the INSTANT a tool
+        fires — BEFORE the (often 2–12s) network call — so the FE shows live activity
+        instead of an idle gap while gather runs. Skips tools that emit their own
+        progress (debate → round_start) or are instant (load_skill)."""
+        if fn in ("debate", "load_skill"):
+            return
+        note = {
+            "recall": "Recalling the company brain…",
+            "org_directory": "Reading the org directory…",
+            "web_search": "Searching the web…",
+            "fetch_detail": "Fetching detail…",
+        }.get(fn)
+        if not note and fn in self._connector_routes:
+            _, provider, _tool = self._connector_routes[fn]
+            q = ""
+            for k in ("query", "id", "documentId", "spreadsheetId", "threadId"):
+                if (args or {}).get(k):
+                    q = str(args[k])[:60]; break
+            note = f"Reading {provider}" + (f" · “{q}”" if q else "…")
+        if not note:
+            return
+        agent = self.participants[0].get("slug") if self.participants else "director"
+        await self.emit({"t": "typing", "agent": agent, "note": note})
 
     async def _exec(self, name: str, args: Dict[str, Any]) -> str:
         try:
@@ -627,6 +655,12 @@ class Director:
 
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
+        # Instant feedback from t=0: connector-tool init + the first model call run
+        # with no event of their own, so without this the FE sits idle (only the
+        # router showing) until the first tool fires. One typing note so the room
+        # never looks frozen right after the query is sent.
+        _lead = self.participants[0].get("slug") if self.participants else "director"
+        await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
         await self._init_connector_tools()  # register toggled connectors as read tools
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
@@ -655,6 +689,7 @@ class Director:
                     a = {}
                 if not isinstance(a, dict):
                     a = {}
+                await self._emit_tool_start(fn, a)
                 result = await self._exec(fn, a)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": fn, "content": result})
         else:

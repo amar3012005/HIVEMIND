@@ -267,6 +267,10 @@ autoUpdater.on('update-downloaded', () => {
 });
 
 // ── App lifecycle ─────────────────────────────────────────────
+ipcMain.handle('open-external', (_, url) => {
+  shell.openExternal(url);
+});
+
 // IPC: splash "launch" button → open main window, close splash
 ipcMain.handle('launch-app', () => {
   createWindow();

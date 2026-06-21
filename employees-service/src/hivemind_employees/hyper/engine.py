@@ -312,7 +312,7 @@ class Director:
     async def _groq(
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
-        bucket: str = "director",
+        bucket: str = "director", schema: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """One Groq chat call. Retries a 400 (malformed tool-call generation) once
         at a lower temperature per Groq's guidance. Returns the message dict or
@@ -331,6 +331,11 @@ class Director:
         if tools and not force_text:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        elif schema is not None:
+            # Structured output (the gather PLAN): a JSON-schema response, NOT native
+            # tool-calling — sidesteps the gpt-oss harmony tool-call glitch entirely.
+            body["response_format"] = {"type": "json_schema",
+                                       "json_schema": {"name": "gather_plan", "schema": schema, "strict": True}}
         max_attempts = 3
         _nudged = False
         for attempt in range(max_attempts):
@@ -388,35 +393,6 @@ class Director:
                 log.warning("[hyper-engine] groq call failed (attempt %d): %s", attempt, exc)
                 return None
         return None
-
-    # ── tools ─────────────────────────────────────────────────────────
-    def _tools(self) -> List[Dict[str, Any]]:
-        tools = [
-            _tool("recall", "Search HIVEMIND (the company brain) for grounded facts. Call it as many "
-                  "times as the task needs — once per distinct topic/entity.",
-                  {"query": {"type": "string"}, "max": {"type": "integer"}}, ["query"]),
-            _tool("org_directory", "Look up org members (name, email, role) — for contacts or "
-                  "org-identity grounding.", {"query": {"type": "string"}}, []),
-            _tool("debate", "Convene the room: the personas argue a topic (stance → challenge/support "
-                  "each other, with real skepticism) over 1-2 rounds and return the transcript. Call "
-                  "this when the task needs a decision or genuine discussion before you conclude.",
-                  {"topic": {"type": "string"}, "rounds": {"type": "integer"}}, ["topic"]),
-            _tool("load_skill", "Load a quality authoring skill (a concrete format contract) right "
-                  "before you write the final output, then follow it exactly. Available: polished-doc, "
-                  "polished-email, decision-brief, polished-sheet, status-update, notion-page.",
-                  {"skill_name": {"type": "string"}}, ["skill_name"]),
-        ]
-        if self._web_budget > 0:
-            tools.append(_tool(
-                "web_search",
-                "Search the LIVE PUBLIC WEB (news, market/industry data, public companies, "
-                "current events, competitor info) via Groq's built-in web search. Use ONLY for "
-                "facts that are genuinely EXTERNAL — public info the company brain (recall) would "
-                "NOT hold. Returns a synthesized answer + real source links.",
-                {"query": {"type": "string"}}, ["query"]))
-        # Connector tools toggled on the room (read-only, registered at run() start).
-        tools.extend(self._connector_tools)
-        return tools
 
     async def _init_connector_tools(self) -> None:
         """Register the room's toggled connectors as READ-only director tools (the
@@ -711,27 +687,129 @@ class Director:
         tmpl = (f"\nThis is a '{self.room_template}' room — frame the discussion and the final output to "
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
-        conn_names = [t["function"]["name"] for t in self._connector_tools]
-        conn_line = (" Connected systems you can READ live via tools: " + ", ".join(conn_names)
-                     + " — use them for live company data (these are reads; the room produces any"
-                     " output once at the end).") if conn_names else ""
         return (
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
             "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
-            "GATHER grounded facts first (recall the company brain as many times as needed; org_directory "
-            "for people)." + conn_line + " Use web_search for genuinely EXTERNAL/"
-            "public facts the company brain would not hold (industry/market data, news, public companies, "
-            "current events) — never for internal facts; and if the user EXPLICITLY asks to search the web / "
-            "for the latest / current / public data, you MUST call web_search. When the task needs a decision or genuine "
-            "discussion, call debate(topic) — the room's personas will argue it with real skepticism. "
-            "Load a skill (load_skill) before writing the final output. Ground EVERYTHING in tool results; "
-            "flag anything you cannot verify as UNVERIFIED; never invent facts, names, numbers, or links. "
-            "When you are done gathering and debating, STOP calling tools and write the FINAL DELIVERABLE "
-            "as your message: the publish-ready content only (no process narration, no placeholders). "
-            "If the output is a document begin with '# <specific Title>'; if an email begin with "
-            "'Subject:'; if a question, the direct grounded answer. Close with a one-line synthesis citing "
-            "who argued what when a debate happened."
+            "FORMAT THE DELIVERABLE FOR QUALITY:\n"
+            "• Lead with the answer / recommendation up front, then support it.\n"
+            "• Structure with '## <Section>' headings; '- ' bullets for lists, '1. ' for ordered steps.\n"
+            "• **Bold** every key term, name, figure, date, and decision.\n"
+            "• For ANY comparative / numeric / cost / options / schedule data, USE A REAL MARKDOWN TABLE "
+            "(a header row, a '|---|---|' rule line, then data rows).\n"
+            "• If the deliverable is a document, begin with '# <specific Title>' (NOT the room goal); if an "
+            "email, begin with 'Subject:'; if a question, give the direct grounded answer.\n"
+            "• Ground EVERY specific in the gathered context; never invent facts, names, numbers, or links; "
+            "flag anything you cannot verify as UNVERIFIED and collect open items under a short "
+            "'## Gaps to confirm'.\n"
+            "• When a debate happened, close with a one-line synthesis citing who argued what.\n"
+            "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs."
         )
+
+    # ── plan → parallel-gather → synth (the fast path) ────────────────
+    async def _plan_gather(self) -> Dict[str, Any]:
+        """ONE structured-output call that plans the gather: which company-brain recalls,
+        which connector reads, whether web + debate are needed. JSON schema, NOT native
+        tool-calling — reliable on gpt-oss + a single round-trip (replaces the old 15-call
+        sequential agentic loop)."""
+        conn = list(self._connector_routes.keys())
+        conn_line = (f"Connector READ tools available (use these EXACT names): {conn}."
+                     if conn else "No external connectors are connected.")
+        web_line = ("Web search IS available (external/public facts only)." if self._web_budget > 0
+                    else "Web search is NOT available.")
+        schema = {
+            "type": "object",
+            "properties": {
+                "recall_queries": {"type": "array", "items": {"type": "string"}},
+                "connector_calls": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, "args_json": {"type": "string"}},
+                    "required": ["name", "args_json"], "additionalProperties": False}},
+                "web_query": {"type": ["string", "null"]},
+                "needs_debate": {"type": "boolean"},
+            },
+            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate"],
+            "additionalProperties": False,
+        }
+        sysp = (
+            "You plan the GATHER step for a HIVEMIND room turn. " + conn_line + " " + web_line + " "
+            "Output a JSON gather plan:\n"
+            "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
+            "task (fewer, sharper beats many).\n"
+            "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
+            "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
+            "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
+            "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
+            "hold; otherwise null.\n"
+            "- needs_debate: true ONLY if the task needs a decision, judgment, trade-off, or genuine discussion; "
+            "false for a pure lookup / factual answer."
+        )
+        user = f"ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                               model=self.director_model, temp=0.3, schema=schema, bucket="director")
+        self.director_iters.append(self._last_tok)
+        try:
+            plan = json.loads((msg or {}).get("content") or "{}")
+        except Exception:  # noqa: BLE001
+            plan = {}
+        if not isinstance(plan, dict):
+            plan = {}
+        rq = [q for q in (plan.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:3]
+        plan["recall_queries"] = rq or [(self.user_message or self.room_goal or "")[:200]]
+        ccs: List[Dict[str, Any]] = []
+        for c in (plan.get("connector_calls") or []):
+            if not (isinstance(c, dict) and c.get("name") in self._connector_routes):
+                continue
+            try:
+                a = json.loads(c.get("args_json") or "{}")
+            except Exception:  # noqa: BLE001
+                a = {}
+            ccs.append({"name": c["name"], "args": a if isinstance(a, dict) else {}})
+        plan["connector_calls"] = ccs[:4]
+        wq = plan.get("web_query")
+        plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        plan["needs_debate"] = bool(plan.get("needs_debate"))
+        log.info("[hyper-engine] plan recalls=%d connectors=%d web=%s debate=%s",
+                 len(plan["recall_queries"]), len(plan["connector_calls"]),
+                 bool(plan["web_query"]), plan["needs_debate"])
+        return plan
+
+    async def _gather_one(self, fn: str, args: Dict[str, Any]) -> None:
+        try:
+            await self._emit_tool_start(fn, args)
+            await self._exec(fn, args)
+        except Exception as exc:  # noqa: BLE001 — one failed gather never fails the turn
+            log.warning("[hyper-engine] gather %s failed: %s", fn, exc)
+
+    async def _run_gather(self, plan: Dict[str, Any]) -> int:
+        """Run every planned recall / connector read / web search CONCURRENTLY — gather
+        wall-time is the slowest single call, not the sum of 7 sequential ones."""
+        tasks: List[Awaitable[None]] = []
+        for q in plan["recall_queries"]:
+            tasks.append(self._gather_one("recall", {"query": q, "max": 6}))
+        for c in plan["connector_calls"]:
+            tasks.append(self._gather_one(c["name"], dict(c.get("args") or {})))
+        if plan["web_query"]:
+            tasks.append(self._gather_one("web_search", {"query": plan["web_query"]}))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
+    async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
+        """Write the final deliverable from the gathered board (+ debate). Clean context
+        on the synth model — no tool-call transcript → no harmony glitch, full quality."""
+        board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
+        debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
+                      if forced_debate else "")
+        sysp = (self._system_prompt() + "\n\nYou are now WRITING THE FINAL DELIVERABLE from the gathered "
+                "context below — publish-ready content only, plain text, no tool calls, no process narration, "
+                "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
+                "flag anything unverifiable as UNVERIFIED.")
+        user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}\n\n"
+                "Write the final, publish-ready deliverable now.")
+        msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                               force_text=True, model=self.synth_model, bucket="director")
+        self.director_iters.append(self._last_tok)
+        return (msg or {}).get("content") or ""
 
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
@@ -742,89 +820,34 @@ class Director:
         _lead = self.participants[0].get("slug") if self.participants else "director"
         await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
         await self._init_connector_tools()  # register toggled connectors as read tools
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": self.user_message},
-        ]
-        tools = self._tools()
-        tool_calls_made = 0
-        final_text = ""
-        for it in range(self.max_iters):
-            force_text = it == self.max_iters - 1  # last turn: force a synthesis, never another tool round
-            msg = await self._groq(messages, tools=tools, force_text=force_text)
-            self.director_iters.append(self._last_tok)
-            if msg is None:
-                break
-            messages.append(msg)
-            tcs = msg.get("tool_calls") or []
-            if not tcs:
-                final_text = msg.get("content") or ""
-                break
-            for tc in tcs:
-                tool_calls_made += 1
-                fn = (tc.get("function") or {}).get("name") or ""
-                try:
-                    a = json.loads((tc.get("function") or {}).get("arguments") or "{}")
-                except Exception:  # noqa: BLE001
-                    a = {}
-                if not isinstance(a, dict):
-                    a = {}
-                await self._emit_tool_start(fn, a)
-                result = await self._exec(fn, a)
-                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": fn, "content": result})
-        else:
-            # Loop exhausted without a no-tool-call finish — force one synthesis.
-            msg = await self._groq(messages, tools=tools, force_text=True)
-            final_text = (msg or {}).get("content") or final_text
-
-        # FORCE the room to actually debate. The debate tool is the multi-agent
-        # product, but the director (esp. the cheap gather model) often skips it. If
-        # this is a multi-agent room (≥2 participants) on a substantive task and no
-        # debate ran, convene it now so the deliverable reflects the team, not one voice.
+        # PHASE 1 — STRUCTURED GATHER PLAN. One JSON-schema call (NOT native tool-calling)
+        # decides what to recall / which connectors to read / web + debate. Replaces the
+        # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
+        plan = await self._plan_gather()
+        # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
+        tool_calls_made = await self._run_gather(plan)
+        # PHASE 3 — DEBATE (the multi-agent product). Convene only when the plan judges the
+        # task needs a decision/judgment/discussion — a pure lookup skips it (faster, on-point).
         forced_debate = False
-        if (self._round_seq == 0 and len(self.participants) >= 2
-                and len((self.user_message or "").split()) >= 6):
+        transcript_json = ""
+        if len(self.participants) >= 2 and plan.get("needs_debate"):
             try:
                 topic = (self.room_goal or self.user_message or "")[:400]
                 transcript_json = await self._debate(topic, self.debate_max_rounds)
-                messages.append({"role": "user", "content": (
-                    "The room just debated this — transcript:\n" + str(transcript_json) + "\n\n"
-                    "Now write the FINAL DELIVERABLE incorporating the debate; cite who argued what.")})
                 forced_debate = True
             except Exception as exc:  # noqa: BLE001
-                log.warning("[hyper-engine] forced debate failed: %s", exc)
-
-        # Strong-model synthesis. Runs when (a) multi-model 'auto' (synth != director),
-        # or (b) we just forced a debate that must be folded in. Writes the FINAL
-        # deliverable from the full accumulated context. No tools (force_text) → no 400.
-        if final_text and (self.synth_model != self.director_model or forced_debate):
-            synth_msg = await self._groq(
-                messages + [{"role": "user", "content": (
-                    "Write the FINAL DELIVERABLE now — the publish-ready content only, FULLY grounded "
-                    "in the tool results and debate above, with real markdown tables where they help. "
-                    "No tool calls, no process narration, no placeholders.")}],
-                force_text=True, model=self.synth_model, bucket="director")
-            if synth_msg and (synth_msg.get("content") or "").strip():
-                final_text = synth_msg["content"]
-
+                log.warning("[hyper-engine] debate failed: %s", exc)
+        # PHASE 4 — STRONG-MODEL SYNTHESIS from the gathered board + debate. Clean context
+        # (no tool-call transcript) on the synth model → no harmony glitch, full quality.
+        final_text = await self._synthesize(forced_debate, transcript_json)
         if not final_text:
-            # Defensive: never return empty. Synthesize from the board.
-            board = "\n".join(self.blackboard)[:3000]
-            msg = await self._groq([
-                {"role": "system", "content": "Write the final grounded deliverable from the notes. No narration."},
-                {"role": "user", "content": f"Task: {self.user_message}\n\nNotes:\n{board}"},
-            ], temp=0.4)
-            final_text = (msg or {}).get("content") or ""
-        if not final_text:
-            # Every LLM call (incl. the defensive synth) failed — honor "never return
-            # empty" at the actual emit/return boundary so the FE never shows a blank
-            # synthesis line and the verifier gets honest feedback, not "".
+            # Every synthesis attempt failed — never return empty at the emit boundary.
             final_text = ("(The room could not produce a grounded answer this turn — "
                           "the model was unreachable. Please retry, or add more context.)")
 
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})
-        log.info("[hyper-engine] done calls=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
+        log.info("[hyper-engine] done plan+gather=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
                  tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000),
                  self.gather_count, self.tok_by, self.director_iters)
         return {

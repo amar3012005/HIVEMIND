@@ -29,17 +29,15 @@ export const MCP_CATALOG = [
   {
     name: 'notion',
     label: 'Notion',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@notionhq/notion-mcp-server'],
+    // Notion's HOSTED MCP. The Nango `notion` integration uses the `notion-mcp`
+    // provider (Notion's MCP OAuth / dynamic client registration) — its token is
+    // valid for mcp.notion.com but is REJECTED by the REST API (api.notion.com),
+    // which the self-hosted @notionhq/notion-mcp-server calls → 401 "API token is
+    // invalid". Pointing at the hosted MCP matches the token we already mint.
+    transport: 'streamable-http',
+    url: 'https://mcp.notion.com/mcp',
     nango_provider: 'notion',
-    // notion server reads a JSON blob of headers from OPENAPI_MCP_HEADERS
-    token_inject: {
-      kind: 'env',
-      var: 'OPENAPI_MCP_HEADERS',
-      format: 'json_auth_header',
-      extra: { 'Notion-Version': '2022-06-28' },
-    },
+    // default Authorization: Bearer header (token_inject omitted → buildHeaders default)
     category: 'productivity',
   },
   {

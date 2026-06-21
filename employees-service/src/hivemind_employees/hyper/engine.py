@@ -401,6 +401,23 @@ class Director:
             return json.dumps({"error": str(exc)[:200], "is_error": True})
         res = r.get("result") if isinstance(r, dict) and isinstance(r.get("result"), dict) else (r or {})
         out = json.dumps(res)[:1500] if isinstance(res, (dict, list)) else str(res)[:1500]
+        # Connector AUTH failure (expired/revoked token → 401/403). Surface a clean
+        # "reconnect" signal instead of feeding the raw error to the agents as if it were
+        # data — otherwise the room debates "API error logs" pointlessly. Tell the director
+        # the connector is unavailable + emit a warning the FE renders as "reconnect X".
+        _low = out.lower()
+        _status = res.get("status") if isinstance(res, dict) else None
+        if _status in (401, 403) or any(k in _low for k in (
+                "unauthorized", "api token is invalid", "invalid_grant", "insufficient",
+                "\"status\":401", "\"status\":403", "not authorized")):
+            await self.emit({"t": "warning", "code": "connector_reauth", "connector": provider,
+                             "message": f"{provider} is not authorized — reconnect it in Connectors to use it here."})
+            self.blackboard.append(
+                f"- {provider}: NOT AUTHORIZED — its connection token is invalid/expired. The user "
+                f"must RECONNECT {provider}. Do NOT treat this error as data or debate it; just note "
+                f"{provider} is unavailable this turn.")
+            self.gather_count += 1
+            return json.dumps({"error": f"{provider} not authorized — reconnect required", "reconnect": provider})
         self.blackboard.append(f"- {provider}/{tool}: {out[:300]}")
         self.gather_count += 1
         # Harvest email addresses from gmail reads (result + the search args) so a

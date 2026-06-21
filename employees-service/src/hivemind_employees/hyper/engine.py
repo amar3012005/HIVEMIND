@@ -199,6 +199,34 @@ def _flatten_for_text(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+# Connector tool-schema inspect is the SAME across tenants (it's the MCP server's tool
+# list, not tenant data) and rarely changes — but a COLD inspect (a fresh mcp.notion.com
+# connection from hm-core) can block ~20s at run() start, stalling the whole turn before
+# any gathering. Cache the tool list per connector so only the first turn pays it;
+# every later turn (within the TTL) skips the inspect entirely and starts instantly.
+_INSPECT_CACHE: Dict[str, tuple] = {}
+_INSPECT_TTL = float(os.environ.get("HYPER_CONNECTOR_INSPECT_TTL", "900") or "900")
+
+
+async def _inspect_connector_tools(norm: str, *, user_id: str, org_id: str) -> List[Dict[str, Any]]:
+    """Cached connector tool-list inspect. Returns the raw tools list. Caches only a
+    non-empty success (an empty/failed inspect — e.g. a not-connected connector or a
+    cold timeout — is retried next turn rather than cached as 'no tools')."""
+    now = time.time()
+    cached = _INSPECT_CACHE.get(norm)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        insp = await connector_inspect_emulated(norm, user_id=user_id, org_id=org_id)
+    except Exception:  # noqa: BLE001
+        insp = {}
+    raw = (((insp or {}).get("inspection") or {}).get("tools")
+           or (insp or {}).get("tools") or [])
+    if isinstance(raw, list) and raw:
+        _INSPECT_CACHE[norm] = (now + _INSPECT_TTL, raw)
+    return raw if isinstance(raw, list) else []
+
+
 def _persona_fields(emp: Dict[str, Any]) -> tuple[str, str, str]:
     name = emp.get("name") or emp.get("slug") or "Teammate"
     lane = emp.get("_lane") or emp.get("role_archetype") or "Communicator"
@@ -416,13 +444,9 @@ class Director:
                 for (n, d, p, rq) in google:
                     _add(n, d, p, rq, "google", norm, n)
                 continue
-            # Non-Google → discover the connector's read tools via the bridge.
-            try:
-                insp = await connector_inspect_emulated(norm, user_id=self.user_id, org_id=self.org_id)
-            except Exception:  # noqa: BLE001
-                insp = {}
-            raw = (((insp or {}).get("inspection") or {}).get("tools")
-                   or (insp or {}).get("tools") or [])
+            # Non-Google → discover the connector's read tools via the bridge (cached:
+            # the cold inspect is ~20s and was stalling every turn at run() start).
+            raw = await _inspect_connector_tools(norm, user_id=self.user_id, org_id=self.org_id)
             count = 0
             for tspec in (raw if isinstance(raw, list) else []):
                 if count >= _MCP_TOOLS_PER_CONNECTOR or len(registered) >= _CONNECTOR_TOOL_CAP:

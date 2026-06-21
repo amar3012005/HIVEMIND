@@ -14,6 +14,8 @@ jobs:
   release:
     runs-on: macos-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -56,9 +58,9 @@ jobs:
       - name: Build & package DMG (unsigned, no notarization)
         working-directory: electron-app
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run build
+          ELECTRON_BUILDER_PUBLISH: never
+        run: npx electron-builder build --mac --publish=never
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4

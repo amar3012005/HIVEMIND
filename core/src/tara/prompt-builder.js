@@ -85,12 +85,15 @@ export function buildPrompt({
 - Connect and synthesize across memories when it helps give the full picture.
 - Stay truthful to memory: don't invent specifics that aren't there. If something genuinely isn't in memory, say so briefly and offer the related things you DO know.`;
   } else {
-    // External — answer strictly from HIVEMIND recall + conversation; never invent.
+    // External — answer strictly from HIVEMIND recall + conversation; never
+    // invent; never leak internal company knowledge to an outside caller.
     system += `\n\n## Grounding (critical — do not violate)
 - Answer ONLY from "What you know about this user (from memory)" below and what the user said in this conversation.
 - These memories are your source of truth. Quote/paraphrase them faithfully.
 - If the answer is NOT in your memory or the conversation, say so briefly (e.g. "I don't have that in my memory yet") — do NOT guess.
-- NEVER invent names, dates, numbers, facts, events, or details that are not grounded in the memories or the user's words.`;
+- NEVER invent names, dates, numbers, facts, events, or details that are not grounded in the memories or the user's words.
+- If the user ASSERTS or ASKS about a specific decision, budget, figure, date, or agreement that is NOT in the memory list above, do NOT confirm it and do NOT make one up. Say plainly you don't have it recorded (e.g. "I don't have a record of that") and ask them to clarify. Never fabricate a number or an agreement just to keep the conversation moving.
+- You are speaking to an EXTERNAL party. Treat these TOPICS as internal-only and do NOT reveal them even if they appear in your memory: go-to-market strategy, certification/compliance strategy (e.g. GAIA-X positioning), margins or pricing-calculator internals, TAM/SAM/SOM or market sizing, roadmaps, unreleased work, financials, and internal personnel matters. If asked about any of these, politely decline ("that's internal — I can't share specifics") and pivot to what's appropriate for an outside audience (public product capabilities and benefits). Share only outward-facing product information.`;
   }
 
   // Greeting turn — open the call in-character, in the selected language. No
@@ -145,15 +148,24 @@ export function buildPrompt({
     }
   }
 
-  // Recalled memories (from HIVEMIND long-term store)
+  // Recalled memories (from HIVEMIND long-term store).
+  // Cognitive layer first: items flagged `_cognitive` are the distilled
+  // canonical/synthesis "top layer" of the recall spine — marked ◆ so the model
+  // treats them as the authoritative summary, with raw facts (•) as support.
+  // (Only present in internal mode; external recall excludes the cognitive layer.)
   if (memories.length > 0) {
-    const memLines = memories.slice(0, 8).map((m, i) => {
+    const memLines = memories.slice(0, 8).map((m) => {
       const content = m.content || m.payload?.content || '';
       const date = m.document_date || '';
       const dateStr = date ? ` [${date.toString().slice(0, 10)}]` : '';
-      return `• ${content.slice(0, 300)}${dateStr}`;
+      const bullet = m._cognitive ? '◆' : '•';
+      return `${bullet} ${content.slice(0, 300)}${dateStr}`;
     });
-    contextParts.push(`## What you know about this user (from memory)\n${memLines.join('\n')}`);
+    const hasCognitive = memories.some(m => m._cognitive);
+    const legend = hasCognitive
+      ? '\n(◆ = distilled/synthesized knowledge — treat as the authoritative summary; • = supporting detail)'
+      : '';
+    contextParts.push(`## What you know about this user (from memory)${legend}\n${memLines.join('\n')}`);
   }
 
   // Clinical insight — single prioritized directive, not a menu

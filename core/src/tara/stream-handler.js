@@ -46,7 +46,7 @@ export class TaraStreamHandler {
     this._sessionMemoryStats = new Map();  // session_id → { chunks_saved, chunks_candidates, chunks_skipped, turns }
   }
 
-  async handleStream(params, { userId, orgId, res }) {
+  async handleStream(params, { userId, orgId, accessContext = null, res }) {
     const {
       session_id: sessionId,
       tenant_id: tenantId,
@@ -85,11 +85,17 @@ export class TaraStreamHandler {
       // Config is cached — avoids DB hit on every turn
       const configPromise = this._getCachedConfig(tenantId, agentName, { userId, orgId });
 
+      // Mode decides the recall SHAPE, so resolve it before recall fires:
+      //   internal → cognitive voice: distilled syntheses prioritized.
+      //   external → ground facts only, cognitive layer EXCLUDED (no internal
+      //              distilled knowledge ever reaches an outside caller).
+      const internalMode = (params.mode || 'external') === 'internal';
+
       // Fast KB-only recall — skip tsvector/vector/scoring pipeline entirely
       // Voice needs speed (<100ms), not exhaustive search
       const recallPromise = greetingMode
         ? Promise.resolve([])
-        : this._fastKBRecall(query, { userId, orgId }).catch(() => []);
+        : this._fastKBRecall(query, { userId, orgId, accessContext, internalMode }).catch(() => []);
 
       const sessionPromise = this.sessionManager.load(sessionId, { tenantId, userId, orgId, language });
 
@@ -118,15 +124,16 @@ export class TaraStreamHandler {
       this._writeLine(res, {
         type: 'status', step: 'context_ready',
         recall_count: memories.length,
+        cognitive_count: memories.filter(m => m._cognitive).length,
         session_turns: sessionState.turn_count,
         ms: fetchMs,
       });
 
       // ── STEP 2: Build prompt (< 5ms) ──
       const model = config.model || this.defaultModel;
-      // mode='internal' → direct humanized recall, NO clinical reasoning layer.
-      // mode='external' (default) → full current behavior (clinical if configured).
-      const internalMode = (params.mode || 'external') === 'internal';
+      // internalMode resolved above (drives both recall shape and prompt).
+      // internal → direct humanized recall, NO clinical layer.
+      // external → sales persona + clinical (if configured).
       const hasClinical = !internalMode && !!config.clinical_prompt;
 
       // Store clinical config in session state for post-turn use
@@ -170,6 +177,14 @@ export class TaraStreamHandler {
       let fullResponse = '';
       const llmStartMs = Date.now();
 
+      // External (grounded sales voice) is clamped to a low temperature so the
+      // model refuses/grounds reliably instead of confabulating confident
+      // specifics (budgets, figures, agreements) on questions not in memory —
+      // gpt-oss confabulates at 0.7. Internal keeps the configured temperature.
+      const turnTemperature = internalMode
+        ? (config.temperature ?? 0.7)
+        : Math.min(config.temperature ?? 0.7, 0.4);
+
       const llmResp = await fetch(`${this.llmBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -179,7 +194,7 @@ export class TaraStreamHandler {
         body: JSON.stringify({
           model,
           messages,
-          temperature: config.temperature ?? 0.7,
+          temperature: turnTemperature,
           max_tokens: config.max_tokens ?? 2048,  // gpt-oss reasoning models need headroom
           stream: true,
         }),
@@ -328,13 +343,20 @@ export class TaraStreamHandler {
   // Set TARA_FAST_RECALL=true to fall back to the legacy KB-only path
   // for latency-critical deployments.
 
-  async _fastKBRecall(query, { userId, orgId }) {
+  async _fastKBRecall(query, { userId, orgId, accessContext = null, internalMode = false }) {
     if (!query || query.length < 5) return [];
 
-    // Skip recall entirely for greetings / trivial turns — these waste
-    // budget and the prompt builder already handles cold-start phrasing.
-    const trivial = /^(hi|hey|hello|thanks|ok|yes|no|sure|bye|good|great)\b/i.test(query.trim());
+    // Skip recall ONLY when the WHOLE utterance is a bare greeting / filler.
+    // The check is end-anchored so a greeting PREFIX on a real question
+    // ("Hey, hi! So I want to know about Amar") still recalls — the old
+    // `^(hey)\b` matched that and wrongly skipped recall, so Tara answered
+    // "no record" on questions that merely opened with a hello.
+    const trivial = /^(hi+|hey+|hello|hi there|hey there|thanks|thank you|ok(ay)?|yes|no|sure|bye|good|great|cool|nice)[\s.!,'-]*$/i.test(query.trim());
     if (trivial) return [];
+
+    // Strip a leading greeting/filler prefix so the semantic recall query is
+    // the substantive ask ("I want to know about Amar"), not the hello noise.
+    query = query.replace(/^((hi+|hey+|hello|thanks|thank you|ok(ay)?|sure|so|well|um|uh)[\s,!.]+)+/i, '').trim() || query;
 
     const useFastPath = String(process.env.TARA_FAST_RECALL || '').toLowerCase() === 'true';
 
@@ -345,10 +367,37 @@ export class TaraStreamHandler {
           query_context: query,
           user_id: userId,
           org_id: orgId,
-          max_memories: 6,
+          max_memories: 8,
+          // Multi-tier scope (projectIds/teamIds) so project/team/org-shared
+          // memories surface — parity with /api/recall + Talk-to-HIVE chat.
+          access_context: accessContext,
         });
-        const rows = recall?.combined || recall?.memories || recall || [];
-        return rows.slice(0, 8).map(r => ({
+        const rows = recall?.memories || recall?.combined || recall || [];
+
+        // Cognitive layer = the distilled "top layer" of the recall spine
+        // (canonical-fact / synthesis-bridge). These encode synthesized,
+        // strategic, cross-memory knowledge.
+        const isCognitive = (r) => {
+          const st = r.source_metadata?.source_type || r.sourceMetadata?.sourceType
+            || r.source_type || null;
+          if (st === 'canonical-fact' || st === 'synthesis-bridge') return true;
+          const role = r.cognitive_layer_role || r.cognitiveLayerRole || null;
+          if (role === 'canonical' || role === 'bridge' || role === 'principle') return true;
+          const tags = Array.isArray(r.tags) ? r.tags : [];
+          return tags.includes('synthesis:canonical') || tags.includes('synthesis:bridge');
+        };
+        const cognitive = rows.filter(isCognitive);
+        const supporting = rows.filter(r => !isCognitive(r));
+
+        // Mode gate:
+        //   internal → cognitive VOICE: distilled syntheses lead, raw facts
+        //              support (mirrors the main tiered-retrieval architecture).
+        //   external → ground facts ONLY: the cognitive/synthesis layer is
+        //              DROPPED so internal distilled knowledge never leaks to an
+        //              outside caller. Answers stay grounded in raw memories.
+        const ordered = internalMode ? [...cognitive, ...supporting] : supporting;
+
+        return ordered.slice(0, 8).map(r => ({
           id: r.id,
           content: r.content || r.text || '',
           title: r.title || '',
@@ -358,6 +407,7 @@ export class TaraStreamHandler {
           created_at: r.created_at || r.createdAt,
           score: r.score || r.score_value || r.relevance,
           source_platform: r.source_metadata?.source_platform || r.source,
+          _cognitive: isCognitive(r),
         }));
       } catch (err) {
         console.warn('[tara/recall] Full pipeline failed, falling back to Qdrant:', err.message);

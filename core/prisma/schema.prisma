@@ -1474,6 +1474,8 @@ model HyperRoom {
   /// Additional Population-Sim toggle: 'on' runs an extra many-voice social simulation that
   /// produces a popup report folded into the synthesis; 'off' (default) leaves the main flow untouched.
   simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
+  /// Population-Sim cast size (FE slider, 10-100). Default 24.
+  simAgents          Int          @default(24) @map("sim_agents")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

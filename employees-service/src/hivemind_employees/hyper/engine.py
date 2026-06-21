@@ -290,6 +290,7 @@ class Director:
         debate_max_rounds: int = 2,
         synth_model: Optional[str] = None,
         sim_mode: str = "off",
+        sim_agents: int = 0,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -336,6 +337,8 @@ class Director:
         self._last_tok = 0
         # Population-Sim (additional, opt-in). Default off — the main flow is untouched.
         self.sim_mode = str(sim_mode or "off").strip().lower()
+        # How many synthetic voices to simulate (FE slider 10-100; 0 → env default). Clamped.
+        self.sim_agents = max(10, min(100, int(sim_agents or _SIM_PERSONAS)))
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
@@ -959,9 +962,9 @@ class Director:
             ctx = "\n".join(self.blackboard)[:3000] or (self.room_goal or topic)
             sem = asyncio.Semaphore(_SIM_CONCURRENCY)
             await self.emit({"t": "typing", "agent": "swarm",
-                             "note": f"Simulating a population of ~{_SIM_PERSONAS} voices…"})
+                             "note": f"Simulating a population of ~{self.sim_agents} voices…"})
             ontology = await self._sim_ontology(topic, ctx)
-            cast = await self._sim_cast(topic, ctx, ontology, _SIM_PERSONAS)
+            cast = await self._sim_cast(topic, ctx, ontology, self.sim_agents)
             if len(cast) < 3:
                 log.warning("[hyper-engine] population-sim: too few personas (%d) — skipping", len(cast))
                 return None
@@ -974,6 +977,9 @@ class Director:
             payload = {"report": report, "ontology": [t["name"] for t in ontology],
                        "n_personas": len(cast), "n_posts": len(posts),
                        "role_mix": dict(Counter(p["role"] for p in posts).most_common(12)),
+                       # ALL posts (capped) so the FE popup shows the whole simulation, not a teaser.
+                       "posts": [{"name": p["name"], "role": p["role"], "stance": p.get("stance", ""),
+                                  "text": p["text"][:400]} for p in posts[:120]],
                        "sample": [{"name": p["name"], "role": p["role"], "text": p["text"][:240]} for p in posts[:8]]}
             log.info("[hyper-engine] population-sim ok: %d personas, %d posts, report %d chars",
                      len(cast), len(posts), len(report))
@@ -1062,6 +1068,7 @@ async def run_director(
     synth_model: Optional[str] = None,
     max_iters: int = 16,
     sim_mode: str = "off",
+    sim_agents: int = 0,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -1070,6 +1077,6 @@ async def run_director(
         participants=participants, room_template=room_template, room_goal=room_goal,
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
-        max_iters=max_iters, sim_mode=sim_mode,
+        max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
     )
     return await director.run()

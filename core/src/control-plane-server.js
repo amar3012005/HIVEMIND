@@ -5819,6 +5819,7 @@ Write the persona now.`;
             template: r.template,
             quality_mode: r.qualityMode || 'auto',
             sim_mode: r.simMode || 'off',
+            sim_agents: r.simAgents || 24,
             participant_ids: r.participantIds,
             participants: (r.participantIds || []).map(id => empById[id]).filter(Boolean),
             created_at: r.createdAt,
@@ -6055,12 +6056,13 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
         room.quality_mode = pr?.[0]?.quality_mode || 'auto';
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
+        room.sim_agents = pr?.[0]?.sim_agents || 24;
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6203,6 +6205,17 @@ Write the persona now.`;
           );
           updated.sim_mode = body.sim_mode;
         } catch (e) { console.warn('[hyper-rooms] sim_mode update failed:', e.message); }
+      }
+      // Population-sim cast size (slider 10-100). Clamped; same fail-safe raw-SQL pattern.
+      if (body.sim_agents != null && Number.isFinite(Number(body.sim_agents))) {
+        const n = Math.max(10, Math.min(100, Math.round(Number(body.sim_agents))));
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "sim_agents" = $1 WHERE "id" = $2::uuid',
+            n, roomId,
+          );
+          updated.sim_agents = n;
+        } catch (e) { console.warn('[hyper-rooms] sim_agents update failed:', e.message); }
       }
       return jsonResponse(res, { room: updated });
     }

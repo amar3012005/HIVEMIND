@@ -339,6 +339,28 @@ async def get_room_sim_mode(room_id: str, org_id: Optional[str] = None) -> str:
     return "off"
 
 
+async def get_room_sim_agents(room_id: str, org_id: Optional[str] = None) -> int:
+    """Population-sim cast size (FE slider 10-100). Defaults to 24 (graceful pre-migration).
+    Clamped to [10, 100] so a bad value can't blow up the parallel burst."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT sim_agents FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT sim_agents FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["sim_agents"]:
+                return max(10, min(100, int(row["sim_agents"])))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_sim_agents fallback: %s", exc)
+    return 24
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

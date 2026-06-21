@@ -63,6 +63,7 @@ from .db import (
     get_room_enabled_connectors,
     get_room_quality_mode,
     get_room_sim_mode,
+    get_room_sim_agents,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -1633,6 +1634,7 @@ class RoomTurnRequest(BaseModel):
     # Additional Population-Sim toggle ("on" runs it). Per-turn override; else the room's
     # stored sim_mode is read. Optional so existing callers are unaffected (additive).
     sim_mode: Optional[str] = None
+    sim_agents: Optional[int] = None  # population-sim cast size (10-100); per-turn override
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2618,8 +2620,14 @@ async def _orchestrate_single_agent(
             _sim_mode = await get_room_sim_mode(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _sim_mode = "off"
-    log.info("[single] room=%s quality=%s sim=%s models=(%s, %s, %s)",
-             req.room_id, _qmode, _sim_mode, _dir_m, _per_m, _syn_m)
+    _sim_agents = int(getattr(req, "sim_agents", 0) or 0)
+    if _sim_mode in ("on", "simulation", "additional", "true", "1", "yes") and not _sim_agents:
+        try:
+            _sim_agents = await get_room_sim_agents(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _sim_agents = 24
+    log.info("[single] room=%s quality=%s sim=%s/%d models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _sim_agents, _dir_m, _per_m, _syn_m)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2630,7 +2638,7 @@ async def _orchestrate_single_agent(
             participants=participants, room_template=room_template,
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
-            sim_mode=_sim_mode,
+            sim_mode=_sim_mode, sim_agents=_sim_agents,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

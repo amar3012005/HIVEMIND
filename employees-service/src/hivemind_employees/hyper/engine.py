@@ -225,11 +225,13 @@ _SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MA
 _GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
 _GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
 
-# Web PROSPECTING: a query needing real-world contacts/businesses/people uses the full groq/compound
-# model (which actually crawls via visit_website) instead of compound-mini (which only searches +
-# guesses info@ addresses). The regex picks prospecting intent — model/tool selection only, never an
-# output gate, so it stays general for any room.
-_WEB_PROSPECT_MODEL = os.environ.get("HYPER_WEB_PROSPECT_MODEL", "groq/compound")
+# Web PROSPECTING: a query needing real-world contacts/businesses/people uses gpt-oss + the native
+# browser_search built-in (Exa) — it INTERACTIVELY browses pages (reads the real Impressum/Kontakt),
+# unlike compound-mini which only searches + guesses info@ addresses. gpt-oss browser_search is ~3x
+# cheaper + ~7x faster than groq/compound+visit_website for the same job (24k tok/4s vs 75k/30s,
+# measured) and runs on the director's own model family. The regex picks prospecting intent —
+# model/tool selection only, never an output gate, so it stays general for any room.
+_WEB_PROSPECT_MODEL = os.environ.get("HYPER_WEB_PROSPECT_MODEL", "openai/gpt-oss-20b")
 _PROSPECT_RE = re.compile(
     r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
     r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
@@ -995,19 +997,23 @@ class Director:
         # strict rule: quote a contact detail ONLY if it literally appears on a visited page, else mark
         # it NOT VERIFIED — never guess. Keeps the room from inventing prospects. General, no tenant facts.
         prospect = bool(_PROSPECT_RE.search(query))
-        model = (_WEB_PROSPECT_MODEL if prospect else self.web_model)
-        content = query
         if prospect:
-            content = (query + "\n\nRULES: use web_search to find the REAL entities, then use "
-                       "visit_website to OPEN each one's official page (for a company, its Impressum / "
-                       "Kontakt / About page) and READ it. Give a contact detail (email, phone) ONLY if it "
-                       "literally appears in a page you actually visited — quote it verbatim and cite the "
-                       "exact URL you read it from. If you did not open a page that shows it, write "
-                       "'NOT VERIFIED' for that entity. NEVER guess or construct an address (no inventing "
-                       "info@domain). List each entity: name | website | email/phone or NOT VERIFIED | source URL.")
-        body: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": content}],
-                                "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
-        timeout = httpx.Timeout(180.0 if prospect else 45.0, connect=5.0)
+            # gpt-oss + native browser_search (Exa): interactively opens the real pages, faster +
+            # cheaper than compound+visit. Results come back in message.content (no executed_tools).
+            content = (query + "\n\nRULES: BROWSE each entity's official page (its Impressum / Kontakt / "
+                       "About page) and READ it. Give a contact detail (email, phone) ONLY if it literally "
+                       "appears on a page you opened — quote it verbatim and cite the exact source URL. If "
+                       "no contact appears, write 'NOT VERIFIED'. NEVER guess or construct an address (no "
+                       "inventing info@domain). List each: name | website | email/phone or NOT VERIFIED | source URL.")
+            body: Dict[str, Any] = {"model": _WEB_PROSPECT_MODEL,
+                                    "messages": [{"role": "user", "content": content}],
+                                    "tools": [{"type": "browser_search"}], "tool_choice": "required",
+                                    "temperature": 1, "top_p": 1, "max_completion_tokens": 4096,
+                                    "reasoning_effort": "low"}
+        else:
+            body = {"model": self.web_model, "messages": [{"role": "user", "content": query}],
+                    "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
+        timeout = httpx.Timeout(120.0 if prospect else 45.0, connect=5.0)
         keep = 2400 if prospect else 1000
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:

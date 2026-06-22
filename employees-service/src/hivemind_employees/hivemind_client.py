@@ -45,9 +45,11 @@ def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str
 
 async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                           api_key: str = "", max_memories: int = 8,
-                          project_id: Optional[str] = None) -> Dict[str, Any]:
+                          project_id: Optional[str] = None,
+                          tags: Optional[list] = None) -> Dict[str, Any]:
     """Async recall that works even when the employee has no minted key, via
-    master + emulation headers. Returns the raw /api/recall JSON."""
+    master + emulation headers. Returns the raw /api/recall JSON. `tags` filters
+    to memories carrying those tags (e.g. a per-employee scope ["emp:<slug>"])."""
     settings = get_settings()
     headers = _emulated_headers(api_key, user_id, org_id)
     async with httpx.AsyncClient(
@@ -56,6 +58,8 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         headers=headers,
     ) as c:
         body: Dict[str, Any] = {"query_context": query, "max_memories": max_memories}
+        if tags:
+            body["tags"] = list(tags)
         if project_id:
             # project_id (snake) is the HARD scope: core forces the access context to this
             # project and EXCLUDES other projects' memories (so a Solvis-project room never

@@ -199,6 +199,42 @@ _JOURNAL_ENABLED = (os.environ.get("HYPER_JOURNAL_ENABLED", "true").strip().lowe
 _JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "llama-3.1-8b-instant")  # cheap, content-returning summariser
 _JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
 
+# ── Self-revision (reflexion on the final deliverable) ─────────────────────
+# ONE bounded critique→revise pass after synth: the synth model re-reads its OWN draft against the
+# GATHERED BOARD (the only ground-truth — works for ANY room/tenant, zero hardcoded rules) and
+# corrects three GENERAL failure classes before the turn seals:
+#   (1) FABRICATION — any concrete specific (date/number/%/metric/price/person/contact/product-capability)
+#       not traceable to the board → omit or [placeholder] + surface under Gaps; never assert as fact.
+#   (2) INTERNAL-PROCESS LEAK — when the ask is an external artifact (email/copy/post/talking-points),
+#       strip facilitator/agent names, "the debate", "who argued what", inline (UNVERIFIED); no invented signatory.
+#   (3) FORMAT MISFIT — a diagram (mermaid/ascii) only where the medium renders it; never in an email/spoken script.
+# Catches synth-level defects BEFORE the (expensive) goalkeeper re-runs the whole turn → higher quality
+# AND cheaper. Bounded to 1 pass, skipped on the direct fast-path + tiny drafts (nothing to revise),
+# flag-gated (reversible). Composes with — does NOT replace — the P6 goalkeeper outer net.
+_SELF_REVISE = (os.environ.get("HYPER_SELF_REVISE", "true").strip().lower() not in ("0", "false", "no", "off"))
+_SELF_REVISE_MIN_CHARS = max(200, int(os.environ.get("HYPER_SELF_REVISE_MIN_CHARS", "400") or "400"))
+_SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MAX_CYCLES", "2") or "2")))
+
+
+def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
+    Returns the parsed dict, or None when nothing valid parses (caller treats None as fail-safe)."""
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001
+        pass
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
 
 def _journal_positions(transcript: Optional[List[Dict[str, Any]]]) -> str:
     """Compact 'what each agent argued this turn' from the debate transcript — the per-agent slice.
@@ -1240,6 +1276,107 @@ class Director:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
 
+    # Three GENERAL deliverable-quality classes the critic audits — described, never hardcoded to a
+    # tenant. Shared by the critic + reviser so the contract is identical.
+    _REVISE_CLASSES = (
+        "1. fabrications — any concrete specific STATED AS FACT (a date, number, %, metric, price, a named "
+        "person, a contact detail, a named source/citation, or a claim about what a product/feature does) "
+        "that is NOT supported by the GATHERED CONTEXT and is NOT already softened/labeled "
+        "UNVERIFIED/[placeholder]. Recommendations and proposed next-steps are NOT fabrications.\n"
+        "2. leaks — ONLY when the deliverable is meant for an EXTERNAL party (an email, customer/marketing "
+        "copy, a post, talking points, a message handed over): any internal-process trace — facilitator/"
+        "agent/teammate names presented as real staff, 'the debate'/'who argued what', inline (UNVERIFIED) "
+        "tags shown to the recipient, OR an INVENTED signatory name/title/phone/email. (Internal advice or "
+        "strategy keeps its reasoning → leaks is always [] for those.)\n"
+        "3. format_issues — a diagram (a ```mermaid block or ASCII box/flow art) placed where the medium "
+        "will NOT render it: inside an email body, or in spoken talking points / a phone script."
+    )
+
+    async def _revise_critique(self, draft: str, board: str) -> Optional[Dict[str, Any]]:
+        """Audit the draft against the board for the 3 general classes. Returns
+        {fabrications:[], leaks:[], format_issues:[]} or None on any failure (→ treat as clean, fail-safe)."""
+        sysp = (
+            "You audit a DRAFT deliverable before publication, using ONLY the GATHERED CONTEXT as ground "
+            "truth. Find violations in three classes and output STRICT JSON (no prose, no markdown), exactly: "
+            '{"fabrications": [..], "leaks": [..], "format_issues": [..]}. Each array holds short, specific '
+            "strings naming the exact offending item (quote it); use [] when a class has none. First infer "
+            "whether the deliverable is EXTERNAL (handed to a third party) or INTERNAL (advice/strategy for "
+            "the asker) — this decides the leaks class.\nCLASSES:\n" + self._REVISE_CLASSES +
+            "\nOutput ONLY the JSON object."
+        )
+        user = (f"USER ASK:\n{self.user_message}\n\nGATHERED CONTEXT (source of truth):\n{board}\n\n"
+                f"DRAFT:\n{draft}\n\nOutput the audit JSON now.")
+        try:
+            msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                   force_text=True, model=self.synth_model, bucket="synth")
+            self.director_iters.append(self._last_tok)
+            obj = _first_json_object((msg or {}).get("content") or "")
+            if not isinstance(obj, dict):
+                return None
+            return {k: [str(x)[:200] for x in (obj.get(k) or []) if str(x).strip()][:8]
+                    for k in ("fabrications", "leaks", "format_issues")}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] revise-critique failed: %s", exc)
+            return None
+
+    async def _revise_apply(self, draft: str, board: str, violations: Dict[str, Any]) -> str:
+        """Rewrite the draft to fix EXACTLY the audited violations, preserving everything correct.
+        Returns the corrected text, or the original on a truncated/degenerate reply (fail-safe)."""
+        sysp = (
+            "You are editing a DRAFT deliverable. Fix EXACTLY the audited VIOLATIONS below and nothing else — "
+            "PRESERVE all correct, grounded content (do not shorten, weaken, or re-style sound material).\n"
+            "How to fix each class:\n"
+            "- fabrications: remove the unsupported specific, OR replace it with a clearly bracketed "
+            "placeholder ([date to confirm] / [figure to confirm]) and list it under a short '## Gaps to "
+            "confirm' (in an email, a 'Before you send' note). Never assert an unsupported specific as fact.\n"
+            "- leaks: delete internal-process traces and any invented signatory; sign an external artifact "
+            "with a neutral placeholder like [Your name] / [Your contact].\n"
+            "- format_issues: convert the mis-placed diagram into a short plain-text list suited to the medium.\n"
+            "Output ONLY the corrected final deliverable text — no preamble, no commentary, no change-log.\n\n"
+            "REFERENCE — the violation classes:\n" + self._REVISE_CLASSES
+        )
+        user = (f"USER ASK:\n{self.user_message}\n\nGATHERED CONTEXT (source of truth):\n{board}\n\n"
+                f"AUDITED VIOLATIONS TO FIX:\n{json.dumps(violations, ensure_ascii=False)}\n\n"
+                f"DRAFT:\n{draft}\n\nOutput the corrected final deliverable now.")
+        try:
+            msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                   force_text=True, model=self.synth_model, bucket="synth")
+            self.director_iters.append(self._last_tok)
+            revised = (msg or {}).get("content") or ""
+            if revised and len(revised) >= max(120, int(len(draft) * 0.4)):
+                return revised
+            return draft
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] revise-apply failed: %s", exc)
+            return draft
+
+    async def _self_revise(self, draft: str, board: str) -> str:
+        """Reflexion RECURSION on the synth draft: critique → targeted revise → re-critique, bounded.
+        General for ANY room/agent — the board is the only ground-truth, no hardcoded rules, names, or
+        tenant facts. Fixes fabrication / internal-process leak / format-misfit BEFORE the turn seals
+        (so the expensive P6 goalkeeper fires less). Stops as soon as the audit is clean (most turns:
+        one cheap critique, no rewrite) or the cycle cap is hit. Never raises — any failure returns the
+        best draft so far (degrades to pre-revise quality, never worse)."""
+        if not _SELF_REVISE or not draft or len(draft) < _SELF_REVISE_MIN_CHARS:
+            return draft
+        current = draft
+        for cycle in range(_SELF_REVISE_MAX_CYCLES):
+            v = await self._revise_critique(current, board)
+            if not v:  # critic failed/unparseable → fail-safe: keep the current draft
+                break
+            n = len(v["fabrications"]) + len(v["leaks"]) + len(v["format_issues"])
+            if n == 0:  # clean → done
+                if cycle:
+                    log.info("[hyper-engine] self-revise clean after %d cycle(s)", cycle)
+                break
+            revised = await self._revise_apply(current, board, v)
+            if revised == current:  # no usable rewrite → stop (avoid spinning)
+                break
+            log.info("[hyper-engine] self-revise cycle %d fixed %d issue(s) (fab=%d leak=%d fmt=%d)",
+                     cycle + 1, n, len(v["fabrications"]), len(v["leaks"]), len(v["format_issues"]))
+            current = revised
+        return current
+
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
@@ -1260,7 +1397,12 @@ class Director:
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                force_text=True, model=self.synth_model, bucket="synth")
         self.director_iters.append(self._last_tok)
-        return (msg or {}).get("content") or ""
+        draft = (msg or {}).get("content") or ""
+        # Reflexion: skip on the direct fast-path (keep the lookup cheap) — a deliberate turn gets
+        # the bounded grounding/leak/format pass against the same board. No-op on tiny/empty drafts.
+        if draft and not getattr(self, "_direct", False):
+            draft = await self._self_revise(draft, board)
+        return draft
 
     # ── Population-Sim (ADDITIONAL, opt-in) ───────────────────────────
     async def _groq_fb(self, messages: List[Dict[str, Any]], models: List[str], **kw: Any) -> Optional[Dict[str, Any]]:
@@ -1416,6 +1558,7 @@ class Director:
         # Fixes "user asks a simple question but the room runs a full debate". Conservative: only when
         # the plan is confident it's direct (defaults to the full pipeline otherwise).
         direct = (plan.get("intent") == "direct")
+        self._direct = direct  # gates the synth self-revise (skip on the cheap fast-path)
         if direct:
             await self.emit({"t": "typing", "agent": _lead, "note": "Direct question — answering from memory…"})
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.

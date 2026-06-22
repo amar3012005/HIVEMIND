@@ -162,6 +162,12 @@ _WEB_INTEL_PAYLOADS: Dict[str, Dict[str, Any]] = {}
 # (assignment-driven execution, goalkeeper) and surfaced to the FE.
 _PLAN_BY_TURN: Dict[str, Dict[str, Any]] = {}
 
+# Population-sim payload computed THIS turn, keyed by turn_id. The goalkeeper re-runs the whole
+# pipeline per round; the sim is per-(room, topic) and does NOT change across re-plans, so compute it
+# ONCE (round 1) and reuse it on rework rounds instead of re-paying ~30k tokens each round. Cleared at
+# turn end (both this and _PLAN_BY_TURN, which previously leaked per turn_id).
+_SIM_BY_TURN: Dict[str, Dict[str, Any]] = {}
+
 # Phase 4 — writes held for the user's approval, keyed by approval_id. Each
 # record carries the bridge descriptor + creds needed to replay the call once
 # approved (via /internal/hyper/approve). Bounded to avoid unbounded growth.
@@ -2668,6 +2674,9 @@ async def _orchestrate_single_agent(
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
+    # Reuse a population-sim already computed earlier this turn (a prior goalkeeper round) instead of
+    # re-paying ~30k tokens to regenerate the same stakeholder simulation.
+    _precomp_sim = _SIM_BY_TURN.get(req.turn_id)
     try:
         result = await run_director(
             user_message=req.user_message,
@@ -2677,12 +2686,16 @@ async def _orchestrate_single_agent(
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks, journal=_journal,
+            precomputed_sim=_precomp_sim,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
         await _emit({"t": "seal", "cost_tokens": 0, "status": "failed",
                      "duration_ms": int((time.time() - started) * 1000)})
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+    # Cache the sim for this turn so a goalkeeper rework round reuses it (computed once).
+    if not _precomp_sim and isinstance(result.get("sim_report"), dict):
+        _SIM_BY_TURN[req.turn_id] = result["sim_report"]
 
     cost_tokens = int(result.get("cost_tokens") or 0)
     final_text = str(result.get("final_text") or "")
@@ -2999,14 +3012,22 @@ async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     return "ask" if conns else "auto"
 
 
-def _goalkeeper_max_rounds() -> int:
-    """Phase 6 — hard cap on goalkeeper rounds (1 initial + retries). Small by
-    default: only genuinely-incomplete turns loop, and a misconfigured task
-    can't loop forever."""
+def _goalkeeper_max_rounds(quality_mode: str = "best") -> int:
+    """Phase 6 — hard cap on goalkeeper rounds (1 initial + retries). Each round re-runs the FULL
+    pipeline, so a re-plan is expensive. CHEAP rooms (auto/eval) get a lower cap (fewer costly
+    re-runs, accept a slightly-less-polished result) while BEST rooms keep the full cap (higher
+    stakes → worth the rework). Env-overridable. Small by default so a misconfigured task can't loop."""
     try:
-        return max(1, min(5, int(os.environ.get("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS", "3"))))
+        best = max(1, min(5, int(os.environ.get("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS", "3"))))
     except Exception:  # noqa: BLE001
-        return 3
+        best = 3
+    if str(quality_mode or "").strip().lower() == "best":
+        return best
+    try:
+        cheap = max(1, min(best, int(os.environ.get("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS_CHEAP", "2"))))
+    except Exception:  # noqa: BLE001
+        cheap = min(best, 2)
+    return cheap
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
@@ -3046,7 +3067,17 @@ async def post_room_turn(
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back
     # into the turn message and re-plan, up to a round cap. Same shape as the
     # Claude `/goal` keep-working-toward-the-goal loop.
-    max_rounds = _goalkeeper_max_rounds()
+    # Quality-aware round cap: cheap rooms (auto / per-turn eval override) get fewer expensive
+    # re-runs; best rooms keep the full cap. Resolved once, here (never fail the turn over it).
+    _gk_quality = "best"
+    if getattr(req, "agentic_model", None):
+        _gk_quality = "eval"  # per-turn eval override → treat as cheap
+    else:
+        try:
+            _gk_quality = await get_room_quality_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _gk_quality = "auto"
+    max_rounds = _goalkeeper_max_rounds(_gk_quality)
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None
@@ -3145,6 +3176,9 @@ async def post_room_turn(
         resp.status = "blocked"
         log.info("[dead-end] room=%s blocked honestly: %s",
                  req.room_id, (_vplan.get("dead_end") or {}).get("reason"))
+    # Turn done — free the per-turn caches (both previously kept their turn_id forever).
+    _SIM_BY_TURN.pop(req.turn_id, None)
+    _PLAN_BY_TURN.pop(req.turn_id, None)
     return resp
 
 

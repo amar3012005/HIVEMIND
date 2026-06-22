@@ -186,7 +186,7 @@ _DIGEST_ENABLED = (os.environ.get("HYPER_DIGEST_ENABLED", "true").strip().lower(
 # gpt-oss models can route plain-text output to an analysis channel → empty content; a llama
 # instruct model returns content reliably + is just as cheap for extractive compression.
 _DIGEST_MODEL = os.environ.get("HYPER_DIGEST_MODEL", "llama-3.1-8b-instant")
-_DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "5000") or "5000"))  # gate: only a FAT board
+_DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "2500") or "2500"))  # gate: engage on a moderately-full board (spike: +21% even at ~2k chars)
 _DIGEST_MAX_CHARS = max(800, int(os.environ.get("HYPER_DIGEST_MAX_CHARS", "2400") or "2400"))   # bound the digest
 _DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000") or "12000"))  # cap the digester's own input
 
@@ -583,6 +583,7 @@ class Director:
         evo_mode: str = "off",
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
         journal: Optional[List[str]] = None,
+        precomputed_sim: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -639,6 +640,9 @@ class Director:
         self.sim_agents = max(10, min(100, int(sim_agents or _SIM_PERSONAS)))
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
+        # A population-sim already computed earlier this turn (a prior goalkeeper round) — reuse it
+        # instead of re-running the ~30k-token simulation (it's the same room/topic across re-plans).
+        self._precomputed_sim: Optional[Dict[str, Any]] = precomputed_sim if isinstance(precomputed_sim, dict) else None
         # Self-evolving employees (Loop 1, additional + opt-in). evo_playbooks = the per-employee
         # lessons learned in PRIOR turns of this room — injected before each employee speaks. The
         # WRITE (reflection) now happens in the api layer post-verification via
@@ -1409,10 +1413,18 @@ class Director:
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Skipped on a direct question (pointless for a
         # lookup). Fully wrapped — a failure just skips it; the main turn is never affected.
         if self.sim_mode in _SIM_ON and not direct:
-            self._sim_payload = await self._population_sim(self.room_goal or self.user_message or "")
-            if self._sim_payload:
+            if self._precomputed_sim:
+                # Reuse the sim from an earlier goalkeeper round — re-emit so the FE still shows it,
+                # but skip the ~30k-token recompute (same room/topic across re-plans).
+                self._sim_payload = self._precomputed_sim
                 self._sim_report = self._sim_payload.get("report")
                 await self.emit({"t": "sim_report", **self._sim_payload})
+                log.info("[hyper-engine] population-sim REUSED from a prior round (recompute skipped)")
+            else:
+                self._sim_payload = await self._population_sim(self.room_goal or self.user_message or "")
+                if self._sim_payload:
+                    self._sim_report = self._sim_payload.get("report")
+                    await self.emit({"t": "sim_report", **self._sim_payload})
         # PHASE 3 — DEBATE (the multi-agent product). Convene only when the plan judges the task needs a
         # decision/judgment/discussion AND it isn't a direct lookup — a pure recall skips it (faster).
         forced_debate = False
@@ -1479,6 +1491,7 @@ async def run_director(
     evo_mode: str = "off",
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
     journal: Optional[List[str]] = None,
+    precomputed_sim: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report, evo_updates}."""
@@ -1488,6 +1501,6 @@ async def run_director(
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents, journal=journal,
-        evo_mode=evo_mode, evo_playbooks=evo_playbooks,
+        evo_mode=evo_mode, evo_playbooks=evo_playbooks, precomputed_sim=precomputed_sim,
     )
     return await director.run()

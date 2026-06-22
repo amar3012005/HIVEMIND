@@ -1126,6 +1126,12 @@ class Director:
             "• Ground EVERY specific in the gathered context; never invent facts, names, numbers, or links; "
             "flag anything you cannot verify as UNVERIFIED and collect open items under a short "
             "'## Gaps to confirm'.\n"
+            "• NO GENERIC PLAYBOOKS. Build every recommendation FROM the company's OWN recalled specifics — "
+            "their named products, sub-brands, partners, strategy, market, and the actual figures in the "
+            "context. A recommendation that could be copy-pasted to ANY company (a generic 'enablement "
+            "program', 'X-phase rollout', 'referral hub') is a FAILURE — name the real entities and tie each "
+            "move to a concrete fact you gathered. If the context lacks the specifics to be concrete, say so "
+            "under '## Gaps to confirm' rather than padding with generic advice.\n"
             "• When a debate happened, close with a one-line synthesis citing who argued what.\n"
             "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs."
         )

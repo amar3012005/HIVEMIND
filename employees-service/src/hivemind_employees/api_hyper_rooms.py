@@ -413,14 +413,10 @@ async def _save_room_decision(
     user_message: str,
     decision_text: str,
     trigger: str,
-    project_id: Optional[str] = None,
-    positions: str = "",
-    participant_slugs: Optional[list] = None,
 ) -> Optional[str]:
-    """Persist a room decision as a HIVEMIND memory — the company brain's record of what a room
-    decided AND what each employee argued. Tagged per-employee (emp:<slug>) + project so the
-    PROJECT-SCOPED gather recall can surface an employee's prior cross-room positions WITHOUT leaking
-    across projects (the proven project_id hard-scope). Returns memory id or None. Master + emulation."""
+    """Persist a room decision as a HIVEMIND memory. Returns memory id
+    or None on failure. Uses master key + X-HM-User-Id/Org-Id emulation
+    so we don't require per-employee scoped keys."""
     settings = get_settings()
     master = settings.hivemind_master_api_key
     if not master:
@@ -428,27 +424,16 @@ async def _save_room_decision(
         return None
     title = f"Room decision · {user_message[:80]}"
     body = (
+        f"Trigger: {trigger}\n"
         f"User asked: {user_message}\n\n"
         f"Decision / closing line:\n{decision_text.strip()}\n"
-        + (f"\nWhat each employee argued:\n{positions.strip()}\n" if positions.strip() else "")
     )
     tags = [
         "room-decision",
         f"room:{room_id}",
         f"turn:{turn_id}",
         "hyper-rooms",
-        "hyper-agent-memory",
     ]
-    if project_id:
-        tags.append(f"project:{project_id}")
-    for s in (participant_slugs or [])[:8]:
-        if s:
-            tags.append(f"emp:{s}")
-    save_body: Dict[str, Any] = {
-        "title": title, "content": body, "tags": tags, "memory_type": "decision", "sync": True,
-    }
-    if project_id:
-        save_body["project_id"] = project_id  # associate the memory with the project for scoped recall
     try:
         async with httpx.AsyncClient(
             base_url=settings.hivemind_core_url,
@@ -461,7 +446,16 @@ async def _save_room_decision(
                 "Content-Type": "application/json",
             },
         ) as c:
-            r = await c.post("/api/memories", json=save_body)
+            r = await c.post(
+                "/api/memories",
+                json={
+                    "title": title,
+                    "content": body,
+                    "tags": tags,
+                    "memory_type": "decision",
+                    "sync": True,
+                },
+            )
             r.raise_for_status()
             data = r.json()
             mid = data.get("id") or (data.get("memory") or {}).get("id")
@@ -2824,26 +2818,6 @@ async def _orchestrate_single_agent(
                 log.info("[single] room=%s journal appended=%s entries=%d", req.room_id, ok, len(_new_journal))
         except Exception as exc:  # noqa: BLE001 — journaling must never fail the turn
             log.warning("[single] journal write failed (non-fatal): %s", exc)
-    # Decision sink (#2 cross-room agent memory) — persist the decision + each employee's position to
-    # the company brain, tagged emp:<slug> + project, so the PROJECT-SCOPED gather recall surfaces an
-    # employee's prior cross-room positions in OTHER rooms (leak-safe via the project hard-scope). One
-    # memory per answered debate turn (not per employee → no KB bloat). After seal; best-effort.
-    if final_text and transcript and status not in ("failed", "blocked"):
-        try:
-            _latest: Dict[str, str] = {}
-            for _x in transcript:
-                if isinstance(_x, dict) and _x.get("agent") and _x.get("text"):
-                    _latest[str(_x["agent"])] = str(_x["text"])
-            _positions = "\n".join(f"- {nm}: {tx[:200]}" for nm, tx in list(_latest.items())[:6])
-            _slugs = [p.get("slug") or p.get("id") for p in (participants or [])[:8] if (p.get("slug") or p.get("id"))]
-            _mid = await _save_room_decision(
-                user_id=req.user_id, org_id=req.org_id, room_id=req.room_id, turn_id=req.turn_id,
-                user_message=req.user_message, decision_text=final_text, trigger="turn-seal",
-                project_id=req.project_id, positions=_positions, participant_slugs=_slugs)
-            if _mid:
-                log.info("[single] room=%s decision+positions saved to brain memory=%s", req.room_id, _mid)
-        except Exception as exc:  # noqa: BLE001 — brain save must never fail the turn
-            log.warning("[single] decision-sink save failed (non-fatal): %s", exc)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

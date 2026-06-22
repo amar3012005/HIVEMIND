@@ -2790,17 +2790,12 @@ async def _orchestrate_single_agent(
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
 
-    await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
-                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",
-                 "tokens_in": int(_io.get("input", 0) or 0),
-                 "tokens_out": int(_io.get("output", 0) or 0),
-                 "tokens_cached": int(_io.get("cached", 0) or 0),
-                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
-                 "quality_mode": _qmode})
-    # Self-evolving (Loop 1) reflection + write-back — runs AFTER the seal (the user already has the
-    # answer) AND after verification, so each employee's contribution is scored against the turn's
-    # REAL outcome (verifier verdict + status + whether a write was held for approval), not just the
-    # deliverable. Best-effort + org-scoped; any failure leaves playbooks untouched.
+    # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal emit (the answer was
+    # already streamed during run_director) so the FE — whose SSE closes ON seal — receives a live
+    # `self_evolve` event with the per-employee lesson deltas. Reflection scores each employee's
+    # contribution against the turn's REAL outcome (verifier verdict + status + held write), then
+    # persists; a strong turn is skipped inside evo_reflect_and_merge → no event (nothing learned).
+    # Best-effort + org-scoped; any failure leaves playbooks untouched and never blocks the seal.
     if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
             _outcome = {
@@ -2815,10 +2810,30 @@ async def _orchestrate_single_agent(
             )
             if isinstance(_merged, dict) and _merged:
                 ok = await update_room_evo_playbooks(req.room_id, _merged, org_id=req.org_id)
-                log.info("[single] room=%s evo reflected+persisted=%s employees=%d status=%s",
-                         req.room_id, ok, len(_merged), status)
+                # Per-employee delta so the FE can show "🧬 N learned this turn" live + refresh
+                # the playbook view race-free (the post-seal refetch otherwise beats the write).
+                _names = {str(p.get("slug")): (p.get("name") or p.get("slug")) for p in (participants or [])}
+                _evo_emp = []
+                for _slug, _lessons in _merged.items():
+                    _added = max(0, len(_lessons) - len(_evo_playbooks.get(_slug, [])))
+                    _evo_emp.append({"slug": _slug, "name": _names.get(str(_slug), _slug),
+                                     "added": _added, "total": len(_lessons)})
+                _evo_added_total = sum(e["added"] for e in _evo_emp)
+                if ok and _evo_added_total > 0:
+                    await _emit({"t": "self_evolve", "employees": _evo_emp,
+                                 "added": _evo_added_total, "playbooks": _merged})
+                log.info("[single] room=%s evo reflected+persisted=%s employees=%d added=%d status=%s",
+                         req.room_id, ok, len(_merged), _evo_added_total, status)
         except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
             log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
+
+    await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
+                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+                 "tokens_in": int(_io.get("input", 0) or 0),
+                 "tokens_out": int(_io.get("output", 0) or 0),
+                 "tokens_cached": int(_io.get("cached", 0) or 0),
+                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
+                 "quality_mode": _qmode})
     # Swarm journal write-back — summarize this turn into ONE compact, figure-preserving entry and
     # append to the room's journal (bounded to the last N). Gives the NEXT turn continuity. After the
     # seal; best-effort; only on a genuinely-answered turn (skip failed/blocked → no junk entries).

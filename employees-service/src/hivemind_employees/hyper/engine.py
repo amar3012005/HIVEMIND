@@ -225,6 +225,15 @@ _SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MA
 _GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
 _GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
 
+# Web PROSPECTING: a query needing real-world contacts/businesses/people uses the full groq/compound
+# model (which actually crawls via visit_website) instead of compound-mini (which only searches +
+# guesses info@ addresses). The regex picks prospecting intent — model/tool selection only, never an
+# output gate, so it stays general for any room.
+_WEB_PROSPECT_MODEL = os.environ.get("HYPER_WEB_PROSPECT_MODEL", "groq/compound")
+_PROSPECT_RE = re.compile(
+    r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
+    r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
+
 
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
@@ -980,11 +989,29 @@ class Director:
         if not key:
             return json.dumps({"error": "web search unavailable (no key)"})
         self._web_calls += 1
+        # PROSPECTING: when the query needs real-world CONTACTS / businesses / people (not a general
+        # fact), use the full groq/compound model with visit_website ENABLED — it actually crawls the
+        # sites (compound-mini only searches + guesses info@ addresses, which is fabrication). Force a
+        # strict rule: quote a contact detail ONLY if it literally appears on a visited page, else mark
+        # it NOT VERIFIED — never guess. Keeps the room from inventing prospects. General, no tenant facts.
+        prospect = bool(_PROSPECT_RE.search(query))
+        model = (_WEB_PROSPECT_MODEL if prospect else self.web_model)
+        content = query
+        if prospect:
+            content = (query + "\n\nRULES: use web_search to find the REAL entities, then use "
+                       "visit_website to OPEN each one's official page (for a company, its Impressum / "
+                       "Kontakt / About page) and READ it. Give a contact detail (email, phone) ONLY if it "
+                       "literally appears in a page you actually visited — quote it verbatim and cite the "
+                       "exact URL you read it from. If you did not open a page that shows it, write "
+                       "'NOT VERIFIED' for that entity. NEVER guess or construct an address (no inventing "
+                       "info@domain). List each entity: name | website | email/phone or NOT VERIFIED | source URL.")
+        body: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": content}],
+                                "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
+        timeout = httpx.Timeout(180.0 if prospect else 45.0, connect=5.0)
+        keep = 2400 if prospect else 1000
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
-                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"},
-                                 json={"model": self.web_model,
-                                       "messages": [{"role": "user", "content": query}]})
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
             if r.status_code != 200:
                 log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
                 return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
@@ -997,7 +1024,7 @@ class Director:
             self.io["output"] += int(uw.get("completion_tokens", 0) or 0)
             self.io["cached"] += int(((uw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
             msg = j["choices"][0]["message"]
-            answer = str(msg.get("content") or "")[:1500]
+            answer = str(msg.get("content") or "")[:keep]
             sources: List[Dict[str, str]] = []
             for et in (msg.get("executed_tools") or []):
                 sr = et.get("search_results")
@@ -1016,7 +1043,7 @@ class Director:
             self.blackboard.append(
                 f"- WEB[{query[:60]}] (EXTERNAL/public, entity UNVERIFIED — may describe a different "
                 f"same-named entity; do NOT treat as a fact about THIS company unless it matches the "
-                f"internal facts): {answer[:300]}")
+                f"internal facts): {answer[:keep]}")
             self.gather_count += 1
             await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
                              "sources": sources[:5], "summary": answer[:400]})

@@ -215,6 +215,16 @@ _SELF_REVISE = (os.environ.get("HYPER_SELF_REVISE", "true").strip().lower() not 
 _SELF_REVISE_MIN_CHARS = max(200, int(os.environ.get("HYPER_SELF_REVISE_MIN_CHARS", "400") or "400"))
 _SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MAX_CYCLES", "2") or "2")))
 
+# ── Gather deepening (recall-sufficiency recursion) ─────────────────────────
+# After the first gather, a cheap judge asks: is there enough GROUNDED company-specific material
+# to answer the task SPECIFICALLY, or is the board too thin (→ the synth would pad with generic
+# scaffolding)? If thin, it proposes new-angle recall queries (decompose the task, name each
+# entity, try synonyms) and re-gathers ONCE. No magic thresholds — an LLM judges sufficiency, same
+# shape as the synth self-revise. General for any room/agent; skipped on the direct fast-path;
+# bounded to one extra round; flag-gated. Fixes "thin recall → generic answer" at the SOURCE.
+_GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
+_GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
+
 
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
@@ -999,7 +1009,14 @@ class Director:
                 for s in sr[:5]:
                     if isinstance(s, dict) and s.get("url"):
                         sources.append({"title": str(s.get("title") or "")[:120], "url": str(s.get("url"))})
-            self.blackboard.append(f"- WEB[{query[:60]}]: {answer[:300]}")
+            # Tag web facts as EXTERNAL + entity-unverified: a public search can return a DIFFERENT
+            # same-named entity (the 'Oekosystem' contamination). The synth critic reconciles this
+            # against the internal board; the explicit tag keeps a web hit from masquerading as a
+            # fact about THIS company's own identity. General, no extra call.
+            self.blackboard.append(
+                f"- WEB[{query[:60]}] (EXTERNAL/public, entity UNVERIFIED — may describe a different "
+                f"same-named entity; do NOT treat as a fact about THIS company unless it matches the "
+                f"internal facts): {answer[:300]}")
             self.gather_count += 1
             await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
                              "sources": sources[:5], "summary": answer[:400]})
@@ -1275,6 +1292,51 @@ class Director:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
+
+    async def _deepen_gather(self, plan: Dict[str, Any]) -> int:
+        """Recall-sufficiency recursion: ONE bounded re-gather round. A cheap judge inspects the task +
+        gathered board; if the grounding is too thin to answer SPECIFICALLY (a key entity/subtopic has
+        no grounded fact → synth would pad generic), it proposes NEW-angle recall queries that are
+        gathered + merged into the board. General (no thresholds, no tenant facts); skipped on the
+        direct fast-path; bounded to one round. Returns the number of extra recall calls (0 if
+        sufficient/skipped). Never raises — a failure leaves the original gather intact."""
+        if not _GATHER_DEEPEN or getattr(self, "_direct", False):
+            return 0
+        try:
+            board = "\n".join(self.blackboard)[:3500] or "(nothing grounded was gathered)"
+            already = "; ".join(plan.get("recall_queries") or [])[:400]
+            schema = {"type": "object", "additionalProperties": False,
+                      "required": ["sufficient", "recall_queries"],
+                      "properties": {"sufficient": {"type": "boolean"},
+                                     "recall_queries": {"type": "array", "items": {"type": "string"}}}}
+            sysp = (
+                "You judge whether the room gathered ENOUGH grounded, company-specific material to answer "
+                "the TASK SPECIFICALLY (with the company's OWN real entities/figures) rather than with "
+                "generic advice. Compare the GATHERED FACTS against the distinct entities/subtopics the "
+                "TASK implies. If a key entity or subtopic has NO grounded fact, output sufficient=false "
+                "and 2-4 NEW recall queries that attack the GAPS from DIFFERENT angles — decompose the "
+                "task, name each distinct entity/subtopic explicitly, try synonyms — and do NOT repeat "
+                "the queries already run. If the facts already let a writer be concrete, sufficient=true "
+                "and recall_queries=[]. Output ONLY the JSON.")
+            user = f"TASK: {self.user_message}\nQUERIES ALREADY RUN: {already}\n\nGATHERED FACTS:\n{board}"
+            msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
+                                   model=self.director_model, temp=0.3, schema=schema, bucket="director")
+            self.director_iters.append(self._last_tok)
+            obj = _first_json_object((msg or {}).get("content") or "")
+            if not isinstance(obj, dict) or obj.get("sufficient"):
+                return 0
+            newq = [q for q in (obj.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:_GATHER_DEEPEN_MAX_Q]
+            if not newq:
+                return 0
+            agent = self.participants[0].get("slug") if self.participants else "director"
+            await self.emit({"t": "typing", "agent": agent, "note": "Recall thin — gathering more from the company brain…"})
+            await asyncio.gather(*[self._gather_one("recall", {"query": q, "max": 6}) for q in newq],
+                                 return_exceptions=True)
+            log.info("[hyper-engine] gather DEEPENED: +%d recall queries (board was thin)", len(newq))
+            return len(newq)
+        except Exception as exc:  # noqa: BLE001 — deepen is best-effort; never break the turn
+            log.warning("[hyper-engine] gather-deepen skipped: %s", exc)
+            return 0
 
     # Three GENERAL deliverable-quality classes the critic audits — described, never hardcoded to a
     # tenant. Shared by the critic + reviser so the contract is identical.
@@ -1577,6 +1639,10 @@ class Director:
             await self.emit({"t": "typing", "agent": _lead, "note": "Direct question — answering from memory…"})
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
         tool_calls_made = await self._run_gather(plan)
+        # PHASE 2.1 — DEEPEN (recall-sufficiency recursion). If the board is too thin to answer
+        # specifically, a cheap judge proposes new-angle recalls and gathers once more. Skipped on
+        # the direct fast-path. Fixes "thin recall → generic" at the source; bounded to one round.
+        tool_calls_made += await self._deepen_gather(plan)
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Skipped on a direct question (pointless for a
         # lookup). Fully wrapped — a failure just skips it; the main turn is never affected.
         if self.sim_mode in _SIM_ON and not direct:

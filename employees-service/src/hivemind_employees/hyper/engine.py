@@ -1131,8 +1131,9 @@ class Director:
                     "required": ["name", "args_json"], "additionalProperties": False}},
                 "web_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
+                "intent": {"type": "string", "enum": ["direct", "deliberate"]},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate"],
+            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate", "intent"],
             "additionalProperties": False,
         }
         sysp = (
@@ -1147,7 +1148,11 @@ class Director:
             "hold; otherwise null.\n"
             "- needs_debate: true ONLY if the task needs a decision, judgment, trade-off, or genuine discussion; "
             "false for a pure lookup / factual answer. If the ROOM JOURNAL already answers the task "
-            "(a recall of a prior decision), set needs_debate=false and keep recalls minimal."
+            "(a recall of a prior decision), set needs_debate=false and keep recalls minimal.\n"
+            "- intent: 'direct' = a recall/lookup/greeting/simple factual question answerable from the journal "
+            "or a quick recall WITHOUT a team debate (asking what WAS decided/agreed); 'deliberate' = a NEW "
+            "decision/strategy/analysis the team must reason through (asking what we SHOULD do). Rule of thumb: "
+            "what was decided = direct; what we should do = deliberate."
         )
         user = f"ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}{self._journal_block()}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
@@ -1371,21 +1376,27 @@ class Director:
         # decides what to recall / which connectors to read / web + debate. Replaces the
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
         plan = await self._plan_gather()
+        # FAST-PATH: a DIRECT question (recall/lookup, answerable from the journal/quick recall) skips
+        # the heavy machinery — no population-sim, no debate. The deliberate pipeline is unchanged.
+        # Fixes "user asks a simple question but the room runs a full debate". Conservative: only when
+        # the plan is confident it's direct (defaults to the full pipeline otherwise).
+        direct = (plan.get("intent") == "direct")
+        if direct:
+            await self.emit({"t": "typing", "agent": _lead, "note": "Direct question — answering from memory…"})
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
         tool_calls_made = await self._run_gather(plan)
-        # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
-        # report the FE shows as a hideable popup, and feeds that report into the synthesis. Fully
-        # wrapped — a failure just skips it; the main turn (debate + synth) is never affected.
-        if self.sim_mode in _SIM_ON:
+        # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Skipped on a direct question (pointless for a
+        # lookup). Fully wrapped — a failure just skips it; the main turn is never affected.
+        if self.sim_mode in _SIM_ON and not direct:
             self._sim_payload = await self._population_sim(self.room_goal or self.user_message or "")
             if self._sim_payload:
                 self._sim_report = self._sim_payload.get("report")
                 await self.emit({"t": "sim_report", **self._sim_payload})
-        # PHASE 3 — DEBATE (the multi-agent product). Convene only when the plan judges the
-        # task needs a decision/judgment/discussion — a pure lookup skips it (faster, on-point).
+        # PHASE 3 — DEBATE (the multi-agent product). Convene only when the plan judges the task needs a
+        # decision/judgment/discussion AND it isn't a direct lookup — a pure recall skips it (faster).
         forced_debate = False
         transcript_json = ""
-        if len(self.participants) >= 2 and plan.get("needs_debate"):
+        if len(self.participants) >= 2 and plan.get("needs_debate") and not direct:
             try:
                 topic = (self.room_goal or self.user_message or "")[:400]
                 transcript_json = await self._debate(topic, self.debate_max_rounds)

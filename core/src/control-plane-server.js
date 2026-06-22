@@ -6057,7 +6057,7 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode, evo_playbooks FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
@@ -6065,6 +6065,7 @@ Write the persona now.`;
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
         room.evo_mode = pr?.[0]?.evo_mode || 'off';
+        room.evo_playbooks = pr?.[0]?.evo_playbooks || {};
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6228,6 +6229,25 @@ Write the persona now.`;
           );
           updated.evo_mode = body.evo_mode;
         } catch (e) { console.warn('[hyper-rooms] evo_mode update failed:', e.message); }
+      }
+      // Reset learned playbooks (clear what employees have learned in this room). Either
+      // evo_reset:true (wipe all) or evo_reset:"<slug>" (wipe one employee). Reversible only
+      // forward (re-learns over future turns); safe raw-SQL, never 500s.
+      if (body.evo_reset === true) {
+        try {
+          await prisma.$executeRawUnsafe(
+            `UPDATE "hivemind"."hyper_rooms" SET "evo_playbooks" = '{}'::jsonb WHERE "id" = $1::uuid`, roomId,
+          );
+          updated.evo_playbooks = {};
+        } catch (e) { console.warn('[hyper-rooms] evo_reset failed:', e.message); }
+      } else if (typeof body.evo_reset === 'string' && body.evo_reset) {
+        try {
+          await prisma.$executeRawUnsafe(
+            `UPDATE "hivemind"."hyper_rooms" SET "evo_playbooks" = "evo_playbooks" - $1 WHERE "id" = $2::uuid`,
+            body.evo_reset, roomId,
+          );
+          updated.evo_reset = body.evo_reset;
+        } catch (e) { console.warn('[hyper-rooms] evo_reset(slug) failed:', e.message); }
       }
       return jsonResponse(res, { room: updated });
     }

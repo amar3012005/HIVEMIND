@@ -80,7 +80,8 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director, evo_reflect_and_merge, make_journal_entry, _JOURNAL_ENABLED, _JOURNAL_KEEP
+from .hyper.engine import (run_director, evo_reflect_and_merge, make_journal_entry, _evo_groq,
+                           _JOURNAL_ENABLED, _JOURNAL_KEEP)
 
 log = logging.getLogger(__name__)
 
@@ -2179,6 +2180,15 @@ _GDOCS_URL_RE = re.compile(r"https?://(?:docs|drive|sheets)\.google\.com/\S+", r
 async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
                          step: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
     contacts = plan.get("verified_contacts") or []
+    # MULTI-RECIPIENT OUTREACH: more than one verified contact (e.g. web-crawled prospects) → draft a
+    # personalized email PER recipient, each queued for HITL approval. Nothing sends until the user
+    # approves each. Grounded in the synthesis (the offer); never invents a sender.
+    if len(contacts) > 1:
+        made = await _draft_outreach(req, contacts, ctx.get("body") or "")
+        if made:
+            log.info("[produce] outreach drafts queued for %d recipient(s)", len(made))
+            return {"drafts": len(made), "to": made}
+        return {"skipped": "no outreach drafts could be created for the verified prospects"}
     to = (contacts[0].get("email") if contacts else "") or ""
     # Agent-driven recipient fallback: an owner may have RECALLED the contact from
     # HIVEMIND during EXECUTE — scan the executed work + synthesis for a real email.
@@ -2517,6 +2527,85 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
     return resolved
 
 
+# Our own brands — never email ourselves when harvesting prospects.
+_OWN_RECIP_DOMAINS = ("singulance", "hivemind", "davinci", "solvis")
+_BAD_EMAIL_BITS = ("noreply", "no-reply", "example.", "@sentry", "wixpress", "@2x", ".png", ".jpg", "sentry.io")
+
+
+def _harvest_web_recipients(gather_facts: List[Any]) -> List[Dict[str, Any]]:
+    """Pull provenance-backed PROSPECT emails the room actually crawled from the web this turn.
+    Only emails inside a WEB[...] gather-fact that ALSO carries a source URL qualify — i.e. the room
+    visited a page and quoted the address (grounded), NOT a synth invention. Returns
+    [{name, email, source:'web', line}], deduped, our-own/noreply/asset domains skipped. General."""
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for f in (gather_facts or []):
+        s = str(f)
+        if "WEB[" not in s or "http" not in s.lower():
+            continue  # require web provenance on the fact
+        for line in s.splitlines():
+            for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", line):
+                low = addr.lower()
+                if low in seen or any(b in low for b in _BAD_EMAIL_BITS):
+                    continue
+                if any(d in low for d in _OWN_RECIP_DOMAINS):
+                    continue
+                seen.add(low)
+                m = re.search(r"\*{0,2}([A-ZÄÖÜ][\wÄÖÜäöüß&.\- ]{2,40})", line)
+                nm = (m.group(1).strip() if m else low.split("@")[0])
+                out.append({"name": nm, "email": addr, "source": "web", "line": line.strip()[:250]})
+    return out[:10]
+
+
+async def _draft_outreach(req: "RoomTurnRequest", contacts: List[Dict[str, Any]], offer_text: str) -> List[str]:
+    """Multi-recipient outreach: ONE batched call writes a short, personalized, grounded email per
+    prospect; each becomes a Gmail DRAFT queued for HITL approval (nothing sends until the user
+    approves). Grounded ONLY in the offer; neutral [Your name] signature (never an invented sender).
+    Returns the list of recipient emails a draft was queued for. General — no tenant hardcoding."""
+    roster = "\n".join(f"- {c.get('name') or c['email']} <{c['email']}> | ctx: {c.get('line', '')}" for c in contacts)
+    schema = {"type": "object", "additionalProperties": False, "required": ["drafts"],
+              "properties": {"drafts": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                  "required": ["email", "subject", "body"],
+                  "properties": {"email": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}}}}}
+    sysp = ("You write short, professional, PERSONALIZED B2B outreach emails for the German market — write "
+            "in German, polite Sie-form, 4-7 sentences. For EACH prospect, pitch the OFFER below. Ground "
+            "ONLY in the offer text: do NOT invent statistics, prices, dates, or claims not present in it. "
+            "Sign with a neutral placeholder '[Ihr Name]' — NEVER invent a sender name, phone, or email. "
+            "Personalize lightly to the prospect's business where the context allows. Output one draft per "
+            "prospect email, matching the exact email address given.")
+    usr = f"OFFER / CONTEXT:\n{offer_text[:2500]}\n\nPROSPECTS:\n{roster}\n\nReturn one draft per prospect email."
+    made: List[str] = []
+    try:
+        out = await _evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+                              model="openai/gpt-oss-120b", schema=schema)
+        obj = json.loads(out or "{}") if out else {}
+        drafts = obj.get("drafts") if isinstance(obj, dict) else []
+        by_email = {str(d.get("email", "")).lower(): d for d in (drafts or []) if isinstance(d, dict)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[produce] outreach batch failed: %s", exc)
+        by_email = {}
+    for c in contacts:
+        d = by_email.get(c["email"].lower()) or {}
+        subject = (d.get("subject") or "").strip() or "HIVEMIND — kostenlose Testphase"
+        body = (d.get("body") or "").strip()
+        if not body:
+            continue
+        try:
+            res = await google_exec_emulated("gmail_create_draft",
+                                             {"to": c["email"], "subject": subject, "body": body},
+                                             user_id=req.user_id, org_id=req.org_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[produce] outreach draft to %s failed: %s", c["email"], exc)
+            continue
+        inner = (res or {}).get("result") or res or {}
+        draft_id = inner.get("draftId") or (res or {}).get("draftId")
+        url = inner.get("url") or (res or {}).get("url") or ""
+        if draft_id:
+            queue_email_approval(c["email"], subject, draft_id, url)
+            made.append(c["email"])
+    return made
+
+
 
 
 
@@ -2752,6 +2841,20 @@ async def _orchestrate_single_agent(
             if pick:
                 _vc = [{"name": pick.split("@")[0], "email": pick, "source": "gmail-context"}]
                 log.info("[single] recipient resolved from gathered gmail: %s", pick)
+        # ALSO harvest provenance-backed prospect emails the room CRAWLED this turn (real businesses,
+        # source-cited on the board) — so outreach drafts to verified-found contacts, not only the
+        # recipients named in the user's message. Every draft still goes through HITL approval.
+        try:
+            _web_rec = _harvest_web_recipients(result.get("gather_facts") or [])
+            _have = {r["email"].lower() for r in _vc}
+            for r in _web_rec:
+                if r["email"].lower() not in _have:
+                    _vc.append(r)
+                    _have.add(r["email"].lower())
+            if _web_rec:
+                log.info("[single] harvested %d web-verified prospect email(s)", len(_web_rec))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[single] web recipient harvest failed: %s", exc)
 
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output,

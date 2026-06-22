@@ -122,10 +122,11 @@ function tasksForKey(key) {
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--employee') {
-      out.employee = argv[i + 1];
-      i += 1;
-    }
+    if (argv[i] === '--employee') { out.employee = argv[i + 1]; i += 1; }
+    // Loop 2: --playbook-room <roomId> distils that room's accrued self-evolve playbook for this
+    // employee INTO the candidate persona (in addition to low-scoring evals), then runs the SAME
+    // A/B + promote gate. Manual/opt-in — never auto-runs against a live employee.
+    else if (argv[i] === '--playbook-room') { out.playbookRoom = argv[i + 1]; i += 1; }
   }
   return out;
 }
@@ -153,8 +154,9 @@ async function groqComplete({ apiKey, system, user, temperature, maxTokens }) {
   return (data.choices?.[0]?.message?.content || '').trim();
 }
 
-// PROPOSE: ask the teacher to rewrite the persona using low-score examples.
-async function proposeImprovedPrompt({ apiKey, persona, role, lowExamples }) {
+// PROPOSE: ask the teacher to rewrite the persona using low-score examples + (Loop 2) the
+// employee's accrued self-evolve playbook.
+async function proposeImprovedPrompt({ apiKey, persona, role, lowExamples, playbook }) {
   const sys = `You improve system prompts for AI digital employees. Output ONLY the improved persona system-prompt as plain text — no preamble, no markdown, no headers. Keep the employee's identity and role intact. Strengthen the instructions so responses are more consistent with the role, more complete, clearer, and deeper in reasoning. Address the employee in second person ("You are ...").`;
 
   const examplesBlock = lowExamples.length
@@ -162,6 +164,11 @@ async function proposeImprovedPrompt({ apiKey, persona, role, lowExamples }) {
         .map((ex, i) => `Example ${i + 1} (score ${ex.score.toFixed(2)}):\nUser: ${String(ex.query || '').slice(0, 400)}\nWeak response: ${String(ex.response || '').slice(0, 600)}`)
         .join('\n\n')
     : '(no low-scoring evaluations available — improve generically for the role)';
+
+  // Loop 2: bake the accrued playbook (lessons Loop 1 learned, turn over turn) into the persona.
+  const playbookBlock = (Array.isArray(playbook) && playbook.length)
+    ? `\n\nThis employee has also LEARNED these operating lessons over many turns — bake them PERMANENTLY into the persona so it always applies them:\n${playbook.map((l) => `- ${l}`).join('\n')}`
+    : '';
 
   const user = `Role / archetype: ${role || 'generalist'}
 
@@ -172,11 +179,27 @@ ${persona}
 
 The following past responses scored poorly. Diagnose what they lack (role consistency, completeness, clarity, depth) and rewrite the persona so future responses avoid these weaknesses:
 
-${examplesBlock}
+${examplesBlock}${playbookBlock}
 
 Write the improved persona now.`;
 
   return groqComplete({ apiKey, system: sys, user, temperature: 0.5, maxTokens: 600 });
+}
+
+// Loop 2: pull the accrued self-evolve playbook for this employee from a room's evo_playbooks.
+async function loadPlaybookForEmployee(prisma, roomId, slug) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT evo_playbooks FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+    );
+    const pb = rows?.[0]?.evo_playbooks;
+    const map = typeof pb === 'string' ? JSON.parse(pb) : (pb || {});
+    const lessons = Array.isArray(map?.[slug]) ? map[slug].map((x) => String(x)) : [];
+    return lessons;
+  } catch (err) {
+    console.warn(`[prompt-tune] could not load playbook (room=${roomId}, slug=${slug}): ${err.message}`);
+    return [];
+  }
 }
 
 // A/B: run all tasks through a given system prompt, score, return average.
@@ -300,10 +323,17 @@ async function main() {
   const lowExamples = await readLowEvals(key, N_LOW_EXAMPLES);
   console.log(`[prompt-tune] loaded ${lowExamples.length} low-scoring evaluation example(s)`);
 
+  // Step 2b (Loop 2): the employee's accrued self-evolve playbook, if a room was given.
+  let playbook = [];
+  if (args.playbookRoom) {
+    playbook = await loadPlaybookForEmployee(prisma, args.playbookRoom, employee.slug);
+    console.log(`[prompt-tune] loaded ${playbook.length} learned playbook lesson(s) from room ${args.playbookRoom}`);
+  }
+
   // Step 3: PROPOSE candidate.
   let candidate;
   try {
-    candidate = await proposeImprovedPrompt({ apiKey, persona, role, lowExamples });
+    candidate = await proposeImprovedPrompt({ apiKey, persona, role, lowExamples, playbook });
   } catch (err) {
     console.error(`PROPOSE step failed: ${err.message}`);
     await prisma.$disconnect().catch(() => {});
@@ -360,6 +390,10 @@ async function main() {
       },
       timestamp,
       optimization_level: optimizationLevel,
+      // Loop 2 provenance: which signal drove this promotion + how many learned lessons were baked in.
+      source: playbook.length ? 'evo_playbook' : 'evals',
+      playbook_lessons: playbook.length,
+      playbook_room: args.playbookRoom || null,
     };
     await fs.writeFile(variantFile, `${JSON.stringify(variantRecord, null, 2)}\n`, 'utf8');
     console.log(`[prompt-tune] PROMOTED — wrote ${variantFile}`);

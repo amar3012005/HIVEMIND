@@ -77,13 +77,26 @@ def scenario_cap():
 
 
 async def scenario_entry():
+    cap = {"usr": ""}
+
     async def fake_evo_groq(messages, *, model, schema, temp=0.3):
         assert schema is None, "journal entry must use plain text (schema=None)"
-        return "asked: prepay vendor? | decided: yes — prepay 12mo saves 20% (€8k); CFO confirms Fri"
+        cap["usr"] = next((m["content"] for m in messages if m["role"] == "user"), "")
+        return "asked: prepay vendor? | decided: yes — prepay 12mo saves 20% (€8k) | positions: Fin: yes; Vic: liquidity risk"
     E._evo_groq = fake_evo_groq  # type: ignore
-    line = await E.make_journal_entry("Should we prepay the vendor?", "Decision: prepay, saves 20%...")
-    assert line and "decided:" in line and "20%" in line, f"bad entry: {line}"
-    print(f"  ✅ make_journal_entry: '{line[:60]}…'")
+    # no transcript → no positions block in the prompt
+    line0 = await E.make_journal_entry("Should we prepay the vendor?", "Decision: prepay, saves 20%...")
+    assert "WHAT EACH AGENT ARGUED" not in cap["usr"], "no transcript must omit the positions block"
+    # WITH transcript → per-agent positions fed to the summariser
+    tr = [{"round": 1, "agent": "Fin", "text": "Prepay — saves 20%, runway fine."},
+          {"round": 2, "agent": "Fin", "text": "Still yes; lock the 20%."},
+          {"round": 1, "agent": "Vic", "text": "Liquidity risk if cash tightens."}]
+    line = await E.make_journal_entry("Should we prepay the vendor?", "Decision: prepay, saves 20%...", transcript=tr)
+    assert "WHAT EACH AGENT ARGUED" in cap["usr"] and "Fin:" in cap["usr"] and "Vic:" in cap["usr"], \
+        "transcript must feed per-agent positions to the summariser"
+    assert "Still yes" in cap["usr"], "should keep each agent's LATEST stance"
+    assert line and "positions:" in line, f"entry missing positions slice: {line}"
+    print(f"  ✅ per-agent slice: positions fed when debate happened; '{line[:72]}…'")
 
 
 async def main():

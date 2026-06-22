@@ -6057,7 +6057,7 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode, evo_playbooks FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode, evo_playbooks, evo_journal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
@@ -6066,6 +6066,7 @@ Write the persona now.`;
         room.sim_agents = pr?.[0]?.sim_agents || 24;
         room.evo_mode = pr?.[0]?.evo_mode || 'off';
         room.evo_playbooks = pr?.[0]?.evo_playbooks || {};
+        room.evo_journal = pr?.[0]?.evo_journal || [];
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6248,6 +6249,15 @@ Write the persona now.`;
           );
           updated.evo_reset = body.evo_reset;
         } catch (e) { console.warn('[hyper-rooms] evo_reset(slug) failed:', e.message); }
+      }
+      // Clear the swarm journal (forget the room's prior-turn memory). Reversible only forward.
+      if (body.journal_reset === true) {
+        try {
+          await prisma.$executeRawUnsafe(
+            `UPDATE "hivemind"."hyper_rooms" SET "evo_journal" = '[]'::jsonb WHERE "id" = $1::uuid`, roomId,
+          );
+          updated.evo_journal = [];
+        } catch (e) { console.warn('[hyper-rooms] journal_reset failed:', e.message); }
       }
       return jsonResponse(res, { room: updated });
     }

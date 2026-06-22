@@ -200,21 +200,42 @@ _JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "llama-3.1-8b-instant")  
 _JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
 
 
-async def make_journal_entry(user_message: str, final_text: str, *, model: Optional[str] = None) -> Optional[str]:
+def _journal_positions(transcript: Optional[List[Dict[str, Any]]]) -> str:
+    """Compact 'what each agent argued this turn' from the debate transcript — the per-agent slice.
+    Latest contribution per agent, trimmed. Empty when there was no debate (direct/fast-path turn)."""
+    if not transcript:
+        return ""
+    latest: Dict[str, str] = {}
+    for x in transcript:
+        if isinstance(x, dict) and x.get("agent") and x.get("text"):
+            latest[str(x["agent"])] = str(x["text"])  # later rounds overwrite → keep the agent's final stance
+    if not latest:
+        return ""
+    rows = "\n".join(f"- {name}: {text[:240]}" for name, text in list(latest.items())[:5])
+    return f"\n\nWHAT EACH AGENT ARGUED:\n{rows}"
+
+
+async def make_journal_entry(user_message: str, final_text: str, *,
+                             transcript: Optional[List[Dict[str, Any]]] = None,
+                             model: Optional[str] = None) -> Optional[str]:
     """Compact this turn into ONE figure-preserving journal line for future turns (the Claude-Code
     compaction model). Keeps the decision + key numbers verbatim (the spike showed dropping figures
-    halves recall). Returns the line or None on failure. Called by the api AFTER the turn seals."""
+    halves recall) AND a per-agent positions slice when a debate happened (so agents stay consistent
+    with their own prior stance). Returns the line or None on failure. Called by the api AFTER seal."""
     if not _JOURNAL_ENABLED:
         return None
     try:
+        pos = _journal_positions(transcript)
+        fmt = ("\"asked: <≤10 words> | decided: <decision + EVERY key figure/amount/%/date verbatim, ≤28 words>"
+               + (" | positions: <≤6 words per agent, 'Name: stance; …', ONLY agents who took a clear stance>\""
+                  if pos else "\""))
         sysp = ("Summarize this room turn into ONE compact journal line for future turns. Format EXACTLY: "
-                "\"asked: <≤10 words> | decided: <the decision + EVERY key figure/amount/%/date verbatim, "
-                "≤30 words>\". Preserve numbers exactly; never round or drop them. No preamble, one line.")
-        usr = f"USER ASKED: {user_message[:400]}\n\nTEAM DELIVERABLE:\n{final_text[:1800]}"
+                + fmt + " Preserve numbers exactly; never round or drop them. No preamble, one line.")
+        usr = f"USER ASKED: {user_message[:400]}\n\nTEAM DELIVERABLE:\n{final_text[:1500]}{pos}"
         out = await _evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
                               model=(model or _JOURNAL_MODEL), schema=None)
         line = (out or "").strip().split("\n")[0].strip()
-        return line[:320] or None
+        return line[:420] or None
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
         return None

@@ -2811,7 +2811,7 @@ async def _orchestrate_single_agent(
     # seal; best-effort; only on a genuinely-answered turn (skip failed/blocked → no junk entries).
     if _JOURNAL_ENABLED and final_text and status not in ("failed", "blocked"):
         try:
-            _entry = await make_journal_entry(req.user_message, final_text)
+            _entry = await make_journal_entry(req.user_message, final_text, transcript=transcript)
             if _entry:
                 _new_journal = ([str(x) for x in _journal] + [_entry])[-_JOURNAL_KEEP:]
                 ok = await update_room_journal(req.room_id, _new_journal, org_id=req.org_id)

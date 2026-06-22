@@ -441,6 +441,59 @@ async def update_room_evo_playbooks(
     return False
 
 
+async def get_room_journal(room_id: str, org_id: Optional[str] = None) -> list:
+    """Swarm journal — ordered list of compact per-turn entries (strings) giving the room
+    continuity. Empty list if missing/pre-migration. org_id scopes the read."""
+    import json as _json
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT evo_journal FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT evo_journal FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["evo_journal"]:
+                raw = row["evo_journal"]
+                jr = _json.loads(raw) if isinstance(raw, str) else list(raw)
+                if isinstance(jr, list):
+                    return [str(x) for x in jr if str(x).strip()]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_journal fallback: %s", exc)
+    return []
+
+
+async def update_room_journal(room_id: str, journal: list, org_id: Optional[str] = None) -> bool:
+    """Persist the room's journal (already bounded by the caller). Best-effort — returns False
+    (never raises) on failure so a journal write can never break the sealed turn. org_id scopes."""
+    import json as _json
+    if not isinstance(journal, list):
+        return False
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            payload = _json.dumps([str(x) for x in journal])
+            if org_id is not None:
+                await conn.execute(
+                    "UPDATE hivemind.hyper_rooms SET evo_journal = $1::jsonb, updated_at = now() "
+                    "WHERE id = $2 AND org_id = $3::uuid",
+                    payload, room_id, org_id,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE hivemind.hyper_rooms SET evo_journal = $1::jsonb, updated_at = now() WHERE id = $2",
+                    payload, room_id,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update_room_journal failed (non-fatal): %s", exc)
+    return False
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

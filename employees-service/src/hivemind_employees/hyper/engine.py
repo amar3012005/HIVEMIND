@@ -190,6 +190,35 @@ _DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "5000
 _DIGEST_MAX_CHARS = max(800, int(os.environ.get("HYPER_DIGEST_MAX_CHARS", "2400") or "2400"))   # bound the digest
 _DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000") or "12000"))  # cap the digester's own input
 
+# ── Swarm journal (episodic continuity) ────────────────────────────────────
+# A compact, ordered, per-turn log injected at the START of plan + synth so a turn RECALLS prior
+# turns ("as we decided…"). Proven (scripts/swarm_spike/journal_spike.py): journal arm recalls a
+# prior-turn figure 0.45 vs blank arm 0.00 (blank FABRICATES). Bounded (last N entries) → no token
+# regression. Distinct from evo_playbooks (skills) — this is episodic memory of WHAT HAPPENED.
+_JOURNAL_ENABLED = (os.environ.get("HYPER_JOURNAL_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+_JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "llama-3.1-8b-instant")  # cheap, content-returning summariser
+_JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
+
+
+async def make_journal_entry(user_message: str, final_text: str, *, model: Optional[str] = None) -> Optional[str]:
+    """Compact this turn into ONE figure-preserving journal line for future turns (the Claude-Code
+    compaction model). Keeps the decision + key numbers verbatim (the spike showed dropping figures
+    halves recall). Returns the line or None on failure. Called by the api AFTER the turn seals."""
+    if not _JOURNAL_ENABLED:
+        return None
+    try:
+        sysp = ("Summarize this room turn into ONE compact journal line for future turns. Format EXACTLY: "
+                "\"asked: <≤10 words> | decided: <the decision + EVERY key figure/amount/%/date verbatim, "
+                "≤30 words>\". Preserve numbers exactly; never round or drop them. No preamble, one line.")
+        usr = f"USER ASKED: {user_message[:400]}\n\nTEAM DELIVERABLE:\n{final_text[:1800]}"
+        out = await _evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+                              model=(model or _JOURNAL_MODEL), schema=None)
+        line = (out or "").strip().split("\n")[0].strip()
+        return line[:320] or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
+        return None
+
 
 def _evo_keywords(s: str) -> set:
     return set(_EVO_WORD.findall((s or "").lower()))
@@ -224,17 +253,18 @@ def _evo_merge(playbook: List[str], new_lessons: List[str], cap: int = _EVO_CAP)
     return out[-cap:]
 
 
-async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Dict[str, Any],
+async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optional[Dict[str, Any]],
                     temp: float = 0.3) -> Optional[str]:
-    """Minimal standalone Groq call for the post-verify reflection (decoupled from the
-    Director instance, since reflection now runs in the api layer after verification).
-    Strict json_schema output; short backoff on 429/5xx. Returns content or None."""
+    """Minimal standalone Groq call for api-layer helpers (post-verify reflection + journal entry),
+    decoupled from the Director instance. With a schema → strict json_schema output; schema=None →
+    plain text. Short backoff on 429/5xx. Returns content or None."""
     key = _groq_key()
     if not key:
         return None
-    body = {"model": model, "messages": messages, "temperature": temp,
-            "response_format": {"type": "json_schema",
-                                "json_schema": {"name": "evo_reflect", "schema": schema, "strict": True}}}
+    body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temp}
+    if schema is not None:
+        body["response_format"] = {"type": "json_schema",
+                                   "json_schema": {"name": "evo_out", "schema": schema, "strict": True}}
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
@@ -531,11 +561,15 @@ class Director:
         sim_agents: int = 0,
         evo_mode: str = "off",
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
+        journal: Optional[List[str]] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
         self.org_id = org_id
         self.project_id = project_id
+        # Swarm journal — prior-turn compact entries for CONTINUITY (read-only here; the api writes
+        # a new entry after the turn seals). Injected at plan + synth. Empty on the first turn.
+        self.journal: List[str] = [str(x) for x in (journal or []) if str(x).strip()][-_JOURNAL_KEEP:]
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -1068,6 +1102,15 @@ class Director:
         )
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
+    def _journal_block(self) -> str:
+        """Render the swarm journal (prior-turn entries) as a compact block for plan + synth.
+        Empty string when there's no journal (first turn / disabled) → zero added cost."""
+        if not _JOURNAL_ENABLED or not self.journal:
+            return ""
+        lines = "\n".join(f"- {e}" for e in self.journal[-_JOURNAL_KEEP:])
+        return ("\n\nROOM JOURNAL (what THIS room asked + decided in prior turns — treat as established "
+                f"context; build on it, don't contradict or re-derive it):\n{lines}")
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
@@ -1103,9 +1146,10 @@ class Director:
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true ONLY if the task needs a decision, judgment, trade-off, or genuine discussion; "
-            "false for a pure lookup / factual answer."
+            "false for a pure lookup / factual answer. If the ROOM JOURNAL already answers the task "
+            "(a recall of a prior decision), set needs_debate=false and keep recalls minimal."
         )
-        user = f"ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        user = f"ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}{self._journal_block()}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                model=self.director_model, temp=0.3, schema=schema, bucket="director")
         self.director_iters.append(self._last_tok)
@@ -1171,8 +1215,8 @@ class Director:
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED.")
-        user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
-                "Write the final, publish-ready deliverable now.")
+        user = (f"TASK: {self.user_message}{self._journal_block()}\n\nGATHERED CONTEXT (the room's shared "
+                f"board):\n{board}{debate_ctx}{sim_ctx}\n\nWrite the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                force_text=True, model=self.synth_model, bucket="synth")
         self.director_iters.append(self._last_tok)
@@ -1402,6 +1446,7 @@ async def run_director(
     sim_agents: int = 0,
     evo_mode: str = "off",
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
+    journal: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report, evo_updates}."""
@@ -1410,7 +1455,7 @@ async def run_director(
         participants=participants, room_template=room_template, room_goal=room_goal,
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
-        max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
+        max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents, journal=journal,
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
     )
     return await director.run()

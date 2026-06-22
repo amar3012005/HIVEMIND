@@ -67,6 +67,8 @@ from .db import (
     get_room_evo_mode,
     get_room_evo_playbooks,
     update_room_evo_playbooks,
+    get_room_journal,
+    update_room_journal,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -78,7 +80,7 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director, evo_reflect_and_merge
+from .hyper.engine import run_director, evo_reflect_and_merge, make_journal_entry, _JOURNAL_ENABLED, _JOURNAL_KEEP
 
 log = logging.getLogger(__name__)
 
@@ -2652,8 +2654,17 @@ async def _orchestrate_single_agent(
             _evo_playbooks = await get_room_evo_playbooks(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _evo_playbooks = {}
-    log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d models=(%s, %s, %s)",
-             req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks), _dir_m, _per_m, _syn_m)
+    # Swarm journal — prior-turn compact entries for continuity (injected at plan + synth). Loaded
+    # always (it's the room's episodic memory), bounded, never raises.
+    _journal: list = []
+    if _JOURNAL_ENABLED:
+        try:
+            _journal = await get_room_journal(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _journal = []
+    log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d journal=%d models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks), len(_journal),
+             _dir_m, _per_m, _syn_m)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2665,7 +2676,7 @@ async def _orchestrate_single_agent(
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
-            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
+            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks, journal=_journal,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2795,6 +2806,18 @@ async def _orchestrate_single_agent(
                          req.room_id, ok, len(_merged), status)
         except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
             log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
+    # Swarm journal write-back — summarize this turn into ONE compact, figure-preserving entry and
+    # append to the room's journal (bounded to the last N). Gives the NEXT turn continuity. After the
+    # seal; best-effort; only on a genuinely-answered turn (skip failed/blocked → no junk entries).
+    if _JOURNAL_ENABLED and final_text and status not in ("failed", "blocked"):
+        try:
+            _entry = await make_journal_entry(req.user_message, final_text)
+            if _entry:
+                _new_journal = ([str(x) for x in _journal] + [_entry])[-_JOURNAL_KEEP:]
+                ok = await update_room_journal(req.room_id, _new_journal, org_id=req.org_id)
+                log.info("[single] room=%s journal appended=%s entries=%d", req.room_id, ok, len(_new_journal))
+        except Exception as exc:  # noqa: BLE001 — journaling must never fail the turn
+            log.warning("[single] journal write failed (non-fatal): %s", exc)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

@@ -176,6 +176,20 @@ _EVO_RECALL_K = max(2, min(8, int(os.environ.get("HYPER_EVOLVE_RECALL_K", "5") o
 _EVO_CAP = max(4, min(30, int(os.environ.get("HYPER_EVOLVE_CAP", "12") or "12")))          # max lessons/employee
 _EVO_WORD = re.compile(r"[a-z0-9]{4,}")
 
+# ── Board digest (debate-context compression) ──────────────────────────────
+# The debate fan-out re-pays the gathered blackboard N×2 times. Compress it ONCE into a
+# goal-scoped, fact-preserving digest fed to the DEBATE only; synth keeps the raw board.
+# Proven (scripts/swarm_spike/digest_board_spike.py): ~47% less debate input on a fat board
+# with NO quality loss (digest strips noise → debaters ground cleaner). Compressing the synth
+# too (the deliverable's source) craters grounding — so synth ALWAYS keeps raw.
+_DIGEST_ENABLED = (os.environ.get("HYPER_DIGEST_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+# gpt-oss models can route plain-text output to an analysis channel → empty content; a llama
+# instruct model returns content reliably + is just as cheap for extractive compression.
+_DIGEST_MODEL = os.environ.get("HYPER_DIGEST_MODEL", "llama-3.1-8b-instant")
+_DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "5000") or "5000"))  # gate: only a FAT board
+_DIGEST_MAX_CHARS = max(800, int(os.environ.get("HYPER_DIGEST_MAX_CHARS", "2400") or "2400"))   # bound the digest
+_DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000") or "12000"))  # cap the digester's own input
+
 
 def _evo_keywords(s: str) -> set:
     return set(_EVO_WORD.findall((s or "").lower()))
@@ -561,6 +575,9 @@ class Director:
         self.tok_by: Dict[str, int] = {"director": 0, "debate": 0, "web": 0}
         self.director_iters: List[int] = []
         self._last_tok = 0
+        # Board digest for the debate (compressed once, reused across rounds). None = use raw board.
+        self._board_digest: Optional[str] = None
+        self._digest_key: Optional[int] = None
         # Population-Sim (additional, opt-in). Default off — the main flow is untouched.
         self.sim_mode = str(sim_mode or "off").strip().lower()
         # How many synthetic voices to simulate (FE slider 10-100; 0 → env default). Clamped.
@@ -897,12 +914,15 @@ class Director:
             return json.dumps({"error": str(exc)[:200], "is_error": True})
 
     # ── debate (the room) ─────────────────────────────────────────────
-    async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int) -> Dict[str, Any]:
+    async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int,
+                       ctx_override: Optional[str] = None) -> Dict[str, Any]:
         name, lane, sysp = _persona_fields(emp)
         is_skeptic = "skeptic" in lane.lower()
         bias = (" You are the SKEPTIC of this room — find the single weakest claim and challenge it hard "
                 "with specifics." if is_skeptic else "")
-        ctx = "\n".join(self.blackboard)[:4000]
+        # Debate context: the goal-scoped DIGEST when available (cheaper, noise-free), else the raw board.
+        # Synth keeps the raw board regardless — only the N×2 debate fan-out reads the digest.
+        ctx = ctx_override if ctx_override is not None else "\n".join(self.blackboard)[:4000]
         # Self-evolving (Loop 1): inject THIS employee's learned playbook — lessons distilled
         # from its own past turns in this room — so it reflects them in this decision. Recall is
         # lexical, scoped to the employee's slug, bounded. Dormant + empty unless evo is active.
@@ -925,17 +945,56 @@ class Director:
         return {"slug": emp.get("slug") or emp.get("id"), "name": name, "lane": lane,
                 "is_skeptic": is_skeptic, "text": text}
 
+    async def _digest_board(self) -> Optional[str]:
+        """Goal-scoped EXTRACTIVE compression of the gathered board for the DEBATE only.
+        Gated on board size (small board → None, raw is used: a digest call would be net overhead),
+        cached by board hash (reused across rounds), fail-open to None. Keeps every figure/name/
+        source verbatim, drops noise, never invents. Synth keeps the raw board regardless."""
+        if not _DIGEST_ENABLED:
+            return None
+        raw = "\n".join(self.blackboard)
+        if len(raw) < _DIGEST_MIN_CHARS:
+            return None  # small board doesn't compound much → skip the overhead
+        key = hash(raw)
+        if self._board_digest is not None and self._digest_key == key:
+            return self._board_digest
+        try:
+            goal = self.room_goal or self.user_message
+            sysp = ("You compress a team's gathered research into a DENSE, goal-scoped briefing for a debate. "
+                    "RULES: (1) keep ONLY what's relevant to the goal + question; drop unrelated items. "
+                    "(2) Preserve EVERY figure, name, date, and (source:...) tag VERBATIM — never round, rename, "
+                    "or drop a number or named entity. (3) Extractive only — never add or infer facts not present. "
+                    "(4) Keep UNVERIFIED markers. (5) Be terse: bullet points, no padding. Output ONLY the briefing.")
+            usr = (f"GOAL: {goal}\nQUESTION: {self.user_message}\n\nGATHERED RESEARCH "
+                   f"(compress to the goal-relevant essence):\n{raw[:_DIGEST_READ_CAP]}")
+            msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+                                   force_text=True, model=_DIGEST_MODEL, bucket="digest")
+            digest = ((msg or {}).get("content") or "").strip()
+            if not digest:
+                return None  # fail-open: empty content → debate falls back to raw
+            digest = digest[:_DIGEST_MAX_CHARS]
+            self._board_digest, self._digest_key = digest, key
+            log.info("[hyper-engine] board digest: %d → %d chars (debate context compressed)", len(raw), len(digest))
+            return digest
+        except Exception as exc:  # noqa: BLE001 — never block the debate
+            log.warning("[hyper-engine] board digest failed (non-fatal): %s", exc)
+            return None
+
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
         members = self.participants[:5]
         if not members:
             return json.dumps({"error": "no participants to debate"})
 
+        # Compress the gathered board ONCE for the debate fan-out (None on a small board → raw used).
+        debate_ctx = await self._digest_board()
+
         # Round 1 — independent stances (parallel sub-calls = genuine independence)
         self._round_seq += 1
         await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
         r1 = await asyncio.gather(*[
-            self._consult(m, f"What is your stance on: {topic}? Give your view + your single biggest concern.", self._round_seq)
+            self._consult(m, f"What is your stance on: {topic}? Give your view + your single biggest concern.",
+                          self._round_seq, ctx_override=debate_ctx)
             for m in members
         ])
         for c in r1:
@@ -952,7 +1011,8 @@ class Director:
             prior = "\n".join(f"{c['name']}: {c['text']}" for c in r1)[:3500]
             r2 = await asyncio.gather(*[
                 self._consult(m, (f"Your teammates said:\n{prior}\n\nREACT: whose point is weakest? Challenge "
-                                  f"or build on it — be specific. Do you change your view on '{topic}'?"), self._round_seq)
+                                  f"or build on it — be specific. Do you change your view on '{topic}'?"),
+                              self._round_seq, ctx_override=debate_ctx)
                 for m in members
             ])
             for c in r2:

@@ -225,13 +225,9 @@ _SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MA
 _GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
 _GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
 
-# Web PROSPECTING: a query needing real-world contacts/businesses/people uses gpt-oss + the native
-# browser_search built-in (Exa) — it INTERACTIVELY browses pages (reads the real Impressum/Kontakt),
-# unlike compound-mini which only searches + guesses info@ addresses. gpt-oss browser_search is ~3x
-# cheaper + ~7x faster than groq/compound+visit_website for the same job (24k tok/4s vs 75k/30s,
-# measured) and runs on the director's own model family. The regex picks prospecting intent —
-# model/tool selection only, never an output gate, so it stays general for any room.
-_WEB_PROSPECT_MODEL = os.environ.get("HYPER_WEB_PROSPECT_MODEL", "openai/gpt-oss-20b")
+# Web PROSPECTING: a query needing real-world contacts/businesses/people gets the strict
+# verbatim-or-NOT-VERIFIED extraction contract on the deep compound crawl (web_search + visit_website).
+# The regex picks prospecting intent — prompt selection only, never an output gate → general for any room.
 _PROSPECT_RE = re.compile(
     r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
     r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
@@ -663,10 +659,12 @@ class Director:
         # strong model writes it. When equal to director_model, no extra call (the
         # loop's own final IS the deliverable). Multi-model "Auto" = cheap gather + strong synth.
         self.synth_model = synth_model or self.director_model
-        # Live public-web search uses Groq's built-in web search (only on the
-        # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
-        # cheaper/faster and fine for in-room gathering; env-tunable.
-        self.web_model = os.environ.get("HYPER_WEB_MODEL", "groq/compound-mini")
+        # Live public-web search uses Groq's built-in web search (only on the `groq/compound*`
+        # systems — gpt-oss can't run web_search/visit_website directly). DEFAULT = the FULL
+        # `groq/compound` (not mini): it runs the DEEP agentic stack — web_search + multi-page
+        # visit_website crawl — so the director's web calls return real, page-verified data, not
+        # snippet guesses. Robustness over cost (product directive). Env-tunable for a cheaper run.
+        self.web_model = os.environ.get("HYPER_WEB_MODEL", "groq/compound")
         self.max_iters = max_iters
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)
@@ -975,6 +973,26 @@ class Director:
             log.warning("[hyper-engine] tool %s failed: %s", name, exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
 
+    async def _browser_search_fallback(self, content: str, key: str) -> str:
+        """gpt-oss browser_search retry — used when the deep compound web call returns empty content.
+        Exa-powered interactive browse, reliably returns its result inline. '' on failure; never raises."""
+        try:
+            body = {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": content}],
+                    "tools": [{"type": "browser_search"}], "tool_choice": "required",
+                    "temperature": 1, "top_p": 1, "max_completion_tokens": 4096, "reasoning_effort": "low"}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+            if r.status_code != 200:
+                return ""
+            j = r.json()
+            wt = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            self.tokens += wt
+            self.tok_by["web"] = self.tok_by.get("web", 0) + wt
+            return str(j["choices"][0]["message"].get("content") or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] browser_search fallback failed: %s", exc)
+            return ""
+
     # ── live web search (Groq built-in, via a compound sub-call) ───────
     async def _web_search(self, query: str) -> str:
         """Search the live public web using Groq's BUILT-IN web search. The built-in
@@ -997,24 +1015,23 @@ class Director:
         # strict rule: quote a contact detail ONLY if it literally appears on a visited page, else mark
         # it NOT VERIFIED — never guess. Keeps the room from inventing prospects. General, no tenant facts.
         prospect = bool(_PROSPECT_RE.search(query))
+        # DEEPEST robust stack on EVERY director web call: full groq/compound (self.web_model) with
+        # BOTH web_search AND visit_website enabled → it searches, then actually OPENS pages and reads
+        # them (multi-page agentic crawl). No snippet-only mini, no guessing. Prospecting adds the
+        # strict verbatim-or-NOT-VERIFIED contract; general queries use the same deep engine.
+        content = query
         if prospect:
-            # gpt-oss + native browser_search (Exa): interactively opens the real pages, faster +
-            # cheaper than compound+visit. Results come back in message.content (no executed_tools).
-            content = (query + "\n\nRULES: BROWSE each entity's official page (its Impressum / Kontakt / "
-                       "About page) and READ it. Give a contact detail (email, phone) ONLY if it literally "
-                       "appears on a page you opened — quote it verbatim and cite the exact source URL. If "
-                       "no contact appears, write 'NOT VERIFIED'. NEVER guess or construct an address (no "
-                       "inventing info@domain). List each: name | website | email/phone or NOT VERIFIED | source URL.")
-            body: Dict[str, Any] = {"model": _WEB_PROSPECT_MODEL,
-                                    "messages": [{"role": "user", "content": content}],
-                                    "tools": [{"type": "browser_search"}], "tool_choice": "required",
-                                    "temperature": 1, "top_p": 1, "max_completion_tokens": 4096,
-                                    "reasoning_effort": "low"}
-        else:
-            body = {"model": self.web_model, "messages": [{"role": "user", "content": query}],
-                    "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
-        timeout = httpx.Timeout(120.0 if prospect else 45.0, connect=5.0)
-        keep = 2400 if prospect else 1000
+            content = (query + "\n\nRULES: use web_search to find the REAL entities, then use "
+                       "visit_website to OPEN each one's official page (for a company, its Impressum / "
+                       "Kontakt / About page) and READ it. Give a contact detail (email, phone) ONLY if it "
+                       "literally appears on a page you actually visited — quote it verbatim and cite the "
+                       "exact source URL. If you did not open a page that shows it, write 'NOT VERIFIED'. "
+                       "NEVER guess or construct an address (no inventing info@domain). Cover as many real "
+                       "entities as you can. List each: name | website | email/phone or NOT VERIFIED | source URL.")
+        body: Dict[str, Any] = {"model": self.web_model, "messages": [{"role": "user", "content": content}],
+                                "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
+        timeout = httpx.Timeout(180.0, connect=5.0)
+        keep = 3000 if prospect else 1500
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:
                 r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
@@ -1031,6 +1048,15 @@ class Director:
             self.io["cached"] += int(((uw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
             msg = j["choices"][0]["message"]
             answer = str(msg.get("content") or "")[:keep]
+            # ROBUST fallback: the deep compound sometimes does all the tool work but returns an EMPTY
+            # final summary → the room would have nothing real to ground on (and the synth invents).
+            # If the content is empty/thin, retry once with gpt-oss browser_search, which reliably
+            # returns its result inline. A director web call must NEVER come back empty.
+            if len(answer.strip()) < 80:
+                fb = await self._browser_search_fallback(content, key)
+                if len(fb.strip()) >= 80:
+                    answer = fb[:keep]
+                    log.info("[hyper-engine] web: compound empty → browser_search fallback (%d chars)", len(answer))
             sources: List[Dict[str, str]] = []
             for et in (msg.get("executed_tools") or []):
                 sr = et.get("search_results")

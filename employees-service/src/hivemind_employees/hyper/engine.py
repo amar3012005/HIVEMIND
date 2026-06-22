@@ -174,7 +174,6 @@ _EVO_ENABLED = (os.environ.get("HYPER_EVOLVE_ENABLED", "true").strip().lower() n
 _EVO_REFLECT_MODEL = os.environ.get("HYPER_EVOLVE_REFLECT_MODEL", "openai/gpt-oss-20b")  # cheap coach call
 _EVO_RECALL_K = max(2, min(8, int(os.environ.get("HYPER_EVOLVE_RECALL_K", "5") or "5")))  # lessons injected
 _EVO_CAP = max(4, min(30, int(os.environ.get("HYPER_EVOLVE_CAP", "12") or "12")))          # max lessons/employee
-_EVO_CONCURRENCY = max(2, int(os.environ.get("HYPER_EVOLVE_CONCURRENCY", "5") or "5"))     # parallel reflections
 _EVO_WORD = re.compile(r"[a-z0-9]{4,}")
 
 
@@ -209,24 +208,6 @@ def _evo_merge(playbook: List[str], new_lessons: List[str], cap: int = _EVO_CAP)
             continue
         out.append(les)
     return out[-cap:]
-
-
-# Reflection output (the OUTCOME signal → distilled lessons). Generic, domain-agnostic
-# decision-quality dims (the same ones the synth prompt itself enforces) so it works in ANY
-# room, not just finance. Flat schema (no nested objects) → strict json_schema is happy.
-_EVO_REFLECT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "grounded": {"type": "number"},     # used only context facts, flagged unverified
-        "specific": {"type": "number"},      # concrete + actionable, named a next step
-        "risk_aware": {"type": "number"},    # surfaced the key risk/unknown
-        "on_goal": {"type": "number"},       # addressed the actual question/goal
-        "concise": {"type": "number"},       # no filler
-        "lessons": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["grounded", "specific", "risk_aware", "on_goal", "concise", "lessons"],
-    "additionalProperties": False,
-}
 
 
 async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Dict[str, Any],
@@ -283,36 +264,45 @@ def _evo_outcome_brief(outcome: Optional[Dict[str, Any]]) -> str:
             "escalation):\n- " + "\n- ".join(parts))
 
 
-async def _evo_reflect_one(name: str, lane: str, contribution: str, final_text: str,
-                           outcome: Optional[Dict[str, Any]], model: str) -> List[str]:
-    """One cheap coach call = the outcome signal. Scores a contribution on generic decision-quality
-    dims (now ALSO conditioned on the turn's real verifier outcome) and distills 0-2 GENERAL lessons.
-    Returns [] if already strong (no noise) or on any failure (never raises)."""
-    try:
-        sysp = (
-            "You are a performance coach for a team employee. Given the employee's contribution this turn, "
-            "the team's final deliverable, AND how that deliverable actually scored, score the contribution "
-            "0.0-1.0 on each dimension (1.0=fully met), then write 0-2 SHORT, GENERAL, reusable operating "
-            "rules (imperative, <=18 words each) that would make THIS employee more useful on FUTURE, "
-            "DIFFERENT questions. Rules must be transferable principles, never specific to this turn's facts. "
-            "If the contribution is already strong on every dimension, return an empty lessons list. "
-            "Dimensions: grounded (used only given context, flagged unverifiable), specific (concrete + named "
-            "a next step), risk_aware (surfaced the key risk/unknown), on_goal (addressed the actual "
-            "question), concise (no filler).")
-        usr = (f"EMPLOYEE: {name} ({lane})\n\nTHEIR CONTRIBUTION THIS TURN:\n{contribution[:1800]}\n\n"
-               f"THE TEAM'S FINAL DELIVERABLE:\n{final_text[:1500]}" + _evo_outcome_brief(outcome))
-        content = await _evo_groq(
-            [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
-            model=model, schema=_EVO_REFLECT_SCHEMA)
-        data = json.loads(content or "{}")
-        dims = ["grounded", "specific", "risk_aware", "on_goal", "concise"]
-        scores = [float(data.get(d, 0.0) or 0.0) for d in dims]
-        if all(s >= 0.7 for s in scores):
-            return []
-        return [str(x).strip() for x in (data.get("lessons") or []) if str(x).strip()][:2]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[hyper-engine] evo reflect failed (non-fatal): %s", exc)
-        return []
+# Batched reflection output: lessons per employee from ONE coach call (not N). Cuts the per-turn
+# evo cost ~Nx. Strict-schema friendly (array of flat objects).
+_EVO_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "employees": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string"},
+                    "lessons": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["slug", "lessons"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["employees"],
+    "additionalProperties": False,
+}
+
+# Skip reflection entirely on a STRONG turn (verdict met + grounded, completed, no rerun/HITL
+# signal) — there's nothing to learn, so spend 0 tokens. Env-tunable: set HYPER_EVOLVE_REFLECT_ALWAYS
+# to reflect on every turn regardless (costs more). Default: skip strong turns.
+_EVO_REFLECT_ALWAYS = (os.environ.get("HYPER_EVOLVE_REFLECT_ALWAYS", "").strip().lower() in ("1", "true", "yes", "on"))
+
+
+def _evo_skip_strong(outcome: Optional[Dict[str, Any]]) -> bool:
+    """True when the turn clearly succeeded → no lesson to learn → skip the coach call(s)."""
+    if _EVO_REFLECT_ALWAYS or not isinstance(outcome, dict):
+        return False
+    if outcome.get("user_signal"):
+        return False  # an explicit user/HITL signal always warrants reflection
+    if str(outcome.get("status") or "").lower() not in ("", "complete"):
+        return False  # escalated/blocked → learn from it
+    v = outcome.get("verdict") if isinstance(outcome.get("verdict"), dict) else {}
+    gaps = v.get("gaps") or []
+    return bool(v.get("met")) and bool(v.get("grounded_ok")) and not gaps
 
 
 async def evo_reflect_and_merge(
@@ -323,8 +313,13 @@ async def evo_reflect_and_merge(
     """Loop 1 reflection, run by the api layer AFTER verification so it sees the real outcome.
     Reflects each debating employee's contribution (conditioned on the verifier verdict) into its
     slug-scoped playbook; returns the FULL merged map to persist (only when something changed),
-    else None. Fully wrapped — any failure returns None (turn already sealed, never affected)."""
+    else None. ONE batched coach call (not N) + skips strong turns → bounded token cost. Fully
+    wrapped — any failure returns None (turn already sealed, never affected)."""
     if not transcript or not participants:
+        return None
+    # COST GUARD: a clearly-good turn has nothing to teach → spend nothing.
+    if _evo_skip_strong(outcome):
+        log.info("[hyper-engine] evo: strong turn (met+grounded) — reflection skipped (0 tokens)")
         return None
     try:
         model = reflect_model or _EVO_REFLECT_MODEL
@@ -334,7 +329,7 @@ async def evo_reflect_and_merge(
             return "\n".join(str(x.get("text") or "") for x in transcript
                              if isinstance(x, dict) and x.get("agent") == nm).strip()
 
-        targets = []
+        targets = []  # (slug, name, lane, contribution)
         for emp in participants[:5]:
             name, lane, _ = _persona_fields(emp)
             slug = str(emp.get("slug") or emp.get("id"))
@@ -344,21 +339,40 @@ async def evo_reflect_and_merge(
         if not targets:
             return None
 
-        sem = asyncio.Semaphore(_EVO_CONCURRENCY)
+        # ONE batched coach call scores+coaches ALL contributing employees at once.
+        roster = "\n\n".join(
+            f"[{i+1}] slug={slug} ({name}, {lane})\nCONTRIBUTION:\n{c[:1100]}"
+            for i, (slug, name, lane, c) in enumerate(targets))
+        sysp = (
+            "You are a performance coach for a team of employees. For EACH employee below, judge their "
+            "contribution this turn against the team's final deliverable and how it actually scored, on these "
+            "dims: grounded (only given context, flagged unverifiable), specific (concrete + named next step), "
+            "risk_aware (surfaced the key risk), on_goal (addressed the question), concise (no filler). For each "
+            "employee return 0-2 SHORT, GENERAL, reusable operating rules (imperative, <=18 words) that would "
+            "make THEM better on FUTURE, DIFFERENT questions — transferable principles, never specific to this "
+            "turn's facts. Return an EMPTY lessons list for any employee already strong on every dim. Echo each "
+            "employee's exact slug. Output ONLY the schema.")
+        usr = (f"TEAM EMPLOYEES + CONTRIBUTIONS:\n{roster}\n\nTHE TEAM'S FINAL DELIVERABLE:\n"
+               f"{final_text[:1500]}" + _evo_outcome_brief(outcome))
+        content = await _evo_groq(
+            [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+            model=model, schema=_EVO_BATCH_SCHEMA)
+        data = json.loads(content or "{}")
+        valid_slugs = {t[0] for t in targets}
+        by_slug: Dict[str, List[str]] = {}
+        for row in (data.get("employees") or []):
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "")
+            if slug not in valid_slugs:
+                continue
+            lessons = [str(x).strip() for x in (row.get("lessons") or []) if str(x).strip()][:2]
+            if lessons:
+                by_slug[slug] = lessons
 
-        async def _one(slug: str, name: str, lane: str, c: str):
-            async with sem:
-                return slug, await _evo_reflect_one(name, lane, c, final_text, outcome, model)
-
-        results = await asyncio.gather(*[_one(*t) for t in targets], return_exceptions=True)
         updates: Dict[str, List[str]] = {}
         learned = 0
-        for res in results:
-            if isinstance(res, Exception) or not res:
-                continue
-            slug, lessons = res
-            if not lessons:
-                continue
+        for slug, lessons in by_slug.items():
             merged = _evo_merge(playbooks.get(slug, []), lessons)
             if merged != playbooks.get(slug, []):
                 updates[slug] = merged
@@ -367,7 +381,8 @@ async def evo_reflect_and_merge(
             return None
         full = dict(playbooks)
         full.update(updates)
-        log.info("[hyper-engine] evo: %d lesson(s) learned across %d employee(s)", learned, len(updates))
+        log.info("[hyper-engine] evo: %d lesson(s) learned across %d employee(s) (1 batched call)",
+                 learned, len(updates))
         return full
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)

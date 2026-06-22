@@ -51,17 +51,17 @@ def make_director(evo_mode, playbooks):
     return d
 
 
-# monkeypatch the MODULE-LEVEL groq used by the standalone reflection (api-layer path)
+# monkeypatch the MODULE-LEVEL groq used by the standalone reflection (api-layer path).
+# Returns the BATCHED schema ({"employees":[{slug,lessons}]}) — ONE call coaches all employees.
 async def fake_evo_groq(messages, *, model, schema, temp=0.3):
     sysmsg = next((m["content"] for m in messages if m["role"] == "system"), "")
     usrmsg = next((m["content"] for m in messages if m["role"] == "user"), "")
     CAPTURED_REFLECT.append((sysmsg, usrmsg))
-    # weak on risk + next-step → 2 general lessons
-    return json.dumps({
-        "grounded": 0.9, "specific": 0.4, "risk_aware": 0.3, "on_goal": 0.8, "concise": 0.6,
-        "lessons": ["End with one concrete next step, owner, and deadline.",
-                    "Surface the single biggest risk before recommending."],
-    })
+    return json.dumps({"employees": [
+        {"slug": "fin", "lessons": ["End with one concrete next step, owner, and deadline.",
+                                    "Surface the single biggest risk before recommending."]},
+        {"slug": "eng", "lessons": ["Tie technical options to the runway and timeline."]},
+    ]})
 
 
 async def scenario_on():
@@ -91,11 +91,20 @@ async def scenario_on():
     assert len(merged["fin"]) <= E._EVO_CAP, "playbook must be bounded"
     # 3. the richer signal reached the coach prompt (verdict + status + held write)
     assert CAPTURED_REFLECT, "reflection coach never called"
+    assert len(CAPTURED_REFLECT) == 1, f"reflection must be ONE batched call, got {len(CAPTURED_REFLECT)}"
     joined = "\n".join(u for (_, u) in CAPTURED_REFLECT)
     assert "met=False" in joined and "escalated" in joined and "open gaps" in joined.lower() \
         and "approval" in joined.lower(), "verifier outcome NOT folded into the coach prompt"
     print(f"  ✅ evo ON: injected; learned fin={len(merged['fin'])} eng={len(merged['eng'])}; "
-          f"outcome (verdict+status+held-write) reached the coach")
+          f"outcome reached the coach in 1 batched call")
+    # 4. COST GUARD: a strong turn (met+grounded, no gaps/signal) skips reflection → 0 calls
+    CAPTURED_REFLECT.clear()
+    strong = await E.evo_reflect_and_merge(
+        evo_playbooks=d.evo_playbooks, transcript=d.transcript, participants=PARTS,
+        final_text="great deliverable",
+        outcome={"verdict": {"met": True, "grounded_ok": True, "gaps": []}, "status": "complete"})
+    assert strong is None and not CAPTURED_REFLECT, "strong turn must SKIP reflection (0 coach calls)"
+    print("  ✅ cost guard: strong turn (met+grounded) skipped reflection — 0 tokens")
 
 
 async def scenario_off():

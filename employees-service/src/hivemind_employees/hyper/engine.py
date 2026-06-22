@@ -229,6 +229,151 @@ _EVO_REFLECT_SCHEMA = {
 }
 
 
+async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Dict[str, Any],
+                    temp: float = 0.3) -> Optional[str]:
+    """Minimal standalone Groq call for the post-verify reflection (decoupled from the
+    Director instance, since reflection now runs in the api layer after verification).
+    Strict json_schema output; short backoff on 429/5xx. Returns content or None."""
+    key = _groq_key()
+    if not key:
+        return None
+    body = {"model": model, "messages": messages, "temperature": temp,
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "evo_reflect", "schema": schema, "strict": True}}}
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+            if r.status_code == 200:
+                return (r.json()["choices"][0]["message"].get("content") or "").strip()
+            if r.status_code in (429, 500, 502, 503) and attempt < 2:
+                await asyncio.sleep(min(2 ** attempt, 6))
+                continue
+            return None
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(min(2 ** attempt, 6))
+    return None
+
+
+def _evo_outcome_brief(outcome: Optional[Dict[str, Any]]) -> str:
+    """Render the turn's REAL outcome (verifier verdict + status + whether a write was held for
+    approval) into a short prompt block — the richer signal the coach scores against. Empty when
+    no outcome is available (falls back to deliverable-only scoring)."""
+    if not isinstance(outcome, dict) or not outcome:
+        return ""
+    v = outcome.get("verdict") if isinstance(outcome.get("verdict"), dict) else {}
+    parts = []
+    if v:
+        flags = ", ".join(f"{k}={v.get(k)}" for k in ("met", "grounded_ok", "artifact_ok") if k in v)
+        if flags:
+            parts.append(flags)
+        gaps = v.get("gaps") or []
+        if isinstance(gaps, list) and gaps:
+            parts.append("open gaps: " + "; ".join(str(g)[:120] for g in gaps[:3]))
+    if outcome.get("status"):
+        parts.append(f"turn status: {outcome.get('status')}")
+    if outcome.get("pending_writes"):
+        parts.append("a side-effectful action was proposed and HELD for human approval")
+    if outcome.get("user_signal"):
+        parts.append(f"user signal on a recent turn: {outcome.get('user_signal')}")
+    if not parts:
+        return ""
+    return ("\n\nHOW THE TEAM'S DELIVERABLE ACTUALLY SCORED (the real outcome — weight your "
+            "critique by this, reward what led to a met+grounded result, correct what led to gaps/"
+            "escalation):\n- " + "\n- ".join(parts))
+
+
+async def _evo_reflect_one(name: str, lane: str, contribution: str, final_text: str,
+                           outcome: Optional[Dict[str, Any]], model: str) -> List[str]:
+    """One cheap coach call = the outcome signal. Scores a contribution on generic decision-quality
+    dims (now ALSO conditioned on the turn's real verifier outcome) and distills 0-2 GENERAL lessons.
+    Returns [] if already strong (no noise) or on any failure (never raises)."""
+    try:
+        sysp = (
+            "You are a performance coach for a team employee. Given the employee's contribution this turn, "
+            "the team's final deliverable, AND how that deliverable actually scored, score the contribution "
+            "0.0-1.0 on each dimension (1.0=fully met), then write 0-2 SHORT, GENERAL, reusable operating "
+            "rules (imperative, <=18 words each) that would make THIS employee more useful on FUTURE, "
+            "DIFFERENT questions. Rules must be transferable principles, never specific to this turn's facts. "
+            "If the contribution is already strong on every dimension, return an empty lessons list. "
+            "Dimensions: grounded (used only given context, flagged unverifiable), specific (concrete + named "
+            "a next step), risk_aware (surfaced the key risk/unknown), on_goal (addressed the actual "
+            "question), concise (no filler).")
+        usr = (f"EMPLOYEE: {name} ({lane})\n\nTHEIR CONTRIBUTION THIS TURN:\n{contribution[:1800]}\n\n"
+               f"THE TEAM'S FINAL DELIVERABLE:\n{final_text[:1500]}" + _evo_outcome_brief(outcome))
+        content = await _evo_groq(
+            [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+            model=model, schema=_EVO_REFLECT_SCHEMA)
+        data = json.loads(content or "{}")
+        dims = ["grounded", "specific", "risk_aware", "on_goal", "concise"]
+        scores = [float(data.get(d, 0.0) or 0.0) for d in dims]
+        if all(s >= 0.7 for s in scores):
+            return []
+        return [str(x).strip() for x in (data.get("lessons") or []) if str(x).strip()][:2]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] evo reflect failed (non-fatal): %s", exc)
+        return []
+
+
+async def evo_reflect_and_merge(
+    *, evo_playbooks: Dict[str, List[str]], transcript: List[Dict[str, Any]],
+    participants: List[Dict[str, Any]], final_text: str,
+    outcome: Optional[Dict[str, Any]] = None, reflect_model: Optional[str] = None,
+) -> Optional[Dict[str, List[str]]]:
+    """Loop 1 reflection, run by the api layer AFTER verification so it sees the real outcome.
+    Reflects each debating employee's contribution (conditioned on the verifier verdict) into its
+    slug-scoped playbook; returns the FULL merged map to persist (only when something changed),
+    else None. Fully wrapped — any failure returns None (turn already sealed, never affected)."""
+    if not transcript or not participants:
+        return None
+    try:
+        model = reflect_model or _EVO_REFLECT_MODEL
+        playbooks = {str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)}
+
+        def _contrib(nm: str) -> str:
+            return "\n".join(str(x.get("text") or "") for x in transcript
+                             if isinstance(x, dict) and x.get("agent") == nm).strip()
+
+        targets = []
+        for emp in participants[:5]:
+            name, lane, _ = _persona_fields(emp)
+            slug = str(emp.get("slug") or emp.get("id"))
+            c = _contrib(name)
+            if c:
+                targets.append((slug, name, lane, c))
+        if not targets:
+            return None
+
+        sem = asyncio.Semaphore(_EVO_CONCURRENCY)
+
+        async def _one(slug: str, name: str, lane: str, c: str):
+            async with sem:
+                return slug, await _evo_reflect_one(name, lane, c, final_text, outcome, model)
+
+        results = await asyncio.gather(*[_one(*t) for t in targets], return_exceptions=True)
+        updates: Dict[str, List[str]] = {}
+        learned = 0
+        for res in results:
+            if isinstance(res, Exception) or not res:
+                continue
+            slug, lessons = res
+            if not lessons:
+                continue
+            merged = _evo_merge(playbooks.get(slug, []), lessons)
+            if merged != playbooks.get(slug, []):
+                updates[slug] = merged
+                learned += len(lessons)
+        if not updates:
+            return None
+        full = dict(playbooks)
+        full.update(updates)
+        log.info("[hyper-engine] evo: %d lesson(s) learned across %d employee(s)", learned, len(updates))
+        return full
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)
+        return None
+
+
 def _norm_connector(cid: str) -> str:
     return str(cid or "").strip().lower().replace("_", "-")
 
@@ -408,15 +553,15 @@ class Director:
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
         # Self-evolving employees (Loop 1, additional + opt-in). evo_playbooks = the per-employee
-        # lessons learned in PRIOR turns of this room (injected before each speaks); _evo_updates =
-        # the merged playbooks this turn produces (the api layer persists them). Dormant unless
-        # the global env flag AND the room toggle are both on. Default off → turn untouched.
+        # lessons learned in PRIOR turns of this room — injected before each employee speaks. The
+        # WRITE (reflection) now happens in the api layer post-verification via
+        # engine.evo_reflect_and_merge() so it scores against the real outcome. Dormant unless the
+        # global env flag AND the room toggle are both on. Default off → turn untouched.
         self.evo_mode = str(evo_mode or "off").strip().lower()
         self.evo_active = _EVO_ENABLED and self.evo_mode in _EVO_ON
         self.evo_playbooks: Dict[str, List[str]] = {
             str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)
         }
-        self._evo_updates: Optional[Dict[str, List[str]]] = None  # merged playbooks → returned for persist
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
         # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
         self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
@@ -951,91 +1096,6 @@ class Director:
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
 
-    # ── Self-evolving employees: Loop 1 reflection (ADDITIONAL, opt-in) ───
-    async def _evo_reflect(self, name: str, lane: str, contribution: str, final_text: str) -> List[str]:
-        """ONE cheap coach call = the outcome signal. Scores this employee's contribution on
-        generic decision-quality dims (vs the final deliverable as the bar) and distills 1-2
-        GENERAL, reusable lessons to apply next turn. Returns [] if the contribution was already
-        strong (don't write noise) or on any failure (never raises into the turn)."""
-        try:
-            sysp = (
-                "You are a performance coach for a team employee. Given the employee's contribution this turn "
-                "and the team's final deliverable, score the contribution 0.0-1.0 on each dimension (1.0=fully "
-                "met), then write 0-2 SHORT, GENERAL, reusable operating rules (imperative, <=18 words each) "
-                "that would make THIS employee more useful on FUTURE, DIFFERENT questions. Rules must be "
-                "transferable principles, never specific to this turn's facts. If the contribution is already "
-                "strong on every dimension, return an empty lessons list. Dimensions: grounded (used only given "
-                "context, flagged unverifiable), specific (concrete + named a next step), risk_aware (surfaced "
-                "the key risk/unknown), on_goal (addressed the actual question), concise (no filler).")
-            usr = (f"EMPLOYEE: {name} ({lane})\n\nTHEIR CONTRIBUTION THIS TURN:\n{contribution[:1800]}\n\n"
-                   f"THE TEAM'S FINAL DELIVERABLE (the quality bar):\n{final_text[:1800]}")
-            msg = await self._groq(
-                [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
-                model=_EVO_REFLECT_MODEL, temp=0.3, bucket="evo", schema=_EVO_REFLECT_SCHEMA)
-            data = json.loads((msg or {}).get("content") or "{}")
-            dims = ["grounded", "specific", "risk_aware", "on_goal", "concise"]
-            scores = [float(data.get(d, 0.0) or 0.0) for d in dims]
-            # only learn when there's a real weakness (mirror the proven spike: no weak dim → no lesson)
-            if all(s >= 0.7 for s in scores):
-                return []
-            lessons = [str(x).strip() for x in (data.get("lessons") or []) if str(x).strip()]
-            return lessons[:2]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[hyper-engine] evo reflect failed (non-fatal): %s", exc)
-            return []
-
-    async def _run_evo_reflection(self, final_text: str) -> None:
-        """After the turn seals: reflect each debating employee's contribution into its playbook.
-        Bounded-parallel, fully wrapped. Sets self._evo_updates = the merged playbooks (only the
-        slugs that changed) for the api layer to persist. A failure leaves _evo_updates None →
-        nothing persisted, turn unaffected."""
-        if not self.evo_active or not self.transcript:
-            return
-        try:
-            members = self.participants[:5]
-            # gather each employee's contributions this turn (joined across debate rounds)
-            def _contrib(nm: str) -> str:
-                return "\n".join(str(x.get("text") or "") for x in self.transcript
-                                 if isinstance(x, dict) and x.get("agent") == nm).strip()
-
-            targets = []
-            for emp in members:
-                name, lane, _ = _persona_fields(emp)
-                slug = str(emp.get("slug") or emp.get("id"))
-                contribution = _contrib(name)
-                if contribution:
-                    targets.append((slug, name, lane, contribution))
-            if not targets:
-                return
-
-            sem = asyncio.Semaphore(_EVO_CONCURRENCY)
-
-            async def _one(slug: str, name: str, lane: str, contribution: str):
-                async with sem:
-                    return slug, await self._evo_reflect(name, lane, contribution, final_text)
-
-            results = await asyncio.gather(*[_one(*t) for t in targets], return_exceptions=True)
-            updates: Dict[str, List[str]] = {}
-            learned = 0
-            for res in results:
-                if isinstance(res, Exception) or not res:
-                    continue
-                slug, lessons = res
-                if not lessons:
-                    continue
-                merged = _evo_merge(self.evo_playbooks.get(slug, []), lessons)
-                if merged != self.evo_playbooks.get(slug, []):
-                    updates[slug] = merged
-                    learned += len(lessons)
-            if updates:
-                # carry forward unchanged playbooks so the persisted map is complete
-                full = dict(self.evo_playbooks)
-                full.update(updates)
-                self._evo_updates = full
-                log.info("[hyper-engine] evo: %d lesson(s) learned across %d employee(s)", learned, len(updates))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)
-
     # ── Population-Sim (ADDITIONAL, opt-in) ───────────────────────────
     async def _groq_fb(self, messages: List[Dict[str, Any]], models: List[str], **kw: Any) -> Optional[Dict[str, Any]]:
         """Try each model until one returns usable content — the sim's rate-limit fallback
@@ -1216,11 +1276,10 @@ class Director:
 
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})
-        # PHASE 5 — SELF-EVOLVING REFLECTION (ADDITIONAL, opt-in). Runs AFTER the deliverable is
-        # emitted (never delays the user-visible answer). Reflects each employee's contribution into
-        # its playbook; the merged playbooks are returned for the api layer to persist. Fully wrapped.
-        if self.evo_active:
-            await self._run_evo_reflection(final_text)
+        # NOTE: Self-evolving reflection (Loop 1) is NO LONGER run here — it moved to the api layer
+        # (post-verification) so it can score each employee's contribution against the turn's REAL
+        # outcome (verifier verdict + status + held-write), not just the deliverable. The api calls
+        # engine.evo_reflect_and_merge(...) with self.evo_playbooks + the transcript.
         log.info("[hyper-engine] done plan+gather=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
                  tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000),
                  self.gather_count, self.tok_by, self.director_iters)
@@ -1238,7 +1297,7 @@ class Director:
             "gathered_emails": sorted(self.gathered_emails),
             "gather_facts": list(self.blackboard),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
-            "evo_updates": self._evo_updates,  # merged per-employee playbooks to persist (None unless learned)
+            "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
         }
 
 

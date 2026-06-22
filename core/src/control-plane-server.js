@@ -6664,6 +6664,9 @@ Write the persona now.`;
               user_message: userMessage,
               participant_ids: room.participantIds || [], project_id: room.projectId || null,
               room_goal: room.goal || '',
+              // Richer self-evolve signal: a rerun/HITL phrase the FE attaches (folded into the
+              // employee reflection so they learn from real human feedback, not just the verifier).
+              user_signal: (typeof body.user_signal === 'string' && body.user_signal.trim()) ? body.user_signal.trim().slice(0, 200) : undefined,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));

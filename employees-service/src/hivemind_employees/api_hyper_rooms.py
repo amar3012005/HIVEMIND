@@ -78,7 +78,7 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director
+from .hyper.engine import run_director, evo_reflect_and_merge
 
 log = logging.getLogger(__name__)
 
@@ -1641,6 +1641,11 @@ class RoomTurnRequest(BaseModel):
     # Self-evolving employees toggle ("on" reflects+injects per-employee playbooks). Per-turn
     # override; else the room's stored evo_mode is read. Optional → existing callers unaffected.
     evo_mode: Optional[str] = None
+    # Optional richer outcome signal for the reflection: a short phrase describing a user/HITL
+    # action on a recent turn (e.g. "user reran this turn", "user approved the proposed action",
+    # "user rejected the draft"). Folded into the reflection's outcome so employees learn from real
+    # human feedback, not just the verifier. The FE sets it on a rerun; HITL flows can pass it too.
+    user_signal: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2768,16 +2773,28 @@ async def _orchestrate_single_agent(
                  "tokens_cached": int(_io.get("cached", 0) or 0),
                  "tok_by": {k: int(v) for k, v in _tok_by.items()},
                  "quality_mode": _qmode})
-    # Self-evolving (Loop 1) write-back: persist the merged per-employee playbooks AFTER the seal
-    # (the user already has the answer — this never blocks the turn). Best-effort + scoped to org.
-    _evo_updates = result.get("evo_updates")
-    if isinstance(_evo_updates, dict) and _evo_updates:
+    # Self-evolving (Loop 1) reflection + write-back — runs AFTER the seal (the user already has the
+    # answer) AND after verification, so each employee's contribution is scored against the turn's
+    # REAL outcome (verifier verdict + status + whether a write was held for approval), not just the
+    # deliverable. Best-effort + org-scoped; any failure leaves playbooks untouched.
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
-            ok = await update_room_evo_playbooks(req.room_id, _evo_updates, org_id=req.org_id)
-            log.info("[single] room=%s evo playbooks persisted=%s employees=%d",
-                     req.room_id, ok, len(_evo_updates))
-        except Exception as exc:  # noqa: BLE001 — a learning write must never fail the turn
-            log.warning("[single] evo playbook persist failed (non-fatal): %s", exc)
+            _outcome = {
+                "verdict": _gv if isinstance(_gv, dict) else {},
+                "status": status,
+                "pending_writes": bool(pending),
+                "user_signal": (str(getattr(req, "user_signal", "") or "").strip() or None),
+            }
+            _merged = await evo_reflect_and_merge(
+                evo_playbooks=_evo_playbooks, transcript=transcript, participants=participants,
+                final_text=final_text, outcome=_outcome, reflect_model=None,
+            )
+            if isinstance(_merged, dict) and _merged:
+                ok = await update_room_evo_playbooks(req.room_id, _merged, org_id=req.org_id)
+                log.info("[single] room=%s evo reflected+persisted=%s employees=%d status=%s",
+                         req.room_id, ok, len(_merged), status)
+        except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
+            log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]

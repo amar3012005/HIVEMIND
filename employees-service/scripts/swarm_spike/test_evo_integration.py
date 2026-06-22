@@ -22,21 +22,21 @@ sys.path.insert(0, str(SRC))
 from hivemind_employees.hyper import engine as E  # noqa: E402
 
 CAPTURED_SYSTEMS = []
+PARTS = [
+    {"slug": "fin", "name": "Fin", "_lane": "Finance", "persona": "You are Fin, finance."},
+    {"slug": "eng", "name": "Eng", "_lane": "Engineering", "persona": "You are Eng, engineering."},
+]
+CAPTURED_REFLECT = []  # (system, user) pairs the reflection coach saw
 
 
 def make_director(evo_mode, playbooks):
-    parts = [
-        {"slug": "fin", "name": "Fin", "_lane": "Finance", "persona": "You are Fin, finance."},
-        {"slug": "eng", "name": "Eng", "_lane": "Engineering", "persona": "You are Eng, engineering."},
-    ]
-
     async def _noop_emit(ev):
         return None
 
     d = E.Director(
         user_message="Should we prepay the annual contract to save 20%?",
         user_id="u1", org_id="o1", project_id="p1",
-        participants=parts, room_template="decision", room_goal="Decide on the prepay",
+        participants=PARTS, room_template="decision", room_goal="Decide on the prepay",
         enabled_connectors=[], emit=_noop_emit,
         evo_mode=evo_mode, evo_playbooks=playbooks,
     )
@@ -45,23 +45,28 @@ def make_director(evo_mode, playbooks):
                         force_text=False, bucket="director", schema=None):
         sysmsg = next((m["content"] for m in messages if m["role"] == "system"), "")
         CAPTURED_SYSTEMS.append((bucket, sysmsg))
-        if bucket == "evo":
-            # reviewer/coach: weak on risk + next-step → emits 2 general lessons
-            return {"content": json.dumps({
-                "grounded": 0.9, "specific": 0.4, "risk_aware": 0.3,
-                "on_goal": 0.8, "concise": 0.6,
-                "lessons": ["End with one concrete next step, owner, and deadline.",
-                            "Surface the single biggest risk before recommending."],
-            })}
-        # debate persona reply
         return {"content": f"[{model}] my take: prepay only if runway allows."}
 
     d._groq = fake_groq  # type: ignore
     return d
 
 
+# monkeypatch the MODULE-LEVEL groq used by the standalone reflection (api-layer path)
+async def fake_evo_groq(messages, *, model, schema, temp=0.3):
+    sysmsg = next((m["content"] for m in messages if m["role"] == "system"), "")
+    usrmsg = next((m["content"] for m in messages if m["role"] == "user"), "")
+    CAPTURED_REFLECT.append((sysmsg, usrmsg))
+    # weak on risk + next-step → 2 general lessons
+    return json.dumps({
+        "grounded": 0.9, "specific": 0.4, "risk_aware": 0.3, "on_goal": 0.8, "concise": 0.6,
+        "lessons": ["End with one concrete next step, owner, and deadline.",
+                    "Surface the single biggest risk before recommending."],
+    })
+
+
 async def scenario_on():
-    CAPTURED_SYSTEMS.clear()
+    CAPTURED_SYSTEMS.clear(); CAPTURED_REFLECT.clear()
+    E._evo_groq = fake_evo_groq  # type: ignore
     d = make_director("on", {"fin": ["Always tie advice to the ~13-month runway."]})
     assert d.evo_active, "evo should be active with mode=on and env default enabled"
     await d._debate("Should we prepay the annual contract?", 1)
@@ -70,32 +75,40 @@ async def scenario_on():
     assert fin_sys, "Fin was never consulted"
     assert any("YOUR PLAYBOOK" in s and "13-month runway" in s for s in fin_sys), \
         "playbook NOT injected into Fin's consult prompt"
-    # eng has NO playbook → no block
     eng_sys = [s for (b, s) in CAPTURED_SYSTEMS if b == "debate" and "Eng" in s]
-    assert eng_sys and not any("YOUR PLAYBOOK" in s for s in eng_sys), \
-        "eng should have no playbook block"
-    # 2. reflection produces merged updates
-    await d._run_evo_reflection("Final: prepay; next step: CFO reviews cash by Friday; risk: vendor lock-in.")
-    assert d._evo_updates is not None, "reflection produced no updates"
-    assert "fin" in d._evo_updates and "eng" in d._evo_updates, "both employees should have learned"
-    fin_pb = d._evo_updates["fin"]
-    assert any("runway" in l for l in fin_pb), "fin's prior lesson must be carried forward"
-    assert any("next step" in l.lower() for l in fin_pb), "fin should have learned the next-step lesson"
-    assert len(fin_pb) <= E._EVO_CAP, "playbook must be bounded"
-    print(f"  ✅ evo ON: playbook injected; learned fin={len(fin_pb)} eng={len(d._evo_updates['eng'])} lessons")
+    assert eng_sys and not any("YOUR PLAYBOOK" in s for s in eng_sys), "eng should have no playbook block"
+    # 2. standalone reflection (api-layer path) WITH a real verifier outcome → merged updates
+    outcome = {"verdict": {"met": False, "grounded_ok": True, "gaps": ["no owner named for the cash review"]},
+               "status": "escalated", "pending_writes": True}
+    merged = await E.evo_reflect_and_merge(
+        evo_playbooks=d.evo_playbooks, transcript=d.transcript, participants=PARTS,
+        final_text="Final: prepay; next step: CFO reviews cash by Friday; risk: vendor lock-in.",
+        outcome=outcome)
+    assert merged is not None, "reflection produced no updates"
+    assert "fin" in merged and "eng" in merged, "both employees should have learned"
+    assert any("runway" in l for l in merged["fin"]), "fin's prior lesson must be carried forward"
+    assert any("next step" in l.lower() for l in merged["fin"]), "fin should have learned the next-step lesson"
+    assert len(merged["fin"]) <= E._EVO_CAP, "playbook must be bounded"
+    # 3. the richer signal reached the coach prompt (verdict + status + held write)
+    assert CAPTURED_REFLECT, "reflection coach never called"
+    joined = "\n".join(u for (_, u) in CAPTURED_REFLECT)
+    assert "met=False" in joined and "escalated" in joined and "open gaps" in joined.lower() \
+        and "approval" in joined.lower(), "verifier outcome NOT folded into the coach prompt"
+    print(f"  ✅ evo ON: injected; learned fin={len(merged['fin'])} eng={len(merged['eng'])}; "
+          f"outcome (verdict+status+held-write) reached the coach")
 
 
 async def scenario_off():
-    CAPTURED_SYSTEMS.clear()
+    CAPTURED_SYSTEMS.clear(); CAPTURED_REFLECT.clear()
+    E._evo_groq = fake_evo_groq  # type: ignore
     d = make_director("off", {"fin": ["Some prior lesson."]})
     assert not d.evo_active, "evo must be inactive when mode=off"
     await d._debate("topic", 1)
-    assert not any("YOUR PLAYBOOK" in s for (_, s) in CAPTURED_SYSTEMS), \
-        "OFF must inject NO playbook"
-    await d._run_evo_reflection("final")
-    assert d._evo_updates is None, "OFF must produce no updates"
-    assert not any(b == "evo" for (b, _) in CAPTURED_SYSTEMS), "OFF must make no reflection calls"
-    print("  ✅ evo OFF: fully inert (no injection, no reflection, no updates)")
+    assert not any("YOUR PLAYBOOK" in s for (_, s) in CAPTURED_SYSTEMS), "OFF must inject NO playbook"
+    # the api gates the reflection call on evo_mode, so OFF simply never calls evo_reflect_and_merge;
+    # assert the gate the api uses (evo_active) is false — that's what suppresses the write path.
+    assert not d.evo_active and not CAPTURED_REFLECT, "OFF must make no reflection calls"
+    print("  ✅ evo OFF: fully inert (no injection, api never reflects)")
 
 
 def scenario_pure():

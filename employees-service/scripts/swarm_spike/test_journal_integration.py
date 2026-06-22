@@ -28,17 +28,20 @@ def make_director(journal):
         user_message="What did we allocate to ads?", user_id="u", org_id="o", project_id=None,
         participants=PARTS, room_template="decision", room_goal="GTM + spend",
         enabled_connectors=[], emit=emit, journal=journal)
-    cap = {"plan": [], "synth": []}
+    cap = {"plan": [], "synth": [], "debate": []}
 
     async def fake_groq(messages, *, tools=None, model=None, temp=0.4, force_text=False,
                         bucket="director", schema=None):
         usr = next((m["content"] for m in messages if m["role"] == "user"), "")
         if bucket == "director" and schema is not None:
             cap["plan"].append(usr)
-            return {"content": '{"recall_queries":[],"connector_calls":[],"web_query":null,"needs_debate":false}'}
+            return {"content": '{"recall_queries":[],"connector_calls":[],"web_query":null,"needs_debate":true,"intent":"deliberate"}'}
         if bucket == "synth":
             cap["synth"].append(usr)
             return {"content": "Final answer."}
+        if bucket == "debate":
+            cap["debate"].append(usr)
+            return {"content": "my stance."}
         return {"content": "x"}
 
     d._groq = fake_groq  # type: ignore
@@ -51,11 +54,13 @@ async def scenario_with_journal():
     d, cap = make_director(journal)
     await d._plan_gather()
     await d._synthesize(False, "")
+    await d._debate("topic", 1)  # debate agents must ALSO see the journal
     assert cap["plan"] and "ROOM JOURNAL" in cap["plan"][0], "journal NOT injected into plan"
     assert "€30k" in cap["plan"][0], "journal figures missing from plan"
     assert cap["synth"] and "ROOM JOURNAL" in cap["synth"][0], "journal NOT injected into synth"
     assert "€30k" in cap["synth"][0], "journal figures missing from synth"
-    print("  ✅ with journal: ROOM JOURNAL (+figures) injected into BOTH plan and synth")
+    assert cap["debate"] and all("ROOM JOURNAL" in c for c in cap["debate"]), "journal NOT injected into debate agents"
+    print("  ✅ with journal: ROOM JOURNAL (+figures) injected into plan, synth, AND debate agents")
 
 
 async def scenario_empty():

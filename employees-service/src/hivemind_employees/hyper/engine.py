@@ -994,7 +994,7 @@ class Director:
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
-            {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
+            {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}{self._journal_block()}\n\n[Debate round {round_no}] {prompt}"},
         ], model=self.persona_model, temp=min(0.7, 0.45 + 0.1 * round_no), bucket="debate")
         text = (msg or {}).get("content") or "(no reply)"
         return {"slug": emp.get("slug") or emp.get("id"), "name": name, "lane": lane,

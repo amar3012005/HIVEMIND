@@ -6057,7 +6057,7 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode, evo_playbooks, evo_journal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents, evo_mode, evo_playbooks, evo_journal, swarm_instructions FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
@@ -6067,6 +6067,7 @@ Write the persona now.`;
         room.evo_mode = pr?.[0]?.evo_mode || 'off';
         room.evo_playbooks = pr?.[0]?.evo_playbooks || {};
         room.evo_journal = pr?.[0]?.evo_journal || [];
+        room.swarm_instructions = pr?.[0]?.swarm_instructions || '';
       } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
@@ -6230,6 +6231,17 @@ Write the persona now.`;
           );
           updated.evo_mode = body.evo_mode;
         } catch (e) { console.warn('[hyper-rooms] evo_mode update failed:', e.message); }
+      }
+      // Additive swarm_instructions column (room owner's custom override instructions, markdown).
+      if (typeof body.swarm_instructions === 'string') {
+        try {
+          const si = body.swarm_instructions.slice(0, 4000);
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "swarm_instructions" = $1 WHERE "id" = $2::uuid',
+            si, roomId,
+          );
+          updated.swarm_instructions = si;
+        } catch (e) { console.warn('[hyper-rooms] swarm_instructions update failed:', e.message); }
       }
       // Reset learned playbooks (clear what employees have learned in this room). Either
       // evo_reset:true (wipe all) or evo_reset:"<slug>" (wipe one employee). Reversible only
@@ -6679,6 +6691,8 @@ Write the persona now.`;
               user_signal: (typeof body.user_signal === 'string' && body.user_signal.trim()) ? body.user_signal.trim().slice(0, 200) : undefined,
               // Run-wide output language from the FE navbar toggle (i18n locale, e.g. 'de'/'fr').
               language: (typeof body.language === 'string' && body.language.trim()) ? body.language.trim().slice(0, 12) : undefined,
+              // Room owner's Swarm Instructions (custom override directives) — applied to the whole run.
+              swarm_instructions: (typeof room.swarmInstructions === 'string' && room.swarmInstructions.trim()) ? room.swarmInstructions.slice(0, 4000) : undefined,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));

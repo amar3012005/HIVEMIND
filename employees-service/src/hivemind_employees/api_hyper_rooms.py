@@ -1659,6 +1659,10 @@ class RoomTurnRequest(BaseModel):
     # WHOLE run — agent debate, synthesis, and final deliverable — is produced in that language.
     # Per-turn (the toggle is global UI). Optional → existing callers unaffected (default English).
     language: Optional[str] = None
+    # Room owner's free-form custom instructions ("Swarm Instructions") — injected at highest priority
+    # so they override the default format/content rules (e.g. "no Gaps to confirm", "no mermaid").
+    # Forwarded per-turn from the room's stored value. Optional → existing callers unaffected.
+    swarm_instructions: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2796,6 +2800,7 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks, journal=_journal,
             precomputed_sim=_precomp_sim, language=(getattr(req, "language", "") or ""),
+            swarm_instructions=(getattr(req, "swarm_instructions", "") or ""),
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

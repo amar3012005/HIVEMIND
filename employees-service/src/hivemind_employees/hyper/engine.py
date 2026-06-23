@@ -654,10 +654,15 @@ class Director:
         journal: Optional[List[str]] = None,
         precomputed_sim: Optional[Dict[str, Any]] = None,
         language: str = "",
+        swarm_instructions: str = "",
     ) -> None:
         # Run-wide output language (from the FE navbar toggle). Accepts a locale code ("fr") or name
         # ("French"); resolved to a name. "" / English → no directive (default behavior unchanged).
         self.language = _resolve_language(language)
+        # Room owner's free-form custom instructions ("Swarm Instructions") — injected at HIGHEST
+        # priority so they override the default format/content rules (e.g. "no Gaps to confirm",
+        # "no mermaid"). Per-room customization; "" → no-op.
+        self.swarm_instructions = (swarm_instructions or "").strip()[:4000]
         self.user_message = user_message
         self.user_id = user_id
         self.org_id = org_id
@@ -737,23 +742,33 @@ class Director:
         self.gathered_emails: set = set()
 
     # ── LLM ───────────────────────────────────────────────────────────
-    def _with_language(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Append the run-wide language directive to the system message (or prepend one) so the LLM
-        writes its output in self.language. Non-destructive; targets user-facing prose, not queries."""
-        directive = (f"RESPOND IN {self.language.upper()}: write ALL of your natural-language output — "
-                     f"discussion, reasoning, headings, and the final deliverable — ENTIRELY in "
-                     f"{self.language}. Do not switch to English. (Search queries and tool-argument "
-                     f"values may stay as needed to match the source data.)")
+    def _with_directives(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Append run-wide directives to the system message so EVERY LLM call honors them:
+        (1) the output language, and (2) the room owner's Swarm Instructions — appended LAST so they
+        OVERRIDE the default format/content rules wherever they conflict. Non-destructive."""
+        suffix = ""
+        if self.language:
+            suffix += (f"\n\nRESPOND IN {self.language.upper()}: write ALL of your natural-language output — "
+                       f"discussion, reasoning, headings, and the final deliverable — ENTIRELY in "
+                       f"{self.language}. Do not switch to English. (Search queries and tool-argument "
+                       f"values may stay as needed to match the source data.)")
+        if self.swarm_instructions:
+            suffix += ("\n\n=== ROOM OWNER'S CUSTOM INSTRUCTIONS (HIGHEST PRIORITY) ===\n"
+                       "The room owner set these explicit instructions. They OVERRIDE any default rule "
+                       "above wherever they conflict — follow them exactly (e.g. if they say to omit a "
+                       "section or a diagram type, OMIT it):\n" + self.swarm_instructions)
+        if not suffix:
+            return messages
         out: List[Dict[str, Any]] = []
         injected = False
         for m in messages:
             if not injected and m.get("role") == "system":
-                out.append({**m, "content": ((m.get("content") or "") + "\n\n" + directive)})
+                out.append({**m, "content": ((m.get("content") or "") + suffix)})
                 injected = True
             else:
                 out.append(m)
         if not injected:
-            out.insert(0, {"role": "system", "content": directive})
+            out.insert(0, {"role": "system", "content": suffix.strip()})
         return out
 
     async def _groq(
@@ -773,10 +788,10 @@ class Director:
         # keeps emitting tool calls on a no-tools call → repeated 400 "Tool choice is
         # none, but model called a tool"; removing the structure (not just the tools) is
         # what actually stops it.
-        # Run-wide language: inject the directive into EVERY LLM call (plan/debate/synth/self-revise
-        # all flow through here) so the whole run + output is in the selected language. No-op default.
-        if self.language:
-            messages = self._with_language(messages)
+        # Run-wide directives (language + room owner's Swarm Instructions): inject into EVERY LLM call
+        # (plan/debate/synth/self-revise all flow through here) so the whole run honors them. No-op default.
+        if self.language or self.swarm_instructions:
+            messages = self._with_directives(messages)
         msgs = _flatten_for_text(messages) if force_text else messages
         body: Dict[str, Any] = {"model": model or self.director_model, "messages": msgs, "temperature": temp}
         if tools and not force_text:
@@ -1829,6 +1844,7 @@ async def run_director(
     journal: Optional[List[str]] = None,
     precomputed_sim: Optional[Dict[str, Any]] = None,
     language: str = "",
+    swarm_instructions: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report, evo_updates}."""
@@ -1839,6 +1855,6 @@ async def run_director(
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents, journal=journal,
         evo_mode=evo_mode, evo_playbooks=evo_playbooks, precomputed_sim=precomputed_sim,
-        language=language,
+        language=language, swarm_instructions=swarm_instructions,
     )
     return await director.run()

@@ -1488,6 +1488,10 @@ model HyperRoom {
   /// CONTINUITY — injected at the start of plan + synth so a turn recalls prior turns. Bounded
   /// (rolling, last N), figure-preserving. Episodic memory (distinct from evoPlaybooks = skills).
   evoJournal         Json         @default("[]") @map("evo_journal")
+  /// Room owner's free-form custom instructions ("Swarm Instructions"), markdown. Injected at HIGHEST
+  /// priority into the director so they override the default format/content rules (e.g. "no Gaps to
+  /// confirm", "no mermaid"). Empty = defaults. Per-room customization.
+  swarmInstructions  String?      @map("swarm_instructions") @db.Text
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

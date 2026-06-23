@@ -1655,6 +1655,10 @@ class RoomTurnRequest(BaseModel):
     # "user rejected the draft"). Folded into the reflection's outcome so employees learn from real
     # human feedback, not just the verifier. The FE sets it on a rerun; HITL flows can pass it too.
     user_signal: Optional[str] = None
+    # Run-wide output language (FE navbar i18n locale, e.g. "de"/"fr"). When set + non-English, the
+    # WHOLE run — agent debate, synthesis, and final deliverable — is produced in that language.
+    # Per-turn (the toggle is global UI). Optional → existing callers unaffected (default English).
+    language: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2791,7 +2795,7 @@ async def _orchestrate_single_agent(
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks, journal=_journal,
-            precomputed_sim=_precomp_sim,
+            precomputed_sim=_precomp_sim, language=(getattr(req, "language", "") or ""),
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

@@ -6677,6 +6677,8 @@ Write the persona now.`;
               // Richer self-evolve signal: a rerun/HITL phrase the FE attaches (folded into the
               // employee reflection so they learn from real human feedback, not just the verifier).
               user_signal: (typeof body.user_signal === 'string' && body.user_signal.trim()) ? body.user_signal.trim().slice(0, 200) : undefined,
+              // Run-wide output language from the FE navbar toggle (i18n locale, e.g. 'de'/'fr').
+              language: (typeof body.language === 'string' && body.language.trim()) ? body.language.trim().slice(0, 12) : undefined,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));

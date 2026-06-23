@@ -232,6 +232,22 @@ _PROSPECT_RE = re.compile(
     r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
     r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
 
+# Run-wide output language (FE navbar toggle). locale code → language NAME; "" / English → no directive.
+_LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish", "it": "Italian",
+               "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "ru": "Russian",
+               "ja": "Japanese", "zh": "Chinese", "ar": "Arabic", "hi": "Hindi", "ko": "Korean",
+               "sv": "Swedish", "da": "Danish", "no": "Norwegian", "fi": "Finnish", "cs": "Czech"}
+
+
+def _resolve_language(lang: str) -> str:
+    """Map a locale code or name ('fr' / 'French' / 'fr-FR') to a language NAME. '' or English → ''
+    (no directive → default English behavior, zero overhead)."""
+    s = (lang or "").strip().lower()
+    if not s or s.split("-")[0] in ("en", "english"):
+        return ""
+    name = _LANG_NAMES.get(s.split("-")[0]) or (lang.strip().title() if lang.strip().isalpha() else "")
+    return "" if name.lower() == "english" else name
+
 
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
@@ -637,7 +653,11 @@ class Director:
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
         journal: Optional[List[str]] = None,
         precomputed_sim: Optional[Dict[str, Any]] = None,
+        language: str = "",
     ) -> None:
+        # Run-wide output language (from the FE navbar toggle). Accepts a locale code ("fr") or name
+        # ("French"); resolved to a name. "" / English → no directive (default behavior unchanged).
+        self.language = _resolve_language(language)
         self.user_message = user_message
         self.user_id = user_id
         self.org_id = org_id
@@ -717,6 +737,25 @@ class Director:
         self.gathered_emails: set = set()
 
     # ── LLM ───────────────────────────────────────────────────────────
+    def _with_language(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Append the run-wide language directive to the system message (or prepend one) so the LLM
+        writes its output in self.language. Non-destructive; targets user-facing prose, not queries."""
+        directive = (f"RESPOND IN {self.language.upper()}: write ALL of your natural-language output — "
+                     f"discussion, reasoning, headings, and the final deliverable — ENTIRELY in "
+                     f"{self.language}. Do not switch to English. (Search queries and tool-argument "
+                     f"values may stay as needed to match the source data.)")
+        out: List[Dict[str, Any]] = []
+        injected = False
+        for m in messages:
+            if not injected and m.get("role") == "system":
+                out.append({**m, "content": ((m.get("content") or "") + "\n\n" + directive)})
+                injected = True
+            else:
+                out.append(m)
+        if not injected:
+            out.insert(0, {"role": "system", "content": directive})
+        return out
+
     async def _groq(
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
@@ -734,6 +773,10 @@ class Director:
         # keeps emitting tool calls on a no-tools call → repeated 400 "Tool choice is
         # none, but model called a tool"; removing the structure (not just the tools) is
         # what actually stops it.
+        # Run-wide language: inject the directive into EVERY LLM call (plan/debate/synth/self-revise
+        # all flow through here) so the whole run + output is in the selected language. No-op default.
+        if self.language:
+            messages = self._with_language(messages)
         msgs = _flatten_for_text(messages) if force_text else messages
         body: Dict[str, Any] = {"model": model or self.director_model, "messages": msgs, "temperature": temp}
         if tools and not force_text:
@@ -1785,6 +1828,7 @@ async def run_director(
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
     journal: Optional[List[str]] = None,
     precomputed_sim: Optional[Dict[str, Any]] = None,
+    language: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report, evo_updates}."""
@@ -1795,5 +1839,6 @@ async def run_director(
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents, journal=journal,
         evo_mode=evo_mode, evo_playbooks=evo_playbooks, precomputed_sim=precomputed_sim,
+        language=language,
     )
     return await director.run()

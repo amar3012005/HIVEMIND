@@ -13,10 +13,30 @@ Run:  docker exec -i hm-employees python3 - < quality_eval.py        # or via th
 Env:  QE_SAMPLES (default 2), QE_PROFILE_JSON (override room+profile+questions)
 """
 import asyncio, json, os, re, time
+import httpx
 from hivemind_employees.hyper import engine as E
 from hivemind_employees.hyper.engine import run_director
 
 SAMPLES = max(1, int(os.environ.get("QE_SAMPLES", "2")))
+_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+async def _judge_groq(messages, schema, model="openai/gpt-oss-120b"):
+    """Self-contained Groq judge call — does NOT depend on engine internals, so the harness runs
+    against ANY deployed engine version (only needs run_director to generate + a Groq key to judge)."""
+    key = os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY") or ""
+    if not key:
+        return None
+    body = {"model": model, "messages": messages, "temperature": 0.2,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "judge", "schema": schema, "strict": True}}}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
+            r = await c.post(_GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"].get("content") or ""
+    except Exception:
+        return None
+    return None
 MODELS = dict(director_model="openai/gpt-oss-20b", persona_model="openai/gpt-oss-20b", synth_model="openai/gpt-oss-120b")
 
 # Default profile = Solvis. Override with QE_PROFILE_JSON to point at any room (institutionalize per tenant).
@@ -56,8 +76,7 @@ async def judge(profile, q, a):
               "is_generic": {"type": "boolean"}, "why": {"type": "string"}},
               "required": DIMS + ["is_generic", "why"], "additionalProperties": False}
     for _ in range(3):
-        out = await E._evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
-                                model="openai/gpt-oss-120b", schema=schema)
+        out = await _judge_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}], schema)
         if out:
             try:
                 return json.loads(out)

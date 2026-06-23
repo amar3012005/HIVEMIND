@@ -31,6 +31,12 @@ const MIN_MEMORIES          = Number(process.env.PROFILE_DREAM_MIN_MEMORIES || 5
 const RAW_TAKE              = Number(process.env.PROFILE_DREAM_RAW_TAKE || 60);
 const CONFIDENCE_FLOOR      = Number(process.env.PROFILE_DREAM_CONFIDENCE_FLOOR || 0.55);
 const DECAY_FACTOR          = Number(process.env.PROFILE_DREAM_DECAY || 0.8);
+// gpt-oss-* are reasoning models: thinking + answer share the completion budget.
+// With the long strict persona prompt, 1200 tokens were spent on reasoning and the
+// JSON answer came back EMPTY → the dreamer silently produced 0 facts. Give it real
+// headroom so the array is actually emitted. Pure-additive (more room only); never
+// alters the prompt, grounding gate, decay, or fact selection — so quality can't drop.
+const MAX_TOKENS            = Number(process.env.PROFILE_DREAM_MAX_TOKENS || 4096);
 // WS5 step-4 — bounded read-only TRANSCRIPT REPLAY. When on, the dreamer ALSO reads
 // recent conversation transcripts as persona evidence (a lot of "who the user is"
 // signal lives in chat, not in extracted facts). STRICT rail: transcripts are READ
@@ -272,7 +278,7 @@ Output JSON only — an array (max 12), strongest first:
         model: PROFILE_DREAM_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        max_tokens: 1200,
+        max_tokens: MAX_TOKENS,
       });
     } catch (err) {
       this.logger.warn?.(`[profile-dreamer] LLM failed: ${err.message}`);

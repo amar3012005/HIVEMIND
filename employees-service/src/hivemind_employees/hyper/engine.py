@@ -1022,8 +1022,9 @@ class Director:
         content = query
         if prospect:
             content = (query + "\n\nRULES: use web_search to find the REAL entities, then use "
-                       "visit_website to OPEN each one's official page (for a company, its Impressum / "
-                       "Kontakt / About page) and READ it. Give a contact detail (email, phone) ONLY if it "
+                       "visit_website to OPEN each one's official page (a company's Contact / About / "
+                       "legal-notice page — Impressum/Kontakt in German-speaking regions) and READ it. "
+                       "Give a contact detail (email, phone) ONLY if it "
                        "literally appears on a page you actually visited — quote it verbatim and cite the "
                        "exact source URL. If you did not open a page that shows it, write 'NOT VERIFIED'. "
                        "NEVER guess or construct an address (no inventing info@domain). Cover as many real "

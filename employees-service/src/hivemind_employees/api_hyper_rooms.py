@@ -2527,16 +2527,28 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
     return resolved
 
 
-# Our own brands — never email ourselves when harvesting prospects.
-_OWN_RECIP_DOMAINS = ("singulance", "hivemind", "davinci", "solvis")
 _BAD_EMAIL_BITS = ("noreply", "no-reply", "example.", "@sentry", "wixpress", "@2x", ".png", ".jpg", "sentry.io")
 
 
-def _harvest_web_recipients(gather_facts: List[Any]) -> List[Dict[str, Any]]:
+def _own_domains_from_emails(emails: List[Any]) -> set:
+    """Derive the tenant's OWN email domains from addresses seen in their mailbox this turn (the room
+    owner's gathered_emails). Used so outreach never targets the sender's own org. GENERAL + tenant-
+    agnostic — no hardcoded brand names (works for any customer at launch)."""
+    doms: set = set()
+    for e in (emails or []):
+        m = re.search(r"@([\w.-]+)", str(e).lower())
+        if m:
+            doms.add(m.group(1))
+    return doms
+
+
+def _harvest_web_recipients(gather_facts: List[Any], own_domains: Optional[set] = None) -> List[Dict[str, Any]]:
     """Pull provenance-backed PROSPECT emails the room actually crawled from the web this turn.
     Only emails inside a WEB[...] gather-fact that ALSO carries a source URL qualify — i.e. the room
     visited a page and quoted the address (grounded), NOT a synth invention. Returns
-    [{name, email, source:'web', line}], deduped, our-own/noreply/asset domains skipped. General."""
+    [{name, email, source:'web', line}], deduped; noreply/asset + the tenant's OWN domains skipped
+    (own_domains is DERIVED per-tenant — never a hardcoded brand list)."""
+    own = {str(d).lower() for d in (own_domains or set())}
     out: List[Dict[str, Any]] = []
     seen: set = set()
     for f in (gather_facts or []):
@@ -2548,8 +2560,8 @@ def _harvest_web_recipients(gather_facts: List[Any]) -> List[Dict[str, Any]]:
                 low = addr.lower()
                 if low in seen or any(b in low for b in _BAD_EMAIL_BITS):
                     continue
-                if any(d in low for d in _OWN_RECIP_DOMAINS):
-                    continue
+                if own and low.split("@")[-1] in own:
+                    continue  # don't email the tenant's own org (derived, not hardcoded)
                 seen.add(low)
                 m = re.search(r"\*{0,2}([A-ZÄÖÜ][\wÄÖÜäöüß&.\- ]{2,40})", line)
                 nm = (m.group(1).strip() if m else low.split("@")[0])
@@ -2567,12 +2579,16 @@ async def _draft_outreach(req: "RoomTurnRequest", contacts: List[Dict[str, Any]]
               "properties": {"drafts": {"type": "array", "items": {"type": "object", "additionalProperties": False,
                   "required": ["email", "subject", "body"],
                   "properties": {"email": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}}}}}
-    sysp = ("You write short, professional, PERSONALIZED B2B outreach emails for the German market — write "
-            "in German, polite Sie-form, 4-7 sentences. For EACH prospect, pitch the OFFER below. Ground "
-            "ONLY in the offer text: do NOT invent statistics, prices, dates, or claims not present in it. "
-            "Sign with a neutral placeholder '[Ihr Name]' — NEVER invent a sender name, phone, or email. "
-            "Personalize lightly to the prospect's business where the context allows. Output one draft per "
-            "prospect email, matching the exact email address given.")
+    sysp = ("You write short, professional, PERSONALIZED B2B outreach emails. Write EACH email in the "
+            "language appropriate to THAT prospect: match the language of the OFFER and the prospect's "
+            "locale — infer from the email domain / context (e.g. a .de business → German, .fr → French, "
+            ".es → Spanish; otherwise use the offer's own language). Use the polite professional register "
+            "for that language, 4-7 sentences. For EACH prospect, pitch the OFFER below. Ground ONLY in "
+            "the offer text: do NOT invent statistics, prices, dates, or claims not present in it. Sign "
+            "with a neutral sender-name placeholder in that language (e.g. '[Your name]' / '[Ihr Name]') "
+            "— NEVER invent a sender name, phone, or email. Personalize lightly to the prospect's business "
+            "where the context allows. Output one draft per prospect email, matching the exact email "
+            "address given.")
     usr = f"OFFER / CONTEXT:\n{offer_text[:2500]}\n\nPROSPECTS:\n{roster}\n\nReturn one draft per prospect email."
     made: List[str] = []
     try:
@@ -2586,7 +2602,7 @@ async def _draft_outreach(req: "RoomTurnRequest", contacts: List[Dict[str, Any]]
         by_email = {}
     for c in contacts:
         d = by_email.get(c["email"].lower()) or {}
-        subject = (d.get("subject") or "").strip() or "HIVEMIND — kostenlose Testphase"
+        subject = (d.get("subject") or "").strip() or "Introduction"  # neutral fallback; LLM sets the real one (language-matched)
         body = (d.get("body") or "").strip()
         if not body:
             continue
@@ -2845,7 +2861,8 @@ async def _orchestrate_single_agent(
         # source-cited on the board) — so outreach drafts to verified-found contacts, not only the
         # recipients named in the user's message. Every draft still goes through HITL approval.
         try:
-            _web_rec = _harvest_web_recipients(result.get("gather_facts") or [])
+            _own = _own_domains_from_emails(result.get("gathered_emails") or [])
+            _web_rec = _harvest_web_recipients(result.get("gather_facts") or [], own_domains=_own)
             _have = {r["email"].lower() for r in _vc}
             for r in _web_rec:
                 if r["email"].lower() not in _have:

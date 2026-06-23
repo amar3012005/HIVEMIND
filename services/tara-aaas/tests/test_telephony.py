@@ -13,6 +13,7 @@ import pytest
 
 from tara_aaas.telephony.audio_bridge import AudioBridge
 from tara_aaas.telephony import outbound_api
+from tara_aaas.telephony.disclosure import ai_disclosure, _DISCLOSURE
 
 
 # ─────────────────────────── AudioBridge ───────────────────────────
@@ -74,6 +75,39 @@ def test_bridge_state_persists_across_chunks():
     whole = oneshot.pcm16_to_phone(tone)
     # Stateful chunking must match the single-shot result almost exactly.
     assert abs(len(chunks) - len(whole)) <= 4
+
+
+# ─────────────────── AI disclosure (EU AI Act Art. 50) ───────────────────
+
+def test_disclosure_english_default():
+    assert ai_disclosure("en") == _DISCLOSURE["en"]
+
+
+def test_disclosure_german():
+    assert ai_disclosure("de") == _DISCLOSURE["de"]
+
+
+@pytest.mark.parametrize("lang", ["fr", "it", "xx", "", "zz-ZZ"])
+def test_disclosure_unknown_lang_falls_back_to_english(lang):
+    assert ai_disclosure(lang) == _DISCLOSURE["en"]
+
+
+@pytest.mark.parametrize("lang", ["EN", "De", "en-US", "de-DE"])
+def test_disclosure_is_case_and_region_insensitive(lang):
+    assert ai_disclosure(lang) in _DISCLOSURE.values()
+
+
+def test_disclosure_none_is_safe():
+    assert ai_disclosure(None) == _DISCLOSURE["en"]  # type: ignore[arg-type]
+
+
+def test_every_disclosure_states_it_is_ai():
+    """Art. 50 requires the subject be told they're talking to an AI."""
+    markers = ("ai", "artificial intelligence", "ki", "künstlich")
+    for text in _DISCLOSURE.values():
+        low = text.lower()
+        assert any(m in low for m in markers), f"disclosure missing AI marker: {text!r}"
+        assert len(text.strip()) > 20
 
 
 # ─────────────────────── webhook handler (mocked Telnyx) ───────────────────────

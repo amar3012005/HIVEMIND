@@ -28,19 +28,9 @@ from ..tts.config import CartesiaConfig
 from ..tara_stream import stream_tara
 from ..voice_ws import _is_junk_transcript, _flush_boundary, _core_post
 from .audio_bridge import AudioBridge
+from .disclosure import ai_disclosure
 
 log = logging.getLogger("tara_aaas.telnyx")
-
-# EU AI Act Art 50 — mandatory AI disclosure at open of every AI-initiated call.
-_DISCLOSURE = {
-    "de": "Guten Tag! Ich bin TARA, ein KI-Assistent. Dieses Gespräch wird von einer künstlichen Intelligenz geführt.",
-    "en": "Hello! I'm TARA, an AI assistant. This call is handled by artificial intelligence.",
-}
-
-
-def _ai_disclosure(language: str) -> str:
-    return _DISCLOSURE.get(language[:2].lower(), _DISCLOSURE["en"])
-
 
 async def handle_telnyx_stream(
     ws: WebSocket,
@@ -163,7 +153,7 @@ async def handle_telnyx_stream(
             # 1. Fixed AI disclosure — always plays even if HIVEMIND is down.
             try:
                 await tts.stream_text_to_audio(
-                    _ai_disclosure(language),
+                    ai_disclosure(language),
                     audio_callback=send_audio_to_phone,
                     context_id=f"{session_id}-disclosure",
                     voice_id=voice_id,

@@ -94,7 +94,7 @@ async def eval_q(kind, q):
 
 
 async def main():
-    print(f"QUALITY LOOP · samples/q={SAMPLES} · digest_gate={E._DIGEST_MIN_CHARS}")
+    print(f"QUALITY LOOP · samples/q={SAMPLES} · digest_gate={getattr(E, '_DIGEST_MIN_CHARS', 'n/a')}")
     rows = []
     for kind, q in CFG["questions"]:
         r = await eval_q(kind, q)

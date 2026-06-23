@@ -5037,6 +5037,58 @@ Write the persona now.`;
     }
   }
 
+  // POST /v1/marketplace/rank-professions — rank a field's professions by relevance to THIS org.
+  // Recalls the company's business → LLM ranks + gives a short why-fits each. Best-effort: on any
+  // failure (no key, no org context, bad JSON) it returns the input order with no why_fits. Powers
+  // the marketplace "closest professions" view. Validates titles (never invents a profession).
+  if (pathname === '/v1/marketplace/rank-professions' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const body = await parseBody(req);
+    const field = (body.field || '').trim();
+    const profs = Array.isArray(body.professions) ? body.professions.filter((p) => p && p.title).slice(0, 12) : [];
+    const passthrough = () => jsonResponse(res, { ranked: profs.map((p) => ({ title: p.title })), org_grounded: false });
+    if (!field || !profs.length) return passthrough();
+    const apiKey = process.env.GROQ_API_KEY;
+    let orgContext = '';
+    try {
+      const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+        body: JSON.stringify({ query_context: `company business, industry, ${field} needs, products, market`, org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
+      });
+      if (rr.ok) {
+        const rd = await rr.json().catch(() => ({}));
+        const mems = rd.memories || rd.results || rd.context || [];
+        orgContext = (Array.isArray(mems) ? mems : []).map((m) => (m.content || m.summary || m.text || '')).filter(Boolean).slice(0, 6).join(' | ').slice(0, 1200);
+      }
+    } catch { /* best-effort */ }
+    if (!orgContext || !apiKey) return passthrough();
+    const sys = `You rank professions by relevance to a SPECIFIC company. Output ONLY JSON: {"ranked":[{"title":"<exact input title>","why_fits":"<=8 words tying it to THIS company>"}]}. Include EVERY input title exactly once, ordered most→least relevant to the company. why_fits must reference the company's real domain — no generic filler.`;
+    const user = `COMPANY CONTEXT:\n${orgContext}\n\nFIELD: ${field}\nPROFESSIONS:\n${profs.map((p) => `- ${p.title}: ${p.blurb || ''}`).join('\n')}\n\nRank now.`;
+    try {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.3, max_tokens: 600, response_format: { type: 'json_object' } }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const parsed = JSON.parse(d.choices?.[0]?.message?.content || '{}');
+        const ranked = Array.isArray(parsed.ranked) ? parsed.ranked : [];
+        const known = new Set(profs.map((p) => p.title));
+        const seen = new Set();
+        const out = [];
+        for (const x of ranked) {
+          if (x && known.has(x.title) && !seen.has(x.title)) { out.push({ title: x.title, why_fits: String(x.why_fits || '').slice(0, 90) }); seen.add(x.title); }
+        }
+        for (const p of profs) if (!seen.has(p.title)) out.push({ title: p.title });  // append any the LLM dropped
+        return jsonResponse(res, { ranked: out, org_grounded: true });
+      }
+    } catch { /* fall through to passthrough */ }
+    return passthrough();
+  }
+
   // POST /v1/employees — create (org_admin only)
   if (pathname === '/v1/employees' && req.method === 'POST') {
     const current = await requireSession(req, res);

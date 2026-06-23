@@ -73,6 +73,10 @@ model Organization {
   // raw SQL in cognition-pilot.js. See migration 20260606193000.
   cognitionOrgEnabled          Boolean            @default(false) @map("cognition_org_enabled")
   cognitionPersonalEnabled     Boolean            @default(false) @map("cognition_personal_enabled")
+  // Per-org opt-in for the profile-dream cron (auto-maintain evolving user
+  // profiles). Durable DB toggle surfaced in the Cognition tab; read via raw SQL
+  // in governance-routes.js + server.js profile-dream-cron. See migration 20260623.
+  profileAutomaintainEnabled   Boolean            @default(false) @map("profile_automaintain_enabled")
   // Set to now() on the false→true toggle. The cognition loop clamps its
   // synthesis window to max(now-1h, this) so enabling NEVER backfills the
   // org's history — it starts from a 1h window at toggle-on and rolls forward.

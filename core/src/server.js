@@ -764,15 +764,15 @@ if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma
   const PROFILE_DREAM_ORG_LIMIT = Number(process.env.PROFILE_DREAM_ORG_LIMIT || 25);
   const runProfileDreamCron = async () => {
     try {
-      // Most-recently-active orgs (a write in the last 30d) — newest first.
-      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      const orgs = await prisma.memory.groupBy({
-        by: ['orgId'],
-        where: { deletedAt: null, isLatest: true, updatedAt: { gte: since }, orgId: { not: null } },
-        _max: { updatedAt: true },
-        orderBy: { _max: { updatedAt: 'desc' } },
-        take: PROFILE_DREAM_ORG_LIMIT,
-      });
+      // Per-org opt-in: only orgs that flipped the "auto-maintain profiles"
+      // toggle in the Cognition tab (organizations.profile_automaintain_enabled,
+      // a durable DB flag). The global ENABLE_PROFILE_DREAM_CRON env is the
+      // platform master switch; this is the per-tenant control.
+      const enabledRows = await prisma.$queryRawUnsafe(
+        `SELECT id FROM hivemind.organizations WHERE profile_automaintain_enabled = true LIMIT $1`,
+        PROFILE_DREAM_ORG_LIMIT,
+      );
+      const orgs = (enabledRows || []).map((r) => ({ orgId: r.id }));
       let dreamed = 0, skipped = 0, members = 0, orgsRun = 0;
       for (const { orgId: oid } of orgs) {
         if (!oid) continue;

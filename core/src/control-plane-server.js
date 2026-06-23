@@ -4985,11 +4985,31 @@ const server = http.createServer(async (req, res) => {
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) return jsonResponse(res, { error: 'GROQ_API_KEY not configured' }, 503);
 
-    const sys = `You write concise, human-sounding system prompts for AI digital employees. Output ONLY the persona system-prompt as plain text — no preamble, no markdown, no headers. 3-6 sentences. Address the employee in second person ("You are ..."). Include: role, communication style, what they prioritise, and one tasteful quirk. Reflect the requested age/gender/experience subtly through voice, not biography.`;
+    // Org-ground the persona (best-effort): pull the company's own business context from HIVEMIND so a
+    // marketplace profession is tuned to THIS org (not a generic role) — the "closest profession" edge.
+    // Triggered by ground_org (the marketplace hire flow sets it). Never blocks persona generation.
+    let orgContext = '';
+    if (body.ground_org) {
+      try {
+        const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+          body: JSON.stringify({ query_context: 'company business, industry, products, market, brand, strategy', org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
+        });
+        if (rr.ok) {
+          const rd = await rr.json().catch(() => ({}));
+          const mems = rd.memories || rd.results || rd.context || [];
+          const facts = (Array.isArray(mems) ? mems : []).map((m) => (m.content || m.summary || m.text || '')).filter(Boolean).slice(0, 6);
+          if (facts.length) orgContext = facts.join(' | ').slice(0, 1200);
+        }
+      } catch { /* best-effort — fall back to a non-org-grounded persona */ }
+    }
+
+    const sys = `You write concise, human-sounding system prompts for AI digital employees. Output ONLY the persona system-prompt as plain text — no preamble, no markdown, no headers. 3-6 sentences. Address the employee in second person ("You are ..."). Include: role, communication style, what they prioritise, and one tasteful quirk. Reflect the requested age/gender/experience subtly through voice, not biography.${orgContext ? ' If COMPANY CONTEXT is provided, GROUND the persona in that company\'s real domain, market, and products — make this a specialist for THIS company, not a generic role (do not invent facts beyond the context).' : ''}`;
     const user = `Brief: ${brief}
 Name: ${name}
 Role: ${role}${team ? `\nTeam: ${team}` : ''}${age ? `\nAge: ${age}` : ''}${gender ? `\nGender: ${gender}` : ''}
-Experience years: ${exp}
+Experience years: ${exp}${orgContext ? `\n\nCOMPANY CONTEXT (tune the persona to this company):\n${orgContext}` : ''}
 
 Write the persona now.`;
 

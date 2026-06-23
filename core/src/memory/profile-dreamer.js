@@ -68,6 +68,10 @@ export class ProfileDreamer {
     if (!PROFILE_DREAM_ENABLED) return { skipped: true, reason: 'PROFILE_DREAM_ENABLED!=true' };
     if (!this.prisma) return { skipped: true, reason: 'no prisma' };
     const apply = opts.apply === true && PROFILE_DREAM_APPLY;
+    // force=true bypasses the dirty-gate (re-dream even if nothing changed) —
+    // used by the manual endpoint. Scheduled runs leave it false so unchanged
+    // users are skipped (no wasted LLM call).
+    const force = opts.force === true;
 
     let members = [];
     try {
@@ -84,7 +88,7 @@ export class ProfileDreamer {
       const userId = m.user_id;
       if (!userId) continue;
       try {
-        perUser.push(await this._dreamUser(orgId, userId, apply));
+        perUser.push(await this._dreamUser(orgId, userId, apply, force));
       } catch (err) {
         this.logger.warn?.(`[profile-dreamer] user=${String(userId).slice(0, 8)} failed: ${err.message}`);
         perUser.push({ userId, error: err.message });
@@ -93,7 +97,7 @@ export class ProfileDreamer {
     return { orgId, members: members.length, apply, perUser };
   }
 
-  async _dreamUser(orgId, userId, apply) {
+  async _dreamUser(orgId, userId, apply, force = false) {
     // RAW memories only — never syntheses (cognitiveLayerRole null).
     const raw = await this.prisma.memory.findMany({
       where: {
@@ -107,6 +111,28 @@ export class ProfileDreamer {
       select: { id: true, content: true, title: true, createdAt: true },
     });
     if (raw.length < MIN_MEMORIES) return { userId, skipped: 'below_min_memories', count: raw.length };
+
+    // DIRTY-GATE — skip the (expensive) LLM re-distillation when nothing new has
+    // arrived since this user was last dreamed. raw is ordered desc so raw[0] is
+    // their newest memory; compare to the max lastDreamedAt across their profile.
+    // Bounds scheduled-run cost to ONLY users with fresh evidence. force bypasses.
+    // (A user who has never been dreamed has lastDreamedAt=null → always runs.)
+    if (!force) {
+      try {
+        const agg = await this.prisma.userProfile.aggregate({
+          where: { userId, orgId: orgId || null, deletedAt: null },
+          _max: { lastDreamedAt: true },
+        });
+        const lastDreamed = agg?._max?.lastDreamedAt || null;
+        const latestMem = raw[0]?.createdAt || null;
+        if (lastDreamed && latestMem && new Date(latestMem) <= new Date(lastDreamed)) {
+          return { userId, skipped: 'no_new_memories', lastDreamed, latestMem, count: raw.length };
+        }
+      } catch (err) {
+        // Gate failure must never block dreaming — fall through and dream.
+        this.logger.warn?.(`[profile-dreamer] dirty-gate check failed for ${String(userId).slice(0, 8)}: ${err.message}`);
+      }
+    }
 
     // WS5 step-4: optionally fold in recent conversation transcripts as READ-ONLY
     // persona evidence. Bounded + truncated. NEVER written back / ingested.

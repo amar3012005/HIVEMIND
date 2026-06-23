@@ -754,6 +754,55 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
   console.log(`[hygiene-cron] scheduled — every ${HYGIENE_INTERVAL_MS / 3600000}h, top ${HYGIENE_USER_LIMIT} tenants`);
 }
 
+// ─── Profile Dreamer cron (evolving user profiles, auto-maintained) ──────────
+// Keeps every active user's profile fresh WITHOUT manual triggers. The dreamer's
+// own DIRTY-GATE skips any user with no new memories since their last dream, so a
+// run only spends LLM calls on users with fresh evidence — bounded cost at scale.
+// Requires PROFILE_DREAM_ENABLED + PROFILE_DREAM_APPLY (the dreamer's own gates).
+if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma) {
+  const PROFILE_DREAM_INTERVAL_MS = Number(process.env.PROFILE_DREAM_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
+  const PROFILE_DREAM_ORG_LIMIT = Number(process.env.PROFILE_DREAM_ORG_LIMIT || 25);
+  const runProfileDreamCron = async () => {
+    try {
+      // Most-recently-active orgs (a write in the last 30d) — newest first.
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const orgs = await prisma.memory.groupBy({
+        by: ['orgId'],
+        where: { deletedAt: null, isLatest: true, updatedAt: { gte: since }, orgId: { not: null } },
+        _max: { updatedAt: true },
+        orderBy: { _max: { updatedAt: 'desc' } },
+        take: PROFILE_DREAM_ORG_LIMIT,
+      });
+      let dreamed = 0, skipped = 0, members = 0, orgsRun = 0;
+      for (const { orgId: oid } of orgs) {
+        if (!oid) continue;
+        try {
+          const res = await profileDreamer.dreamProfilesForOrg(oid, { apply: true });
+          if (res?.skipped) continue; // dreamer globally disabled — stop early
+          orgsRun++;
+          for (const u of (res.perUser || [])) {
+            members++;
+            if (u.skipped) skipped++;
+            else if (u.applied) dreamed++;
+          }
+        } catch (err) {
+          console.warn(`[profile-dream-cron] org ${String(oid).slice(0, 8)} failed: ${err.message}`);
+        }
+      }
+      globalThis.__hmMetrics = globalThis.__hmMetrics || {};
+      globalThis.__hmMetrics.profile_dream_runs_total = (globalThis.__hmMetrics.profile_dream_runs_total || 0) + 1;
+      globalThis.__hmMetrics.profile_dream_users_dreamed_total = (globalThis.__hmMetrics.profile_dream_users_dreamed_total || 0) + dreamed;
+      console.log(`[profile-dream-cron] ${orgsRun}/${orgs.length} orgs, ${members} members → ${dreamed} dreamed, ${skipped} skipped (dirty-gate)`);
+    } catch (err) {
+      console.error('[profile-dream-cron] tick failed:', err.message);
+    }
+  };
+  // First run after 10min (post-boot warm-up), then every interval.
+  setTimeout(runProfileDreamCron, 10 * 60 * 1000);
+  setInterval(runProfileDreamCron, PROFILE_DREAM_INTERVAL_MS);
+  console.log(`[profile-dream-cron] scheduled — every ${PROFILE_DREAM_INTERVAL_MS / 3600000}h, top ${PROFILE_DREAM_ORG_LIMIT} orgs`);
+}
+
 // ─── Audit logging helper ────────────────────────────────────────────────────
 // Writes are always recorded regardless of plan tier. Plan gating now happens
 // at the READ side (/v1/audit/logs, /v1/audit/export.csv) so paying customers
@@ -15447,7 +15496,7 @@ exit \$RC
             if (!adminOk && !principal.master) {
               return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
-            const result = await profileDreamer.dreamProfilesForOrg(orgId, { apply: body?.apply === true });
+            const result = await profileDreamer.dreamProfilesForOrg(orgId, { apply: body?.apply === true, force: body?.force === true });
             return jsonResponse(res, result);
           } catch (err) {
             console.error('[profiles/dream] failed:', err.message);

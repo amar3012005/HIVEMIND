@@ -1824,7 +1824,16 @@ _PLAN_OUTPUTS = {"email", "doc", "sheet", "slack", "ticket", "crm", "decision", 
 _SEND_INTENT_RE = re.compile(
     r"\b(e-?mail|send|sent|sending|reply|replies|replying|respond|responding|"
     r"forward|cc\b|draft(?:ing)?\s+(?:an?\s+)?(?:e-?mail|mail|message|note|reply)|"
-    r"write\s+(?:back|to|an?\s+(?:e-?mail|mail|note|message)))\b",
+    r"write\s+(?:back|to|an?\s+(?:e-?mail|mail|note|message))|"
+    # softer-but-clear outreach phrasings (precision-guarded so nouns don't misfire):
+    r"reach(?:ing)?\s+out|follow[\s-]?up\s+with|following\s+up\s+with|get(?:ting)?\s+in\s+touch|"
+    r"outreach|cold[\s-]?email|"
+    r"shoot\s+(?:an?\s+)?(?:e-?mail|mail|message|note)|"
+    r"drop\s+(?:an?\s+)?(?:line|note|message|mail)\s+to|"
+    # ping/notify/message/contact only when followed by @ or a Capitalized name/org "
+    # (inline case-sensitive (?-i:[A-Z]) so the global IGNORECASE doesn't defeat the guard):
+    r"(?:ping|notify|message|contact)\s+(?:@\w+|(?-i:[A-Z]\w*))|"
+    r"intro(?:duce)?\b[^.\n]{0,30}?\bto\b)\b",
     re.IGNORECASE,
 )
 

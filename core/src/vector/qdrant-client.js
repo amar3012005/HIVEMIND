@@ -10,6 +10,8 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
+// mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
+import { mnemeOn, mirrorStore, search as mnemeSearch } from './mneme-backend.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
@@ -281,6 +283,12 @@ export class QdrantClient {
         throw new Error(`Qdrant upsert failed: ${JSON.stringify(error)}`);
       }
 
+      // mneme dual-write (best-effort): mirror this point into the org's .amr shard so reads can
+      // be served from mneme for enabled orgs. Qdrant above remains the source of truth.
+      if (mnemeOn(memory.org_id)) {
+        mirrorStore(collectionName, point).catch(() => {});
+      }
+
       return memory.id;
     } catch (error) {
       console.error('Failed to store memory in Qdrant:', error.message);
@@ -338,6 +346,18 @@ export class QdrantClient {
     if (!searchVector) {
       console.warn('⚠️  No vector available for search');
       return [];
+    }
+
+    // mneme read path: for orgs in MNEME_ENABLED_ORGS, serve recall from the org's .amr shard.
+    // Returns null on empty shard / any error -> we transparently fall through to Qdrant below.
+    const _mnemeOrg = filterMatchValue(filter, 'org_id');
+    if (mnemeOn(_mnemeOrg)) {
+      const mres = await mnemeSearch(resolvedCollection, searchVector, limit, { isLatest: true });
+      if (mres) {
+        console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
+        return mres;
+      }
+      console.log(`[mneme] recall fallback=qdrant org=${_mnemeOrg} coll=${resolvedCollection}`);
     }
 
     const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
@@ -600,6 +620,14 @@ export class QdrantClient {
       if (!response.ok) {
         const error = await response.json();
         throw new Error(`Batch upsert failed: ${JSON.stringify(error)}`);
+      }
+
+      // mneme dual-write (best-effort): mirror each enabled-org point into its .amr shard. Uses
+      // org_<id> (enterprise per-tenant collection) to match the recall read key. Qdrant above
+      // is the source of truth, so any skipped mirror is safe.
+      for (const p of points) {
+        const oid = p.payload?.org_id;
+        if (mnemeOn(oid)) mirrorStore(`org_${oid}`, p).catch(() => {});
       }
 
       return memories.map(m => m.id);

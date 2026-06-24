@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::MmapMut;
 use mseg_format::{
-    read_text, FileHeader, MsegError, Result, SlotHeader, TextRef, FILE_HEADER_SIZE,
-    SLOT_REGION_OFFSET, SLOT_SIZE,
+    flags, read_text, FileHeader, MsegError, Result, SlotHeader, TextRef, EDGE_WIRE_BYTES,
+    FILE_HEADER_SIZE, SLOT_REGION_OFFSET, SLOT_SIZE,
 };
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -392,8 +392,43 @@ impl Segment {
             h.set_var_region_len(new_len as u32);
             h.set_last_compact_at(compacted_at);
         });
+
+        // reclaim the `.edg` overflow region too: copy each LIVE overflow slot's edge block into a
+        // fresh file and rewrite its descriptor — orphaned blocks from edge updates are dropped.
+        let edg_path = self.dir.join(format!("{}.edg", self.name));
+        let edg_tmp = self.dir.join(format!("{}.edg.compact", self.name));
+        let old_edg = self.edg_len;
+        let mut etmp = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&edg_tmp)?;
+        let mut enew: u64 = 0;
+        for i in 0..n {
+            let mut slot = self.slot(i)?;
+            if slot.is_tombstoned() || !slot.has_flag(flags::EDGE_OVERFLOW) {
+                continue;
+            }
+            let (ptr, count) = slot.edge_overflow();
+            let len = count as usize * EDGE_WIRE_BYTES;
+            let mut buf = vec![0u8; len];
+            self.edg_file.seek(SeekFrom::Start(ptr as u64))?;
+            self.edg_file.read_exact(&mut buf)?;
+            etmp.write_all(&buf)?;
+            slot.set_edge_overflow(enew as u32, count);
+            self.write_slot(i, &slot)?;
+            enew += len as u64;
+        }
+        etmp.flush()?;
+        etmp.sync_all()?;
+        drop(etmp);
+        self.mmap.flush()?;
+        std::fs::rename(&edg_tmp, &edg_path)?;
+        self.edg_file = OpenOptions::new().read(true).write(true).open(&edg_path)?;
+        self.edg_len = enew;
+
         self.flush()?;
-        Ok(old_len.saturating_sub(new_len))
+        Ok((old_len.saturating_sub(new_len)) + old_edg.saturating_sub(enew))
     }
 
     /// Flush all maps + files to disk (msync + fsync).

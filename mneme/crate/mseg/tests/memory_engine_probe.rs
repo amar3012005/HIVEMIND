@@ -48,6 +48,47 @@ fn typed_edges_overflow_to_edg_region() {
     assert_eq!(reached.len(), N as usize, "1-hop must reach all 50 targets");
 }
 
+/// `.edg` overflow churns (each edge add to an overflowed slot rewrites the whole block, orphaning
+/// the old one). compact() must reclaim those orphans while keeping the edges correct.
+#[test]
+fn compact_reclaims_orphaned_edg_blocks() {
+    let dir = tempdir().unwrap();
+    let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+    let hub = seg
+        .insert(MemoryInput::new("hub", vec![1.0, 0.0, 0.0, 0.0]))
+        .unwrap();
+    // create overflow + churn: 40 adds, each (past inline) rewrites the whole block -> orphans.
+    for i in 0..40u32 {
+        let t = seg
+            .insert(MemoryInput::new(
+                format!("t{i}"),
+                vec![i as f32, 1.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        seg.add_edge(hub, t, EDGE_MENTIONS, 1).unwrap();
+    }
+    seg.flush().unwrap();
+    let edg_path = dir.path().join("g.edg");
+    let before = std::fs::metadata(&edg_path).unwrap().len();
+
+    let reclaimed = seg.compact().unwrap();
+    let after = std::fs::metadata(&edg_path).unwrap().len();
+    assert!(
+        after < before,
+        "compact must shrink the churned .edg ({after} !< {before})"
+    );
+    assert!(reclaimed > 0);
+
+    // edges survive compaction + reopen, all 40 reachable.
+    seg.flush().unwrap();
+    let seg2 = Segment::open(dir.path(), "g").unwrap();
+    assert_eq!(seg2.slot_edges(hub).unwrap().len(), 40);
+    assert_eq!(
+        seg2.traverse_typed(&[hub], EDGE_MENTIONS, 1).unwrap().len(),
+        40
+    );
+}
+
 fn mem(text: &str, x: f32, created_at: i64) -> MemoryInput {
     let mut m = MemoryInput::new(text.to_string(), vec![x, 1.0, 0.0, 0.0]);
     m.created_at = Some(created_at);

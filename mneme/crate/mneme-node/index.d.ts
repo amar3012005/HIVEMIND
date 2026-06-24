@@ -22,6 +22,33 @@ export declare class MnemeStore {
   enableHnsw(): void
   /** Recall the top-`top_k` memories for `query`. */
   recall(query: Float32Array, topK: number): Array<MnemeHit>
+  /**
+   * Add a typed edge `slot_id` --(edge_type)--> `target` (unbounded; overflows to `.edg`).
+   * edge_type: 1=Mentions 2=Updates 3=Derives 4=Contradicts 5=PartOf 6=Extends.
+   */
+  addEdge(slotId: number, target: number, edgeType: number, weight: number): void
+  /**
+   * Typed graph traversal from `seed`, following ONLY `edge_type`, up to `max_hops`. Returns
+   * reachable slot ids (HIVEMIND `traverse_graph` parity, served from the one shard).
+   */
+  traverseTyped(seed: number, edgeType: number, maxHops: number): Array<number>
+  /**
+   * Bi-temporal point-in-time: the version of a memory current as of transaction time
+   * `txn_time` (ns), walking the Updates chain from `head_slot`. Returns the slot id, or -1 if
+   * not yet known (HIVEMIND `hivemind_at` / `timeline` parity).
+   */
+  asOf(headSlot: number, txnTime: number): number
+  /**
+   * Insert with explicit bi-temporal stamps: `created_at` (transaction time — when learned)
+   * and `valid_from` (valid time — when true), both ns. `created_at` drives `as_of`.
+   */
+  insertAt(text: string, vector: Float32Array, createdAt: number, validFrom: number): number
+  /**
+   * Update memory `old_slot` with a new version: inserts, auto-links new--Updates-->old, marks
+   * old superseded. Recall then returns only the latest; `as_of` reaches the history. `created_at`
+   * is the transaction time of the new version (drives `as_of`). Returns the new slot id.
+   */
+  update(oldSlot: number, text: string, vector: Float32Array, createdAt: number, validFrom: number): number
   /** Delete (tombstone) a memory by slot id. */
   delete(slotId: number): void
   /** Number of live memories in the shard. */

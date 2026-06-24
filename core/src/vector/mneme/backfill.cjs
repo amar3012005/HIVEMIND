@@ -1,9 +1,11 @@
-// One-time backfill: scroll an org's existing Qdrant points (vector + payload) and build its
-// .amr shard, so mneme recall is complete from the first request. Runs INSIDE hm-core (linux,
-// docker network). Read-only on Qdrant. Usage:
+// One-time backfill: scroll an org's existing Qdrant points (vector + payload) into its .amr
+// shard, building the id->slot map (idmap.json) so the adapter can do upsert-by-id replace +
+// delete. Runs INSIDE hm-core (linux, docker network). Read-only on Qdrant. Usage:
 //   docker exec -e BACKFILL_ORG=<orgId> hm-core node /app/src/vector/mneme/backfill.cjs
 const http = require('http');
-const { MnemeVectorStore } = require('./index.cjs');
+const fs = require('fs');
+const path = require('path');
+const { MnemeStore, sanitizeOrg } = require('./index.cjs');
 
 const KEY = process.env.QDRANT_API_KEY;
 const ORG = process.env.BACKFILL_ORG;
@@ -25,21 +27,27 @@ function scroll(body) {
 
 (async () => {
   if (!ORG) throw new Error('set BACKFILL_ORG');
-  const store = new MnemeVectorStore({ dataRoot: DATA_ROOT, dim: DIM });
+  const store = MnemeStore.open(DATA_ROOT, sanitizeOrg(COLL), DIM);
+  const idMap = {};
   let offset = null, total = 0;
   for (;;) {
     const body = { limit: 500, with_vector: true, with_payload: true };
     if (offset) body.offset = offset;
     const j = await scroll(body);
     const pts = (j.result && j.result.points) || [];
-    if (pts.length) {
-      await store.upsert(COLL, pts.map((p) => ({ id: p.id, vector: p.vector, payload: p.payload || {} })));
-      total += pts.length;
+    for (const p of pts) {
+      const id = String(p.id);
+      const validFrom = Number(p.payload && p.payload.event_time_ns) || 0;
+      const slot = store.insert(JSON.stringify({ id, payload: p.payload || {} }), Float32Array.from(p.vector), validFrom);
+      idMap[id] = slot;
+      total++;
     }
     offset = j.result && j.result.next_page_offset;
     if (!offset || pts.length === 0) break;
   }
-  // trigger one search to build the HNSW overlay, then flush.
-  await store.search(COLL, new Float32Array(DIM), 1).catch(() => {});
-  console.log(`backfilled ${total} points into mneme shard ${COLL} at ${DATA_ROOT}`);
+  store.enableHnsw();
+  store.flush();
+  const dir = path.join(DATA_ROOT, sanitizeOrg(COLL));
+  fs.writeFileSync(path.join(dir, 'idmap.json'), JSON.stringify(idMap));
+  console.log(`backfilled ${total} points into ${COLL} at ${DATA_ROOT} (idmap: ${Object.keys(idMap).length} ids)`);
 })();

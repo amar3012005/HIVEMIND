@@ -11,7 +11,7 @@ import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
 // mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
-import { mnemeOn, mirrorStore, search as mnemeSearch } from './mneme-backend.js';
+import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
@@ -348,21 +348,25 @@ export class QdrantClient {
       return [];
     }
 
-    // mneme read path: for orgs in MNEME_ENABLED_ORGS, serve recall from the org's .amr shard.
-    // Returns null on empty shard / any error -> we transparently fall through to Qdrant below.
+    const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
+      ? 0
+      : score_threshold;
+
+    // mneme read path: for enabled orgs, serve recall from the org's .amr shard with the SAME
+    // score threshold + is_latest filter Qdrant would apply. Returns null on empty/error -> we
+    // transparently fall through to Qdrant below.
     const _mnemeOrg = filterMatchValue(filter, 'org_id');
     if (mnemeOn(_mnemeOrg)) {
-      const mres = await mnemeSearch(resolvedCollection, searchVector, limit, { isLatest: true });
+      const mres = await mnemeSearch(resolvedCollection, searchVector, limit, {
+        isLatest: true,
+        scoreThreshold: effectiveScoreThreshold
+      });
       if (mres) {
         console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
         return mres;
       }
       console.log(`[mneme] recall fallback=qdrant org=${_mnemeOrg} coll=${resolvedCollection}`);
     }
-
-    const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
-      ? 0
-      : score_threshold;
 
     const searchRequest = {
       vector: searchVector,
@@ -553,6 +557,9 @@ export class QdrantClient {
           })
         }
       );
+
+      // mirror the delete into any enabled-org .amr shard that holds this memory (best-effort).
+      mirrorDelete(memoryId).catch(() => {});
 
       return response.ok;
     } catch (error) {

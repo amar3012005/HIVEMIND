@@ -41,6 +41,9 @@ pub mod flags {
     /// Typed edges overflowed the inline slots: edge[0]'s 8 bytes are a `{ptr:u32, count:u32}`
     /// descriptor into the `.edg` side-file; all edges live there (the memory-engine layer).
     pub const EDGE_OVERFLOW: u16 = 0x0010;
+    /// A non-latest version superseded by a newer one (linked via an `Updates` edge). Excluded
+    /// from vector recall, retained for bi-temporal `as_of` queries.
+    pub const SUPERSEDED: u16 = 0x0020;
 }
 
 /// The 64-byte `.mseg` file header (SPEC §1.2). Offsets are exact; see the field table.
@@ -206,6 +209,11 @@ impl SlotHeader {
     }
     pub fn is_tombstoned(&self) -> bool {
         self.has_flag(flags::TOMBSTONE)
+    }
+    /// A superseded (non-latest) version: kept for bi-temporal `as_of` queries, but excluded from
+    /// vector recall (which returns only the latest version — HIVEMIND `is_latest=true` parity).
+    pub fn is_superseded(&self) -> bool {
+        self.has_flag(flags::SUPERSEDED)
     }
 
     pub fn created_at(&self) -> i64 {

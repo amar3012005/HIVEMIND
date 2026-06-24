@@ -109,7 +109,7 @@ impl Segment {
                 continue; // stale/duplicate label guard
             }
             let slot = self.slot(idx)?;
-            if slot.is_tombstoned() {
+            if slot.is_tombstoned() || slot.is_superseded() {
                 continue;
             }
             if !filter.matches(slot.entity_bitmap(), slot.created_at(), slot.valid_from()) {
@@ -144,7 +144,7 @@ impl Segment {
         let mut scored: Vec<(f32, usize)> = Vec::new();
         for idx in 0..n {
             let slot = self.slot(idx)?;
-            if slot.is_tombstoned() {
+            if slot.is_tombstoned() || slot.is_superseded() {
                 continue;
             }
             if !filter.matches(slot.entity_bitmap(), slot.created_at(), slot.valid_from()) {
@@ -230,7 +230,7 @@ impl Segment {
         let mut scored: Vec<(f32, usize)> = Vec::with_capacity(seen.len());
         for &idx in &seen {
             let slot = self.slot(idx)?;
-            if slot.is_tombstoned() {
+            if slot.is_tombstoned() || slot.is_superseded() {
                 continue;
             }
             if !filter.matches(slot.entity_bitmap(), slot.created_at(), slot.valid_from()) {

@@ -54,6 +54,46 @@ fn mem(text: &str, x: f32, created_at: i64) -> MemoryInput {
     m
 }
 
+/// Stage 4.2 — write-path versioning: `update()` builds the version chain itself; recall returns
+/// ONLY the latest version (superseded ones excluded), while `as_of` still reaches every past one.
+#[test]
+fn update_builds_version_chain_recall_latest_only() {
+    use mseg::Filter;
+    let dir = tempdir().unwrap();
+    let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+
+    // a distractor memory + a fact that gets updated twice (same vector across versions).
+    let _other = seg.insert(mem("other", -1.0, 100)).unwrap();
+    let v1 = seg.insert(mem("price=10", 5.0, 100)).unwrap();
+    let v2 = seg.update(v1, mem("price=20", 5.0, 200)).unwrap();
+    let v3 = seg.update(v2, mem("price=30", 5.0, 300)).unwrap();
+    seg.flush().unwrap();
+
+    // recall on the fact vector must return ONLY v3 (latest); v1, v2 are superseded -> excluded.
+    let hits = seg
+        .recall(&[5.0, 1.0, 0.0, 0.0], &Filter::default(), 10)
+        .unwrap();
+    let ids: Vec<u32> = hits.iter().map(|h| h.slot_id).collect();
+    assert!(
+        ids.contains(&v3),
+        "recall must return the latest version v3"
+    );
+    assert!(
+        !ids.contains(&v1) && !ids.contains(&v2),
+        "superseded versions excluded from recall: {ids:?}"
+    );
+
+    // but as_of reaches every past version via the auto-built Updates chain.
+    assert_eq!(seg.as_of(v3, 150).unwrap(), Some(v1));
+    assert_eq!(seg.as_of(v3, 250).unwrap(), Some(v2));
+    assert_eq!(seg.as_of(v3, 350).unwrap(), Some(v3));
+    assert_eq!(
+        seg.get(v1).unwrap().text,
+        "price=10",
+        "old versions still readable for as_of"
+    );
+}
+
 #[test]
 fn typed_traversal_and_bitemporal_from_one_mmap() {
     let dir = tempdir().unwrap();

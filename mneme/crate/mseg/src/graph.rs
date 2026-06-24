@@ -13,7 +13,7 @@ use mseg_format::{
     flags, Result, EDGE_NONE, EDGE_SLOTS, EDGE_UPDATES, EDGE_WIRE_BYTES, SENTINEL_U32,
 };
 
-use crate::Segment;
+use crate::{MemoryInput, Segment, SlotId};
 
 fn edges_to_bytes(edges: &[(u32, u8, u8)]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(edges.len() * EDGE_WIRE_BYTES);
@@ -87,6 +87,19 @@ impl Segment {
             s.set_flag(flags::EDGE_OVERFLOW);
             self.write_slot(slot_id as usize, &s)
         }
+    }
+
+    /// Update memory `old_slot` with a new version (write-path bi-temporal versioning). Inserts
+    /// `new`, links `new --Updates--> old`, and marks `old` SUPERSEDED — so vector recall returns
+    /// only the latest version while `as_of(new, t)` can still reach every past version. The
+    /// version chain builds itself; no manual edges. Returns the new slot id.
+    pub fn update(&mut self, old_slot: u32, new: MemoryInput) -> Result<SlotId> {
+        let new_slot = self.insert(new)?;
+        self.add_edge(new_slot, old_slot, EDGE_UPDATES, 0)?;
+        let mut s = self.slot(old_slot as usize)?;
+        s.set_flag(flags::SUPERSEDED);
+        self.write_slot(old_slot as usize, &s)?;
+        Ok(new_slot)
     }
 
     /// Write typed edge slot `i` (0..EDGE_SLOTS) directly inline. Low-level; prefer `add_edge`

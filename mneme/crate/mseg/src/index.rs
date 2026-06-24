@@ -94,7 +94,17 @@ impl AsyncIndexer {
     /// failed add is surfaced (not silently dropped) so a missing vector can't degrade recall.
     pub fn bulk_add_sequential(&self, batch: &[(u32, Vec<f32>)]) -> Result<()> {
         let target = self.len() + batch.len();
-        ensure_capacity(&self.index, target);
+        ensure_capacity(&self.index, target); // reserve the whole batch up front (no per-add race)
+        // MNEME_BUILD_PARALLEL=1 → concurrent add (usearch is thread-safe; ~6× faster build) at
+        // the cost of a nondeterministic graph. Default sequential = deterministic/reproducible.
+        if std::env::var("MNEME_BUILD_PARALLEL").as_deref() == Ok("1") {
+            use rayon::prelude::*;
+            let g = self.index.read().expect("index lock");
+            batch.par_iter().for_each(|(id, v)| {
+                let _ = g.add(*id, v);
+            });
+            return Ok(());
+        }
         let g = self.index.read().expect("index lock");
         for (id, v) in batch {
             g.add(*id, v).map_err(map_err)?;

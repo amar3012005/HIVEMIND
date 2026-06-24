@@ -101,6 +101,14 @@ impl Segment {
         let q_norm = l2_norm(query);
         let n = self.slot_count() as usize;
 
+        // usearch returns candidates already ordered by (int8) distance, so the true top-k sit
+        // near the front. Exact-rerank only the first MNEME_RERANK_DEPTH survivors instead of all
+        // `ef` — at scale each rerank is a cold `.vec` read, so reranking ~32 vs 256 is the
+        // difference between ~ms and ~30ms at 10M. Default = unbounded (full rerank, max recall).
+        let rerank_depth = std::env::var("MNEME_RERANK_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX);
         let mut scored: Vec<(f32, usize)> = Vec::with_capacity(candidates.len());
         let mut seen = std::collections::HashSet::new();
         for c in candidates {
@@ -117,6 +125,9 @@ impl Segment {
             }
             let v = self.read_vector(idx)?;
             scored.push((cosine(query, q_norm, &v), idx));
+            if scored.len() >= rerank_depth {
+                break; // top int8-ranked survivors reranked; stop the cold reads
+            }
         }
         sort_take(&mut scored, top_k);
         self.hydrate_all(scored)

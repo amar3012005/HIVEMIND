@@ -259,7 +259,41 @@ impl SlotHeader {
         let o = i * 4;
         self.adjacency[o..o + 4].copy_from_slice(&v.to_le_bytes());
     }
+
+    // --- Typed edges (memory-engine layer) --------------------------------------------------
+    // The 32-byte adjacency region is reinterpreted as `EDGE_SLOTS` typed edges of 8 bytes each:
+    //   target: u32 (bytes 0..4) · edge_type: u8 (4) · weight: u8 (5) · reserved: u16 (6..8).
+    // `adjacency[0]` (== edge 0's target) still doubles as the free-list next-pointer on
+    // tombstoned slots (SPEC §1.6), which is compatible (type/weight bytes are unused there).
+
+    /// Read typed edge `i` (0..EDGE_SLOTS) as `(target_slot, edge_type, weight)`.
+    /// `target == SENTINEL_U32` or `edge_type == EDGE_NONE` means empty.
+    pub fn edge(&self, i: usize) -> (u32, u8, u8) {
+        let o = i * 8;
+        let target = u32::from_le_bytes(self.adjacency[o..o + 4].try_into().unwrap());
+        (target, self.adjacency[o + 4], self.adjacency[o + 5])
+    }
+    /// Write typed edge `i`: `target` slot id, `edge_type` (EDGE_*), `weight` (0..=255).
+    pub fn set_edge(&mut self, i: usize, target: u32, edge_type: u8, weight: u8) {
+        let o = i * 8;
+        self.adjacency[o..o + 4].copy_from_slice(&target.to_le_bytes());
+        self.adjacency[o + 4] = edge_type;
+        self.adjacency[o + 5] = weight;
+    }
 }
+
+/// Number of typed-edge slots inline per memory (32-byte region / 8 bytes per edge).
+pub const EDGE_SLOTS: usize = 4;
+
+// Typed edge kinds (mirror HIVEMIND's memory-graph relationships). EDGE_UPDATES encodes a
+// version-supersession link: v_new --Updates--> v_old, which drives bi-temporal "as of date X".
+pub const EDGE_NONE: u8 = 0;
+pub const EDGE_MENTIONS: u8 = 1;
+pub const EDGE_UPDATES: u8 = 2;
+pub const EDGE_DERIVES: u8 = 3;
+pub const EDGE_CONTRADICTS: u8 = 4;
+pub const EDGE_PARTOF: u8 = 5;
+pub const EDGE_EXTENDS: u8 = 6;
 
 #[cfg(test)]
 mod spec_lock {

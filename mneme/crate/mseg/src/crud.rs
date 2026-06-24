@@ -105,10 +105,13 @@ impl Segment {
         // near the front. Exact-rerank only the first MNEME_RERANK_DEPTH survivors instead of all
         // `ef` — at scale each rerank is a cold `.vec` read, so reranking ~32 vs 256 is the
         // difference between ~ms and ~30ms at 10M. Default = unbounded (full rerank, max recall).
+        // Default cap = (top_k*6).max(64): the 10M real-BIGANN sweep showed depth 64 is lossless
+        // vs full-rerank (recall_vs_full 1.0000) while cutting p50 31ms→2.4ms — so cap by default
+        // and let MNEME_RERANK_DEPTH override (huge = exhaustive, smaller = faster/scale).
         let rerank_depth = std::env::var("MNEME_RERANK_DEPTH")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(usize::MAX);
+            .unwrap_or((top_k * 6).max(64));
         let mut scored: Vec<(f32, usize)> = Vec::with_capacity(candidates.len());
         let mut seen = std::collections::HashSet::new();
         for c in candidates {

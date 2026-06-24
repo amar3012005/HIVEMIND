@@ -49,7 +49,25 @@ pub(crate) struct AsyncIndexer {
 impl AsyncIndexer {
     /// Create an empty index of dimension `dim` and start the background add thread.
     pub fn new(dim: usize, capacity: usize) -> Result<AsyncIndexer> {
-        let index = Arc::new(RwLock::new(MnswIndex::new(dim, capacity).map_err(map_err)?));
+        Self::from_index(MnswIndex::new(dim, capacity).map_err(map_err)?)
+    }
+
+    /// Load a persisted index from a `.mnsw` file (skips the expensive rebuild) and start the
+    /// background add thread so incremental inserts continue to apply.
+    pub fn load(path: &std::path::Path, dim: usize) -> Result<AsyncIndexer> {
+        Self::from_index(MnswIndex::load(path, dim).map_err(map_err)?)
+    }
+
+    /// Persist the current index to a `.mnsw` file (drains pending async adds first so the saved
+    /// graph is complete).
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        self.drain();
+        self.index.read().expect("index lock").save(path).map_err(map_err)
+    }
+
+    /// Wrap an existing `MnswIndex` (fresh or loaded) and start its background add thread.
+    fn from_index(index: MnswIndex) -> Result<AsyncIndexer> {
+        let index = Arc::new(RwLock::new(index));
         let (tx, rx) = mpsc::channel::<Msg>();
         let worker = index.clone();
         let handle = std::thread::Builder::new()

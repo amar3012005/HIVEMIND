@@ -441,6 +441,14 @@ impl Segment {
         self.vec_file.sync_all()?;
         self.txt_file.sync_all()?;
         self.edg_file.sync_all()?;
+        // Persist the HNSW graph so a reopen loads it (ms) instead of rebuilding from scratch
+        // (minutes at scale). Best-effort: a save failure must not fail the data flush.
+        if let Some(ix) = &self.hnsw {
+            let mnsw_path = self.dir.join(format!("{}.mnsw", self.name));
+            if let Err(e) = ix.save(&mnsw_path) {
+                eprintln!("[mneme] warn: .mnsw save failed ({e}); will rebuild on next open");
+            }
+        }
         Ok(())
     }
 
@@ -469,6 +477,17 @@ impl Segment {
     /// `insert` enqueues new vectors for background indexing and `recall` uses HNSW candidates.
     /// Idempotent-ish: re-enabling rebuilds the overlay from the current segment.
     pub fn enable_hnsw(&mut self) -> Result<()> {
+        // Fast path: a persisted .mnsw exists → load it (ms) instead of rebuilding the graph.
+        let mnsw_path = self.dir.join(format!("{}.mnsw", self.name));
+        if mnsw_path.exists() {
+            match crate::index::AsyncIndexer::load(&mnsw_path, self.dim) {
+                Ok(ix) => {
+                    self.hnsw = Some(ix);
+                    return Ok(());
+                }
+                Err(e) => eprintln!("[mneme] warn: .mnsw load failed ({e}); rebuilding"),
+            }
+        }
         let n = self.slot_count() as usize;
         let indexer = crate::index::AsyncIndexer::new(self.dim, n.max(self.capacity))?;
         // Seed in parallel chunks: collect a chunk of live (id, vector) pairs, parallel-add it,

@@ -89,6 +89,40 @@ fn compact_reclaims_orphaned_edg_blocks() {
     );
 }
 
+/// Index persistence: enable_hnsw + flush writes `.mnsw`; a reopen loads it (no rebuild) and
+/// recall still returns the right top-1 — turning a minutes-long cold rebuild into a ms load.
+#[test]
+fn hnsw_index_persists_and_reloads() {
+    use mseg::Filter;
+    let dir = tempdir().unwrap();
+    let target;
+    {
+        let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+        for i in 0..200u32 {
+            seg.insert(MemoryInput::new(format!("m{i}"), vec![i as f32, 1.0, 0.0, 0.0]))
+                .unwrap();
+        }
+        target = seg
+            .insert(MemoryInput::new("needle", vec![999.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+        seg.enable_hnsw().unwrap();
+        seg.index_drain();
+        seg.flush().unwrap();
+    }
+    // .mnsw must exist after flush.
+    assert!(
+        dir.path().join("g.mnsw").exists(),
+        "flush must persist the HNSW index to .mnsw"
+    );
+    // reopen + enable_hnsw → loads the persisted graph; recall finds the needle.
+    let mut seg = Segment::open(dir.path(), "g").unwrap();
+    seg.enable_hnsw().unwrap();
+    let hits = seg
+        .recall(&[999.0, 1.0, 0.0, 0.0], &Filter::default(), 1)
+        .unwrap();
+    assert_eq!(hits[0].slot_id, target, "reloaded index must recall the needle");
+}
+
 fn mem(text: &str, x: f32, created_at: i64) -> MemoryInput {
     let mut m = MemoryInput::new(text.to_string(), vec![x, 1.0, 0.0, 0.0]);
     m.created_at = Some(created_at);

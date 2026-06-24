@@ -38,6 +38,9 @@ pub mod flags {
     pub const TEXT_INLINE: u16 = 0x0004;
     /// Adjacency list is stale; async rebuild pending.
     pub const GRAPH_DIRTY: u16 = 0x0008;
+    /// Typed edges overflowed the inline slots: edge[0]'s 8 bytes are a `{ptr:u32, count:u32}`
+    /// descriptor into the `.edg` side-file; all edges live there (the memory-engine layer).
+    pub const EDGE_OVERFLOW: u16 = 0x0010;
 }
 
 /// The 64-byte `.mseg` file header (SPEC §1.2). Offsets are exact; see the field table.
@@ -280,10 +283,25 @@ impl SlotHeader {
         self.adjacency[o + 4] = edge_type;
         self.adjacency[o + 5] = weight;
     }
+
+    /// When the `EDGE_OVERFLOW` flag is set, edge[0]'s 8 bytes are a `.edg` descriptor:
+    /// byte offset (u32) + edge count (u32). Read it.
+    pub fn edge_overflow(&self) -> (u32, u32) {
+        let ptr = u32::from_le_bytes(self.adjacency[0..4].try_into().unwrap());
+        let count = u32::from_le_bytes(self.adjacency[4..8].try_into().unwrap());
+        (ptr, count)
+    }
+    /// Set the overflow descriptor (`.edg` byte offset + edge count) into edge[0]'s 8 bytes.
+    pub fn set_edge_overflow(&mut self, ptr: u32, count: u32) {
+        self.adjacency[0..4].copy_from_slice(&ptr.to_le_bytes());
+        self.adjacency[4..8].copy_from_slice(&count.to_le_bytes());
+    }
 }
 
 /// Number of typed-edge slots inline per memory (32-byte region / 8 bytes per edge).
 pub const EDGE_SLOTS: usize = 4;
+/// Bytes per serialized edge in the `.edg` overflow region: target u32 · type u8 · weight u8 · pad.
+pub const EDGE_WIRE_BYTES: usize = 8;
 
 // Typed edge kinds (mirror HIVEMIND's memory-graph relationships). EDGE_UPDATES encodes a
 // version-supersession link: v_new --Updates--> v_old, which drives bi-temporal "as of date X".

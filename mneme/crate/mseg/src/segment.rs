@@ -43,6 +43,8 @@ pub struct Segment {
     vec_mmap: MmapMut, // parallel f32 vectors, entry i = slot i
     txt_file: File,    // append-only text region
     txt_len: u64,
+    edg_file: File, // append-only typed-edge overflow region (memory-engine layer)
+    edg_len: u64,
     capacity: usize,                          // slots the current maps can hold
     hnsw: Option<crate::index::AsyncIndexer>, // optional async HNSW overlay (P3)
 }
@@ -58,11 +60,12 @@ fn mseg_len_for(capacity: usize) -> u64 {
 }
 
 impl Segment {
-    fn paths(dir: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    fn paths(dir: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         (
             dir.join(format!("{name}.amr")),
             dir.join(format!("{name}.vec")),
             dir.join(format!("{name}.txt")),
+            dir.join(format!("{name}.edg")),
         )
     }
 
@@ -70,7 +73,7 @@ impl Segment {
     /// files of the same name.
     pub fn create(dir: &Path, name: &str, dim: usize) -> Result<Segment> {
         std::fs::create_dir_all(dir)?;
-        let (mseg_path, vec_path, txt_path) = Self::paths(dir, name);
+        let (mseg_path, vec_path, txt_path, edg_path) = Self::paths(dir, name);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -109,6 +112,14 @@ impl Segment {
             .truncate(true)
             .open(&txt_path)?;
 
+        // .edg: empty append-only typed-edge overflow file.
+        let edg_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&edg_path)?;
+
         let mut seg = Segment {
             dir: dir.to_path_buf(),
             name: name.to_string(),
@@ -119,6 +130,8 @@ impl Segment {
             vec_mmap,
             txt_file,
             txt_len: 0,
+            edg_file,
+            edg_len: 0,
             capacity: INITIAL_SLOTS,
             hnsw: None,
         };
@@ -128,7 +141,7 @@ impl Segment {
 
     /// Open an existing segment, validating the file header.
     pub fn open(dir: &Path, name: &str) -> Result<Segment> {
-        let (mseg_path, vec_path, txt_path) = Self::paths(dir, name);
+        let (mseg_path, vec_path, txt_path, edg_path) = Self::paths(dir, name);
         let mseg_file = OpenOptions::new().read(true).write(true).open(&mseg_path)?;
         let mmap = unsafe { MmapMut::map_mut(&mseg_file)? };
         if mmap.len() < FILE_HEADER_SIZE {
@@ -154,6 +167,15 @@ impl Segment {
         let mut txt_file = OpenOptions::new().read(true).write(true).open(&txt_path)?;
         let txt_len = txt_file.seek(SeekFrom::End(0))?;
 
+        // .edg may not exist on shards written before the memory-engine layer — create if absent.
+        let mut edg_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false) // preserve existing edge overflow on reopen
+            .open(&edg_path)?;
+        let edg_len = edg_file.seek(SeekFrom::End(0))?;
+
         Ok(Segment {
             dir: dir.to_path_buf(),
             name: name.to_string(),
@@ -164,6 +186,8 @@ impl Segment {
             vec_mmap,
             txt_file,
             txt_len,
+            edg_file,
+            edg_len,
             capacity,
             hnsw: None,
         })
@@ -377,10 +401,31 @@ impl Segment {
         self.mmap.flush()?;
         self.vec_mmap.flush()?;
         self.txt_file.flush()?;
+        self.edg_file.flush()?;
         self.mseg_file.sync_all()?;
         self.vec_file.sync_all()?;
         self.txt_file.sync_all()?;
+        self.edg_file.sync_all()?;
         Ok(())
+    }
+
+    /// Append raw typed-edge bytes to the `.edg` region; returns the byte offset. Append-only
+    /// (old overflow blocks are orphaned on rewrite, reclaimed at compact — same as `.txt`).
+    pub(crate) fn append_edge_bytes(&mut self, buf: &[u8]) -> Result<u32> {
+        let off = self.edg_len;
+        self.edg_file.seek(SeekFrom::End(0))?;
+        self.edg_file.write_all(buf)?;
+        self.edg_len += buf.len() as u64;
+        Ok(off as u32)
+    }
+
+    /// Read `len` typed-edge bytes from the `.edg` region at `ptr`.
+    pub(crate) fn read_edge_bytes(&self, ptr: u32, len: usize) -> Result<Vec<u8>> {
+        let mut f = &self.edg_file;
+        f.seek(SeekFrom::Start(ptr as u64))?;
+        let mut buf = vec![0u8; len];
+        f.read_exact(&mut buf)?;
+        Ok(buf)
     }
 
     // --- HNSW overlay (P3) -------------------------------------------------------

@@ -11,6 +11,43 @@ use mseg::{MemoryInput, Segment};
 use mseg_format::{EDGE_DERIVES, EDGE_MENTIONS, EDGE_UPDATES};
 use tempfile::tempdir;
 
+/// Stage 4.1 — edge overflow: a memory with far more than the inline edge slots must spill to the
+/// `.edg` region and still traverse correctly after a reopen.
+#[test]
+fn typed_edges_overflow_to_edg_region() {
+    let dir = tempdir().unwrap();
+    const N: u32 = 50;
+    let hub;
+    {
+        let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+        hub = seg
+            .insert(MemoryInput::new("hub", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        // 50 Mentions targets via the unbounded add_edge (forces inline -> .edg overflow).
+        for i in 0..N {
+            let t = seg
+                .insert(MemoryInput::new(
+                    format!("t{i}"),
+                    vec![i as f32, 1.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            seg.add_edge(hub, t, EDGE_MENTIONS, 1).unwrap();
+        }
+        seg.flush().unwrap();
+    }
+    // reopen: all 50 typed edges must survive in the .edg region.
+    let seg = Segment::open(dir.path(), "g").unwrap();
+    let edges = seg.slot_edges(hub).unwrap();
+    assert_eq!(
+        edges.len(),
+        N as usize,
+        "all 50 edges must survive overflow+reopen"
+    );
+    assert!(edges.iter().all(|&(_, ty, _)| ty == EDGE_MENTIONS));
+    let reached = seg.traverse_typed(&[hub], EDGE_MENTIONS, 1).unwrap();
+    assert_eq!(reached.len(), N as usize, "1-hop must reach all 50 targets");
+}
+
 fn mem(text: &str, x: f32, created_at: i64) -> MemoryInput {
     let mut m = MemoryInput::new(text.to_string(), vec![x, 1.0, 0.0, 0.0]);
     m.created_at = Some(created_at);

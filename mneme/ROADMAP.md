@@ -51,16 +51,27 @@ Goal: `.amr` holds the WHOLE memory — not vectors. Then a company's brain is *
 encryptable, movable, auditable, sovereign. Collapses Postgres + Qdrant + Redis → one mmap.
 This is the only 10x no *server* DB can follow us into.
 
-- [ ] T2-PROBE (the make-or-break, ~1 week, run BEFORE committing Tier 2):
-      Extend the slot: typed-edge adjacency `{type, weight, target}` (replace 8 untyped pointers)
-      + bi-temporal version chains (supersede in-place, native `is_latest`). Then ONE test:
-      **a 2-hop *typed* traversal + a "what did we know on date X" version query, served from a
-      single mmap, matching Postgres' answer.**
-      - PASS → it's the first single-file memory engine; we kill a database. Build to production.
-      - FAIL (graph mutation + versioning in a memory-mapped append-only file is genuinely hard —
-        that IS the real physics) → ship Tier 1 as a vector format, stop calling it a memory engine.
-- [ ] T2-1..n: only specced if the probe passes. (typed edges, version queries, entity table,
-      encryption-at-rest as the sovereignty artifact, then HIVEMIND collapses Qdrant→.amr org-wide.)
+- [x] T2-PROBE — **PASSED** (commit 8b121616). Typed-edge slot {target,type,weight} + bi-temporal
+      version chain; 2-hop typed traversal + "what did we know on date X" served from one reopened
+      mmap, matching the reference. The graph-mutation-in-mmap wall is cleared. It IS a single-file
+      memory engine.
+- [x] T2-4.1 — **unbounded typed edges** via `.edg` overflow region (4f280a56). 50 edges spill +
+      survive reopen + traverse. Real memories' relationship count is no longer capped.
+- [x] T2-4.2 — **write-path versioning** (52d86aee). `update()` self-builds the Updates chain +
+      marks old SUPERSEDED; recall returns only latest (HIVEMIND is_latest parity), `as_of` reaches
+      history.
+- [x] T2-4.3 — **scale** (d63903c5). 1M memories, typed 2-hop p50 **1.2µs inline / 16µs overflow**
+      (cache-cold) — 300× under the 5ms gate. vs HIVEMIND Postgres-edge-join baseline (~ms): **100×+
+      latency win on the relationship axis.**
+- [x] T2 Node binding (d03a35fb) — traverseTyped / asOf / update / addEdge exposed: HIVEMIND
+      `traverse_graph` + `hivemind_at`/`timeline` can be served by `.amr`. `.edg` leak closed via
+      compact (ce7e251e).
+- [ ] **T2-4.4 DOGFOOD (next, the only proof that counts):** rebuild the linux binary with the
+      graph methods → backfill sai's typed edges from HIVEMIND's Postgres graph → wire HIVEMIND
+      traverse_graph/at to serve from mneme for sai → compare latency + correctness vs Postgres →
+      then one org runs with the relationship/time-travel path served by `.amr`.
+- [ ] T2-5: entity table (>64 entities) + encryption-at-rest = the sovereignty artifact (one
+      encrypted file = a company's whole brain).
 
 ---
 

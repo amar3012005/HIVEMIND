@@ -754,6 +754,23 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
   console.log(`[hygiene-cron] scheduled — every ${HYGIENE_INTERVAL_MS / 3600000}h, top ${HYGIENE_USER_LIMIT} tenants`);
 }
 
+// ─── A#2: mneme edge-sync cron (flag-gated; dormant unless an org is on .amr) ─
+// Mirrors newly-created Postgres relationships into the org's .amr typed-edge graph so it compounds
+// live. No-op when MNEME enabled-orgs is empty; dynamic import + try/catch so it can never affect
+// boot or the live path. Qdrant + Postgres remain the source of truth regardless.
+const MNEME_EDGE_SYNC_INTERVAL_MS = Number(process.env.MNEME_EDGE_SYNC_INTERVAL_MS || 5 * 60 * 1000);
+if (prisma) {
+  const runMnemeEdgeSync = async () => {
+    try {
+      const { syncEnabledOrgEdges } = await import('./vector/mneme-backend.js');
+      await syncEnabledOrgEdges(prisma);
+    } catch (err) {
+      console.warn('[mneme] edge-sync cron skipped:', err.message);
+    }
+  };
+  setInterval(runMnemeEdgeSync, MNEME_EDGE_SYNC_INTERVAL_MS);
+}
+
 // ─── Profile Dreamer cron (evolving user profiles, auto-maintained) ──────────
 // Keeps every active user's profile fresh WITHOUT manual triggers. The dreamer's
 // own DIRTY-GATE skips any user with no new memories since their last dream, so a

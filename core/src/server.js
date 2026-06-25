@@ -15,6 +15,7 @@ import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRa
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
+import { transcribeAudio } from './llm/stt-route.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -1245,23 +1246,21 @@ if (process.env.DOCLING_URL) {
         const ext = (filename || '').split('.').pop()?.toLowerCase();
         const tParse = Date.now();
 
-        // ── Audio (mp3/wav/m4a/ogg/flac) → Groq Whisper transcription ──
-        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && process.env.GROQ_API_KEY) {
+        // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──
+        //    (sttRoute / STT_PROVIDER); this feature's model = INGEST_STT_MODEL.
+        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
           try {
-            const fd = new FormData();
-            fd.append('file', new Blob([fs.readFileSync(tempPath)]), filename);
-            fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
-            fd.append('response_format', 'verbose_json');
-            const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-              body: fd,
-              signal: AbortSignal.timeout(180_000),
+            const t = await transcribeAudio({
+              audio: fs.readFileSync(tempPath),
+              filename,
+              contentType: `audio/${ext === 'm4a' ? 'mp4' : ext}`,
+              model: process.env.INGEST_STT_MODEL,
+              response_format: 'verbose_json',
+              timeoutMs: 180_000,
             });
-            if (!wRes.ok) throw new Error(`Whisper ${wRes.status}: ${(await wRes.text()).slice(0, 200)}`);
-            const wJson = await wRes.json();
-            const transcript = wJson.text || '';
-            const segments = Array.isArray(wJson.segments) ? wJson.segments : [];
+            if (!t.ok) throw new Error(`STT ${t.status}: ${(t.detail || '').slice(0, 200)}`);
+            const transcript = t.text || '';
+            const segments = Array.isArray(t.segments) ? t.segments : [];
             // One chunk per Whisper segment so timestamps survive into memory.
             const hybridChunks = segments.length
               ? segments.map(s => ({
@@ -1272,9 +1271,9 @@ if (process.env.DOCLING_URL) {
               : [{ text: transcript.trim(), headings: [filename], page: 1 }];
             console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
             return {
-              text: transcript, markdown: transcript, json: { segments: wJson.segments, language: wJson.language },
+              text: transcript, markdown: transcript, json: { segments, language: t.language },
               tables: [], pages: 1, confidence: null, error: null,
-              hybridChunks, chunkerError: null, engine: 'groq-whisper',
+              hybridChunks, chunkerError: null, engine: `stt-${t.provider}`,
             };
           } catch (audioErr) {
             console.warn(`[docling-adapter] whisper failed: ${audioErr.message}`);
@@ -5256,66 +5255,33 @@ exit \$RC
               message: `Recording is ${(audio.length / 1048576).toFixed(1)} MB — over the ${maxMb} MB transcription limit. Record shorter segments or split the meeting.`,
             }, 413);
           }
-          const ext = ((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm';
-          const fd = new FormData();
-          fd.append('file', new Blob([audio], { type: _ct || 'audio/webm' }), `meeting.${ext}`);
-          // Accuracy config (Groq Whisper): whisper-large-v3 is the lowest-WER
-          // model (10.3% vs turbo 12%); verbose_json yields segment timestamps
-          // (needed for diarization alignment); temperature 0 = deterministic,
-          // most-accurate decoding. LANGUAGE is intentionally OMITTED → Whisper
-          // auto-detects the spoken language (surfaced back as wJson.language).
-          fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
-          fd.append('response_format', 'verbose_json');
-          fd.append('temperature', '0');
-          // Optional meeting context (?prompt=) — biases Whisper toward the
-          // correct spelling of names/companies/jargon the user typed before
-          // the meeting (Whisper prompt cap ~224 tokens → hard-slice).
+          // STT via the single ground-truth route (sttRoute / STT_PROVIDER);
+          // this feature's model = MEETING_STT_MODEL. transcribeAudio() owns the
+          // provider request shapes, retries, + one-shot cross-provider failover.
+          // Optional ?prompt= biases Groq Whisper toward names/jargon (cap ~224 tok).
           const ctxPrompt = (url.searchParams.get('prompt') || '').toString().slice(0, 800);
-          if (ctxPrompt) fd.append('prompt', ctxPrompt);
-          // Resilient Groq call — retry transient failures (429 rate-limit,
-          // 5xx, network/timeout) with exponential backoff. A single un-retried
-          // call meant any momentary Groq blip surfaced as a user-facing 502
-          // ("whisper model issue"). Up to 3 attempts; honor Retry-After on 429.
-          let wRes = null;
-          let lastDetail = '';
-          let lastStatus = 0;
-          const maxAttempts = 3;
-          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-              const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-                body: fd,
-                signal: AbortSignal.timeout(300_000),
-              });
-              if (r.ok) { wRes = r; break; }
-              lastStatus = r.status;
-              lastDetail = (await r.text().catch(() => '')).slice(0, 200);
-              // Retry only transient classes; client errors (400/413/415) are terminal.
-              const transient = r.status === 429 || r.status >= 500;
-              if (!transient || attempt === maxAttempts) break;
-              const retryAfter = Number(r.headers.get('retry-after')) || 0;
-              const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(800 * 2 ** (attempt - 1), 4000);
-              await new Promise((rs) => setTimeout(rs, backoffMs));
-            } catch (netErr) {
-              lastStatus = 0;
-              lastDetail = netErr.name === 'TimeoutError' ? 'groq timeout (300s)' : netErr.message;
-              if (attempt === maxAttempts) break;
-              await new Promise((rs) => setTimeout(rs, Math.min(800 * 2 ** (attempt - 1), 4000)));
-            }
-          }
-          if (!wRes) {
+          const t = await transcribeAudio({
+            audio,
+            contentType: _ct,
+            filename: `meeting.${((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm'}`,
+            model: process.env.MEETING_STT_MODEL,
+            prompt: ctxPrompt || undefined,
+            temperature: 0,
+            response_format: 'verbose_json',
+            timeoutMs: 300_000,
+          });
+          if (!t.ok) {
             // Specific, actionable errors instead of one opaque 502.
-            if (lastStatus === 429) {
+            if (t.status === 429) {
               return jsonResponse(res, { error: 'transcription_busy', message: 'Transcription service is busy right now — please try again in a moment.' }, 503);
             }
-            if (lastStatus === 400 || lastStatus === 415) {
-              return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : lastDetail }, 400);
+            if (t.status === 400 || t.status === 415) {
+              return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : t.detail }, 400);
             }
-            return jsonResponse(res, { error: 'whisper_failed', message: 'Transcription failed after retries — please try again.', detail: process.env.NODE_ENV === 'production' ? undefined : `status=${lastStatus} ${lastDetail}` }, 502);
+            return jsonResponse(res, { error: 'whisper_failed', message: 'Transcription failed after retries — please try again.', detail: process.env.NODE_ENV === 'production' ? undefined : `status=${t.status} ${t.detail}` }, 502);
           }
-          const wJson = await wRes.json();
-          const baseOut = { transcript: wJson.text || '', language: wJson.language || null, segments: wJson.segments || [], bytes: audio.length };
+          const wJson = { text: t.text, language: t.language, segments: t.segments };
+          const baseOut = { transcript: t.text || '', language: t.language || null, segments: t.segments || [], bytes: audio.length, stt_provider: t.provider, stt_model: t.model };
           // Opt-in multi-speaker diarization. Requires ?diarize=true AND the
           // PYANNOTE_API_TOKEN env; any failure falls through to plain transcript.
           if (url.searchParams.get('diarize') === 'true' && process.env.PYANNOTE_API_TOKEN) {

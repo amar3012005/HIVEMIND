@@ -123,6 +123,37 @@ fn hnsw_index_persists_and_reloads() {
     assert_eq!(hits[0].slot_id, target, "reloaded index must recall the needle");
 }
 
+/// 3-layer separation: one shard holds evidence + memory + cognitive; a layer-filtered recall
+/// returns ONLY that layer (like Qdrant's `layer` payload filter), default recall = memory only.
+#[test]
+fn layers_are_separated_and_filtered_per_usage() {
+    use mseg::Filter;
+    use mseg_format::{LAYER_COGNITIVE, LAYER_EVIDENCE, LAYER_MEMORY};
+    let dir = tempdir().unwrap();
+    let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+    let mk = |layer: u8| {
+        let mut m = MemoryInput::new("x".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+        m.layer = layer;
+        m
+    };
+    let ev = seg.insert(mk(LAYER_EVIDENCE)).unwrap();
+    let me = seg.insert(mk(LAYER_MEMORY)).unwrap();
+    let co = seg.insert(mk(LAYER_COGNITIVE)).unwrap();
+    seg.flush().unwrap();
+
+    let q = [1.0, 0.0, 0.0, 0.0];
+    let mut only = |layer: u8| {
+        let f = Filter { layer: Some(layer), ..Default::default() };
+        seg.recall(&q, &f, 10).unwrap().iter().map(|h| h.slot_id).collect::<Vec<_>>()
+    };
+    assert_eq!(only(LAYER_EVIDENCE), vec![ev], "evidence filter returns only evidence");
+    assert_eq!(only(LAYER_MEMORY), vec![me], "memory filter returns only memory");
+    assert_eq!(only(LAYER_COGNITIVE), vec![co], "cognitive filter returns only cognitive");
+    // no filter = all 3 layers present
+    let all = seg.recall(&q, &Filter::default(), 10).unwrap().len();
+    assert_eq!(all, 3, "unfiltered recall sees all layers");
+}
+
 fn mem(text: &str, x: f32, created_at: i64) -> MemoryInput {
     let mut m = MemoryInput::new(text.to_string(), vec![x, 1.0, 0.0, 0.0]);
     m.created_at = Some(created_at);

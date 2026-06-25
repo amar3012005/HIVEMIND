@@ -45,6 +45,10 @@ pub mod flags {
     /// A non-latest version superseded by a newer one (linked via an `Updates` edge). Excluded
     /// from vector recall, retained for bi-temporal `as_of` queries.
     pub const SUPERSEDED: u16 = 0x0020;
+    /// Layer tag occupies flag bits 8-9 (mask 0x0300): 0=memory (default), 1=evidence, 2=cognitive.
+    /// Lets one .amr shard hold all 3 HIVEMIND layers, filtered per query exactly like Qdrant's
+    /// `layer` payload field — memory for recall, evidence for provenance, cognitive for synthesis.
+    pub const LAYER_MASK: u16 = 0x0300;
 }
 
 /// The 64-byte `.mseg` file header (SPEC §1.2). Offsets are exact; see the field table.
@@ -212,6 +216,14 @@ impl SlotHeader {
         let v = self.flags() | mask;
         self.set_flags(v);
     }
+    /// The slot's layer (0=memory, 1=evidence, 2=cognitive), stored in flag bits 8-9.
+    pub fn layer(&self) -> u8 {
+        ((self.flags() & flags::LAYER_MASK) >> 8) as u8
+    }
+    pub fn set_layer(&mut self, layer: u8) {
+        let v = (self.flags() & !flags::LAYER_MASK) | (((layer as u16) << 8) & flags::LAYER_MASK);
+        self.set_flags(v);
+    }
     pub fn clear_flag(&mut self, mask: u16) {
         let v = self.flags() & !mask;
         self.set_flags(v);
@@ -319,6 +331,13 @@ impl SlotHeader {
 pub const EDGE_SLOTS: usize = 4;
 /// Bytes per serialized edge in the `.edg` overflow region: target u32 · type u8 · weight u8 · pad.
 pub const EDGE_WIRE_BYTES: usize = 8;
+
+// HIVEMIND's 3 cognitive layers, stored per-slot in flag bits 8-9 (see flags::LAYER_MASK).
+// memory = recalled facts (default); evidence = raw segments (recall-excluded provenance);
+// cognitive = synthesized/dream memories.
+pub const LAYER_MEMORY: u8 = 0;
+pub const LAYER_EVIDENCE: u8 = 1;
+pub const LAYER_COGNITIVE: u8 = 2;
 
 // Typed edge kinds (mirror HIVEMIND's memory-graph relationships). EDGE_UPDATES encodes a
 // version-supersession link: v_new --Updates--> v_old, which drives bi-temporal "as of date X".

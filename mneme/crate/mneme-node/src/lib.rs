@@ -56,6 +56,33 @@ impl MnemeStore {
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// Insert tagged with a layer (0=memory, 1=evidence, 2=cognitive). Lets one shard hold all 3
+    /// HIVEMIND layers, separated, for layer-filtered recall.
+    #[napi]
+    pub fn insert_layered(
+        &mut self,
+        text: String,
+        vector: Float32Array,
+        valid_from: i64,
+        layer: u8,
+    ) -> Result<u32> {
+        let v: Vec<f32> = vector.to_vec();
+        if v.len() != self.dim {
+            return Err(Error::from_reason(format!(
+                "vector dim {} != store dim {}",
+                v.len(),
+                self.dim
+            )));
+        }
+        let mut m = MemoryInput::new(text, v);
+        m.valid_from = valid_from;
+        m.layer = layer;
+        self.shard
+            .segment()
+            .insert(m)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
     /// Build the HNSW overlay over all current vectors (call after a bulk load).
     #[napi]
     pub fn enable_hnsw(&mut self) -> Result<()> {
@@ -73,6 +100,36 @@ impl MnemeStore {
             .shard
             .segment()
             .recall(&q, &Filter::default(), top_k as usize)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(hits
+            .into_iter()
+            .map(|h| MnemeHit {
+                slot_id: h.slot_id,
+                score: h.score as f64,
+                text: h.text,
+            })
+            .collect())
+    }
+
+    /// Layer-filtered recall: `layer` 0=memory, 1=evidence, 2=cognitive; pass -1 for all layers.
+    /// This is how the 3 layers are queried separately from one shard (recall=memory,
+    /// provenance=evidence, synthesis=cognitive), exactly like a Qdrant `layer` filter.
+    #[napi]
+    pub fn recall_layer(
+        &mut self,
+        query: Float32Array,
+        top_k: u32,
+        layer: i32,
+    ) -> Result<Vec<MnemeHit>> {
+        let q: Vec<f32> = query.to_vec();
+        let filter = Filter {
+            layer: if layer < 0 { None } else { Some(layer as u8) },
+            ..Default::default()
+        };
+        let hits = self
+            .shard
+            .segment()
+            .recall(&q, &filter, top_k as usize)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(hits
             .into_iter()

@@ -132,22 +132,50 @@ export async function syncEnabledOrgEdges(prisma) {
         take: 5000,
       });
       if (!rels.length) continue;
+      const zero = new Float32Array(DIM);
+      // Materialize an endpoint memory as a .amr graph node if it isn't already a slot — e.g.
+      // tier-1 promoted memories that have NO Qdrant vector (so the vector-sync never saw them).
+      // Zero vector = graph node only (never semantically recalled); layer from tags so promoted
+      // chunks stay evidence. Without this, edges whose target is a tier-1 memory are silently
+      // dropped (the .edg-is-empty bug).
+      const materialize = async (memId) => {
+        const key = String(memId);
+        let slot = c.idMap.get(key);
+        if (slot != null) return slot;
+        const mem = await prisma.memory
+          .findUnique({ where: { id: key }, select: { content: true, tags: true } })
+          .catch(() => null);
+        if (!mem) return null;
+        const tags = Array.isArray(mem.tags) ? mem.tags : [];
+        const lyr = tags.includes('promoted-from-segment') || tags.includes('evidence') ? 1 : 0;
+        const data = JSON.stringify({ id: key, payload: { memory_id: key, org_id: org, tags, content: mem.content || '', layer: lyr === 1 ? 'evidence' : 'memory' } });
+        slot = typeof c.store.insertLayered === 'function'
+          ? c.store.insertLayered(data, zero, 0, lyr)
+          : c.store.insert(data, zero, 0);
+        c.idMap.set(key, slot);
+        return slot;
+      };
       let added = 0;
+      let materialized = 0;
       let max = watermark;
       for (const r of rels) {
         if (r.createdAt > max) max = r.createdAt;
-        const fromSlot = c.idMap.get(String(r.fromId));
-        const toSlot = c.idMap.get(String(r.toId));
         const et = REL_TYPE[r.type];
-        if (fromSlot == null || toSlot == null || !et) continue;
+        if (!et) continue;
+        const sizeBefore = c.idMap.size;
+        const fromSlot = await materialize(r.fromId);
+        const toSlot = await materialize(r.toId);
+        materialized += c.idMap.size - sizeBefore;
+        if (fromSlot == null || toSlot == null) continue;
         const w = Math.max(1, Math.min(255, Math.round((r.confidence ?? 1) * 255)));
         c.store.addEdge(Number(fromSlot), Number(toSlot), et, w);
         added++;
       }
       c.store.flush();
+      persist(c); // idMap grew (materialized nodes) — persist it
       c.edgeWatermark = max;
       try { fs.writeFileSync(wmFile, JSON.stringify({ lastCreatedAt: new Date(max).toISOString() })); } catch (_) {}
-      if (added) console.log(`[mneme] edge-sync ${coll}: +${added} edges (watermark ${new Date(max).toISOString()})`);
+      if (added || materialized) console.log(`[mneme] edge-sync ${coll}: +${added} edges, +${materialized} nodes (watermark ${new Date(max).toISOString()})`);
     } catch (e) {
       console.warn(`[mneme] edge-sync ${org} skipped: ${e.message}`);
     }

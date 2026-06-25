@@ -769,6 +769,7 @@ if (prisma) {
       console.warn('[mneme] sync cron skipped:', err.message);
     }
   };
+  setTimeout(runMnemeSync, 30 * 1000); // initial catch-up shortly after boot
   setInterval(runMnemeSync, MNEME_EDGE_SYNC_INTERVAL_MS);
 }
 

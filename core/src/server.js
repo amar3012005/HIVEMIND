@@ -760,15 +760,16 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
 // boot or the live path. Qdrant + Postgres remain the source of truth regardless.
 const MNEME_EDGE_SYNC_INTERVAL_MS = Number(process.env.MNEME_EDGE_SYNC_INTERVAL_MS || 5 * 60 * 1000);
 if (prisma) {
-  const runMnemeEdgeSync = async () => {
+  const runMnemeSync = async () => {
     try {
-      const { syncEnabledOrgEdges } = await import('./vector/mneme-backend.js');
-      await syncEnabledOrgEdges(prisma);
+      const { syncEnabledOrgEdges, syncEnabledOrgVectors } = await import('./vector/mneme-backend.js');
+      await syncEnabledOrgVectors();      // vectors first → all 3 layers land in .amr
+      await syncEnabledOrgEdges(prisma);  // then edges (slots now exist in the idMap)
     } catch (err) {
-      console.warn('[mneme] edge-sync cron skipped:', err.message);
+      console.warn('[mneme] sync cron skipped:', err.message);
     }
   };
-  setInterval(runMnemeEdgeSync, MNEME_EDGE_SYNC_INTERVAL_MS);
+  setInterval(runMnemeSync, MNEME_EDGE_SYNC_INTERVAL_MS);
 }
 
 // ─── Profile Dreamer cron (evolving user profiles, auto-maintained) ──────────

@@ -154,6 +154,58 @@ export async function syncEnabledOrgEdges(prisma) {
   }
 }
 
+// ---- 3-layer vector-sync: Qdrant -> .amr (catches ALL write paths) ----------
+const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
+const QDRANT_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
+
+// Pull every point in an enabled org's Qdrant collection not yet in .amr and insert it
+// LAYER-TAGGED. Catches all write paths — memory (storeMemory), evidence (embeddingService
+// .storeVector), promotion — regardless of which mirror hook fired, so .amr holds all 3 layers.
+// In-process on the open store (no flock conflict); best-effort; flag-gated; never throws.
+export async function syncEnabledOrgVectors() {
+  for (const org of enabledSet()) {
+    try {
+      const coll = `org_${org}`;
+      const c = getCtx(coll);
+      let offset = null;
+      let added = 0;
+      do {
+        const body = { with_vector: true, with_payload: true, limit: 256 };
+        if (offset != null) body.offset = offset;
+        const r = await fetch(`${QDRANT_URL}/collections/${sanitizeOrg(coll)}/points/scroll`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'api-key': QDRANT_KEY },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) break;
+        const j = await r.json();
+        for (const p of j.result?.points || []) {
+          const id = String(p.payload?.memory_id || p.payload?.segment_id || p.id);
+          if (c.idMap.has(id)) continue;
+          const vec = Array.isArray(p.vector) ? p.vector : (p.vector && p.vector.default) || null;
+          if (!vec) continue;
+          const layer = LAYER_ID[p.payload?.layer] ?? 0;
+          const validFrom = Number(p.payload?.event_time_ns || 0) || 0;
+          const data = JSON.stringify({ id, payload: p.payload || {} });
+          const slot = typeof c.store.insertLayered === 'function'
+            ? c.store.insertLayered(data, Float32Array.from(vec), validFrom, layer)
+            : c.store.insert(data, Float32Array.from(vec), validFrom);
+          c.idMap.set(id, slot);
+          added++;
+        }
+        offset = j.result?.next_page_offset ?? null;
+      } while (offset != null);
+      if (added) {
+        c.store.flush();
+        persist(c);
+        console.log(`[mneme] vector-sync ${coll}: +${added} points into .amr (layer-tagged)`);
+      }
+    } catch (e) {
+      console.warn(`[mneme] vector-sync ${org} skipped: ${e.message}`);
+    }
+  }
+}
+
 // ---- delete: mirror across enabled shards (delete is by memory id, no org) --
 export async function mirrorDelete(memoryId) {
   const id = String(memoryId);
@@ -177,6 +229,9 @@ export async function mirrorDelete(memoryId) {
 export async function search(collection, vector, topK = 10, opts = {}) {
   const isLatest = opts.isLatest !== false;
   const minScore = typeof opts.scoreThreshold === 'number' ? opts.scoreThreshold : 0;
+  // layer filter: default recall excludes evidence (memory + cognitive only), exactly like Qdrant.
+  // opts.layer = 'evidence' (provenance) / 'cognitive' (synthesis) restricts to that one layer.
+  const onlyLayer = opts.layer || null;
   try {
     const c = getCtx(collection);
     if (!c.built) { try { c.store.enableHnsw(); } catch (_) {} c.built = true; }
@@ -188,6 +243,8 @@ export async function search(collection, vector, topK = 10, opts = {}) {
       if (h.score < minScore) continue;
       let rec;
       try { rec = JSON.parse(h.text); } catch (_) { rec = { id: h.slotId, payload: {} }; }
+      const lyr = rec.payload?.layer || 'memory';
+      if (onlyLayer ? lyr !== onlyLayer : lyr === 'evidence') continue; // recall excludes evidence
       if (isLatest && rec.payload && rec.payload.is_latest === false) continue;
       out.push({ id: rec.id, score: h.score, payload: rec.payload || {} });
       if (out.length >= topK) break;

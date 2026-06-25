@@ -5211,6 +5211,43 @@ exit \$RC
         } catch { return null; }
       };
 
+      // pyannoteAI speaker IDENTIFICATION — same media:// upload, but /v1/identify
+      // with enrolled voiceprints → turns labeled with REAL names (not SPEAKER_xx).
+      // voiceprints: [{ label, voiceprint(base64) }]. Returns null on any failure.
+      const pyannoteIdentify = async (audio, contentType, voiceprints) => {
+        const token = process.env.PYANNOTE_API_TOKEN;
+        if (!token || !Array.isArray(voiceprints) || !voiceprints.length) return null;
+        const PB = 'https://api.pyannote.ai';
+        const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+        try {
+          const objectKey = `media://hm-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const inRes = await fetch(`${PB}/v1/media/input`, { method: 'POST', headers: H, body: JSON.stringify({ url: objectKey }), signal: AbortSignal.timeout(30_000) });
+          if (!inRes.ok) return null;
+          const presigned = (await inRes.json())?.url;
+          if (!presigned) return null;
+          const putRes = await fetch(presigned, { method: 'PUT', headers: { 'Content-Type': contentType || 'audio/webm' }, body: audio, signal: AbortSignal.timeout(120_000) });
+          if (!putRes.ok) return null;
+          const subRes = await fetch(`${PB}/v1/identify`, {
+            method: 'POST', headers: H,
+            body: JSON.stringify({ url: objectKey, model: process.env.PYANNOTE_MODEL || 'precision-2', voiceprints: voiceprints.slice(0, 50) }),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!subRes.ok) return null;
+          const jobId = (await subRes.json())?.jobId;
+          if (!jobId) return null;
+          const deadline = Date.now() + 240_000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 4000));
+            const jr = await fetch(`${PB}/v1/jobs/${jobId}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
+            if (!jr.ok) continue;
+            const jj = await jr.json();
+            if (jj.status === 'succeeded') return jj.output?.identification || jj.output?.diarization || null;
+            if (jj.status === 'failed' || jj.status === 'canceled') return null;
+          }
+          return null;
+        } catch { return null; }
+      };
+
       // Assign each Whisper segment the diarization turn with max temporal
       // overlap, then merge consecutive same-speaker segments.
       const alignSegmentsToSpeakers = (segments, turns) => {
@@ -5233,6 +5270,32 @@ exit \$RC
           } else merged.push({ ...seg });
         }
         return merged;
+      };
+
+      // Speaker-attributed transcript ("Speaker: text") from aligned segments — fed
+      // to insights + saved to memory so meeting recall knows WHO said what.
+      const buildSpeakerTranscript = (speakerSegments) => {
+        if (!Array.isArray(speakerSegments) || !speakerSegments.length) return null;
+        return speakerSegments.map((s) => `${s.speaker}: ${(s.text || '').trim()}`).join('\n\n');
+      };
+
+      // Talk-time / participation per speaker. Computed from pyannote turns alone,
+      // so it survives even when STT returned no segments (OpenRouter path).
+      const computeTalkTime = (turns) => {
+        if (!Array.isArray(turns) || !turns.length) return null;
+        const by = {};
+        let total = 0;
+        for (const tn of turns) {
+          const d = Math.max(0, (Number(tn.end) || 0) - (Number(tn.start) || 0));
+          const sp = tn.speaker || 'SPEAKER_00';
+          by[sp] = by[sp] || { speaker: sp, seconds: 0, turns: 0 };
+          by[sp].seconds += d;
+          by[sp].turns += 1;
+          total += d;
+        }
+        return Object.values(by)
+          .map((x) => ({ ...x, seconds: Math.round(x.seconds), pct: total > 0 ? Math.round((x.seconds / total) * 100) : 0 }))
+          .sort((a, b) => b.seconds - a.seconds);
       };
 
       // ── AI Meeting Notes ──────────────────────────────────────────────
@@ -5282,13 +5345,28 @@ exit \$RC
           }
           const wJson = { text: t.text, language: t.language, segments: t.segments };
           const baseOut = { transcript: t.text || '', language: t.language || null, segments: t.segments || [], bytes: audio.length, stt_provider: t.provider, stt_model: t.model };
-          // Opt-in multi-speaker diarization. Requires ?diarize=true AND the
-          // PYANNOTE_API_TOKEN env; any failure falls through to plain transcript.
-          if (url.searchParams.get('diarize') === 'true' && process.env.PYANNOTE_API_TOKEN) {
-            const turns = await pyannoteDiarize(audio, _ct);
-            const speakerSegments = alignSegmentsToSpeakers(wJson.segments || [], turns);
-            if (speakerSegments) {
-              return jsonResponse(res, { ...baseOut, diarized: true, speakerSegments });
+          // Multi-speaker — DEFAULT ON when PYANNOTE_API_TOKEN is set (disable per
+          // request with ?diarize=false). Speaker IDENTIFICATION (real names) when
+          // org voiceprints are enrolled; else anonymous SPEAKER_xx diarization.
+          // pyannote runs on the raw audio independent of STT, so talk-time/
+          // participation survives even when STT returned no segments (OpenRouter).
+          if (url.searchParams.get('diarize') !== 'false' && process.env.PYANNOTE_API_TOKEN) {
+            // Staged: voiceprints come from the per-org enrollment store (follow-up).
+            // When present → identify (real names); empty until enrollment ships.
+            const voiceprints = [];
+            const turns = voiceprints.length
+              ? await pyannoteIdentify(audio, _ct, voiceprints)
+              : await pyannoteDiarize(audio, _ct);
+            if (Array.isArray(turns) && turns.length) {
+              const speakerSegments = alignSegmentsToSpeakers(wJson.segments || [], turns);
+              return jsonResponse(res, {
+                ...baseOut,
+                diarized: true,
+                identified: voiceprints.length > 0,
+                speakerSegments,                                   // null when STT had no segments (OpenRouter)
+                speakerTranscript: buildSpeakerTranscript(speakerSegments), // null when no aligned segments
+                talkTime: computeTalkTime(turns),                  // present whenever turns exist
+              });
             }
           }
           return jsonResponse(res, baseOut);
@@ -5300,7 +5378,10 @@ exit \$RC
       // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
       if (pathname === '/api/meetings/insights' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
-        const transcript = (body.transcript || '').toString().trim();
+        // Prefer the speaker-attributed transcript (from /transcribe speakerTranscript)
+        // when the caller sends it → action items/quotes get attributed to speakers;
+        // falls back to the plain transcript. Both carry SPEAKER_xx labels the prompt maps.
+        const transcript = (body.speakerTranscript || body.transcript || '').toString().trim();
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
         // Participants captured at meeting start — names feed speaker_names

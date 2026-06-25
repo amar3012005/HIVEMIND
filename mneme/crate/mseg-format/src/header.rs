@@ -11,8 +11,9 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
 /// File magic (SPEC §1.2): `b"AMR\0\0\0"`, 6 bytes.
 pub const MAGIC: [u8; 6] = *b"AMR\0\0\0";
-/// Frozen format version (SPEC §0).
-pub const FORMAT_VERSION: u16 = 0;
+/// Format version. v1 adds the crash-safety `committed_count` checkpoint (reserves_0 → committed).
+/// v0 shards predate it and are trusted as fully committed on open (back-compat).
+pub const FORMAT_VERSION: u16 = 1;
 /// File header size in bytes (SPEC §1.2).
 pub const FILE_HEADER_SIZE: usize = 64;
 /// Slot header size in bytes (SPEC §1.3) — the authoritative frozen value.
@@ -59,7 +60,7 @@ pub struct FileHeader {
     var_region_off: [u8; 4],   // 24
     var_region_len: [u8; 4],   // 28
     pq_codebook_off: [u8; 4],  // 32
-    reserved_0: [u8; 4],       // 36
+    committed_count: [u8; 4],  // 36 — v1 crash-safety checkpoint (durably-committed slot count)
     created_at_epoch: [u8; 8], // 40
     last_compact_at: [u8; 8],  // 48
     reserved_1: [u8; 8],       // 56
@@ -87,9 +88,9 @@ impl FileHeader {
         h
     }
 
-    /// True if the magic + version identify a SPEC-v0 `.mseg` file.
+    /// True if the magic matches and the version is one this build can read (v0 legacy or v1).
     pub fn is_valid(&self) -> bool {
-        self.magic == MAGIC && self.format_version() == FORMAT_VERSION
+        self.magic == MAGIC && self.format_version() <= FORMAT_VERSION
     }
 
     pub fn magic(&self) -> [u8; 6] {
@@ -112,6 +113,14 @@ impl FileHeader {
     }
     pub fn set_slot_count(&mut self, v: u32) {
         self.slot_count = v.to_le_bytes();
+    }
+    /// Durably-committed slot count (v1 crash-safety checkpoint). Slots in `[committed_count,
+    /// slot_count)` were appended but not yet flushed; `open()` discards them after a crash.
+    pub fn committed_count(&self) -> u32 {
+        u32::from_le_bytes(self.committed_count)
+    }
+    pub fn set_committed_count(&mut self, v: u32) {
+        self.committed_count = v.to_le_bytes();
     }
     pub fn live_count(&self) -> u32 {
         u32::from_le_bytes(self.live_count)
@@ -350,7 +359,7 @@ mod spec_lock {
         assert_eq!(offset_of!(FileHeader, var_region_off), 24);
         assert_eq!(offset_of!(FileHeader, var_region_len), 28);
         assert_eq!(offset_of!(FileHeader, pq_codebook_off), 32);
-        assert_eq!(offset_of!(FileHeader, reserved_0), 36);
+        assert_eq!(offset_of!(FileHeader, committed_count), 36);
         assert_eq!(offset_of!(FileHeader, created_at_epoch), 40);
         assert_eq!(offset_of!(FileHeader, last_compact_at), 48);
         assert_eq!(offset_of!(FileHeader, reserved_1), 56);
@@ -384,7 +393,7 @@ mod spec_lock {
     #[test]
     fn magic_and_version_are_frozen() {
         assert_eq!(MAGIC, *b"AMR\0\0\0");
-        assert_eq!(FORMAT_VERSION, 0);
+        assert_eq!(FORMAT_VERSION, 1); // v1: crash-safety committed_count checkpoint
         assert_eq!(SLOT_REGION_OFFSET, 4096);
         assert_eq!(VECTOR_PQ_LEN, 128);
         assert_eq!(ADJACENCY_LEN, 8);

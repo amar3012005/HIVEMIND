@@ -176,7 +176,7 @@ impl Segment {
             .open(&edg_path)?;
         let edg_len = edg_file.seek(SeekFrom::End(0))?;
 
-        Ok(Segment {
+        let mut seg = Segment {
             dir: dir.to_path_buf(),
             name: name.to_string(),
             dim,
@@ -190,7 +190,39 @@ impl Segment {
             edg_len,
             capacity,
             hnsw: None,
-        })
+        };
+        seg.recover_if_needed()?;
+        Ok(seg)
+    }
+
+    /// Crash recovery (v1+): trust only `committed_count`. Any slots appended after the last
+    /// `flush()` (in `[committed_count, slot_count)`) are discarded — at worst the last unflushed
+    /// batch is lost, never corruption. v0 (pre-checkpoint) shards are trusted as fully committed.
+    /// The free list is reset (orphaning any tombstones freed post-checkpoint) for safety; the next
+    /// `compact()` reclaims that space. live_count is recomputed by scanning the survivors.
+    fn recover_if_needed(&mut self) -> Result<()> {
+        let hdr = read_header(&self.mmap)?;
+        if hdr.format_version() < 1 {
+            return Ok(()); // legacy: no checkpoint, trust slot_count as-is
+        }
+        let committed = hdr.committed_count();
+        let slot_count = hdr.slot_count();
+        if committed >= slot_count {
+            return Ok(()); // clean shutdown — nothing to discard
+        }
+        let mut live = 0u32;
+        for idx in 0..committed as usize {
+            if !self.slot(idx)?.is_tombstoned() {
+                live += 1;
+            }
+        }
+        self.with_header_mut(|h| {
+            h.set_slot_count(committed);
+            h.set_live_count(live);
+            h.set_free_list_head(mseg_format::SENTINEL_U32);
+        });
+        self.mmap.flush()?;
+        Ok(())
     }
 
     pub fn dim(&self) -> usize {
@@ -433,14 +465,28 @@ impl Segment {
 
     /// Flush all maps + files to disk (msync + fsync).
     pub fn flush(&mut self) -> Result<()> {
-        self.mmap.flush()?;
+        // Crash-safe checkpoint. Ordering matters: data durable BEFORE the header records it as
+        // committed, so a crash never leaves committed_count pointing at unwritten data. A crash
+        // between flushes loses at most the last unflushed batch — never corruption.
+        // 1) data files durable first
         self.vec_mmap.flush()?;
         self.txt_file.flush()?;
         self.edg_file.flush()?;
-        self.mseg_file.sync_all()?;
         self.vec_file.sync_all()?;
         self.txt_file.sync_all()?;
         self.edg_file.sync_all()?;
+        // 2) slots durable while header.committed_count still holds the OLD value
+        self.mmap.flush()?;
+        self.mseg_file.sync_all()?;
+        // 3) advance the checkpoint to cover every now-durable slot; stamp the v1 format
+        let committed = self.header().slot_count();
+        self.with_header_mut(|h| {
+            h.set_committed_count(committed);
+            h.set_format_version(mseg_format::FORMAT_VERSION);
+        });
+        // 4) header durable — THIS is the commit point
+        self.mmap.flush()?;
+        self.mseg_file.sync_all()?;
         // Persist the HNSW graph so a reopen loads it (ms) instead of rebuilding from scratch
         // (minutes at scale). Best-effort: a save failure must not fail the data flush.
         if let Some(ix) = &self.hnsw {
@@ -568,4 +614,49 @@ fn read_header(mmap: &[u8]) -> Result<FileHeader> {
 
 fn write_header(mmap: &mut [u8], hdr: &FileHeader) {
     mmap[..FILE_HEADER_SIZE].copy_from_slice(hdr.as_bytes());
+}
+
+#[cfg(test)]
+mod crash_tests {
+    use crate::{Filter, MemoryInput, Segment};
+    use tempfile::tempdir;
+
+    /// Simulate a crash in the exact danger window: N slots flushed (committed), M more appended
+    /// and their slots msync'd to disk, but the process dies BEFORE the checkpoint advances. On
+    /// reopen, recovery must discard the M uncommitted slots — surviving count = N, no corruption.
+    #[test]
+    fn recovers_to_last_checkpoint_after_crash() {
+        let dir = tempdir().unwrap();
+        const N: usize = 100;
+        const M: usize = 37;
+        {
+            let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+            for i in 0..N {
+                seg.insert(MemoryInput::new(format!("c{i}"), vec![i as f32, 1.0, 0.0, 0.0]))
+                    .unwrap();
+            }
+            seg.flush().unwrap(); // checkpoint at N
+            for i in 0..M {
+                seg.insert(MemoryInput::new(format!("u{i}"), vec![1000.0 + i as f32, 1.0, 0.0, 0.0]))
+                    .unwrap();
+            }
+            // crash window: slots durable on disk, but committed_count NOT advanced (no flush()).
+            seg.mmap.flush().unwrap();
+            seg.vec_mmap.flush().unwrap();
+            seg.mseg_file.sync_all().unwrap();
+            // (drop without flush = power loss here)
+        }
+        // reopen → recovery truncates the uncommitted tail.
+        let mut seg = Segment::open(dir.path(), "g").unwrap();
+        assert_eq!(seg.slot_count(), N as u32, "uncommitted tail must be discarded");
+        // a query for an uncommitted vector must NOT return one (it's gone, not corrupt).
+        let hits = seg.recall(&[1000.0, 1.0, 0.0, 0.0], &Filter::default(), 5).unwrap();
+        assert!(
+            hits.iter().all(|h| (h.slot_id as usize) < N),
+            "no recovered hit may reference a discarded slot"
+        );
+        // committed data is intact + queryable.
+        let ok = seg.recall(&[5.0, 1.0, 0.0, 0.0], &Filter::default(), 1).unwrap();
+        assert_eq!(seg.get(ok[0].slot_id).unwrap().text, "c5");
+    }
 }

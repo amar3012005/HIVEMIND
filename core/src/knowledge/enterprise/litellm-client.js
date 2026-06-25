@@ -8,7 +8,7 @@
  */
 
 import fetch from 'node-fetch';
-import { groqFetch } from '../../llm/groq-fallback.js';
+import { groqFetch, memoryLLMRoute } from '../../llm/groq-fallback.js';
 
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
@@ -27,8 +27,18 @@ const LITELLM_BASE_URL = (process.env.LITELLM_BASE_URL
   || process.env.OPENAI_API_BASE_URL
   || 'https://api.blaiq.ai/v1').replace(/\/+$/, '');
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
 function pickRoute(model) {
+  // Single ground truth for canonical memory creation: memoryLLMRoute() resolves
+  // the configured memory model (env MEMORY_LLM_* OR the /app/.memory-llm.json
+  // fallback). When the requested model is that model, route it to OpenRouter —
+  // so chatCompletion-based ingestion callers (entity-extractor, enterprise
+  // extractor) land on the same provider as the raw-fetch memory sites.
+  const mr = memoryLLMRoute();
+  if (mr && model && model === mr.model) {
+    return { base: OPENROUTER_BASE, key: mr.key, provider: 'openrouter' };
+  }
   if (GROQ_KEY && FORCE_GROQ_FOR_MODELS.test(model || '')) {
     return { base: GROQ_BASE_URL, key: GROQ_KEY, provider: 'groq' };
   }

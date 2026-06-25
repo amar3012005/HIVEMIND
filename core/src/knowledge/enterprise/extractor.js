@@ -9,6 +9,7 @@
 
 import { getSchema } from './schemas/index.js';
 import { chatCompletion, getDefaultModel } from './litellm-client.js';
+import { memoryLLMRoute } from '../../llm/groq-fallback.js';
 
 const MAX_DOC_CHARS = 30_000;
 // Multi-pass extraction kicks in above this length. Each window gets its own
@@ -240,7 +241,10 @@ function buildSummary(documentType, fields) {
  */
 export async function extractSchema(text, documentType, options = {}) {
   const schema = getSchema(documentType);
-  const model_used = options.model || getDefaultModel();
+  const model_used = options.model
+    // ground truth: canonical memory model when the route is active
+    || memoryLLMRoute()?.model
+    || getDefaultModel();
 
   try {
     // Multi-pass when document overflows the single-call window. Without
@@ -262,7 +266,7 @@ export async function extractSchema(text, documentType, options = {}) {
             { role: 'system', content: 'You are a precise document data extractor. Output valid JSON only.' },
             { role: 'user', content: buildPrompt(schema, win) },
           ],
-          model: options.model,
+          model: model_used,
           temperature: 0.1,
           max_tokens: 4096,
           json_mode: true,
@@ -304,7 +308,7 @@ export async function extractSchema(text, documentType, options = {}) {
       ];
       raw = await chatCompletion({
         messages,
-        model: options.model,
+        model: model_used,
         temperature: 0.1,
         max_tokens: 4096,
         json_mode: true,

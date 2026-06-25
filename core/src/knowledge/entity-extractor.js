@@ -13,6 +13,7 @@
  */
 
 import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
+import { memoryLLMRoute } from '../llm/groq-fallback.js';
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
@@ -40,6 +41,8 @@ export class EntityExtractor {
     // Entity extraction prefers a fast non-reasoning model (llama 3.3 70B is
     // ~5x faster than gpt-oss-20b and emits JSON cleanly).
     this.model = model
+      // ground truth: canonical memory/relationship model when the route is active
+      || memoryLLMRoute()?.model
       || process.env.ENTITY_EXTRACTION_MODEL
       || (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : getDefaultModel());
   }

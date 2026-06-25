@@ -13,6 +13,7 @@
 import crypto from 'crypto';
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
+import { memoryChatFetch } from '../llm/groq-fallback.js';
 
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
@@ -280,7 +281,7 @@ Output the JSON object and nothing else.`;
         },
       },
     };
-    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({

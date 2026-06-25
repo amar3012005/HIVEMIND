@@ -16,6 +16,14 @@ pub struct MnemeHit {
     pub text: String,
 }
 
+/// One stored record: slot id + its full-record text payload. Used by the Prisma adapter's loader
+/// to hydrate every memory from `.amr` on open (Path B — `.amr` as the relational store).
+#[napi(object)]
+pub struct RecordRow {
+    pub slot_id: u32,
+    pub text: String,
+}
+
 /// A per-org mneme store (wraps one `.amr` shard).
 #[napi]
 pub struct MnemeStore {
@@ -227,6 +235,22 @@ impl MnemeStore {
     #[napi]
     pub fn live_count(&mut self) -> u32 {
         self.shard.segment().live_count()
+    }
+
+    /// Scan every live slot and return its (slot_id, full-record text). The Prisma adapter calls
+    /// this once on open to hydrate all records from `.amr` — making `.amr` the relational store.
+    #[napi]
+    pub fn all_records(&mut self) -> Result<Vec<RecordRow>> {
+        let seg = self.shard.segment();
+        let n = seg.slot_count();
+        let mut out = Vec::with_capacity(n as usize);
+        for idx in 0..n {
+            // get() returns Err for tombstoned/empty slots — skip those, keep the live ones.
+            if let Ok(hit) = seg.get(idx) {
+                out.push(RecordRow { slot_id: idx, text: hit.text });
+            }
+        }
+        Ok(out)
     }
 
     /// Compact the text region, reclaiming bytes of deleted memories. Returns bytes reclaimed.

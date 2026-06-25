@@ -19,6 +19,8 @@
  * save NEVER blocks on the classifier.
  */
 
+import { groqFetch } from '../llm/groq-fallback.js';
+
 const CLASSIFY_MODEL = process.env.PROJECT_CLASSIFY_MODEL || 'openai/gpt-oss-120b';
 // Confidence to auto-assign without asking.
 const CONF_AUTO  = Number(process.env.PROJECT_CLASSIFY_AUTO_CONF || 0.72);
@@ -51,7 +53,7 @@ async function llmClassify({ text, projects, signal }) {
     else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
   }
   try {
-    const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+    const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({

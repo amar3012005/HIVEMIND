@@ -41,7 +41,84 @@ from ..hivemind_client import (
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+
+# Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
+# "no OpenRouter text equivalent" → no fallback, the Groq failure is surfaced.
+_OR_MODEL_MAP: Dict[str, str] = {
+    "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile": "meta-llama/llama-3.3-70b-instruct",
+    "llama-3.1-8b-instant": "meta-llama/llama-3.1-8b-instruct",
+    "llama-3.1-70b-versatile": "meta-llama/llama-3.1-70b-instruct",
+}
+# Agentic web-search / audio / vision / safety — never fall back to OpenRouter.
+_OR_NO_FALLBACK = re.compile(r"compound|whisper|playai|tts|guard|vision|parakeet|moderation", re.I)
+
+
+def _or_model(model: str) -> Optional[str]:
+    """Map a Groq model id to its OpenRouter slug, or None when there is no safe
+    text equivalent (→ caller keeps the Groq failure)."""
+    if not model:
+        return None
+    if _OR_NO_FALLBACK.search(model):
+        return None
+    if model in _OR_MODEL_MAP:
+        return _OR_MODEL_MAP[model]
+    if "/" in model:  # already-namespaced slug (anthropic/*, google/*, …) is a valid OpenRouter id
+        return model
+    return None
+
+
+async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
+    """Replay a Groq chat body against OpenRouter when Groq is unavailable.
+
+    Groq stays PRIMARY: this is invoked ONLY after Groq's own retries are spent
+    (zero added latency on the healthy path). Returns the parsed response JSON
+    (Groq/OpenAI shape, `reasoning` coalesced into `content`/`reasoning_content`)
+    or None when no fallback is possible.
+    """
+    or_key = os.environ.get("OPENROUTER_API_KEY", "")
+    or_model = _or_model(str(body.get("model") or ""))
+    if not or_key or not or_model:
+        return None
+    or_body = dict(body)
+    or_body["model"] = or_model
+    # Fastest provider that supports the request's params (tools / response_format),
+    # with OpenRouter's own cross-provider fallback enabled.
+    or_body["provider"] = {"sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
+    or_body.pop("stream", None)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(
+                _OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {or_key}",
+                    "HTTP-Referer": "https://hivemind.davinciai.eu",
+                    "X-Title": "HIVEMIND",
+                },
+                json=or_body,
+            )
+        if r.status_code != 200:
+            log.warning("[hyper-engine] OpenRouter fallback %s: %s", r.status_code, r.text[:200])
+            return None
+        j = r.json()
+        msg = (j.get("choices") or [{}])[0].get("message") or {}
+        if msg.get("reasoning") and not msg.get("reasoning_content"):
+            msg["reasoning_content"] = msg["reasoning"]
+        if not msg.get("content") and (msg.get("reasoning_content") or msg.get("reasoning")):
+            msg["content"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        log.warning("[hyper-engine] Groq unavailable → OpenRouter served model=%s", or_model)
+        return j
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        log.warning("[hyper-engine] OpenRouter fallback transport error: %s", exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] OpenRouter fallback failed: %s", exc)
+        return None
 
 # Quality skills loaded WITHIN the call (model-driven, not pre-inserted) — the
 # functional equivalent of a Claude skill for the gpt-oss director. Each is a
@@ -364,9 +441,13 @@ async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optio
             if r.status_code in (429, 500, 502, 503) and attempt < 2:
                 await asyncio.sleep(min(2 ** attempt, 6))
                 continue
-            return None
+            break  # non-retryable Groq status → fall through to OpenRouter
         except Exception:  # noqa: BLE001
             await asyncio.sleep(min(2 ** attempt, 6))
+    # Groq exhausted/unavailable → OpenRouter failover (Groq stays primary above).
+    j = await _openrouter_chat(body, timeout=httpx.Timeout(30.0, connect=5.0))
+    if j is not None:
+        return (j["choices"][0]["message"].get("content") or "").strip()
     return None
 
 
@@ -838,7 +919,7 @@ class Director:
                     continue
                 if r.status_code != 200:
                     log.warning("[hyper-engine] groq %s: %s", r.status_code, r.text[:200])
-                    return None
+                    break  # non-retryable Groq status → fall through to OpenRouter
                 j = r.json()
                 u = j.get("usage") or {}
                 t = int(u.get("total_tokens", 0) or 0)
@@ -854,10 +935,23 @@ class Director:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(float(min(2 ** attempt, 8)))
                     continue
-                return None
+                break  # Groq unreachable → fall through to OpenRouter
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] groq call failed (attempt %d): %s", attempt, exc)
-                return None
+                break  # fall through to OpenRouter
+        # Groq exhausted/unavailable → OpenRouter failover. Groq stays primary;
+        # this runs only after Groq's own 400/429/5xx retries above are spent, so
+        # the healthy path is unchanged. `body` carries the same tools/schema.
+        j = await _openrouter_chat(body, timeout=httpx.Timeout(45.0, connect=5.0))
+        if j is not None:
+            u = j.get("usage") or {}
+            t = int(u.get("total_tokens", 0) or 0)
+            self.tokens += t
+            self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+            self._last_tok = t
+            self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+            self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+            return j["choices"][0]["message"]
         return None
 
     async def _init_connector_tools(self) -> None:

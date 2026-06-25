@@ -25,6 +25,7 @@ import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
+import { groqFetch } from './llm/groq-fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -5014,7 +5015,7 @@ Experience years: ${exp}${orgContext ? `\n\nCOMPANY CONTEXT (tune the persona to
 Write the persona now.`;
 
     try {
-      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -5067,7 +5068,7 @@ Write the persona now.`;
     const sys = `You rank professions by relevance to a SPECIFIC company. Output ONLY JSON: {"ranked":[{"title":"<exact input title>","why_fits":"<=8 words tying it to THIS company>"}]}. Include EVERY input title exactly once, ordered most→least relevant to the company. why_fits must reference the company's real domain — no generic filler.`;
     const user = `COMPANY CONTEXT:\n${orgContext}\n\nFIELD: ${field}\nPROFESSIONS:\n${profs.map((p) => `- ${p.title}: ${p.blurb || ''}`).join('\n')}\n\nRank now.`;
     try {
-      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.3, max_tokens: 600, response_format: { type: 'json_object' } }),

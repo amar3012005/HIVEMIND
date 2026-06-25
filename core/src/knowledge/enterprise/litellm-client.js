@@ -8,6 +8,7 @@
  */
 
 import fetch from 'node-fetch';
+import { groqFetch } from '../../llm/groq-fallback.js';
 
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
@@ -68,7 +69,9 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   let res;
   try {
-    res = await fetch(`${route.base}/chat/completions`, {
+    // groqFetch: when route is Groq and Groq fails, transparently replays on
+    // OpenRouter; for the LiteLLM (blaiq) route it is a plain fetch.
+    res = await groqFetch(`${route.base}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

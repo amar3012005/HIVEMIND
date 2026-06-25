@@ -5,6 +5,8 @@
  * Reference: https://console.groq.com/docs
  */
 
+import { groqFetch } from '../src/llm/groq-fallback.js';
+
 /**
  * Groq Configuration
  * @typedef {Object} GroqConfig
@@ -313,7 +315,9 @@ export class GroqClient {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
 
-        const response = await fetch(`https://api.groq.com/openai/v1${endpoint}`, {
+        // groqFetch adds OpenRouter failover for /chat/completions; /embeddings
+        // passes straight through (no OpenRouter text equivalent).
+        const response = await groqFetch(`https://api.groq.com/openai/v1${endpoint}`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.config.apiKey}`,

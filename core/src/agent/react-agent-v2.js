@@ -30,6 +30,7 @@
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
+import { groqFetch } from '../llm/groq-fallback.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -117,7 +118,7 @@ function quickGateClassify(message) {
 // ── Groq JSON helper ───────────────────────────────────────────────────
 
 async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal }) {
-  const resp = await fetch(GROQ_URL, {
+  const resp = await groqFetch(GROQ_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -164,7 +165,7 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
     general: `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely. Plain text only. No JSON, no tool talk.`,
   };
 
-  const resp = await fetch(GROQ_URL, {
+  const resp = await groqFetch(GROQ_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1537,7 +1538,7 @@ RULES:
 
   // Max 3 iterations — enough for tool_call → tool_result → final answer.
   for (let iter = 0; iter < 3; iter++) {
-    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const resp = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({

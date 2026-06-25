@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { createRequire } from 'module';
+import { groqFetch } from './llm/groq-fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -5348,7 +5349,7 @@ exit \$RC
         const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
         const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
         const callLLM = async (messages, ms = 120_000) => {
-          const resp = await fetch(GROQ, {
+          const resp = await groqFetch(GROQ, {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages }),
@@ -5783,7 +5784,7 @@ exit \$RC
           const mapUser = JSON.stringify(recalls.map((t) => ({ key: t.key, value_query: t.value_query, memories: t._mems })));
           let fillMap = [];
           try {
-            const mr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const mr = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: mapSys }, { role: 'user', content: mapUser }] }),
@@ -5830,7 +5831,7 @@ exit \$RC
             return ((r?.memories || r || []) || []).filter((m) => !isJunk(m)).map((m) => ({ id: m.id, text: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 280) }));
           };
           const groqJSON = async (sys, usr) => {
-            const lr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const lr = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }] }),
@@ -5938,7 +5939,7 @@ exit \$RC
               const text = [meeting.summary, ...arr(meeting.key_points).map(String)].filter(Boolean).join('\n').slice(0, 4000);
               if (text.trim()) {
                 try {
-                  const er = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                  const er = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -5990,7 +5991,7 @@ exit \$RC
             } else {
               sys = 'For each {decision,prior} pair, decide if the decision is NEW, UPDATES, or CONFLICTS relative to the prior memory. Be STRICT: only UPDATES if the decision clearly changes a value/state stated in the prior; only CONFLICTS if it directly contradicts the prior; otherwise NEW. When the prior is not clearly about the same thing, NEW with low confidence. Never invent a relationship. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short, cite the change>","confidence":0..1}]} in pair order.';
             }
-            const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -6437,7 +6438,7 @@ exit \$RC
             const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
             if (transcript.trim() && process.env.GROQ_API_KEY) {
               try {
-                const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                const r = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                   method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                   body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
                     messages: [
@@ -8585,7 +8586,7 @@ exit \$RC
                   : persistentMemoryEngine.ingestMemory(routed);
               };
               const summarize = async (transcript) => {
-                const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                   method: 'POST',
                   headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -21562,7 +21563,7 @@ ${injectionText}`;
                 delete groqParams.max_tokens; // Use max_completion_tokens instead
               }
 
-              const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+              const groqResp = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify(groqParams),

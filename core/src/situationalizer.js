@@ -6,6 +6,8 @@
  * Example: "This is from the Q3 2025 Financial Report; Revenue grew by 3%"
  */
 
+import { groqFetch } from './llm/groq-fallback.js';
+
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 /**
@@ -51,7 +53,7 @@ Rules:
         throw new Error('Groq API key not configured');
       }
 
-      const response = await fetch(GROQ_API_URL, {
+      const response = await groqFetch(GROQ_API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

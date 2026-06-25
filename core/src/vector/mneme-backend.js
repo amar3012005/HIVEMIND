@@ -13,6 +13,9 @@ import path from 'path';
 const require = createRequire(import.meta.url);
 const { MnemeStore, sanitizeOrg } = require('./mneme/index.cjs');
 
+// HIVEMIND layer → .amr slot layer id (matches mseg_format::LAYER_*): memory=0, evidence=1, cognitive=2.
+const LAYER_ID = { memory: 0, evidence: 1, cognitive: 2 };
+
 const DATA_ROOT = process.env.MNEME_DATA_ROOT || '/app/data/mneme';
 const DIM = Number(process.env.EMBEDDING_DIMENSION || 1024);
 const ENABLED_FILE = process.env.MNEME_ENABLED_FILE || path.join(DATA_ROOT, 'enabled-orgs');
@@ -88,7 +91,13 @@ export async function mirrorStore(collection, point) {
       try { c.store.delete(Number(c.idMap.get(id))); } catch (_) {}
     }
     const validFrom = Number(point.payload?.event_time_ns || 0) || 0;
-    const slot = c.store.insert(JSON.stringify({ id, payload: point.payload || {} }), vector, validFrom);
+    const layer = LAYER_ID[point.payload?.layer] ?? 0; // 0=memory default, 1=evidence, 2=cognitive
+    const body = JSON.stringify({ id, payload: point.payload || {} });
+    // insertLayered tags the slot's layer so .amr holds all 3 layers, queried separately (like
+    // Qdrant). Falls back to insert on an older binary that lacks the method.
+    const slot = typeof c.store.insertLayered === 'function'
+      ? c.store.insertLayered(body, vector, validFrom, layer)
+      : c.store.insert(body, vector, validFrom);
     c.idMap.set(id, slot);
     persist(c);
     return true;

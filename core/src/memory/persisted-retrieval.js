@@ -1780,6 +1780,13 @@ export async function recallPersistedMemories(store, {
   const cleanFiltered = filtered.filter(item => {
     const content = item.content || item.memory?.content || '';
     const title = item.title || item.memory?.title || '';
+    // Exclude raw `promoted-from-segment` chunks — raw document sections promoted
+    // verbatim. They belong to the evidence layer, not memory. They leak into this
+    // HYBRID recall via the LEXICAL/FTS candidate path (which bypasses the Qdrant
+    // layer/tag filter) as multi-hundred-char raw dumps. Memory recall = distilled
+    // facts only. Source-agnostic chokepoint (covers lexical + vector + graph).
+    const _tags = item.tags || item.memory?.tags || [];
+    if (Array.isArray(_tags) && _tags.includes('promoted-from-segment')) return false;
     if (META_FACT_RE.test(content)) return false;
     // Filter facts that are just file/document references with no real content
     if (content.length < 40 && /\.(pdf|doc|txt|csv|xls)/i.test(content)) return false;

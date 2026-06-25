@@ -182,6 +182,37 @@ export async function syncEnabledOrgEdges(prisma) {
   }
 }
 
+// ---- A#3: graph traversal served from .amr (instead of Postgres per-hop) -----
+// Reachable memory ids from `memoryId` over the typed-edge graph in .amr. relationship=null walks
+// all 6 edge types; else just that type. Returns string[] of memory ids (excluding the seed), or
+// null if the org/seed isn't in .amr (caller falls back to Postgres). Microsecond traversal vs a
+// Postgres relationship.findMany per hop.
+export function graphRelated(orgId, memoryId, opts = {}) {
+  try {
+    const coll = `org_${orgId}`;
+    const c = getCtx(coll);
+    const seed = c.idMap.get(String(memoryId));
+    if (seed == null) return null;
+    // reverse map slot -> memory id (rebuilt per call; cheap, always consistent with idMap)
+    const slot2id = new Map();
+    for (const [id, s] of c.idMap) slot2id.set(s, id);
+    const maxDepth = Math.max(1, Math.min(5, opts.maxDepth || 2));
+    const types = opts.relationship && REL_TYPE[opts.relationship]
+      ? [REL_TYPE[opts.relationship]]
+      : Object.values(REL_TYPE);
+    const reached = new Set();
+    for (const et of types) {
+      for (const slot of c.store.traverseTyped(Number(seed), et, maxDepth)) {
+        const id = slot2id.get(slot);
+        if (id && id !== String(memoryId)) reached.add(id);
+      }
+    }
+    return [...reached];
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---- 3-layer vector-sync: Qdrant -> .amr (catches ALL write paths) ----------
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const QDRANT_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';

@@ -21,23 +21,42 @@ SAMPLES = max(1, int(os.environ.get("QE_SAMPLES", "2")))
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
-async def _judge_groq(messages, schema, model="openai/gpt-oss-120b"):
-    """Self-contained Groq judge call — does NOT depend on engine internals, so the harness runs
-    against ANY deployed engine version (only needs run_director to generate + a Groq key to judge)."""
-    key = os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY") or ""
-    if not key:
-        return None
+async def _judge_groq(messages, schema, model=None):
+    """Self-contained judge call — Groq primary, OpenRouter fallback (survives a Groq
+    billing block). The judge model is FIXED (QE_JUDGE_MODEL) across A/B runs so the
+    comparison is fair; independent of the director model under test."""
+    model = model or os.environ.get("QE_JUDGE_MODEL", "openai/gpt-oss-120b")
     body = {"model": model, "messages": messages, "temperature": 0.2,
             "response_format": {"type": "json_schema", "json_schema": {"name": "judge", "schema": schema, "strict": True}}}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
-            r = await c.post(_GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"].get("content") or ""
-    except Exception:
-        return None
+    gkey = os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY") or ""
+    if gkey:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
+                r = await c.post(_GROQ_URL, headers={"Authorization": f"Bearer {gkey}"}, json=body)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"].get("content") or ""
+        except Exception:
+            pass
+    okey = os.environ.get("OPENROUTER_API_KEY", "")
+    if okey:
+        try:
+            ob = dict(body)
+            ob["provider"] = {"sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as c:
+                r = await c.post("https://openrouter.ai/api/v1/chat/completions",
+                                 headers={"Authorization": f"Bearer {okey}", "HTTP-Referer": "https://hivemind.davinciai.eu", "X-Title": "HIVEMIND"}, json=ob)
+            if r.status_code == 200:
+                m = r.json()["choices"][0]["message"]
+                return m.get("content") or m.get("reasoning") or ""
+        except Exception:
+            return None
     return None
-MODELS = dict(director_model="openai/gpt-oss-20b", persona_model="openai/gpt-oss-20b", synth_model="openai/gpt-oss-120b")
+_QE_DM = os.environ.get("QE_DIRECTOR_MODEL", "openai/gpt-oss-20b")
+MODELS = dict(
+    director_model=_QE_DM,
+    persona_model=os.environ.get("QE_PERSONA_MODEL", _QE_DM),
+    synth_model=os.environ.get("QE_SYNTH_MODEL", "openai/gpt-oss-120b"),
+)
 
 # Default profile = Solvis. Override with QE_PROFILE_JSON to point at any room (institutionalize per tenant).
 DEFAULT = {

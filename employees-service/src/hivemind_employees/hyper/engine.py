@@ -73,6 +73,41 @@ def _or_model(model: str) -> Optional[str]:
     return None
 
 
+# Groq-native models (Groq direct, or gpt-oss via OpenRouter→Cerebras failover).
+# A vendor-namespaced, non-native model (google/, anthropic/, deepseek/, …) routes
+# DIRECT to OpenRouter — no wasted Groq round-trip. Driven by HYPER_DIRECTOR_MODEL.
+_GROQ_NATIVE_RE = re.compile(r"^(openai/gpt-oss|gpt-oss|llama-|llama3|mixtral|gemma|groq/|whisper)", re.I)
+# Pin the OpenRouter provider per vendor → consistent low latency (avoids
+# require_parameters routing to a slow-but-capable provider, e.g. WandB/StreamLake).
+_OR_PROVIDER_PIN = {
+    "google/": ["Google", "Google AI Studio"],
+    "anthropic/": ["Anthropic"],
+    "deepseek/": ["DeepSeek", "Fireworks"],
+    "openai/gpt-oss": ["Cerebras"],
+    "qwen/": ["Alibaba"],
+    "moonshotai/": ["Moonshot AI", "Novita"],
+}
+
+
+def _route_direct_openrouter(model: str) -> bool:
+    """A vendor-namespaced, non-Groq-native model → route DIRECT to OpenRouter."""
+    m = str(model or "")
+    if not m or not os.environ.get("OPENROUTER_API_KEY"):
+        return False
+    if _GROQ_NATIVE_RE.search(m):
+        return False
+    return "/" in m
+
+
+def _or_provider_pin(model: str) -> Optional[List[str]]:
+    """OpenRouter provider order to pin for a model vendor (consistent latency)."""
+    m = str(model or "")
+    for pfx, order in _OR_PROVIDER_PIN.items():
+        if m.startswith(pfx):
+            return order
+    return None
+
+
 async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
     """Replay a Groq chat body against OpenRouter when Groq is unavailable.
 
@@ -89,7 +124,9 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     or_body["model"] = or_model
     # Fastest provider that supports the request's params (tools / response_format),
     # with OpenRouter's own cross-provider fallback enabled.
-    or_body["provider"] = {"sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
+    _pin = _or_provider_pin(or_model)
+    or_body["provider"] = {**({"order": _pin} if _pin else {}),
+                           "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
     or_body.pop("stream", None)
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
@@ -883,6 +920,22 @@ class Director:
             # tool-calling — sidesteps the gpt-oss harmony tool-call glitch entirely.
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "gather_plan", "schema": schema, "strict": True}}
+        # Provider-aware routing: a non-Groq-native model (gemini/claude/deepseek…)
+        # goes DIRECT to OpenRouter (provider-pinned) — skip the Groq round-trip.
+        # gpt-oss/llama stay Groq-primary below + the OpenRouter failover. Non-
+        # regressing: the default gpt-oss director path is unchanged.
+        if _route_direct_openrouter(body.get("model")):
+            j = await _openrouter_chat(body, timeout=httpx.Timeout(60.0, connect=5.0))
+            if j is not None:
+                u = j.get("usage") or {}
+                t = int(u.get("total_tokens", 0) or 0)
+                self.tokens += t
+                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+                self._last_tok = t
+                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+                return j["choices"][0]["message"]
+            return None
         max_attempts = 3
         _nudged = False
         for attempt in range(max_attempts):

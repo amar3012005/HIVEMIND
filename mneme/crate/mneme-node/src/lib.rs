@@ -24,6 +24,15 @@ pub struct RecordRow {
     pub text: String,
 }
 
+/// One typed edge from a slot: target slot, edge type, weight. The relationship backend reads these
+/// back to reconstruct relationship records from the `.amr` graph.
+#[napi(object)]
+pub struct EdgeRow {
+    pub target: u32,
+    pub edge_type: u8,
+    pub weight: u8,
+}
+
 /// A per-org mneme store (wraps one `.amr` shard).
 #[napi]
 pub struct MnemeStore {
@@ -235,6 +244,20 @@ impl MnemeStore {
     #[napi]
     pub fn live_count(&mut self) -> u32 {
         self.shard.segment().live_count()
+    }
+
+    /// Read a slot's typed edges (target, type, weight) — for reconstructing relationship records.
+    #[napi]
+    pub fn slot_edges(&mut self, slot: u32) -> Result<Vec<EdgeRow>> {
+        let edges = self
+            .shard
+            .segment()
+            .slot_edges(slot)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(edges
+            .into_iter()
+            .map(|(target, edge_type, weight)| EdgeRow { target, edge_type, weight })
+            .collect())
     }
 
     /// Scan every live slot and return its (slot_id, full-record text). The Prisma adapter calls

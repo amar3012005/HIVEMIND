@@ -244,7 +244,11 @@ export async function search(collection, vector, topK = 10, opts = {}) {
       let rec;
       try { rec = JSON.parse(h.text); } catch (_) { rec = { id: h.slotId, payload: {} }; }
       const lyr = rec.payload?.layer || 'memory';
-      if (onlyLayer ? lyr !== onlyLayer : lyr === 'evidence') continue; // recall excludes evidence
+      // raw chunk-promotions are evidence masquerading as memory (un-distilled verbatim chunks) —
+      // treat them as evidence: excluded from memory recall, kept only when a layer is explicitly
+      // requested. Kills the chunk-promotion noise without depending on layer-tag propagation.
+      const isPromotedChunk = Array.isArray(rec.payload?.tags) && rec.payload.tags.includes('promoted-from-segment');
+      if (onlyLayer ? lyr !== onlyLayer : (lyr === 'evidence' || isPromotedChunk)) continue;
       if (isLatest && rec.payload && rec.payload.is_latest === false) continue;
       out.push({ id: rec.id, score: h.score, payload: rec.payload || {} });
       if (out.length >= topK) break;

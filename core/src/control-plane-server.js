@@ -1382,10 +1382,11 @@ const server = http.createServer(async (req, res) => {
     if (body.pgUrl) {
       try {
         const { exec } = await import('node:child_process');
-        // create the `hivemind` schema first (prod uses multi-schema), then run prod migrations.
-        const cmd = "echo 'CREATE SCHEMA IF NOT EXISTS hivemind;' | node_modules/.bin/prisma db execute --schema=prisma/schema.prisma --stdin && node_modules/.bin/prisma migrate deploy --schema=prisma/schema.prisma";
+        // Apply the CURATED memory-subgraph schema (14 tables, FKs to global tables relaxed, triggers
+        // stripped) — clean on a fresh customer PG. Global info stays central. Ships at /app/byod-memory-schema.sql.
+        const cmd = 'node_modules/.bin/prisma db execute --file=byod-memory-schema.sql --schema=prisma/schema.prisma';
         await new Promise((resolve, reject) => {
-          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 180000, shell: '/bin/sh' },
+          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 120000, shell: '/bin/sh' },
             (err) => (err ? reject(err) : resolve()));
         });
         migrated = true;

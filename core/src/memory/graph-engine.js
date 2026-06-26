@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
-import { isMnemeOrg } from '../vector/mneme/driver.js';
+import { isMnemeOrg, mnemeMode } from '../vector/mneme/driver.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -623,7 +623,7 @@ export class MemoryGraphEngine {
       && (input.skip_relationship_classification === true || input.smartIngest === false)
       && input.skip_contradiction_detection === true;
     const _acquire = _pureInsert
-      ? (uid, fn) => fn(isMnemeOrg(baseMemory.org_id) ? this.store.inProcessTx() : this.store)
+      ? (uid, fn) => fn((isMnemeOrg(baseMemory.org_id) && mnemeMode() === 'sole') ? this.store.inProcessTx() : this.store)
       : (uid, fn) => this.store.advisoryLock(uid, fn, baseMemory.org_id);
 
     return _acquire(baseMemory.user_id, async lockedStore => {

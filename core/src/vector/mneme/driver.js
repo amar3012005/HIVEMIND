@@ -119,15 +119,39 @@ function allActiveAdapters() {
   return out;
 }
 
+// MNEME_MODE: 'dual' (default, PRODUCTION) keeps Postgres as the relational source of truth — every
+// memory/relationship row still lands in PG so HyperAgents and all relational features work unchanged;
+// .amr is an ADDITIVE vector+graph index (it replaces Qdrant, not Postgres). 'sole' is the residency/
+// research mode where .amr is the ONLY store (PG=0) — used for BYOD where PG is the customer's box.
+export function mnemeMode() {
+  return (process.env.MNEME_MODE || 'dual').trim().toLowerCase() === 'sole' ? 'sole' : 'dual';
+}
+
 // ---- the seam the factories call -------------------------------------------
-// wrap the real Prisma client so .amr-org memory traffic routes to that org's adapter, per-call.
+// wrap the real Prisma client. In 'sole' mode the proxy routes the .amr-org memory subgraph to the
+// adapter (PG=0). In 'dual' mode (default) PG keeps every row — return the real client untouched; .amr
+// is fed the vector via the qdrant-client write-hook and the graph via amrAddEdge.
 export function wrapPrisma(realPrisma) {
-  if (!anyMnemeOrg()) return realPrisma; // no .amr org → untouched, zero overhead
+  if (!anyMnemeOrg() || mnemeMode() === 'dual') return realPrisma; // PG keeps all rows
   return makeMnemePrisma(realPrisma, {
     isAmrOrg: isMnemeOrg,
     getAdapter: (orgId) => orgStore(orgId)?.adapter || null,
     getAllAdapters: allActiveAdapters,
   });
+}
+
+// Mirror a typed relationship edge into the .amr shard that holds its fromId memory (dual mode — PG
+// already has the row; this keeps the .amr graph in sync for graph-recall). No-op if no .amr org.
+export function amrAddEdge(rel) {
+  if (!anyMnemeOrg() || !rel?.fromId || !rel?.toId) return;
+  for (const a of allActiveAdapters()) {
+    if (a?.memory?.byId?.has(rel.fromId)) {
+      try {
+        a.relationship.create({ data: { id: rel.id, fromId: rel.fromId, toId: rel.toId, type: rel.type, confidence: rel.confidence ?? 1 } });
+      } catch { /* edge mirror best-effort; PG is source of truth */ }
+      return;
+    }
+  }
 }
 
 // vector recall for an .amr org from its shared open shard (or null → caller uses Qdrant).

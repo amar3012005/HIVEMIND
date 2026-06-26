@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, amrLexical, withAmrLock } from '../vector/mneme/driver.js';
+import { isMnemeOrg, amrLexical, withAmrLock, amrAddEdge, mnemeMode } from '../vector/mneme/driver.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -254,7 +254,7 @@ export class PrismaGraphStore {
   async advisoryLock(userId, fn, orgId) {
     // .amr org: no Postgres to pg_advisory_lock against. Serialize per-user IN-PROCESS and run the
     // body directly against the routing client (the .amr writes apply immediately). No PG tx opened.
-    if (orgId && isMnemeOrg(orgId)) {
+    if (orgId && isMnemeOrg(orgId) && mnemeMode() === 'sole') {
       return withAmrLock(orgId, `mem:${userId}`, () => fn(new PrismaGraphStore(this.client, { inTransaction: true })));
     }
     if (this.inTransaction) {
@@ -282,7 +282,7 @@ export class PrismaGraphStore {
     // .amr org: no Postgres transaction — run against the routing client (the .amr store is not part
     // of a PG ACID tx anyway; writes apply immediately). Removes the empty-PG-tx dependency so an
     // .amr org functions with Postgres entirely absent.
-    if (orgId && isMnemeOrg(orgId)) {
+    if (orgId && isMnemeOrg(orgId) && mnemeMode() === 'sole') {
       return fn(new PrismaGraphStore(this.client, { inTransaction: true }));
     }
 
@@ -655,7 +655,7 @@ export class PrismaGraphStore {
     // recall runs over the org's .amr records instead — same scope, term-overlap scoring. Without
     // this the lexical leg would $queryRaw-passthrough to central Postgres (PG=0 for this org) and
     // silently return nothing, leaving recall vector-only.
-    if (query && isMnemeOrg(org_id)) {
+    if (query && isMnemeOrg(org_id) && mnemeMode() === 'sole') {
       return amrLexical(org_id, query, { org_id, user_id, scope, is_latest, project, created_after, created_before }, n_results * 3) || [];
     }
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
@@ -952,6 +952,12 @@ export class PrismaGraphStore {
         createdBy: edge.created_by || 'system'
       }
     });
+
+    // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
+    // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
+    if (mnemeMode() === 'dual') {
+      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0 });
+    }
 
     return mapRelationshipRecord(created);
   }

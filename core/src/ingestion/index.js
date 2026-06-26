@@ -4,10 +4,17 @@ const { IngestionAuditLogger } = require('./audit-logger');
 const { PageIndexIntegration, setupIngestionEventListener } = require('./pageindex-hook');
 
 // Per-org routing: run the whole ingest job inside runWithOrg(job.org_id) so a self-host org's writes
-// land in ITS Postgres (the split client resolves by this context). prisma.js is ESM — bridge lazily.
-let _runWithOrg = (_o, fn) => fn();
-import('../db/prisma.js').then((m) => { if (m && m.runWithOrg) _runWithOrg = m.runWithOrg; }).catch(() => {});
-const _withOrg = (job, fn) => { const o = job && job.data && job.data.org_id; return o ? _runWithOrg(o, fn) : fn(); };
+// land in ITS Postgres (the split client resolves by this context). prisma.js (ESM) publishes the
+// AsyncLocalStorage on globalThis at load, so this CJS module reads the SAME instance synchronously.
+const _withOrg = (job, fn) => {
+  const o = job && job.data && (job.data.org_id || (job.data.payload && job.data.payload.org_id));
+  const ctx = globalThis.__hivemindOrgCtx;
+  if (o && ctx && ctx.runWithOrg) {
+    if (process.env.MNEME_DEBUG_ROUTING) console.log('[ingest-route] org', o);
+    return ctx.runWithOrg(o, fn);
+  }
+  return fn();
+};
 
 function createIngestionPipeline(options = {}) {
   const queueSystem = createIngestionQueue(options.queue || {});

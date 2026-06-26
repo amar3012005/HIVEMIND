@@ -21,6 +21,9 @@ export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
 // enterWith persists through the awaiting continuation; each HTTP request is its own async context,
 // so there is no cross-request leak. A null/empty orgId is ignored (resolution falls back to central).
 export function enterOrgContext(orgId) { if (orgId) _orgCtx.enterWith({ orgId }); }
+// Bridge for CommonJS modules (ingestion pipeline) that can't statically import this ESM module.
+// Set synchronously at load so CJS code reads the SAME AsyncLocalStorage instance with no import race.
+globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, enterOrgContext };
 
 // Proxy: memory-subgraph models resolve to the customer PG; all other models + $transaction/$queryRaw
 // resolve to the central global client. So global user/org info is never on the customer box.

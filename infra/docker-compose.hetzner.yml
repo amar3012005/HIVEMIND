@@ -12,7 +12,7 @@ name: hivemind
 x-common-env: &common-env
   NODE_ENV: production
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30
+  DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind&connection_limit=20&pool_timeout=30
   QDRANT_URL: http://qdrant:6333
   QDRANT_API_KEY: ${QDRANT_API_KEY}
   REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -154,7 +154,7 @@ services:
     container_name: hm-byod-broker
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       MNEME_AGENT_REGISTRY_FILE: /app/data/byod-agents.json
       BROKER_PORT: "8790"
     volumes:

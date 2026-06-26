@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 COMPOSE="docker compose -f docker-compose.byod.yml"
-CENTRAL="${HIVEMIND_CENTRAL_URL:-https://api.hivemind.davinciai.eu}"   # control-plane (where you minted the key)
+CENTRAL="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}"   # control-plane (where you minted the key)
 log(){ printf '\033[1;36m[byod]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[byod] %s\033[0m\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die "install Docker first (curl -fsSL https://get.docker.com | sh)"

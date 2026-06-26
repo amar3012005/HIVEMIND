@@ -6,7 +6,7 @@
 #   curl -fsSL https://get.hivemind.<domain>/install | bash
 #   (or)  bash <(curl -fsSL https://get.hivemind.<domain>/install)
 set -euo pipefail
-REPO="${HIVEMIND_REPO:-https://github.com/your-org/hivemind.git}"   # TODO: set to your public repo
+REPO="${HIVEMIND_REPO:-https://github.com/amar3012005/HIVEMIND.git}"   # TODO: set to your public repo
 DIR="${HIVEMIND_DIR:-hivemind-byod}"
 log(){ printf '\033[1;36m[hivemind]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[hivemind] %s\033[0m\n' "$*" >&2; exit 1; }

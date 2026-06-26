@@ -12,7 +12,10 @@
 
 // Option B — the WHOLE memory subgraph routes to .amr/sidecar for the .amr org, so it touches
 // Postgres zero times. memory+relationship → .amr shard; the rest → JSON sidecars (no FK enforcement).
-const ROUTED_MODELS = new Set([
+// The memory subgraph — the ONLY tables that live with the tenant's data (customer PG for self-host).
+// Everything else (User, Organization, ApiKey, memberships, billing, settings = "data information")
+// stays in the ONE global central Postgres for ALL users, exactly like the current version.
+export const ROUTED_MODELS = new Set([
   'memory', 'relationship', 'sourceMetadata', 'memoryVersion', 'memoryProject',
   'codeMemoryMetadata', 'derivationJob', 'memoryDerivation', 'memoryEvidenceLink',
   'vectorEmbedding', 'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',

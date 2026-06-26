@@ -2,27 +2,43 @@ import { PrismaClient } from '@prisma/client';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureDriver, wrapPrisma, anyMnemeOrg } from '../vector/mneme/driver.js';
 import { pgUrlFor } from '../vector/mneme/remote-backend.js';
+import { ROUTED_MODELS } from '../vector/mneme/prisma-proxy.js';
 
 let prisma; // the real Postgres client (singleton)
 
-// Full data residency (self-host): an org's relational data lives in the CUSTOMER's Postgres (reached
-// via their tunnel). We run request/job work inside runWithOrg(orgId, fn); getPrismaClient() then
-// returns a per-org client bound to that org's customer Postgres. Managed orgs have no pgUrl → the
-// central client, unchanged. AsyncLocalStorage means the 35 getPrismaClient() call sites stay as-is.
+// Full data residency (self-host): the tenant's MEMORY subgraph lives in the CUSTOMER's Postgres
+// (their box, via tunnel). Everything else — User/Organization/ApiKey/memberships/billing/settings,
+// the "data information" — stays in the ONE global central Postgres for ALL users, like today.
+// So a self-host org gets a SPLIT client: memory models → customer PG, everything else → central.
+// Managed orgs (no pgUrl) → central for everything, unchanged. runWithOrg() scopes the context;
+// AsyncLocalStorage means the 35 getPrismaClient() call sites stay as-is.
 const _orgCtx = new AsyncLocalStorage();
-const _orgClients = new Map(); // orgId -> PrismaClient (customer PG)
+const _orgClients = new Map(); // orgId -> split client (memory→customer PG, rest→central)
 export function runWithOrg(orgId, fn) { return _orgCtx.run({ orgId }, fn); }
 export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
+
+// Proxy: memory-subgraph models resolve to the customer PG; all other models + $transaction/$queryRaw
+// resolve to the central global client. So global user/org info is never on the customer box.
+function makeSplitClient(central, customer) {
+  return new Proxy(central, {
+    get(target, prop) {
+      if (typeof prop === 'string' && ROUTED_MODELS.has(prop)) return customer[prop];
+      const v = target[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
 function clientForOrg(orgId) {
   const url = pgUrlFor(orgId);
-  if (!url) return null; // not a full-residency org → caller uses the central client
-  let c = _orgClients.get(orgId);
-  if (!c) {
-    c = new PrismaClient({ datasources: { db: { url: tunedDatabaseUrl(url) } }, log: ['error'] });
-    installTenantIsolationMiddleware(c);
-    _orgClients.set(orgId, c);
+  if (!url) return null; // not a full-residency org → caller uses the central client for everything
+  let split = _orgClients.get(orgId);
+  if (!split) {
+    const customer = new PrismaClient({ datasources: { db: { url: tunedDatabaseUrl(url) } }, log: ['error'] });
+    installTenantIsolationMiddleware(customer);
+    split = makeSplitClient(buildRealClient(), customer); // memory→customer PG, global→central
+    _orgClients.set(orgId, split);
   }
-  return c;
+  return split;
 }
 // .amr routing lives entirely behind the driver seam (vector/mneme/driver.js). getPrismaClient()
 // returns ONE stable proxy that routes the configured .amr orgs' memory subgraph to their .amr stores

@@ -1,0 +1,43 @@
+# HIVEMIND BYOD — runs on the CUSTOMER's box. Holds their .amr (and optional Postgres). The agent
+# dials OUT through cloudflared (no inbound port); our central engine reaches it over that tunnel.
+# Customer data never leaves this box — only ranked results / requested rows traverse the TLS link.
+name: hivemind-byod
+
+services:
+  agent:
+    build: ./agent
+    container_name: hm-agent
+    restart: unless-stopped
+    environment:
+      ORG_ID: ${ORG_ID:-}                 # filled by setup.sh after key validation (or leave blank, agent reads from enrollment)
+      AGENT_TOKEN: ${AGENT_TOKEN}
+      AGENT_PORT: "8787"
+      MNEME_DIM: ${MNEME_DIM:-1024}
+      MNEME_DATA_ROOT: /data/mneme
+      MNEME_BINDING: ./mneme/singulance-amr.linux-x64-gnu.node
+      DATABASE_URL: ${DATABASE_URL:-}     # optional local Postgres for /v1/hydrate
+    volumes:
+      - ./data:/data                       # the .amr files live HERE on the customer disk
+    expose:
+      - "8787"
+
+  # outbound-only tunnel: dials cloudflare, exposes the agent at a public https URL, no inbound port.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: hm-agent-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://agent:8787
+    depends_on: [agent]
+
+  # OPTIONAL: the customer's own Postgres (enable with: docker compose --profile pg up -d).
+  postgres:
+    image: postgres:16-alpine
+    container_name: hm-byod-postgres
+    profiles: ["pg"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-byod}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-byod}
+      POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data

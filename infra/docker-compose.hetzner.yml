@@ -182,15 +182,31 @@ services:
     depends_on: [core]
     profiles: ["full"]   # `docker compose --profile full up -d` to include voice/extras
 
-  # ── Extra services whose SOURCE is NOT in this repo (built/pushed separately on prod). Provide the
-  #    images (push to a registry) to run them here, or omit — the core engine works without them.
-  #    hermes (agent runtime :8642) · playwright (browser :8931) · stt-eu (:8002). Uncomment + set images:
-  # hermes:
-  #   image: ${HERMES_IMAGE:-}            # build from your hm-hermes source, push, set HERMES_IMAGE
-  #   container_name: hm-hermes
-  #   restart: unless-stopped
-  #   profiles: ["full"]
-  #   environment: { HIVEMIND_CORE_API_BASE_URL: http://core:3000, GROQ_API_KEY: ${GROQ_API_KEY} }
+  # ── Hermes (agent gateway) — buildable from services/hm-hermes ──
+  hermes:
+    build: { context: ../services/hm-hermes }
+    image: hivemind/hm-hermes:${VERSION:-latest}
+    container_name: hm-hermes
+    restart: unless-stopped
+    environment:
+      HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
+      HERMES_MGMT_KEY: ${HERMES_MGMT_KEY:-}
+    depends_on: [core]
+    profiles: ["full"]
+
+  # ── Playwright (browser automation for connectors/scrape) — buildable from services/hm-playwright ──
+  playwright:
+    build: { context: ../services/hm-playwright }
+    image: hivemind/hm-playwright:${VERSION:-latest}
+    container_name: hm-playwright
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
+  #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.
 
 volumes:
   hivemind-data:     # .amr files + uploads — SOLE COPY for .amr orgs; back up

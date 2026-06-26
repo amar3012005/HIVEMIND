@@ -8,9 +8,16 @@
 const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 
 // orgId → { url, token }. Sources, in order:
-//   1. the broker registry (registerAgent below), populated when an agent enrolls.
-//   2. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
+//   1. in-memory (registerAgent — same-process enrollment).
+//   2. MNEME_AGENT_REGISTRY_FILE: JSON { orgId: { url, token } } written by the standalone broker
+//      (on a shared volume). Lazy-loaded on miss + re-read when stale, so the core picks up new
+//      enrollments without a restart and without the broker touching the core process.
+//   3. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+
 const _registry = new Map();
+const REG_FILE = process.env.MNEME_AGENT_REGISTRY_FILE || '';
+let _fileMtime = 0;
 
 function _loadEnv() {
   const raw = (process.env.MNEME_AGENT_URLS || '').trim();
@@ -22,18 +29,37 @@ function _loadEnv() {
     _registry.set(org.trim(), { url: url.trim(), token: (token || '').trim() });
   }
 }
+function _loadFile() {
+  if (!REG_FILE || !existsSync(REG_FILE)) return;
+  try {
+    const m = statSync(REG_FILE).mtimeMs;
+    if (m === _fileMtime) return; // unchanged
+    _fileMtime = m;
+    const obj = JSON.parse(readFileSync(REG_FILE, 'utf8'));
+    for (const [org, v] of Object.entries(obj)) if (v?.url) _registry.set(org, { url: v.url, token: v.token || '' });
+  } catch { /* malformed file → keep what we have */ }
+}
+function _persist() {
+  if (!REG_FILE) return;
+  try { writeFileSync(REG_FILE, JSON.stringify(Object.fromEntries(_registry)), 'utf8'); } catch { /* best-effort */ }
+}
 _loadEnv();
+_loadFile();
 
 // Broker calls this when an agent enrolls (API-key authenticated → orgId resolved).
 export function registerAgent(orgId, url, token) {
   _registry.set(orgId, { url, token });
+  _persist();
 }
-export function unregisterAgent(orgId) { _registry.delete(orgId); }
-export function agentFor(orgId) { return _registry.get(orgId) || null; }
-export function isRemoteReady(orgId) { return _registry.has(orgId); }
+export function unregisterAgent(orgId) { _registry.delete(orgId); _persist(); }
+export function agentFor(orgId) {
+  if (!_registry.has(orgId)) _loadFile(); // pick up a fresh enrollment from the shared file
+  return _registry.get(orgId) || null;
+}
+export function isRemoteReady(orgId) { return !!agentFor(orgId); }
 
 async function _call(orgId, path, body) {
-  const a = _registry.get(orgId);
+  const a = agentFor(orgId);
   if (!a) throw new Error(`no hm-agent registered for org ${orgId}`);
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);

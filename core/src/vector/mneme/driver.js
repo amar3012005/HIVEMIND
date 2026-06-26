@@ -13,7 +13,15 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, isRemoteReady } from './remote-backend.js';
+
+// A BYOD org is one with a registered hm-agent (data plane on the customer's box) — decided PER ORG,
+// so remote BYOD orgs and central dual/sole orgs coexist on one core. Cheap no-op unless a registry
+// is configured (MNEME_AGENT_REGISTRY_FILE / MNEME_AGENT_URLS).
+const _remoteConfigured = !!(process.env.MNEME_AGENT_REGISTRY_FILE || process.env.MNEME_AGENT_URLS);
+export function orgIsRemote(orgId) {
+  return _remoteConfigured && !!orgId && isRemoteReady(orgId);
+}
 
 const SIDECAR_MODELS = [
   'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
@@ -32,7 +40,8 @@ function orgConfig() {
 export function isMnemeOrg(orgId) {
   if (!orgId) return false;
   const c = orgConfig();
-  return c === '*' ? true : c.has(orgId);
+  if (c === '*' || c.has(orgId)) return true;
+  return orgIsRemote(orgId); // BYOD orgs (agent-registered) are .amr orgs too
 }
 export function anyMnemeOrg() {
   const c = orgConfig();
@@ -89,7 +98,7 @@ function openOrg(orgId) {
 
 // returns the live store handle for an .amr org (lazy-open), or null if not ready / not an .amr org.
 export function orgStore(orgId) {
-  if (!isMnemeOrg(orgId)) return null;
+  if (!isMnemeOrg(orgId) || orgIsRemote(orgId)) return null; // remote orgs have NO local .amr store
   const cur = _stores.get(orgId);
   if (cur && cur !== 'pending' && cur !== 'failed') return cur;
   if (cur === 'pending') return null;
@@ -145,8 +154,9 @@ export function wrapPrisma(realPrisma) {
 // Mirror a typed relationship edge into the .amr shard that holds its fromId memory (dual mode — PG
 // already has the row; this keeps the .amr graph in sync for graph-recall). No-op if no .amr org.
 export function amrAddEdge(rel) {
-  if (!anyMnemeOrg() || !rel?.fromId || !rel?.toId) return;
-  if (mnemeMode() === 'remote') { if (rel.orgId) remoteAddEdge(rel.orgId, rel); return; }
+  if (!rel?.fromId || !rel?.toId) return;
+  if (rel.orgId && orgIsRemote(rel.orgId)) { remoteAddEdge(rel.orgId, rel); return; }
+  if (!anyMnemeOrg()) return;
   for (const a of allActiveAdapters()) {
     if (a?.memory?.byId?.has(rel.fromId)) {
       try {
@@ -159,7 +169,7 @@ export function amrAddEdge(rel) {
 
 // vector recall for an .amr org from its shared open shard (or null → caller uses Qdrant).
 export function amrRecall(orgId, vector, filter, limit, scoreThreshold) {
-  if (mnemeMode() === 'remote') return remoteRecall(orgId, vector, filter, limit, scoreThreshold); // async
+  if (orgIsRemote(orgId)) return remoteRecall(orgId, vector, filter, limit, scoreThreshold); // async
   const h = orgStore(orgId);
   if (!h) return null;
   return amrVectorSearch(h.store, vector, filter, limit, scoreThreshold);
@@ -167,7 +177,7 @@ export function amrRecall(orgId, vector, filter, limit, scoreThreshold) {
 
 // unified write (record + vector) for an .amr org (or null → caller uses Qdrant/PG path only).
 export async function amrWrite(orgId, record, vector, rels = []) {
-  if (mnemeMode() === 'remote') return remoteWrite(orgId, record, vector, rels);
+  if (orgIsRemote(orgId)) return remoteWrite(orgId, record, vector, rels);
   const h = orgStore(orgId);
   if (!h) return null;
   return h.storeMemoryUnified(record, vector, rels);

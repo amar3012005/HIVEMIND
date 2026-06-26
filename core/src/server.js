@@ -53,7 +53,7 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 
 const { MemoryEngine } = await import('./engine.local.js');
 const { getGroqClient } = await import('../config/groq.js');
-const { getPrismaClient, ensureTenantContext, enterOrgContext } = await import('./db/prisma.js');
+const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
 
 // Start capturing logs for this container (hm-core)
@@ -16684,7 +16684,10 @@ exit \$RC
                 // triple-operator detection) runs HERE, not before 202, so
                 // saves stay sub-second while still auto-building
                 // Update/Extend/Derive edges against existing memories.
-                (async () => {
+                // Wrapped in runWithOrg: this is a DETACHED async context (fire-and-forget after the
+                // 202), where enterWith from the request scope does not survive — re-establish the org
+                // context explicitly so the background writes route to the org's store (self-host → its PG).
+                runWithOrg(orgId, async () => {
                   await ingestAcquire();
                   // Deadlock-proof: release the slot exactly once, and force it
                   // free after INGEST_JOB_TIMEOUT_MS so a hung job (qdrant/pool/
@@ -16839,7 +16842,7 @@ exit \$RC
                     clearTimeout(_slotSafety);
                     _freeSlot();
                   }
-                })();
+                });
 
                 return;
               }

@@ -6,7 +6,7 @@ name: hivemind-byod-data
 
 services:
   postgres:
-    image: hivemind/postgres-age:15-age-custom   # PG15 + Apache AGE (same as central) — or postgres:16-alpine
+    image: postgres:16-alpine   # public image; the curated memory schema is plain tables (no AGE needed) — verified
     container_name: hm-byod-postgres
     restart: unless-stopped
     environment:

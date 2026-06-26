@@ -90,3 +90,4 @@ core/src/tara/hivemind-agent/
 .claude/loop/ACTIVE
 .claude/loop/PAUSE
 .claude/worktrees/
+infra/secrets/

@@ -108,26 +108,39 @@ async function configureMnemeDriver() {
   }
 }
 
-export function getPrismaClient() {
-  if (!process.env.DATABASE_URL) {
-    return null;
-  }
-  // Full data residency: if this work runs inside runWithOrg() for a self-host org whose Postgres is
-  // on the customer box, return that org's client (their PG via tunnel). Managed orgs → fall through.
+// Resolve the underlying client for the CURRENT org context (per call): a self-host org → its customer
+// PG split client; an .amr org → the .amr-routing proxy; else the central real client.
+function _resolveClient() {
+  if (!process.env.DATABASE_URL) return null;
   const ctxOrg = _orgCtx.getStore()?.orgId;
   if (ctxOrg) {
-    const c = clientForOrg(ctxOrg);
+    const c = clientForOrg(ctxOrg); // full residency: memory→customer PG, global→central
     if (c) return c;
   }
   const real = buildRealClient();
-  if (!anyMnemeOrg()) return real; // no .amr org configured → real client, zero overhead
-  // .amr orgs configured → ONE stable proxy routing their memory subgraph to .amr per-call; every
-  // other org → Postgres. The driver opens shards lazily; until ready, .amr orgs fall through to PG.
-  if (!_mnemeProxy) {
-    configureMnemeDriver(); // fire-and-forget
-    _mnemeProxy = wrapPrisma(real);
-  }
+  if (!anyMnemeOrg()) return real;
+  if (!_mnemeProxy) { configureMnemeDriver(); _mnemeProxy = wrapPrisma(real); }
   return _mnemeProxy;
+}
+
+// getPrismaClient() returns ONE stable proxy that re-resolves the client on every property access by
+// the current runWithOrg() context. So a module that captures `const db = getPrismaClient()` ONCE at
+// construction STILL routes per-org per-call — the captured-client problem disappears, and wrapping an
+// entry point in runWithOrg(orgId) is enough to send all its DB work to that org's store.
+let _ctxProxy = null;
+export function getPrismaClient() {
+  if (!process.env.DATABASE_URL) return null;
+  if (!_ctxProxy) {
+    _ctxProxy = new Proxy({}, {
+      get(_t, prop) {
+        const c = _resolveClient();
+        if (!c) return undefined;
+        const v = c[prop];
+        return typeof v === 'function' ? v.bind(c) : v;
+      },
+    });
+  }
+  return _ctxProxy;
 }
 
 // kept for back-compat with any external caller; no longer used by the boot path.

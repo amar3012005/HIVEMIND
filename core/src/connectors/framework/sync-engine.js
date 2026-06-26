@@ -6,6 +6,7 @@
  */
 
 import Redis from 'ioredis';
+import { runWithOrg, currentOrg } from '../../db/prisma.js';
 
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 2000;
@@ -80,7 +81,9 @@ export class SyncEngine {
    * @param {boolean} params.incremental - true for delta sync
    * @returns {Promise<SyncResult>}
    */
-  async runSync({ adapter, userId, orgId, provider, cursor = null, incremental = false, targetScope = null, teamId = null }) {
+  async runSync(opts) {
+    if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.runSync(opts)); // residency: org's store
+    const { adapter, userId, orgId, provider, cursor = null, incremental = false, targetScope = null, teamId = null } = opts;
     const telemetry = {
       provider,
       user_id: userId,

@@ -11,6 +11,7 @@
  */
 
 import crypto from 'crypto';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 
@@ -618,7 +619,9 @@ Output the JSON object and nothing else.`;
    * @param {Object} params.metadata
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
-  async ingestKnowledgeDocument({ userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null }) {
+  async ingestKnowledgeDocument(opts) {
+    if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
+    const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
@@ -777,7 +780,9 @@ Output the JSON object and nothing else.`;
   /**
    * Ingest enterprise document with schema extraction
    */
-  async ingestEnterpriseDocument({ userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} }) {
+  async ingestEnterpriseDocument(opts) {
+    if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestEnterpriseDocument(opts)); // residency
+    const { userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} } = opts;
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
     // Step 1: Store raw artifact
@@ -884,7 +889,9 @@ Output the JSON object and nothing else.`;
    * @param {Date} [params.documentDate]
    * @param {Object} [params.metadata]
    */
-  async ingestConnectorRecord({ userId, orgId, providerKey, sourceId, title, content, sourceUrl = null, documentDate = null, metadata = {} }) {
+  async ingestConnectorRecord(opts) {
+    if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestConnectorRecord(opts)); // residency
+    const { userId, orgId, providerKey, sourceId, title, content, sourceUrl = null, documentDate = null, metadata = {} } = opts;
     if (!content || typeof content !== 'string' || content.trim() === '') {
       return { skipped: true, reason: 'empty_content' };
     }

@@ -44,6 +44,25 @@ http.createServer(async (req, res) => {
       console.log(`[hm-broker] enrolled org=${orgId} → ${body.agentUrl}`);
       return send(res, 200, { ok: true, orgId });
     }
+    // Self-host model: the customer runs the FULL engine on their box. enroll = "validate my key, tell
+    // me which org I am" (called at setup, before the stack is up). register = "my instance is live at
+    // this URL" (so the central dashboard can reach/manage it).
+    if (req.url === '/v1/selfhost/enroll') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      console.log(`[hm-broker] selfhost enroll org=${orgId}`);
+      return send(res, 200, { ok: true, orgId });
+    }
+    if (req.url === '/v1/selfhost/register') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      if (!body.instanceUrl) return send(res, 400, { error: 'instanceUrl required' });
+      const reg = loadReg();
+      reg[orgId] = { url: body.instanceUrl.replace(/\/$/, ''), token: '', kind: 'selfhost' };
+      saveReg(reg);
+      console.log(`[hm-broker] selfhost register org=${orgId} → ${body.instanceUrl}`);
+      return send(res, 200, { ok: true, orgId });
+    }
     if (req.url === '/v1/byod/disenroll') {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });

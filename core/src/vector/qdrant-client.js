@@ -261,7 +261,7 @@ export class QdrantClient {
         decay_factor: memory.decay_factor,
         // Layer discriminator — org containers hold memory + evidence in one
         // collection. Default 'memory'; evidence ingest passes options.layer.
-        layer: options.layer || memory.layer || 'memory',
+        layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
         metadata: memory.metadata || {}
       }
     };
@@ -298,7 +298,7 @@ export class QdrantClient {
             id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
             content: memory.content, title: memory.title || null, tags: memory.tags || [],
             memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
-            layer: options.layer || memory.layer || 'memory', deletedAt: null,
+            layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'), deletedAt: null,
             cognitiveLayerRole: memory.cognitive_layer_role || null,
             confidence: memory.importance_score ?? memory.strength ?? null,
             createdAt: memory.created_at || new Date().toISOString(),

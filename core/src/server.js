@@ -53,7 +53,7 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 
 const { MemoryEngine } = await import('./engine.local.js');
 const { getGroqClient } = await import('../config/groq.js');
-const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
+const { getPrismaClient, ensureTenantContext, enterOrgContext } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
 
 // Start capturing logs for this container (hm-core)
@@ -3157,7 +3157,15 @@ function buildAdminServiceSnapshot() {
   };
 }
 
+// Wrapper: on successful auth, enter the org's AsyncLocalStorage context for the REST of this request
+// so every handler + synchronous write routes to the org's store (self-host → customer PG; managed →
+// central, unchanged). The async worker path is covered separately by runWithOrg in ingestion/index.js.
 async function authenticateApiKey(req) {
+  const _r = await _authenticateApiKeyImpl(req);
+  if (_r && _r.ok && _r.principal && _r.principal.orgId) enterOrgContext(_r.principal.orgId);
+  return _r;
+}
+async function _authenticateApiKeyImpl(req) {
   if (!API_KEY_REQUIRED) {
     return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], rawKey: null } };
   }

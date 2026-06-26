@@ -16,6 +16,11 @@ const _orgCtx = new AsyncLocalStorage();
 const _orgClients = new Map(); // orgId -> split client (memory→customer PG, rest→central)
 export function runWithOrg(orgId, fn) { return _orgCtx.run({ orgId }, fn); }
 export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
+// Set the org context for the REST of the current request (no callback to wrap). Used at the auth
+// seam so every downstream handler + synchronous write in this request routes to the org's store.
+// enterWith persists through the awaiting continuation; each HTTP request is its own async context,
+// so there is no cross-request leak. A null/empty orgId is ignored (resolution falls back to central).
+export function enterOrgContext(orgId) { if (orgId) _orgCtx.enterWith({ orgId }); }
 
 // Proxy: memory-subgraph models resolve to the customer PG; all other models + $transaction/$queryRaw
 // resolve to the central global client. So global user/org info is never on the customer box.

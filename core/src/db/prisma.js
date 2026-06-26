@@ -25,12 +25,22 @@ export function enterOrgContext(orgId) { if (orgId) _orgCtx.enterWith({ orgId })
 // Set synchronously at load so CJS code reads the SAME AsyncLocalStorage instance with no import race.
 globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, enterOrgContext };
 
-// Proxy: memory-subgraph models resolve to the customer PG; all other models + $transaction/$queryRaw
-// resolve to the central global client. So global user/org info is never on the customer box.
+// Proxy for a self-host org's split client:
+//   • memory-subgraph models (ROUTED_MODELS)            → customer PG (the data plane)
+//   • raw SQL + transactions ($transaction/$queryRaw/…) → customer PG, because the memory graph store
+//     writes (advisory locks, atomic inserts, version/edge SQL) all target the memory tables that live
+//     on the customer box. Global tables are reached via Prisma MODELS (user/organization/apiKey), which
+//     are NOT in ROUTED_MODELS and so still resolve to central — global identity never hits the customer.
+//   • everything else                                   → central global client.
+const CUSTOMER_RAW = new Set(['$transaction', '$queryRaw', '$queryRawUnsafe', '$executeRaw', '$executeRawUnsafe']);
 function makeSplitClient(central, customer) {
   return new Proxy(central, {
     get(target, prop) {
       if (typeof prop === 'string' && ROUTED_MODELS.has(prop)) return customer[prop];
+      if (typeof prop === 'string' && CUSTOMER_RAW.has(prop)) {
+        const cv = customer[prop];
+        return typeof cv === 'function' ? cv.bind(customer) : cv;
+      }
       const v = target[prop];
       return typeof v === 'function' ? v.bind(target) : v;
     },

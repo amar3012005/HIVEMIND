@@ -36,7 +36,7 @@ function _loadFile() {
     if (m === _fileMtime) return; // unchanged
     _fileMtime = m;
     const obj = JSON.parse(readFileSync(REG_FILE, 'utf8'));
-    for (const [org, v] of Object.entries(obj)) if (v?.url) _registry.set(org, { url: v.url, token: v.token || '' });
+    for (const [org, v] of Object.entries(obj)) if (v?.url || v?.pgUrl) _registry.set(org, { url: v.url || '', token: v.token || '', pgUrl: v.pgUrl || '', kind: v.kind });
   } catch { /* malformed file → keep what we have */ }
 }
 function _persist() {
@@ -57,6 +57,12 @@ export function agentFor(orgId) {
   return _registry.get(orgId) || null;
 }
 export function isRemoteReady(orgId) { return !!agentFor(orgId); }
+
+// Full-residency self-host: the customer's Postgres connection string (via their tunnel), recorded at
+// enrollment. null → that org's relational data is NOT on a customer box (managed / vectors-only).
+export function pgUrlFor(orgId) {
+  return agentFor(orgId)?.pgUrl || null;
+}
 
 async function _call(orgId, path, body) {
   const a = agentFor(orgId);

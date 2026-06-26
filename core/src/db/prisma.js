@@ -1,7 +1,29 @@
 import { PrismaClient } from '@prisma/client';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { configureDriver, wrapPrisma, anyMnemeOrg } from '../vector/mneme/driver.js';
+import { pgUrlFor } from '../vector/mneme/remote-backend.js';
 
 let prisma; // the real Postgres client (singleton)
+
+// Full data residency (self-host): an org's relational data lives in the CUSTOMER's Postgres (reached
+// via their tunnel). We run request/job work inside runWithOrg(orgId, fn); getPrismaClient() then
+// returns a per-org client bound to that org's customer Postgres. Managed orgs have no pgUrl → the
+// central client, unchanged. AsyncLocalStorage means the 35 getPrismaClient() call sites stay as-is.
+const _orgCtx = new AsyncLocalStorage();
+const _orgClients = new Map(); // orgId -> PrismaClient (customer PG)
+export function runWithOrg(orgId, fn) { return _orgCtx.run({ orgId }, fn); }
+export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
+function clientForOrg(orgId) {
+  const url = pgUrlFor(orgId);
+  if (!url) return null; // not a full-residency org → caller uses the central client
+  let c = _orgClients.get(orgId);
+  if (!c) {
+    c = new PrismaClient({ datasources: { db: { url: tunedDatabaseUrl(url) } }, log: ['error'] });
+    installTenantIsolationMiddleware(c);
+    _orgClients.set(orgId, c);
+  }
+  return c;
+}
 // .amr routing lives entirely behind the driver seam (vector/mneme/driver.js). getPrismaClient()
 // returns ONE stable proxy that routes the configured .amr orgs' memory subgraph to their .amr stores
 // per-call, everything else to Postgres. ONE config value (MNEME_ORGS) drives it.
@@ -73,6 +95,13 @@ async function configureMnemeDriver() {
 export function getPrismaClient() {
   if (!process.env.DATABASE_URL) {
     return null;
+  }
+  // Full data residency: if this work runs inside runWithOrg() for a self-host org whose Postgres is
+  // on the customer box, return that org's client (their PG via tunnel). Managed orgs → fall through.
+  const ctxOrg = _orgCtx.getStore()?.orgId;
+  if (ctxOrg) {
+    const c = clientForOrg(ctxOrg);
+    if (c) return c;
   }
   const real = buildRealClient();
   if (!anyMnemeOrg()) return real; // no .amr org configured → real client, zero overhead

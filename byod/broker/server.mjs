@@ -56,9 +56,15 @@ http.createServer(async (req, res) => {
     if (req.url === '/v1/selfhost/register') {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });
-      if (!body.instanceUrl) return send(res, 400, { error: 'instanceUrl required' });
+      if (!body.instanceUrl && !body.pgUrl) return send(res, 400, { error: 'instanceUrl or pgUrl required' });
       const reg = loadReg();
-      reg[orgId] = { url: body.instanceUrl.replace(/\/$/, ''), token: '', kind: 'selfhost' };
+      reg[orgId] = {
+        url: (body.instanceUrl || '').replace(/\/$/, ''),
+        token: body.agentToken || '',
+        pgUrl: body.pgUrl || '',          // full residency: the customer's Postgres (via their tunnel)
+        qdrantUrl: body.qdrantUrl || '',  // and their Qdrant, if hosted on-box
+        kind: 'selfhost',
+      };
       saveReg(reg);
       console.log(`[hm-broker] selfhost register org=${orgId} → ${body.instanceUrl}`);
       return send(res, 200, { ok: true, orgId });

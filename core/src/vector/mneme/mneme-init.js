@@ -10,7 +10,11 @@ import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 
 // memory's FK children + KB doc tables → sidecar records (no vectors needed for their queries).
-const SIDECAR_MODELS = ['sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata', 'knowledgeDocument', 'knowledgeSegment'];
+const SIDECAR_MODELS = [
+  'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
+  'derivationJob', 'memoryDerivation', 'memoryEvidenceLink', 'vectorEmbedding',
+  'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',
+];
 
 export function initMnemeStore({ realPrisma, orgId, dim = 1024, dataRoot, backend }) {
   const dir = `${dataRoot}/org_${orgId}`;

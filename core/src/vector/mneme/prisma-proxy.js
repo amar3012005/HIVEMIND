@@ -13,8 +13,9 @@
 // Option B — the WHOLE memory subgraph routes to .amr/sidecar for the .amr org, so it touches
 // Postgres zero times. memory+relationship → .amr shard; the rest → JSON sidecars (no FK enforcement).
 const ROUTED_MODELS = new Set([
-  'memory', 'relationship', 'sourceMetadata', 'memoryVersion',
-  'memoryProject', 'codeMemoryMetadata', 'knowledgeDocument', 'knowledgeSegment',
+  'memory', 'relationship', 'sourceMetadata', 'memoryVersion', 'memoryProject',
+  'codeMemoryMetadata', 'derivationJob', 'memoryDerivation', 'memoryEvidenceLink',
+  'vectorEmbedding', 'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',
 ]);
 
 // extract the org_id an operation is scoped to, from where (incl. relation filters) or data.
@@ -41,15 +42,22 @@ function orgOf(args) {
 
 // memoryId-scoped FK children (no orgId in their queries) — route by whether the memoryId belongs
 // to the .amr org (present in the adapter's memory set). org-scoped models route by orgOf.
-const MEMID_SCOPED = new Set(['sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata']);
+const MEMID_SCOPED = new Set([
+  'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
+  'derivationJob', 'memoryDerivation', 'memoryEvidenceLink', 'vectorEmbedding',
+  'entityMention', 'memoryEntityLink',
+]);
+const MEMID_FIELDS = ['memoryId', 'sourceMemoryId', 'targetMemoryId'];
 
 function memIdOf(args) {
   if (!args || typeof args !== 'object') return null;
   const w = args.where || {};
-  const d = Array.isArray(args.data) ? args.data[0] : args.data || {};
+  const d = Array.isArray(args.data) ? args.data[0] || {} : args.data || {};
   for (const src of [w, d]) {
-    if (typeof src.memoryId === 'string') return src.memoryId;
-    if (src.memoryId?.equals) return src.memoryId.equals;
+    for (const field of MEMID_FIELDS) {
+      if (typeof src[field] === 'string') return src[field];
+      if (src[field]?.equals) return src[field].equals;
+    }
     // compound key {memoryId_projectId:{memoryId,...}}
     for (const v of Object.values(src)) if (v && typeof v === 'object' && typeof v.memoryId === 'string') return v.memoryId;
   }

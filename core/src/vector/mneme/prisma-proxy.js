@@ -73,26 +73,36 @@ function memIdOf(args) {
   return null;
 }
 
-// Decide if an op on `modelName` belongs to the .amr org. org-scoped → orgOf; FK-child → the
-// memoryId must be in the adapter's memory set (so other orgs' children never touch this adapter).
+// FK-reference fields → the adapter model they point at. A child op with no orgId routes to the
+// adapter iff one of these references a record the adapter already holds (memory/segment/document) —
+// so the whole ingest subgraph (children keyed by memoryId/segmentId/fromId/...) routes together,
+// and other orgs' children (whose parents aren't in this adapter) never touch it.
+const REF_FIELDS = {
+  memoryId: 'memory', sourceMemoryId: 'memory', targetMemoryId: 'memory', relatedMemoryId: 'memory',
+  fromId: 'memory', toId: 'memory',
+  segmentId: 'knowledgeSegment', knowledgeSegmentId: 'knowledgeSegment',
+  documentId: 'knowledgeDocument', knowledgeDocumentId: 'knowledgeDocument',
+};
+function refsAmrRecord(args, adapter) {
+  for (const src of argSources(args)) {
+    if (!src || typeof src !== 'object') continue;
+    for (const [field, model] of Object.entries(REF_FIELDS)) {
+      let v = src[field];
+      if (v && typeof v === 'object') v = v.equals;
+      if (typeof v === 'string' && adapter[model]?.byId?.has(v)) return true;
+    }
+    for (const v of Object.values(src)) if (v && typeof v === 'object' && typeof v.memoryId === 'string' && adapter.memory?.byId?.has(v.memoryId)) return true;
+  }
+  return false;
+}
+
+// Decide if an op on `modelName` belongs to the .amr org. org-scoped → orgOf; FK-child → references
+// a record already in the adapter.
 function shouldRoute(modelName, args, amrOrg, adapter) {
   if (!adapter) return false;
   const org = orgOf(args);
   if (org) return org === amrOrg;
-  if (MEMID_SCOPED.has(modelName)) {
-    const mid = memIdOf(args);
-    return !!(mid && adapter.memory?.byId?.has(mid));
-  }
-  // relationship.create/upsert carry fromId/toId (FK to memory) but no orgId — route if an endpoint
-  // belongs to the .amr org's memory set. Scan where/data/create/update.
-  if (modelName === 'relationship') {
-    for (const src of argSources(args)) {
-      const fid = src?.fromId || src?.toId;
-      if (fid && adapter.memory?.byId?.has(fid)) return true;
-    }
-    return false;
-  }
-  return false; // unresolvable org on an org-scoped model → fail-safe to Postgres
+  return refsAmrRecord(args, adapter); // unresolvable org → route iff it references an .amr-org record
 }
 
 function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {

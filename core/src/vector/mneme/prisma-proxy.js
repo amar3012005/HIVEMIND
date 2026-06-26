@@ -102,7 +102,12 @@ function shouldRoute(modelName, args, amrOrg, adapter) {
   if (!adapter) return false;
   const org = orgOf(args);
   if (org) return org === amrOrg;
-  return refsAmrRecord(args, adapter); // unresolvable org → route iff it references an .amr-org record
+  // op keyed by the model's OWN id (find/update/delete by id) → route if that id is in this model's
+  // adapter set (so e.g. knowledgeSegment.update({where:{id}}) finds the .amr-org segment).
+  let ownId = args?.where?.id ?? args?.data?.id;
+  if (ownId && typeof ownId === 'object') ownId = ownId.equals;
+  if (typeof ownId === 'string' && adapter[modelName]?.byId?.has(ownId)) return true;
+  return refsAmrRecord(args, adapter); // else route iff it references an .amr-org record
 }
 
 function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {

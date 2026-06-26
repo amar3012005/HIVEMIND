@@ -40,9 +40,9 @@ need docker || die "docker install failed"
 
 # ── 2. env (secrets + arch-aware storage) ───────────────────────────────────
 if [ ! -f "$ENV_FILE" ]; then
-  [ -t 0 ] || die "no .env and not a TTY — run interactively, or pre-create .env from infra/defaults.env"
-  DEFAULTS="$ROOT/infra/defaults.env"; [ -f "$DEFAULTS" ] || die "missing infra/defaults.env"
-  log "Interactive setup. Everything else inherits the production config from infra/defaults.env —"
+  [ -t 0 ] || die "no .env and not a TTY — run interactively, or pre-create .env from infra/prod-defaults.conf"
+  DEFAULTS="$ROOT/infra/prod-defaults.conf"; [ -f "$DEFAULTS" ] || die "missing infra/prod-defaults.conf"
+  log "Interactive setup. Everything else inherits the production config from infra/prod-defaults.conf —"
   log "you only enter the domain + the sensitive provider keys. Press Enter to accept a [default]."
   ask(){  local v; read -rp "  $1${2:+ [$2]}: " v </dev/tty; printf '%s' "${v:-$2}"; }
   asks(){ local v; read -rsp "  $1: " v </dev/tty; printf '\n' >/dev/tty; printf '%s' "$v"; }

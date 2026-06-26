@@ -3157,15 +3157,7 @@ function buildAdminServiceSnapshot() {
   };
 }
 
-// Wrapper: on successful auth, enter the org's AsyncLocalStorage context for the REST of this request
-// so every handler + synchronous write routes to the org's store (self-host → customer PG; managed →
-// central, unchanged). The async worker path is covered separately by runWithOrg in ingestion/index.js.
 async function authenticateApiKey(req) {
-  const _r = await _authenticateApiKeyImpl(req);
-  if (_r && _r.ok && _r.principal && _r.principal.orgId) enterOrgContext(_r.principal.orgId);
-  return _r;
-}
-async function _authenticateApiKeyImpl(req) {
   if (!API_KEY_REQUIRED) {
     return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], rawKey: null } };
   }
@@ -7065,6 +7057,11 @@ exit \$RC
       }
       const principal = auth.principal;
       const userId = principal.userId || DEFAULT_USER;
+      // Per-org routing seam: enter the org context in THIS handler's async scope (enterWith inside the
+      // awaited authenticateApiKey would not propagate back here). Every downstream handler + synchronous
+      // write in this request now resolves getPrismaClient() to the org's store — self-host → customer PG,
+      // managed → central (unchanged). Async ingest jobs are covered by the worker's runWithOrg wrap.
+      enterOrgContext(principal.orgId);
       const orgId = principal.orgId || DEFAULT_ORG;
 
       // ── Container Tag (multi-tenant namespace) resolution ──

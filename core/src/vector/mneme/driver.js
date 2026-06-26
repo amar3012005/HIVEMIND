@@ -144,4 +144,64 @@ export async function amrWrite(orgId, record, vector, rels = []) {
   return h.storeMemoryUnified(record, vector, rels);
 }
 
+// ---- lexical (keyword) recall from .amr — replaces the Postgres FTS leg ------
+// For an .amr org there is no Postgres to run to_tsvector against, so the hybrid recall's lexical
+// leg must run here: a term-overlap scan over the org's records (content+title), with the same scope
+// the SQL applied (org + is_latest + deleted + personal→user + project + date window). Returns rows
+// in the SQL leg's shape, or null if not an .amr org (caller uses PG FTS).
+function _lexFilter(rec, f) {
+  if (rec.deletedAt) return false;
+  if (f.org_id && rec.orgId !== f.org_id) return false;
+  if (typeof f.is_latest === 'boolean' && (rec.isLatest !== false) !== f.is_latest) return false;
+  if (f.scope === 'personal' && f.user_id && rec.userId !== f.user_id) return false;
+  if (f.project && rec.project !== f.project) return false;
+  if (f.created_after && new Date(rec.createdAt) < new Date(f.created_after)) return false;
+  if (f.created_before && new Date(rec.createdAt) > new Date(f.created_before)) return false;
+  return true;
+}
+function _toMemoryRow(rec, score) {
+  return {
+    id: rec.id, content: rec.content, title: rec.title || null, tags: rec.tags || [],
+    memory_type: rec.memoryType || null, project: rec.project || null,
+    importance_score: Number(rec.confidence ?? rec.importanceScore ?? 0.5),
+    is_latest: rec.isLatest !== false,
+    created_at: rec.createdAt, updated_at: rec.updatedAt || rec.createdAt,
+    document_date: rec.documentDate || null, event_dates: rec.eventDates || [],
+    source: rec.source || rec.sourcePlatform || null, visibility: rec.visibility || null,
+    cognitive_layer_role: rec.cognitiveLayerRole || null, tier: rec.tier ?? null,
+    fts_score: score,
+  };
+}
+export function amrLexical(orgId, query, filter, limit) {
+  const h = orgStore(orgId);
+  if (!h) return null;
+  const terms = String(query || '').toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, '')).filter((w) => w.length > 1);
+  if (!terms.length) return [];
+  const out = [];
+  for (const rec of h.adapter.memory.records) {
+    if (!_lexFilter(rec, filter || {})) continue;
+    const hay = `${rec.content || ''} ${rec.title || ''}`.toLowerCase();
+    let hits = 0;
+    for (const t of terms) if (hay.includes(t)) hits += 1; // prefix-ish term overlap (mirrors ':*')
+    if (hits > 0) out.push(_toMemoryRow(rec, hits / terms.length));
+  }
+  out.sort((a, b) => b.fts_score - a.fts_score);
+  return out.slice(0, limit || 10);
+}
+
+// ---- store-agnostic mutual exclusion — replaces Postgres advisory locks -----
+// .amr has no Postgres to pg_advisory_xact_lock against. The shard is single-writer (flock) and we
+// run one replica, but async read-then-write gaps still race; serialize per (org,key) in-process.
+const _locks = new Map();
+export async function withAmrLock(orgId, key, fn) {
+  if (!isMnemeOrg(orgId)) return fn(); // hybrid org → caller keeps using PG advisory lock
+  const k = `${orgId}:${key}`;
+  const prev = _locks.get(k) || Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; });
+  _locks.set(k, prev.then(() => mine));
+  await prev.catch(() => {});
+  try { return await fn(); } finally { release(); if (_locks.get(k) === mine) _locks.delete(k); }
+}
+
 export const __test = { orgConfig, _reset: () => { _orgSet = null; _stores.clear(); } };

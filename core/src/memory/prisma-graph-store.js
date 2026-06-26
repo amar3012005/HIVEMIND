@@ -3,6 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
+import { isMnemeOrg, amrLexical, withAmrLock } from '../vector/mneme/driver.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -250,7 +251,12 @@ export class PrismaGraphStore {
     this.inTransaction = inTransaction;
   }
 
-  async advisoryLock(userId, fn) {
+  async advisoryLock(userId, fn, orgId) {
+    // .amr org: no Postgres to pg_advisory_lock against. Serialize per-user IN-PROCESS and run the
+    // body directly against the routing client (the .amr writes apply immediately). No PG tx opened.
+    if (orgId && isMnemeOrg(orgId)) {
+      return withAmrLock(orgId, `mem:${userId}`, () => fn(new PrismaGraphStore(this.client, { inTransaction: true })));
+    }
     if (this.inTransaction) {
       await this.client.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       return fn(this);
@@ -263,9 +269,21 @@ export class PrismaGraphStore {
     }, { timeout: 180000 });
   }
 
-  async transaction(fn) {
+  // A store flagged inTransaction so a nested transaction()/advisoryLock runs the body directly
+  // (no PG tx). Used by the .amr write path to stay Postgres-free for a pure insert.
+  inProcessTx() {
+    return new PrismaGraphStore(this.client, { inTransaction: true });
+  }
+
+  async transaction(fn, orgId) {
     if (this.inTransaction) {
       return fn(this);
+    }
+    // .amr org: no Postgres transaction — run against the routing client (the .amr store is not part
+    // of a PG ACID tx anyway; writes apply immediately). Removes the empty-PG-tx dependency so an
+    // .amr org functions with Postgres entirely absent.
+    if (orgId && isMnemeOrg(orgId)) {
+      return fn(new PrismaGraphStore(this.client, { inTransaction: true }));
     }
 
     return this.client.$transaction(async tx => {
@@ -633,6 +651,13 @@ export class PrismaGraphStore {
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
+    // .amr org: there is no Postgres to run to_tsvector against. The lexical (keyword) leg of hybrid
+    // recall runs over the org's .amr records instead — same scope, term-overlap scoring. Without
+    // this the lexical leg would $queryRaw-passthrough to central Postgres (PG=0 for this org) and
+    // silently return nothing, leaving recall vector-only.
+    if (query && isMnemeOrg(org_id)) {
+      return amrLexical(org_id, query, { org_id, user_id, scope, is_latest, project, created_after, created_before }, n_results * 3) || [];
+    }
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {

@@ -34,6 +34,8 @@ x-common-env: &common-env
   HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY}
   SESSION_SECRET: ${SESSION_SECRET}
   HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET}
+  # ── CORS: FE origins allowed to call the engine (comma-separated) ──
+  HIVEMIND_ALLOWED_ORIGINS: ${HIVEMIND_ALLOWED_ORIGINS:-}
 
 services:
   core:

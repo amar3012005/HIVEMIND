@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HIVEMIND</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+      background: #ffffff;
+      color: #0a0a0a;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-app-region: drag;
+      overflow: hidden;
+    }
+
+    .wordmark {
+      font-family: 'Georgia', 'Times New Roman', serif;
+      font-size: clamp(72px, 12vw, 120px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #117dff;
+      line-height: 1;
+      text-transform: uppercase;
+      opacity: 0;
+      transform: translateY(16px);
+      animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards;
+    }
+
+    .subtitle {
+      margin-top: 24px;
+      font-size: 16px;
+      color: #888;
+      font-weight: 400;
+      letter-spacing: 0.01em;
+      max-width: 420px;
+      text-align: center;
+      line-height: 1.5;
+      opacity: 0;
+      animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.3s forwards;
+    }
+
+    .cta {
+      margin-top: 48px;
+      -webkit-app-region: no-drag;
+      opacity: 0;
+      animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.5s forwards;
+    }
+
+    .cta button {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 40px;
+      background: #117dff;
+      color: #fff;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.12s, box-shadow 0.15s;
+      box-shadow: 0 4px 20px rgba(17, 125, 255, 0.25);
+    }
+
+    .cta button:hover {
+      background: #0066e0;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 28px rgba(17, 125, 255, 0.35);
+    }
+
+    .cta button:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 10px rgba(17, 125, 255, 0.2);
+    }
+
+    .cta button .arrow {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    /* Loading state */
+    .cta button.loading {
+      background: #0066e0;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+
+    .cta button.loading .spinner { display: block; }
+    .cta button.loading .arrow { display: none; }
+    .cta button.loading .label { opacity: 0.7; }
+
+    @keyframes fadeUp {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Subtle background texture */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 100%, rgba(17,125,255,0.04) 0%, transparent 70%);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wordmark">HIVEMIND</div>
+  <p class="subtitle">The agent that remembers everything. We'll get things ready — takes a few seconds.</p>
+  <div class="cta">
+    <button id="btn" onclick="launch()">
+      <span class="label">Open HIVEMIND</span>
+      <span class="arrow">→</span>
+      <div class="spinner"></div>
+    </button>
+  </div>
+
+  <script>
+    function launch() {
+      const btn = document.getElementById('btn');
+      btn.classList.add('loading');
+      btn.querySelector('.label').textContent = 'Opening…';
+      // Tell main process to open the main window
+      window.__electron?.launch();
+    }
+  </script>
+</body>
+</html>

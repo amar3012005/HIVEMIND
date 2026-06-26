@@ -27,3 +27,17 @@ STREAM_MAX_RETRIES = int(os.getenv("TARA_STREAM_MAX_RETRIES", "1"))
 STREAM_MAX_TOKENS = int(os.getenv("TARA_STREAM_MAX_TOKENS", "180"))
 
 VERIFY_TLS = os.getenv("HIVEMIND_TARA_VERIFY_TLS", "true").lower() == "true"
+
+# ── Outbound calling (Telnyx) — requires TARA_OUTBOUND_ENABLED=true ──────────
+TARA_OUTBOUND_ENABLED = os.getenv("TARA_OUTBOUND_ENABLED", "false").lower() == "true"
+TELNYX_API_KEY        = os.getenv("TELNYX_API_KEY", "")
+TELNYX_APP_ID         = os.getenv("TELNYX_APP_ID", "")           # Voice API connection ID
+TELNYX_FROM_NUMBER    = os.getenv("TELNYX_FROM_NUMBER", "")       # E.164 purchased number
+# Publicly reachable base URL of this service (no trailing slash).
+TELNYX_WEBHOOK_BASE_URL = os.getenv("TELNYX_WEBHOOK_BASE_URL", "https://aaas.hivemind.davinciai.eu")
+TELNYX_STREAM_BASE_URL  = os.getenv("TELNYX_STREAM_BASE_URL",  "wss://aaas.hivemind.davinciai.eu")
+# Comma-separated E.164 numbers permitted for outbound dialing.
+# Empty = all calls blocked (safe default).
+TELNYX_ALLOWED_NUMBERS = [
+    n.strip() for n in os.getenv("TELNYX_ALLOWED_NUMBERS", "").split(",") if n.strip()
+]

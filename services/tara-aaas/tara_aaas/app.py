@@ -6,6 +6,7 @@ integration end-to-end. STT/TTS/VAD WS layers land in later phases.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -128,6 +129,63 @@ async def list_voices(language: str | None = None, gender: str | None = None):
     # languages present (for the filter UI)
     langs = sorted({v["language"] for v in out if v.get("language")})
     return {"voices": out, "languages": langs, "count": len(out)}
+
+
+if config.TARA_OUTBOUND_ENABLED:
+    from .telephony.telnyx_bridge import handle_telnyx_stream
+    from .telephony.outbound_api import (
+        initiate_call, hangup_call, handle_webhook_event, get_call_status,
+        OutboundCallRequest, CallStatus,
+    )
+    from fastapi import Request
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    @app.post("/calls/outbound", response_model=None)
+    async def outbound_call(req: OutboundCallRequest):
+        try:
+            result = await initiate_call(req)
+            return result
+        except ValueError as e:
+            return _JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            log.exception("outbound call initiation failed")
+            return _JSONResponse({"error": str(e)}, status_code=502)
+
+    @app.post("/telnyx/webhook")
+    async def telnyx_webhook(request: Request):
+        event = await request.json()
+        asyncio.create_task(handle_webhook_event(event))
+        return {"ok": True}
+
+    @app.post("/calls/outbound/{call_leg_id}/hangup", response_model=None)
+    async def outbound_hangup(call_leg_id: str):
+        try:
+            await hangup_call(call_leg_id)
+            return {"ok": True}
+        except ValueError as e:
+            return _JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:  # noqa: BLE001
+            log.exception("hangup failed")
+            return _JSONResponse({"error": str(e)}, status_code=502)
+
+    @app.get("/calls/outbound/{call_leg_id}/status", response_model=None)
+    async def outbound_call_status(call_leg_id: str):
+        meta = get_call_status(call_leg_id)
+        if not meta:
+            return _JSONResponse({"error": "not_found"}, status_code=404)
+        return {"call_leg_id": call_leg_id, "session_id": meta["session_id"], "status": meta["status"]}
+
+    @app.websocket("/telnyx/stream")
+    async def telnyx_stream(ws: WebSocket):
+        qp = ws.query_params
+        await handle_telnyx_stream(
+            ws,
+            session_id=qp.get("session_id") or "phone-session",
+            user_id=qp.get("user_id") or None,
+            org_id=qp.get("org_id") or None,
+            language=qp.get("language") or "en",
+            voice_id=qp.get("voice_id") or None,
+        )
 
 
 @app.get("/voice-preview")

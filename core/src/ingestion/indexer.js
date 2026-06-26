@@ -58,6 +58,22 @@ class QdrantVectorStore {
         vectors: {
           size: this.dimension,
           distance: 'Cosine',
+          on_disk: true,
+        },
+        hnsw_config: {
+          m: 16,
+          ef_construct: 100,
+          on_disk: true,
+        },
+        quantization_config: {
+          scalar: {
+            type: 'int8',
+            quantile: 0.99,
+            always_ram: true,
+          },
+        },
+        optimizers_config: {
+          memmap_threshold: 20000,
         },
       }),
     });

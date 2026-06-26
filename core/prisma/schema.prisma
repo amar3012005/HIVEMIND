@@ -47,67 +47,71 @@ model User {
 /// Multi-tenant organizations with EU data residency settings
 /// Supports GDPR, NIS2, DORA compliance flags
 model Organization {
-  id                   String             @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  zitadelOrgId         String             @unique @map("zitadel_org_id") @db.VarChar(255)
-  name                 String             @db.VarChar(255)
-  slug                 String             @unique @db.VarChar(100)
-  dataResidencyRegion  String?            @default("eu-central") @map("data_residency_region") @db.VarChar(50)
-  complianceFlags      String[]           @default(["GDPR", "NIS2", "DORA"]) @map("compliance_flags")
-  hsmProvider          String?            @default("ovhcloud") @map("hsm_provider") @db.VarChar(50)
-  hsmKeyArn            String?            @map("hsm_key_arn") @db.VarChar(255)
-  createdAt            DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  plan                 String?            @default("free") @map("plan") @db.VarChar(50)
+  id                           String             @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  zitadelOrgId                 String             @unique @map("zitadel_org_id") @db.VarChar(255)
+  name                         String             @db.VarChar(255)
+  slug                         String             @unique @db.VarChar(100)
+  dataResidencyRegion          String?            @default("eu-central") @map("data_residency_region") @db.VarChar(50)
+  complianceFlags              String[]           @default(["GDPR", "NIS2", "DORA"]) @map("compliance_flags")
+  hsmProvider                  String?            @default("ovhcloud") @map("hsm_provider") @db.VarChar(50)
+  hsmKeyArn                    String?            @map("hsm_key_arn") @db.VarChar(255)
+  createdAt                    DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                    DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  plan                         String?            @default("free") @map("plan") @db.VarChar(50)
   // Stripe billing state — populated on first checkout, sync'd via webhook.
-  stripeCustomerId     String?            @unique @map("stripe_customer_id") @db.VarChar(64)
-  stripeSubscriptionId String?            @map("stripe_subscription_id") @db.VarChar(64)
-  subscriptionStatus   String?            @map("subscription_status") @db.VarChar(32)
+  stripeCustomerId             String?            @unique @map("stripe_customer_id") @db.VarChar(64)
+  stripeSubscriptionId         String?            @map("stripe_subscription_id") @db.VarChar(64)
+  subscriptionStatus           String?            @map("subscription_status") @db.VarChar(32)
   // active | trialing | past_due | canceled | unpaid | incomplete
-  currentPeriodEnd     DateTime?          @map("current_period_end") @db.Timestamptz(6)
-  trialEndsAt          DateTime?          @map("trial_ends_at") @db.Timestamptz(6)
-  billingEmail         String?            @map("billing_email") @db.VarChar(255)
-  defaultProjectPolicy String             @default("private") @map("default_project_policy") @db.VarChar(50)
-  memorySavePolicy     String             @default("private") @map("memory_save_policy") @db.VarChar(50)
+  currentPeriodEnd             DateTime?          @map("current_period_end") @db.Timestamptz(6)
+  trialEndsAt                  DateTime?          @map("trial_ends_at") @db.Timestamptz(6)
+  billingEmail                 String?            @map("billing_email") @db.VarChar(255)
+  defaultProjectPolicy         String             @default("private") @map("default_project_policy") @db.VarChar(50)
+  memorySavePolicy             String             @default("private") @map("memory_save_policy") @db.VarChar(50)
   // Cognition scope toggles (workspace-admin choices). Default OFF — the
   // cognitive layer does nothing for an org until an admin opts in. Read via
   // raw SQL in cognition-pilot.js. See migration 20260606193000.
-  cognitionOrgEnabled      Boolean        @default(false) @map("cognition_org_enabled")
-  cognitionPersonalEnabled Boolean        @default(false) @map("cognition_personal_enabled")
+  cognitionOrgEnabled          Boolean            @default(false) @map("cognition_org_enabled")
+  cognitionPersonalEnabled     Boolean            @default(false) @map("cognition_personal_enabled")
+  // Per-org opt-in for the profile-dream cron (auto-maintain evolving user
+  // profiles). Durable DB toggle surfaced in the Cognition tab; read via raw SQL
+  // in governance-routes.js + server.js profile-dream-cron. See migration 20260623.
+  profileAutomaintainEnabled   Boolean            @default(false) @map("profile_automaintain_enabled")
   // Set to now() on the false→true toggle. The cognition loop clamps its
   // synthesis window to max(now-1h, this) so enabling NEVER backfills the
   // org's history — it starts from a 1h window at toggle-on and rolls forward.
-  cognitionEnabledAt       DateTime?      @map("cognition_enabled_at") @db.Timestamptz(6)
+  cognitionEnabledAt           DateTime?          @map("cognition_enabled_at") @db.Timestamptz(6)
   // Dream SCHEDULING (replaces the 1h rolling-window-only cadence). A scheduled
   // deep dream fires once/day with a wide lookback so it connects dots across the
   // whole period. mode: 'nightmode' (default — fire at midnight), 'interval' (fire
   // once inside [startHour,endHour)), or 'continuous' (legacy event-driven only).
-  cognitionScheduleMode    String         @default("nightmode") @map("cognition_schedule_mode") @db.VarChar(20)
-  cognitionWindowStartHour Int?           @map("cognition_window_start_hour")
-  cognitionWindowEndHour   Int?           @map("cognition_window_end_hour")
-  cognitionScheduleTz      String         @default("UTC") @map("cognition_schedule_tz") @db.VarChar(64)
+  cognitionScheduleMode        String             @default("nightmode") @map("cognition_schedule_mode") @db.VarChar(20)
+  cognitionWindowStartHour     Int?               @map("cognition_window_start_hour")
+  cognitionWindowEndHour       Int?               @map("cognition_window_end_hour")
+  cognitionScheduleTz          String             @default("UTC") @map("cognition_schedule_tz") @db.VarChar(64)
   // Cross-project dreaming: when true the loop may form bridges that span project
   // boundaries (otherwise dreams stay within a single project scope). Default OFF.
-  cognitionCrossProjectEnabled Boolean    @default(false) @map("cognition_cross_project_enabled")
+  cognitionCrossProjectEnabled Boolean            @default(false) @map("cognition_cross_project_enabled")
   // Per-tenant canonical clusterMin override (NULL = adaptive by corpus size).
   // Lets a sparse-entity enterprise lower the floor so its entities still
   // canonicalize, or a dense one raise it. Read by deriveClusterMin.
-  cognitionClusterMin      Int?           @map("cognition_cluster_min")
+  cognitionClusterMin          Int?               @map("cognition_cluster_min")
   // Qdrant container ("collection") that holds ALL memory+evidence for this org.
   // Set on org creation (org_<id>); members + projects share it (filtered by
   // user_id/project_id/layer). Null until provisioned.
-  vectorContainer      String?            @map("vector_container") @db.VarChar(255)
-  apiKeys              ApiKey[]           @relation("OrgApiKeys")
-  auditLogs            AuditLog[]         @relation("OrgAuditLogs")
-  memories             Memory[]           @relation("OrgMemories")
-  invites              OrgInvite[]
-  projects             Project[]
-  teams                Team[]             @relation("OrgTeams")
-  digitalEmployees     DigitalEmployee[]  @relation("OrgDigitalEmployees")
-  teamTasks            TeamTask[]         @relation("OrgTeamTasks")
-  users                UserOrganization[] @relation("OrgUserOrganizations")
-  pageIndexNodes       PageIndexNode[]    @relation("OrgPageIndexNodes")
-  ssoConfig            OrgSsoConfig?      @relation("OrgSsoConfig")
-  hyperRooms           HyperRoom[]        @relation("OrgHyperRooms")
+  vectorContainer              String?            @map("vector_container") @db.VarChar(255)
+  apiKeys                      ApiKey[]           @relation("OrgApiKeys")
+  auditLogs                    AuditLog[]         @relation("OrgAuditLogs")
+  memories                     Memory[]           @relation("OrgMemories")
+  invites                      OrgInvite[]
+  projects                     Project[]
+  teams                        Team[]             @relation("OrgTeams")
+  digitalEmployees             DigitalEmployee[]  @relation("OrgDigitalEmployees")
+  teamTasks                    TeamTask[]         @relation("OrgTeamTasks")
+  users                        UserOrganization[] @relation("OrgUserOrganizations")
+  pageIndexNodes               PageIndexNode[]    @relation("OrgPageIndexNodes")
+  ssoConfig                    OrgSsoConfig?      @relation("OrgSsoConfig")
+  hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
 
   @@map("organizations")
 }
@@ -205,25 +209,25 @@ model TeamMember {
 /// teamId is preferred; orgId retained for backward compatibility with existing
 /// org-level projects predating the Team model.
 model Project {
-  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId       String          @map("org_id") @db.Uuid
-  teamId      String?         @map("team_id") @db.Uuid
-  name        String          @db.VarChar(255)
-  slug        String          @db.VarChar(120)
-  description String?
-  status      String          @default("active") @db.VarChar(20) // 'active' | 'archived'
-  policy      String          @default("private") @db.VarChar(20) // 'private' | 'team_inherited' | 'org_visible'
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String          @map("org_id") @db.Uuid
+  teamId            String?         @map("team_id") @db.Uuid
+  name              String          @db.VarChar(255)
+  slug              String          @db.VarChar(120)
+  description       String?
+  status            String          @default("active") @db.VarChar(20) // 'active' | 'archived'
+  policy            String          @default("private") @db.VarChar(20) // 'private' | 'team_inherited' | 'org_visible'
   // Per-project self-evolve toggle (card switch). Default OFF. When true the
   // cognitive layer synthesizes/evolves this project's memories. Migration 20260606193000.
-  selfEvolveEnabled Boolean    @default(false) @map("self_evolve_enabled")
-  createdBy   String          @map("created_by") @db.Uuid
-  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  archivedAt  DateTime?       @map("archived_at") @db.Timestamptz(6)
-  org         Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  team        Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  members     ProjectMember[]
-  memories    MemoryProject[]
+  selfEvolveEnabled Boolean         @default(false) @map("self_evolve_enabled")
+  createdBy         String          @map("created_by") @db.Uuid
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt        DateTime?       @map("archived_at") @db.Timestamptz(6)
+  org               Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  team              Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  members           ProjectMember[]
+  memories          MemoryProject[]
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -1249,19 +1253,19 @@ model MetaDecaySchedule {
 /// Persistent user profile facts — durable context layer
 /// Separates standing user knowledge from episodic memory search
 model UserProfile {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  userId          String    @map("user_id") @db.Uuid
-  orgId           String?   @map("org_id") @db.Uuid
-  category        String    @default("static")
-  key             String
-  value           String
-  confidence      Float     @default(1.0)
-  sourceMemoryId  String?   @map("source_memory_id") @db.Uuid
-  confirmedCount  Int       @default(1) @map("confirmed_count")
-  lastConfirmedAt DateTime  @default(now()) @map("last_confirmed_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
-  deletedAt       DateTime? @map("deleted_at")
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  orgId             String?   @map("org_id") @db.Uuid
+  category          String    @default("static")
+  key               String
+  value             String
+  confidence        Float     @default(1.0)
+  sourceMemoryId    String?   @map("source_memory_id") @db.Uuid
+  confirmedCount    Int       @default(1) @map("confirmed_count")
+  lastConfirmedAt   DateTime  @default(now()) @map("last_confirmed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
   // WS5 (evolving profile / dreaming): per-fact grounding lineage (a profile line
   // with zero evidence ids must NOT render — anti-hallucination) + when the
   // profile-dreamer last re-synthesized this user. Both additive/backward-compat.
@@ -1682,6 +1686,131 @@ model TaraInsight {
 
   @@index([orgId])
   @@map("tara_insights")
+}
+
+/// TaraCampaign — one outbound calling campaign. Tenant-scoped (org+user).
+/// status: draft → active → paused → completed. complianceConfig holds the
+/// per-campaign gate config (lawful basis, country allowlist, calling hours,
+/// caps); recordingOptIn defaults false (recording off by default, P0 decision).
+model TaraCampaign {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String   @map("org_id") @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  name             String   @db.VarChar(200)
+  status           String   @default("draft") @db.VarChar(20) // draft | active | paused | completed
+  agentSkill       String?  @map("agent_skill") @db.VarChar(120)
+  goal             String?
+  callingWindow    Json     @default("{}") @map("calling_window") // {tz, days[], startHour, endHour}
+  caps             Json     @default("{}") // {concurrency, dailyMax}
+  complianceConfig Json     @default("{}") @map("compliance_config")
+  recordingOptIn   Boolean  @default(false) @map("recording_opt_in")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  contacts     TaraCampaignContact[]
+  callAttempts TaraCallAttempt[]
+
+  @@index([orgId])
+  @@index([userId])
+  @@index([orgId, status])
+  @@map("tara_campaigns")
+}
+
+/// TaraCampaignContact — one dialable contact on a campaign list. Phone in
+/// E.164. lawfulBasis + country drive the compliance gate. Distinct from the
+/// gmail-derived `contacts` table (email-keyed CRM contacts).
+model TaraCampaignContact {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String   @map("campaign_id") @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  phone       String   @db.VarChar(20) // E.164
+  displayName String?  @map("display_name") @db.VarChar(255)
+  company     String?  @db.VarChar(255)
+  country     String?  @db.VarChar(2) // ISO 3166-1 alpha-2
+  timezone    String?  @db.VarChar(60) // IANA tz
+  lawfulBasis String?  @map("lawful_basis") @db.VarChar(40) // legitimate_interest | consent | ...
+  status      String   @default("pending") @db.VarChar(20) // pending | gated | calling | done | skipped
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  campaign     TaraCampaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  callAttempts TaraCallAttempt[]
+
+  @@unique([campaignId, phone])
+  @@index([orgId])
+  @@index([campaignId, status])
+  @@map("tara_campaign_contacts")
+}
+
+/// TaraCallAttempt — state machine for one dial of one contact.
+/// status: queued → gated → dialing → {no_answer|voicemail|connected}
+///         → {declined|completed|callback} → done.
+/// gateResult records the compliance-gate decision (allow|skip + reason).
+/// sessionId links to tara_calls (the conversation record).
+model TaraCallAttempt {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String    @map("campaign_id") @db.Uuid
+  contactId   String    @map("contact_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  attemptNo   Int       @default(1) @map("attempt_no")
+  status      String    @default("queued") @db.VarChar(20)
+  disposition String?   @db.VarChar(30)
+  gateResult  Json?     @map("gate_result")
+  sessionId   String?   @map("session_id") @db.VarChar(120)
+  callLegId   String?   @map("call_leg_id") @db.VarChar(120)
+  scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
+  startedAt   DateTime? @map("started_at") @db.Timestamptz(6)
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  campaign TaraCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact  TaraCampaignContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([campaignId, status])
+  @@index([contactId])
+  @@map("tara_call_attempts")
+}
+
+/// ConsentLedger — append-only audit of consent/disclosure events for outbound
+/// calling (GDPR / EU AI Act accountability). action: disclosed | granted |
+/// withdrawn | declined. Never updated, only inserted.
+model ConsentLedger {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  contactId  String?  @map("contact_id") @db.Uuid
+  phone      String   @db.VarChar(20)
+  action     String   @db.VarChar(20) // disclosed | granted | withdrawn | declined
+  basis      String?  @db.VarChar(40)
+  channel    String   @default("voice") @db.VarChar(20)
+  source     String?  @db.VarChar(60)
+  metadata   Json     @default("{}")
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@index([phone])
+  @@index([contactId])
+  @@map("consent_ledger")
+}
+
+/// DncList — do-not-call registry, per org. phone unique per org. The
+/// compliance gate hard-blocks any phone present here.
+model DncList {
+  id      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId   String   @map("org_id") @db.Uuid
+  phone   String   @db.VarChar(20)
+  reason  String?  @db.VarChar(120)
+  source  String?  @db.VarChar(60) // user | withdrawn | regulator | imported
+  addedAt DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
+
+  @@unique([orgId, phone])
+  @@index([orgId])
+  @@map("dnc_list")
 }
 
 /// AgentEval — one row per (agent, turn-line) scored by the CSI judge.
@@ -2170,36 +2299,36 @@ model GovernanceMetric {
 // and its extracted insights. Distinct from the generic `memories` row (kept
 // for graph/recall); this is the structured, queryable system of record.
 model Meeting {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  userId         String    @map("user_id") @db.Uuid
-  orgId          String    @map("org_id") @db.Uuid
-  projectId      String?   @map("project_id") @db.Uuid
-  title          String    @map("title")
-  summary        String?   @map("summary")
-  transcript     String?   @map("transcript")
-  language       String?   @map("language") @db.VarChar(16)
-  durationSec    Int?      @map("duration_sec")
-  audioBytes     Int?      @map("audio_bytes")
-  multiSpeaker   Boolean   @default(false) @map("multi_speaker")
-  speakerCount   Int?      @map("speaker_count")
-  participants   Json      @default("[]") @map("participants")
-  scope          String?   @map("scope") @db.VarChar(20)
-  actionItems    Json      @default("[]") @map("action_items")
-  decisions      Json      @default("[]") @map("decisions")
-  keyPoints      Json      @default("[]") @map("key_points")
-  questions      Json      @default("[]") @map("questions")
-  segments       Json?     @map("segments")
-  topics         String[]  @default([]) @map("topics")
-  sentiment      String?   @map("sentiment") @db.VarChar(32)
-  notes          String?   @map("notes")
-  insights       Json      @default("{}") @map("insights")
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId                  String    @map("user_id") @db.Uuid
+  orgId                   String    @map("org_id") @db.Uuid
+  projectId               String?   @map("project_id") @db.Uuid
+  title                   String    @map("title")
+  summary                 String?   @map("summary")
+  transcript              String?   @map("transcript")
+  language                String?   @map("language") @db.VarChar(16)
+  durationSec             Int?      @map("duration_sec")
+  audioBytes              Int?      @map("audio_bytes")
+  multiSpeaker            Boolean   @default(false) @map("multi_speaker")
+  speakerCount            Int?      @map("speaker_count")
+  participants            Json      @default("[]") @map("participants")
+  scope                   String?   @map("scope") @db.VarChar(20)
+  actionItems             Json      @default("[]") @map("action_items")
+  decisions               Json      @default("[]") @map("decisions")
+  keyPoints               Json      @default("[]") @map("key_points")
+  questions               Json      @default("[]") @map("questions")
+  segments                Json?     @map("segments")
+  topics                  String[]  @default([]) @map("topics")
+  sentiment               String?   @map("sentiment") @db.VarChar(32)
+  notes                   String?   @map("notes")
+  insights                Json      @default("{}") @map("insights")
   intelligence            Json?     @map("intelligence")
   intelligenceStatus      String    @default("none") @map("intelligence_status") @db.VarChar(16)
   intelligenceGeneratedAt DateTime? @map("intelligence_generated_at") @db.Timestamptz(6)
-  sourceMemoryId String?   @map("source_memory_id") @db.Uuid
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+  sourceMemoryId          String?   @map("source_memory_id") @db.Uuid
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt               DateTime? @map("deleted_at") @db.Timestamptz(6)
 
   @@index([orgId, createdAt(sort: Desc)], map: "meetings_org_created_idx")
   @@index([userId], map: "meetings_user_idx")

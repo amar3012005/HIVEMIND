@@ -47,7 +47,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
             `SELECT cognition_org_enabled, cognition_personal_enabled,
                     cognition_schedule_mode, cognition_window_start_hour,
                     cognition_window_end_hour, cognition_schedule_tz,
-                    cognition_cross_project_enabled
+                    cognition_cross_project_enabled, profile_automaintain_enabled
                FROM hivemind.organizations WHERE id=$1::uuid`,
             orgId,
           );
@@ -63,6 +63,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
           org_enabled: !!orgRow?.cognition_org_enabled,
           personal_enabled: !!orgRow?.cognition_personal_enabled,
           cross_project_enabled: !!orgRow?.cognition_cross_project_enabled,
+          profile_automaintain_enabled: !!orgRow?.profile_automaintain_enabled,
           schedule: {
             mode: orgRow?.cognition_schedule_mode || 'nightmode',
             window_start_hour: orgRow?.cognition_window_start_hour ?? null,
@@ -118,6 +119,14 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
             await prisma.$executeRawUnsafe(
               `UPDATE hivemind.organizations SET cognition_cross_project_enabled=$1 WHERE id=$2::uuid`,
               body.cross_project_enabled, orgId,
+            );
+          }
+          if (typeof body.profile_automaintain_enabled === 'boolean') {
+            // Per-org opt-in for the profile-dream cron. Durable (DB), survives
+            // container recreate — unlike the global env master switches.
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.organizations SET profile_automaintain_enabled=$1 WHERE id=$2::uuid`,
+              body.profile_automaintain_enabled, orgId,
             );
           }
           if (body.schedule && typeof body.schedule === 'object') {

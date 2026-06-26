@@ -1,12 +1,12 @@
 import { PrismaClient } from '@prisma/client';
-import { makeMnemePrisma } from '../vector/mneme/prisma-proxy.js';
+import { configureDriver, wrapPrisma, anyMnemeOrg } from '../vector/mneme/driver.js';
 
 let prisma; // the real Postgres client (singleton)
-// Path B: per-org .amr routing. When MNEME_PRISMA_ORG is set, getPrismaClient() returns ONE stable
-// proxy that routes that org's memory/relationship to .amr per-call, everything else to Postgres.
+// .amr routing lives entirely behind the driver seam (vector/mneme/driver.js). getPrismaClient()
+// returns ONE stable proxy that routes the configured .amr orgs' memory subgraph to their .amr stores
+// per-call, everything else to Postgres. ONE config value (MNEME_ORGS) drives it.
 let _mnemeProxy = null;
-let _mnemeAdapter = null; // live .amr adapter (loaded async; null = not ready → falls back to PG)
-let _mnemeInitStarted = false;
+let _driverConfigured = false;
 
 /**
  * Append connection pool tuning to DATABASE_URL if not already specified.
@@ -49,30 +49,24 @@ function buildRealClient() {
   return prisma;
 }
 
-// Load the .amr adapter for MNEME_PRISMA_ORG once, async (the native binding + shard hydrate). Until
-// it resolves, the proxy's getAdapter() returns null and the .amr org transparently uses Postgres.
-async function ensureMnemeAdapter() {
-  if (_mnemeAdapter || _mnemeInitStarted) return;
-  _mnemeInitStarted = true;
+// Inject the native binding + backends into the driver once (the driver then opens each .amr org's
+// shard lazily on first use). Fire-and-forget; until configured, .amr orgs transparently use Postgres.
+async function configureMnemeDriver() {
+  if (_driverConfigured) return;
+  _driverConfigured = true;
   try {
-    const { initMnemeStore } = await import('../vector/mneme/mneme-init.js');
     const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend } = await import('../vector/mneme/amr-store-backend.mjs');
     const bindingPath = process.env.MNEME_BINDING || new URL('../vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url).pathname;
     const bind = loadBinding(bindingPath);
-    const backend = { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend };
-    const init = initMnemeStore({
+    configureDriver({
+      backend: { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend },
       realPrisma: buildRealClient(),
-      orgId: process.env.MNEME_PRISMA_ORG,
-      dim: Number(process.env.EMBEDDING_DIMENSION || 1024),
       dataRoot: process.env.MNEME_DATA_ROOT || '/app/data/mneme',
-      backend,
+      dim: process.env.EMBEDDING_DIMENSION,
     });
-    _mnemeAdapter = init.adapter;
-    globalThis.__mnemeInit = init;
-    console.log('[mneme] adapter LIVE org=' + process.env.MNEME_PRISMA_ORG, JSON.stringify(init.counts));
   } catch (e) {
-    _mnemeInitStarted = false; // allow retry on next call
-    console.warn('[mneme] adapter init failed, org stays on Postgres:', e.message);
+    _driverConfigured = false; // allow retry
+    console.warn('[mneme] driver configure failed, all orgs on Postgres:', e.message);
   }
 }
 
@@ -81,15 +75,12 @@ export function getPrismaClient() {
     return null;
   }
   const real = buildRealClient();
-  if (!process.env.MNEME_PRISMA_ORG) return real;
-  // Option B — true PG=0 for the .amr org. getPrismaClient returns ONE stable proxy that routes the
-  // WHOLE memory subgraph (memory/relationship → .amr shard; sourceMetadata/memoryVersion/
-  // memoryProject/codeMemoryMetadata/knowledgeDocument/Segment → JSON sidecars) per-call by orgId.
-  // No FK enforcement off-Postgres = the relational hub leaves PG cleanly. Adapter loads async; until
-  // live the org falls through to Postgres (no error). Every other org → real client, untouched.
+  if (!anyMnemeOrg()) return real; // no .amr org configured → real client, zero overhead
+  // .amr orgs configured → ONE stable proxy routing their memory subgraph to .amr per-call; every
+  // other org → Postgres. The driver opens shards lazily; until ready, .amr orgs fall through to PG.
   if (!_mnemeProxy) {
-    ensureMnemeAdapter(); // fire-and-forget; non-blocking
-    _mnemeProxy = makeMnemePrisma(real, { amrOrg: process.env.MNEME_PRISMA_ORG, getAdapter: () => _mnemeAdapter });
+    configureMnemeDriver(); // fire-and-forget
+    _mnemeProxy = wrapPrisma(real);
   }
   return _mnemeProxy;
 }

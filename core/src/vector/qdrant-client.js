@@ -12,7 +12,7 @@ import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
 // mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
 import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
-import { mnemeSearch as amrSearch } from './mneme/mneme-recall.js';
+import { amrRecall, amrWrite, isMnemeOrg } from './mneme/driver.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
@@ -292,7 +292,7 @@ export class QdrantClient {
 
       // Path B: for the .amr-sole-store org, write the FULL record + vector into the adapter so
       // reads served from .amr carry the embedding + Prisma-shaped fields. Flag-gated; inert otherwise.
-      if (process.env.MNEME_PRISMA_ORG === memory.org_id && globalThis.__mnemeInit) {
+      if (isMnemeOrg(memory.org_id)) {
         try {
           const _rec = {
             id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
@@ -304,7 +304,7 @@ export class QdrantClient {
             createdAt: memory.created_at || new Date().toISOString(),
             project: memory.project || null, projectIds: memory.project_ids || [], primaryTeamId: memory.primary_team_id || null, scope: memory.scope || null, visibility: memory.visibility || null, validFrom: memory.valid_from || null, documentDate: memory.document_date || null, metadata: memory.metadata || {},
           };
-          await globalThis.__mnemeInit.storeMemoryUnified(_rec, point.vector);
+          await amrWrite(memory.org_id, _rec, point.vector);
         } catch (e) { console.warn('[mneme] unified write failed:', e.message); }
       }
 
@@ -389,11 +389,13 @@ export class QdrantClient {
     const _mnemeOrg = filterMatchValue(filter, 'org_id');
     // Path B: sole-store org -> serve recall from the adapter's ALREADY-OPEN .amr shard (shared
     // handle, no second flock). Returns memory-layer hits mapped to Qdrant shape.
-    if (process.env.MNEME_PRISMA_ORG === _mnemeOrg && globalThis.__mnemeInit && globalThis.__mnemeInit.store) {
+    if (isMnemeOrg(_mnemeOrg)) {
       try {
-        const _out = amrSearch(globalThis.__mnemeInit.store, searchVector, filter, limit, effectiveScoreThreshold);
+        const _out = amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
+        if (_out) {
         console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
         return _out;
+        }
       } catch (e) { console.warn('[mneme] adapter recall failed, fallback to qdrant:', e.message); }
     }
     if (mnemeOn(_mnemeOrg)) {

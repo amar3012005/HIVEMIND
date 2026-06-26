@@ -96,21 +96,23 @@ function refsAmrRecord(args, adapter) {
   return false;
 }
 
-// Decide if an op on `modelName` belongs to the .amr org. org-scoped → orgOf; FK-child → references
-// a record already in the adapter.
-function shouldRoute(modelName, args, amrOrg, adapter) {
-  if (!adapter) return false;
+// Resolve WHICH adapter serves this op, or null for Postgres. org-scoped → that org's adapter if it
+// is an .amr org; otherwise (FK-child / own-id, no orgId on the op) scan the live .amr adapters for
+// the one already holding the referenced/own record. Multi-org aware via ctx.getAllAdapters().
+function pickAdapter(modelName, args, ctx) {
   const org = orgOf(args);
-  if (org) return org === amrOrg;
-  // op keyed by the model's OWN id (find/update/delete by id) → route if that id is in this model's
-  // adapter set (so e.g. knowledgeSegment.update({where:{id}}) finds the .amr-org segment).
+  if (org) return ctx.isAmrOrg(org) ? (ctx.getAdapter(org) || null) : null;
   let ownId = args?.where?.id ?? args?.data?.id;
   if (ownId && typeof ownId === 'object') ownId = ownId.equals;
-  if (typeof ownId === 'string' && adapter[modelName]?.byId?.has(ownId)) return true;
-  return refsAmrRecord(args, adapter); // else route iff it references an .amr-org record
+  for (const adapter of ctx.getAllAdapters()) {
+    if (!adapter) continue;
+    if (typeof ownId === 'string' && adapter[modelName]?.byId?.has(ownId)) return adapter;
+    if (refsAmrRecord(args, adapter)) return adapter;
+  }
+  return null;
 }
 
-function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {
+function wrapModel(realModel, modelName, ctx) {
   const methodCache = new Map();
   return new Proxy(realModel, {
     get(target, method) {
@@ -118,11 +120,9 @@ function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {
       if (typeof real !== 'function') return real;
       if (!methodCache.has(method)) {
         methodCache.set(method, (args) => {
-          const adapter = resolveAdapter();
-          if (adapter && shouldRoute(modelName, args, amrOrg, adapter)) {
-            const am = adapter[modelName];
-            if (am && typeof am[method] === 'function') return am[method](args);
-          }
+          const adapter = pickAdapter(modelName, args, ctx);
+          const am = adapter && adapter[modelName];
+          if (am && typeof am[method] === 'function') return am[method](args);
           return real.call(target, args);
         });
       }
@@ -131,13 +131,32 @@ function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {
   });
 }
 
-// realPrisma: the live client. Pass either a fixed `adapter` or a lazy `getAdapter` (preferred for
-// prod — the .amr shard loads async). Returns the stable routing proxy.
-export function makeMnemePrisma(realPrisma, { amrOrg, adapter = null, getAdapter = null }) {
-  const resolveAdapter = getAdapter || (() => adapter);
+// Normalize single-org ({amrOrg, adapter|getAdapter}) and multi-org ({isAmrOrg, getAdapter(org),
+// getAllAdapters}) call styles into one routing context.
+function toCtx(opts) {
+  if (opts.isAmrOrg) {
+    return {
+      isAmrOrg: opts.isAmrOrg,
+      getAdapter: opts.getAdapter || (() => null),
+      getAllAdapters: opts.getAllAdapters || (() => []),
+    };
+  }
+  const amrOrg = opts.amrOrg;
+  const get = () => (opts.getAdapter ? opts.getAdapter() : opts.adapter) || null;
+  return {
+    isAmrOrg: (o) => o === amrOrg,
+    getAdapter: () => get(),
+    getAllAdapters: () => { const a = get(); return a ? [a] : []; },
+  };
+}
+
+// realPrisma: the live client. opts: single-org {amrOrg, adapter|getAdapter} OR multi-org
+// {isAmrOrg, getAdapter(org), getAllAdapters}. Returns the stable routing proxy.
+export function makeMnemePrisma(realPrisma, opts = {}) {
+  const ctx = toCtx(opts);
   const wrapped = {};
   for (const model of ROUTED_MODELS) {
-    if (realPrisma[model]) wrapped[model] = wrapModel(realPrisma[model], model, amrOrg, resolveAdapter);
+    if (realPrisma[model]) wrapped[model] = wrapModel(realPrisma[model], model, ctx);
   }
   return new Proxy(realPrisma, {
     get(target, prop) {
@@ -148,11 +167,11 @@ export function makeMnemePrisma(realPrisma, { amrOrg, adapter = null, getAdapter
       // (the .amr write is applied immediately — the .amr store is not part of PG's ACID tx; that's
       // acceptable for a sole-store org where memory lives in .amr, not Postgres).
       if (prop === '$transaction') {
-        return (arg, opts) => {
+        return (arg, txOpts) => {
           if (typeof arg === 'function') {
-            return target.$transaction((tx) => arg(wrapTxClient(tx, amrOrg, resolveAdapter)), opts);
+            return target.$transaction((tx) => arg(wrapTxClient(tx, ctx)), txOpts);
           }
-          return target.$transaction(arg, opts); // batch (array) form — passthrough
+          return target.$transaction(arg, txOpts); // batch (array) form — passthrough
         };
       }
       const v = target[prop];
@@ -162,10 +181,10 @@ export function makeMnemePrisma(realPrisma, { amrOrg, adapter = null, getAdapter
 }
 
 // Wrap an interactive-transaction client so its routed models route per-org, like the top-level proxy.
-function wrapTxClient(tx, amrOrg, resolveAdapter) {
+function wrapTxClient(tx, ctx) {
   const wrapped = {};
   for (const model of ROUTED_MODELS) {
-    if (tx[model]) wrapped[model] = wrapModel(tx[model], model, amrOrg, resolveAdapter);
+    if (tx[model]) wrapped[model] = wrapModel(tx[model], model, ctx);
   }
   return new Proxy(tx, {
     get(target, prop) {

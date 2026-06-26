@@ -60,6 +60,9 @@ MNEME_DATA_ROOT=/app/data/mneme
 MNEME_BINDING=/app/src/vector/mneme/singulance-amr.linux-$([ "$ARCH" = arm64 ] && echo arm64 || echo x64)-gnu.node
 # ── domain (set to enable Caddy auto-TLS for all subdomains) ──
 DOMAIN=
+# ── frontend: "vercel" (default — FE hosted on Vercel, this script just prints the env to set there)
+#    or "container" (self-host the dashboard as a container at <domain> root) ──
+FE_MODE=vercel
 # ── model providers — FILL THESE ──
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
@@ -88,6 +91,7 @@ log "applying schema…"; $COMPOSE exec -T core npx prisma migrate deploy 2>/dev
 log "waiting for core /health…"; for i in $(seq 1 40); do $COMPOSE exec -T core node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null && break; [ "$i" = 40 ] && die "core unhealthy — $COMPOSE logs core"; sleep 3; done
 
 # ── 4. domain + subdomains (Caddy auto-TLS) ─────────────────────────────────
+FE_MODE="${FE_MODE:-vercel}"
 if [ -n "${DOMAIN:-}" ]; then
   log "configuring Caddy for $DOMAIN + subdomains (auto-TLS)…"
   CADDY="$ROOT/infra/Caddyfile"
@@ -97,13 +101,36 @@ core.$DOMAIN  { reverse_proxy localhost:${CORE_PORT:-2026} }
 api.$DOMAIN   { reverse_proxy localhost:${CONTROL_PORT:-2027} }
 nango.$DOMAIN { reverse_proxy localhost:${NANGO_PORT:-3003} }
 EOF
+  # FE: container mode serves the dashboard at the root domain; vercel mode leaves the root to Vercel.
+  if [ "$FE_MODE" = "container" ]; then
+    log "building + serving the dashboard (container) at $DOMAIN…"
+    docker build -t hivemind/fe:${VERSION:-latest} \
+      --build-arg REACT_APP_CONTROL_PLANE_URL="https://api.$DOMAIN" \
+      --build-arg REACT_APP_CORE_API_URL="https://core.$DOMAIN" \
+      "$ROOT/frontend/Da-vinci"
+    docker rm -f hm-fe >/dev/null 2>&1 || true
+    docker run -d --name hm-fe --restart unless-stopped -p ${FE_PORT:-8088}:80 hivemind/fe:${VERSION:-latest}
+    echo "$DOMAIN { reverse_proxy localhost:${FE_PORT:-8088} }" >> "$CADDY"
+    echo "www.$DOMAIN { redir https://$DOMAIN{uri} }" >> "$CADDY"
+  fi
   docker rm -f hm-caddy >/dev/null 2>&1 || true
   docker run -d --name hm-caddy --restart unless-stopped --network host \
     -v "$CADDY":/etc/caddy/Caddyfile -v hm-caddy-data:/data caddy:latest >/dev/null
-  log "Caddy up. DNS needed (A-records → THIS server IP): core.$DOMAIN  api.$DOMAIN  nango.$DOMAIN  (or *.$DOMAIN)."
-  log "Then point the dashboard's REACT_APP_CONTROL_PLANE_URL at https://api.$DOMAIN."
+  log "Caddy up. DNS (A-records → THIS server IP): core.$DOMAIN  api.$DOMAIN  nango.$DOMAIN $([ "$FE_MODE" = container ] && echo "$DOMAIN") (or *.$DOMAIN)."
+  if [ "$FE_MODE" = "vercel" ]; then
+    cat <<FEV
+
+  ── FE is on VERCEL ── set these in your Vercel project (Settings → Environment Variables), then redeploy:
+       REACT_APP_CONTROL_PLANE_URL = https://api.$DOMAIN
+       REACT_APP_CORE_API_URL      = https://core.$DOMAIN
+     Point your Vercel domain (the dashboard) wherever you like; it talks to THIS engine via the URLs above.
+FEV
+  else
+    log "Dashboard served at https://$DOMAIN (container)."
+  fi
 else
   warn "no DOMAIN set — engine on ports core:${CORE_PORT:-2026} control:${CONTROL_PORT:-2027}. Set DOMAIN in .env + re-run for TLS subdomains."
+  [ "$FE_MODE" = vercel ] && warn "FE (Vercel): set REACT_APP_CONTROL_PLANE_URL to your control-plane URL once you have a domain."
 fi
 
 log "✅ HIVEMIND engine up on $OS/$ARCH."

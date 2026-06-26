@@ -70,6 +70,41 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         return r.json()
 
 
+async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
+                              api_key: str = "", limit: int = 6, timeout_s: float = 45.0) -> Dict[str, Any]:
+    """Live web search via HIVEMIND core's Tavily-backed web-intel — the SAME engine
+    behind the hivemind_web_search MCP tool (so the director reuses it, not a bespoke
+    Tavily client). Submits a job, polls until terminal, returns the succeeded payload
+    {status, results:[{title,url,snippet,score}], ...}. Best-effort: returns
+    {"error": ...} instead of raising (web is optional gathering, never fatal)."""
+    import asyncio
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(timeout_s, connect=5.0),
+            headers=headers,
+        ) as c:
+            sub = await c.post("/api/web/search/jobs", json={"query": query, "limit": max(1, min(int(limit or 6), 10))})
+            if sub.status_code not in (200, 202):
+                return {"error": f"web submit {sub.status_code}", "detail": sub.text[:200]}
+            job_id = (sub.json() or {}).get("job_id")
+            if not job_id:
+                return {"error": "no job_id"}
+            for _ in range(max(6, int(timeout_s))):
+                await asyncio.sleep(1)
+                g = await c.get(f"/api/web/jobs/{job_id}")
+                if g.status_code != 200:
+                    continue
+                p = g.json() or {}
+                if p.get("status") in ("succeeded", "failed", "completed", "error", "done"):
+                    return p
+            return {"status": "timeout", "job_id": job_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
+
+
 async def org_members_emulated(
     query: str = "", *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
 ) -> Dict[str, Any]:

@@ -36,6 +36,7 @@ from ..hivemind_client import (
     google_exec_emulated,
     org_members_emulated,
     recall_emulated,
+    web_search_emulated,
 )
 
 log = logging.getLogger(__name__)
@@ -89,13 +90,24 @@ _OR_PROVIDER_PIN = {
 }
 
 
+# Set True the first time Groq returns a billing-block error → gpt-oss/llama then
+# route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
+# on process restart (re-probes Groq once), so funding Groq self-heals.
+_GROQ_DEAD = False
+_BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
+
+
 def _route_direct_openrouter(model: str) -> bool:
-    """A vendor-namespaced, non-Groq-native model → route DIRECT to OpenRouter."""
+    """A vendor-namespaced, non-Groq-native model → route DIRECT to OpenRouter.
+    Once Groq is observed dead (_GROQ_DEAD), gpt-oss/llama also route direct (skip the
+    wasted Groq 400s). compound has no OpenRouter equivalent → never direct-routed."""
     m = str(model or "")
     if not m or not os.environ.get("OPENROUTER_API_KEY"):
         return False
-    if _GROQ_NATIVE_RE.search(m):
+    if "compound" in m.lower():
         return False
+    if _GROQ_NATIVE_RE.search(m):
+        return _GROQ_DEAD
     return "/" in m
 
 
@@ -942,6 +954,14 @@ class Director:
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
                     r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                if r.status_code == 400 and _BILLING_RE.search(r.text or ""):
+                    # Groq billing block: mark dead (gpt-oss routes direct to OpenRouter
+                    # from now) and break straight to the OpenRouter failover below — no
+                    # point burning the 400-retries on a delinquent account.
+                    global _GROQ_DEAD
+                    _GROQ_DEAD = True
+                    log.warning("[hyper-engine] Groq billing block → gpt-oss now routes direct to OpenRouter/Cerebras")
+                    break
                 if r.status_code == 400 and attempt < max_attempts - 1:
                     body["temperature"] = max(0.1, float(body.get("temperature", temp)) - 0.2)
                     # gpt-oss harmony glitch: on a force_text (no-tools) call the decoder
@@ -1210,85 +1230,49 @@ class Director:
             return json.dumps({"error": "empty query"})
         if self._web_calls >= self._web_budget:
             return json.dumps({"error": "web-search budget for this turn is used — rely on what you already gathered."})
-        key = _groq_key()
-        if not key:
-            return json.dumps({"error": "web search unavailable (no key)"})
         self._web_calls += 1
-        # PROSPECTING: when the query needs real-world CONTACTS / businesses / people (not a general
-        # fact), use the full groq/compound model with visit_website ENABLED — it actually crawls the
-        # sites (compound-mini only searches + guesses info@ addresses, which is fabrication). Force a
-        # strict rule: quote a contact detail ONLY if it literally appears on a visited page, else mark
-        # it NOT VERIFIED — never guess. Keeps the room from inventing prospects. General, no tenant facts.
         prospect = bool(_PROSPECT_RE.search(query))
-        # DEEPEST robust stack on EVERY director web call: full groq/compound (self.web_model) with
-        # BOTH web_search AND visit_website enabled → it searches, then actually OPENS pages and reads
-        # them (multi-page agentic crawl). No snippet-only mini, no guessing. Prospecting adds the
-        # strict verbatim-or-NOT-VERIFIED contract; general queries use the same deep engine.
-        content = query
-        if prospect:
-            content = (query + "\n\nRULES: use web_search to find the REAL entities, then use "
-                       "visit_website to OPEN each one's official page (a company's Contact / About / "
-                       "legal-notice page — Impressum/Kontakt in German-speaking regions) and READ it. "
-                       "Give a contact detail (email, phone) ONLY if it "
-                       "literally appears on a page you actually visited — quote it verbatim and cite the "
-                       "exact source URL. If you did not open a page that shows it, write 'NOT VERIFIED'. "
-                       "NEVER guess or construct an address (no inventing info@domain). Cover as many real "
-                       "entities as you can. List each: name | website | email/phone or NOT VERIFIED | source URL.")
-        body: Dict[str, Any] = {"model": self.web_model, "messages": [{"role": "user", "content": content}],
-                                "compound_custom": {"tools": {"enabled_tools": ["web_search", "visit_website"]}}}
-        timeout = httpx.Timeout(180.0, connect=5.0)
         keep = 3000 if prospect else 1500
+        # Reuse HIVEMIND core's Tavily-backed web-intel (the SAME engine behind the
+        # hivemind_web_search MCP tool) — provider-independent, survives a Groq outage,
+        # and inherits core's dedup / rate-limit / quota. No bespoke Tavily client here.
         try:
-            async with httpx.AsyncClient(timeout=timeout) as c:
-                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
-            if r.status_code != 200:
-                log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
-                return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
-            j = r.json()
-            uw = j.get("usage") or {}
-            wt = int(uw.get("total_tokens", 0) or 0)
-            self.tokens += wt
-            self.tok_by["web"] = self.tok_by.get("web", 0) + wt
-            self.io["input"] += int(uw.get("prompt_tokens", 0) or 0)
-            self.io["output"] += int(uw.get("completion_tokens", 0) or 0)
-            self.io["cached"] += int(((uw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
-            msg = j["choices"][0]["message"]
-            answer = str(msg.get("content") or "")[:keep]
-            # ROBUST fallback: the deep compound sometimes does all the tool work but returns an EMPTY
-            # final summary → the room would have nothing real to ground on (and the synth invents).
-            # If the content is empty/thin, retry once with gpt-oss browser_search, which reliably
-            # returns its result inline. A director web call must NEVER come back empty.
-            if len(answer.strip()) < 80:
-                fb = await self._browser_search_fallback(content, key)
-                if len(fb.strip()) >= 80:
-                    answer = fb[:keep]
-                    log.info("[hyper-engine] web: compound empty → browser_search fallback (%d chars)", len(answer))
-            sources: List[Dict[str, str]] = []
-            for et in (msg.get("executed_tools") or []):
-                sr = et.get("search_results")
-                # compound returns either a list, or a dict like {"results": [...]}.
-                if isinstance(sr, dict):
-                    sr = sr.get("results") or sr.get("search_results") or []
-                if not isinstance(sr, list):
-                    sr = []
-                for s in sr[:5]:
-                    if isinstance(s, dict) and s.get("url"):
-                        sources.append({"title": str(s.get("title") or "")[:120], "url": str(s.get("url"))})
-            # Tag web facts as EXTERNAL + entity-unverified: a public search can return a DIFFERENT
-            # same-named entity (the 'Oekosystem' contamination). The synth critic reconciles this
-            # against the internal board; the explicit tag keeps a web hit from masquerading as a
-            # fact about THIS company's own identity. General, no extra call.
-            self.blackboard.append(
-                f"- WEB[{query[:60]}] (EXTERNAL/public, entity UNVERIFIED — may describe a different "
-                f"same-named entity; do NOT treat as a fact about THIS company unless it matches the "
-                f"internal facts): {answer[:keep]}")
-            self.gather_count += 1
-            await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
-                             "sources": sources[:5], "summary": answer[:400]})
-            return json.dumps({"answer": answer, "sources": sources[:5]})
+            res = await web_search_emulated(query, user_id=self.user_id, org_id=self.org_id,
+                                            limit=8 if prospect else 5,
+                                            timeout_s=120.0 if prospect else 45.0)
         except Exception as exc:  # noqa: BLE001
             log.warning("[hyper-engine] web_search failed: %s", exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
+        if res.get("error"):
+            log.warning("[hyper-engine] web_search: %s", res.get("error"))
+            return json.dumps({"error": str(res.get("error"))[:200], "is_error": True})
+        results = res.get("results") or []
+        sources: List[Dict[str, str]] = [
+            {"title": str(x.get("title") or "")[:120], "url": str(x.get("url") or "")}
+            for x in results[:5] if x.get("url")
+        ]
+        parts: List[str] = []
+        for x in results[:(8 if prospect else 5)]:
+            snip = str(x.get("snippet") or x.get("content") or x.get("raw_content") or "")[:500]
+            parts.append(f"- {str(x.get('title') or '')[:120]} | {x.get('url') or ''}\n  {snip}")
+        answer = "\n".join(parts)[:keep]
+        if prospect and answer:
+            # Strict verbatim-or-NOT-VERIFIED contract for prospecting (no invented info@domain).
+            answer = ("CONTACTS — quote an email/phone ONLY if it literally appears in a result snippet "
+                      "below; cite the source URL; else write NOT VERIFIED. Never invent an address.\n") + answer
+        if len(answer.strip()) < 20:
+            await self.emit({"t": "web_intel", "query": query[:200], "count": 0, "sources": [], "summary": "no results"})
+            return json.dumps({"answer": "No web results found.", "sources": []})
+        # Tag web facts EXTERNAL + entity-unverified (a public search can return a DIFFERENT
+        # same-named entity) — the synth critic reconciles this against the internal board.
+        self.blackboard.append(
+            f"- WEB[{query[:60]}] (EXTERNAL/public, entity UNVERIFIED — may describe a different "
+            f"same-named entity; do NOT treat as a fact about THIS company unless it matches the "
+            f"internal facts): {answer[:keep]}")
+        self.gather_count += 1
+        await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
+                         "sources": sources[:5], "summary": answer[:400]})
+        return json.dumps({"answer": answer, "sources": sources[:5]})
 
     # ── debate (the room) ─────────────────────────────────────────────
     async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int,

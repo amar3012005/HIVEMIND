@@ -10,6 +10,9 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
+// mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
+import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
+import { mnemeSearch as amrSearch } from './mneme/mneme-recall.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
@@ -281,6 +284,30 @@ export class QdrantClient {
         throw new Error(`Qdrant upsert failed: ${JSON.stringify(error)}`);
       }
 
+      // mneme dual-write (best-effort): mirror this point into the org's .amr shard so reads can
+      // be served from mneme for enabled orgs. Qdrant above remains the source of truth.
+      if (mnemeOn(memory.org_id)) {
+        mirrorStore(collectionName, point).catch(() => {});
+      }
+
+      // Path B: for the .amr-sole-store org, write the FULL record + vector into the adapter so
+      // reads served from .amr carry the embedding + Prisma-shaped fields. Flag-gated; inert otherwise.
+      if (process.env.MNEME_PRISMA_ORG === memory.org_id && globalThis.__mnemeInit) {
+        try {
+          const _rec = {
+            id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+            content: memory.content, title: memory.title || null, tags: memory.tags || [],
+            memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
+            layer: options.layer || memory.layer || 'memory', deletedAt: null,
+            cognitiveLayerRole: memory.cognitive_layer_role || null,
+            confidence: memory.importance_score ?? memory.strength ?? null,
+            createdAt: memory.created_at || new Date().toISOString(),
+            project: memory.project || null, projectIds: memory.project_ids || [], primaryTeamId: memory.primary_team_id || null, scope: memory.scope || null, visibility: memory.visibility || null, validFrom: memory.valid_from || null, documentDate: memory.document_date || null, metadata: memory.metadata || {},
+          };
+          await globalThis.__mnemeInit.storeMemoryUnified(_rec, point.vector);
+        } catch (e) { console.warn('[mneme] unified write failed:', e.message); }
+      }
+
       return memory.id;
     } catch (error) {
       console.error('Failed to store memory in Qdrant:', error.message);
@@ -323,6 +350,18 @@ export class QdrantClient {
     if (effectiveLayer && filter && Array.isArray(filter.must) && !filter.must.some((c) => c?.key === 'layer')) {
       filter = { ...filter, must: [...filter.must, { key: 'layer', match: { value: effectiveLayer } }] };
     }
+    // Belt-and-braces with the layer filter: `promoted-from-segment` rows are raw
+    // document sections promoted verbatim. They SHOULD be the evidence layer, but
+    // legacy/untagged ones default to layer:'memory' and leak into recall as raw
+    // multi-hundred-char dumps. Exclude the tag from auto-routed MEMORY recall so
+    // recall returns distilled facts only. Mirrors the mneme backend exclusion
+    // (mneme-backend.js:250). Explicit-collection callers (evidence retrieval) untouched.
+    if (autoResolved && filter) {
+      const mn = Array.isArray(filter.must_not) ? filter.must_not : [];
+      if (!mn.some((c) => c?.key === 'tags' && c?.match?.value === 'promoted-from-segment')) {
+        filter = { ...filter, must_not: [...mn, { key: 'tags', match: { value: 'promoted-from-segment' } }] };
+      }
+    }
     const collectionReady = await this.ensureCollection(resolvedCollection);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
@@ -343,6 +382,31 @@ export class QdrantClient {
     const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
       ? 0
       : score_threshold;
+
+    // mneme read path: for enabled orgs, serve recall from the org's .amr shard with the SAME
+    // score threshold + is_latest filter Qdrant would apply. Returns null on empty/error -> we
+    // transparently fall through to Qdrant below.
+    const _mnemeOrg = filterMatchValue(filter, 'org_id');
+    // Path B: sole-store org -> serve recall from the adapter's ALREADY-OPEN .amr shard (shared
+    // handle, no second flock). Returns memory-layer hits mapped to Qdrant shape.
+    if (process.env.MNEME_PRISMA_ORG === _mnemeOrg && globalThis.__mnemeInit && globalThis.__mnemeInit.store) {
+      try {
+        const _out = amrSearch(globalThis.__mnemeInit.store, searchVector, filter, limit, effectiveScoreThreshold);
+        console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
+        return _out;
+      } catch (e) { console.warn('[mneme] adapter recall failed, fallback to qdrant:', e.message); }
+    }
+    if (mnemeOn(_mnemeOrg)) {
+      const mres = await mnemeSearch(resolvedCollection, searchVector, limit, {
+        isLatest: true,
+        scoreThreshold: effectiveScoreThreshold
+      });
+      if (mres) {
+        console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
+        return mres;
+      }
+      console.log(`[mneme] recall fallback=qdrant org=${_mnemeOrg} coll=${resolvedCollection}`);
+    }
 
     const searchRequest = {
       vector: searchVector,
@@ -534,6 +598,9 @@ export class QdrantClient {
         }
       );
 
+      // mirror the delete into any enabled-org .amr shard that holds this memory (best-effort).
+      mirrorDelete(memoryId).catch(() => {});
+
       return response.ok;
     } catch (error) {
       console.error('Failed to delete memory:', error.message);
@@ -600,6 +667,14 @@ export class QdrantClient {
       if (!response.ok) {
         const error = await response.json();
         throw new Error(`Batch upsert failed: ${JSON.stringify(error)}`);
+      }
+
+      // mneme dual-write (best-effort): mirror each enabled-org point into its .amr shard. Uses
+      // org_<id> (enterprise per-tenant collection) to match the recall read key. Qdrant above
+      // is the source of truth, so any skipped mirror is safe.
+      for (const p of points) {
+        const oid = p.payload?.org_id;
+        if (mnemeOn(oid)) mirrorStore(`org_${oid}`, p).catch(() => {});
       }
 
       return memories.map(m => m.id);

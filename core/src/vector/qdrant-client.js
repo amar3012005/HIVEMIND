@@ -391,7 +391,7 @@ export class QdrantClient {
     // handle, no second flock). Returns memory-layer hits mapped to Qdrant shape.
     if (isMnemeOrg(_mnemeOrg)) {
       try {
-        const _out = amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
+        const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
         if (_out) {
         console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
         return _out;

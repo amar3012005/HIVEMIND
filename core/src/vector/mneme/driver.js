@@ -13,6 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
+import { remoteRecall, remoteWrite, remoteAddEdge } from './remote-backend.js';
 
 const SIDECAR_MODELS = [
   'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
@@ -124,7 +125,8 @@ function allActiveAdapters() {
 // .amr is an ADDITIVE vector+graph index (it replaces Qdrant, not Postgres). 'sole' is the residency/
 // research mode where .amr is the ONLY store (PG=0) — used for BYOD where PG is the customer's box.
 export function mnemeMode() {
-  return (process.env.MNEME_MODE || 'dual').trim().toLowerCase() === 'sole' ? 'sole' : 'dual';
+  const m = (process.env.MNEME_MODE || 'dual').trim().toLowerCase();
+  return m === 'sole' || m === 'remote' ? m : 'dual';
 }
 
 // ---- the seam the factories call -------------------------------------------
@@ -144,6 +146,7 @@ export function wrapPrisma(realPrisma) {
 // already has the row; this keeps the .amr graph in sync for graph-recall). No-op if no .amr org.
 export function amrAddEdge(rel) {
   if (!anyMnemeOrg() || !rel?.fromId || !rel?.toId) return;
+  if (mnemeMode() === 'remote') { if (rel.orgId) remoteAddEdge(rel.orgId, rel); return; }
   for (const a of allActiveAdapters()) {
     if (a?.memory?.byId?.has(rel.fromId)) {
       try {
@@ -156,6 +159,7 @@ export function amrAddEdge(rel) {
 
 // vector recall for an .amr org from its shared open shard (or null → caller uses Qdrant).
 export function amrRecall(orgId, vector, filter, limit, scoreThreshold) {
+  if (mnemeMode() === 'remote') return remoteRecall(orgId, vector, filter, limit, scoreThreshold); // async
   const h = orgStore(orgId);
   if (!h) return null;
   return amrVectorSearch(h.store, vector, filter, limit, scoreThreshold);
@@ -163,6 +167,7 @@ export function amrRecall(orgId, vector, filter, limit, scoreThreshold) {
 
 // unified write (record + vector) for an .amr org (or null → caller uses Qdrant/PG path only).
 export async function amrWrite(orgId, record, vector, rels = []) {
+  if (mnemeMode() === 'remote') return remoteWrite(orgId, record, vector, rels);
   const h = orgStore(orgId);
   if (!h) return null;
   return h.storeMemoryUnified(record, vector, rels);

@@ -956,7 +956,7 @@ export class PrismaGraphStore {
     // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
     // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
     if (mnemeMode() === 'dual') {
-      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0 });
+      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: edge.org_id });
     }
 
     return mapRelationshipRecord(created);

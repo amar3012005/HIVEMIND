@@ -21,6 +21,8 @@ x-common-env: &common-env
   MNEME_ORGS: ${MNEME_ORGS:-}                       # "" none | "<orgId>" | "a,b" | "*" all
   MNEME_DATA_ROOT: ${MNEME_DATA_ROOT:-/app/data/mneme}
   MNEME_BINDING: ${MNEME_BINDING:-/app/src/vector/mneme/singulance-amr.linux-x64-gnu.node}
+  # BYOD: per-org remote agents. Inert until an agent enrolls (file empty). Shared with the broker.
+  MNEME_AGENT_REGISTRY_FILE: ${MNEME_AGENT_REGISTRY_FILE:-/app/data/byod-agents.json}
   # ── model providers (egress) ──
   GROQ_API_KEY: ${GROQ_API_KEY}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
@@ -142,6 +144,25 @@ services:
     restart: unless-stopped
     volumes:
       - docling-models:/opt/app-root/src/.cache
+
+  # BYOD broker: validates a customer's API key → binds their hm-agent to their org by writing the
+  # shared registry the core reads. Outbound enrollment only; reachable at /v1/byod/enroll. Optional —
+  # only needed to OFFER BYOD. Shares the hivemind-data volume so core + broker see one registry file.
+  byod-broker:
+    build: { context: ../byod/broker }
+    image: hivemind/byod-broker:${VERSION:-latest}
+    container_name: hm-byod-broker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public
+      MNEME_AGENT_REGISTRY_FILE: /app/data/byod-agents.json
+      BROKER_PORT: "8790"
+    volumes:
+      - hivemind-data:/app/data
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "${BROKER_PORT:-8790}:8790"
 
 volumes:
   hivemind-data:     # .amr files + uploads — SOLE COPY for .amr orgs; back up

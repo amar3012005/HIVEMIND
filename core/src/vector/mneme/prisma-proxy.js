@@ -49,16 +49,25 @@ const MEMID_SCOPED = new Set([
 ]);
 const MEMID_FIELDS = ['memoryId', 'sourceMemoryId', 'targetMemoryId'];
 
+// scan every arg payload (where/data/create/update; data may be an array) for a memory-id field.
+function argSources(args) {
+  const out = [];
+  for (const k of ['where', 'data', 'create', 'update']) {
+    const v = args?.[k];
+    if (!v) continue;
+    if (Array.isArray(v)) out.push(...v);
+    else out.push(v);
+  }
+  return out;
+}
 function memIdOf(args) {
   if (!args || typeof args !== 'object') return null;
-  const w = args.where || {};
-  const d = Array.isArray(args.data) ? args.data[0] || {} : args.data || {};
-  for (const src of [w, d]) {
+  for (const src of argSources(args)) {
+    if (!src || typeof src !== 'object') continue;
     for (const field of MEMID_FIELDS) {
       if (typeof src[field] === 'string') return src[field];
       if (src[field]?.equals) return src[field].equals;
     }
-    // compound key {memoryId_projectId:{memoryId,...}}
     for (const v of Object.values(src)) if (v && typeof v === 'object' && typeof v.memoryId === 'string') return v.memoryId;
   }
   return null;
@@ -75,12 +84,13 @@ function shouldRoute(modelName, args, amrOrg, adapter) {
     return !!(mid && adapter.memory?.byId?.has(mid));
   }
   // relationship.create/upsert carry fromId/toId (FK to memory) but no orgId — route if an endpoint
-  // belongs to the .amr org's memory set.
+  // belongs to the .amr org's memory set. Scan where/data/create/update.
   if (modelName === 'relationship') {
-    const d = Array.isArray(args?.data) ? args.data[0] || {} : args?.data || {};
-    const w = args?.where || {};
-    const fid = d.fromId || d.toId || w.fromId || w.toId;
-    return !!(fid && adapter.memory?.byId?.has(fid));
+    for (const src of argSources(args)) {
+      const fid = src?.fromId || src?.toId;
+      if (fid && adapter.memory?.byId?.has(fid)) return true;
+    }
+    return false;
   }
   return false; // unresolvable org on an org-scoped model → fail-safe to Postgres
 }

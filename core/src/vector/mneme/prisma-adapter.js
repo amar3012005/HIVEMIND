@@ -4,10 +4,11 @@
 // set that a pluggable `backend` persists to .amr. Backend-agnostic so the model + mutation logic is
 // unit-testable without the native binding; the .amr backend (scan/insert/tombstone) is wired at
 // integration. The routing proxy sends sai's queries here; all other orgs stay on Postgres.
+import { randomUUID } from 'crypto';
 import { findMany, findFirst, findUnique, count, groupBy, aggregate, evalWhere } from './query-engine.js';
 
-let _uid = 0;
-const genId = () => `amr_${Date.now().toString(36)}_${(_uid++).toString(36)}`;
+// UUID ids — the pipeline + Qdrant require valid UUIDs (Qdrant rejects non-UUID point ids).
+const genId = () => randomUUID();
 
 // One model = a record array + a backend for durable writes. resolveRelation lets relationship
 // queries filter on the related memory (fromMemory:{orgId}).

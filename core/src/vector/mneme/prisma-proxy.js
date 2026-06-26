@@ -10,9 +10,12 @@
 // and the .amr org transparently falls through to Postgres (no error, no loss; the cutover activates
 // the instant the adapter is live).
 
-// memory + relationship route to .amr. knowledgeSegment stays on Postgres until its .amr backend is
-// wired (routing it now would drop KB evidence — the segment backend isn't persisted yet).
-const ROUTED_MODELS = new Set(['memory', 'relationship']);
+// Option B — the WHOLE memory subgraph routes to .amr/sidecar for the .amr org, so it touches
+// Postgres zero times. memory+relationship → .amr shard; the rest → JSON sidecars (no FK enforcement).
+const ROUTED_MODELS = new Set([
+  'memory', 'relationship', 'sourceMetadata', 'memoryVersion',
+  'memoryProject', 'codeMemoryMetadata', 'knowledgeDocument', 'knowledgeSegment',
+]);
 
 // extract the org_id an operation is scoped to, from where (incl. relation filters) or data.
 function orgOf(args) {
@@ -36,9 +39,36 @@ function orgOf(args) {
   return fromWhere(args.where) || (typeof args.data?.orgId === 'string' ? args.data.orgId : null);
 }
 
-// Wrap one model. Per call: if the op is scoped to the .amr org AND the adapter is live AND it
-// implements the method → route to it; otherwise real Prisma. resolveAdapter() is called per-call
-// (lazy) so a not-yet-loaded adapter just means "fall through to Postgres" for now.
+// memoryId-scoped FK children (no orgId in their queries) — route by whether the memoryId belongs
+// to the .amr org (present in the adapter's memory set). org-scoped models route by orgOf.
+const MEMID_SCOPED = new Set(['sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata']);
+
+function memIdOf(args) {
+  if (!args || typeof args !== 'object') return null;
+  const w = args.where || {};
+  const d = Array.isArray(args.data) ? args.data[0] : args.data || {};
+  for (const src of [w, d]) {
+    if (typeof src.memoryId === 'string') return src.memoryId;
+    if (src.memoryId?.equals) return src.memoryId.equals;
+    // compound key {memoryId_projectId:{memoryId,...}}
+    for (const v of Object.values(src)) if (v && typeof v === 'object' && typeof v.memoryId === 'string') return v.memoryId;
+  }
+  return null;
+}
+
+// Decide if an op on `modelName` belongs to the .amr org. org-scoped → orgOf; FK-child → the
+// memoryId must be in the adapter's memory set (so other orgs' children never touch this adapter).
+function shouldRoute(modelName, args, amrOrg, adapter) {
+  if (!adapter) return false;
+  const org = orgOf(args);
+  if (org) return org === amrOrg;
+  if (MEMID_SCOPED.has(modelName)) {
+    const mid = memIdOf(args);
+    return !!(mid && adapter.memory?.byId?.has(mid));
+  }
+  return false; // unresolvable org on an org-scoped model → fail-safe to Postgres
+}
+
 function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {
   const methodCache = new Map();
   return new Proxy(realModel, {
@@ -47,8 +77,9 @@ function wrapModel(realModel, modelName, amrOrg, resolveAdapter) {
       if (typeof real !== 'function') return real;
       if (!methodCache.has(method)) {
         methodCache.set(method, (args) => {
-          if (orgOf(args) === amrOrg) {
-            const am = resolveAdapter()?.[modelName];
+          const adapter = resolveAdapter();
+          if (adapter && shouldRoute(modelName, args, amrOrg, adapter)) {
+            const am = adapter[modelName];
             if (am && typeof am[method] === 'function') return am[method](args);
           }
           return real.call(target, args);

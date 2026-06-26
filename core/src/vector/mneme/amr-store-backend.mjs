@@ -4,7 +4,29 @@
 // edge round-tripping for relationships. The vector never enters the stored JSON (it's the slot's
 // own vector); _vector is the transient input field.
 import { createRequire } from 'module';
+import fs from 'fs';
 const require = createRequire(import.meta.url);
+
+// Generic persisted record store for the non-vector subgraph models (sourceMetadata, memoryVersion,
+// memoryProject, codeMemoryMetadata, knowledgeDocument/Segment). One JSON file per model in the org's
+// .amr dir. loadAll returns the SAME array the model mutates, so create/update/delete just re-persist.
+// No FK enforcement (that's the whole point of Option B — the relational hub can leave Postgres).
+export class SidecarBackend {
+  constructor(file) {
+    this.file = file;
+    this._records = this._load();
+  }
+  _load() {
+    try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return []; }
+  }
+  loadAll() { return this._records; }
+  insert() { this._save(); }
+  update() { this._save(); }
+  remove() { this._save(); }
+  _save() {
+    try { fs.writeFileSync(this.file, JSON.stringify(this._records)); } catch { /* best-effort */ }
+  }
+}
 
 const LAYER_ID = { memory: 0, evidence: 1, cognitive: 2 };
 const LAYER_NAME = ['memory', 'evidence', 'cognitive'];

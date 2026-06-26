@@ -1,36 +1,44 @@
-// Path B integration glue — wires the whole .amr-as-sole-store chain for ONE org and returns a
-// drop-in Prisma client. The pipeline calls initMnemeStore() once at boot for the .amr org, swaps
-// its prisma for the returned proxy, and writes memories through storeMemoryUnified() so the record
-// + vector + edges land together in .amr (solving the dual-write consistency: in hybrid mode a
-// memory's row goes to Postgres and its vector to Qdrant via two calls — here it's one .amr write).
+// Path B integration glue — wires the WHOLE memory subgraph for one org so it touches Postgres zero
+// times. memory + relationship live in the .amr shard (records+vectors+edges); the FK-child tables
+// (sourceMetadata, memoryVersion, memoryProject, codeMemoryMetadata) + knowledgeDocument/Segment live
+// in per-model JSON sidecars alongside the shard. No FK enforcement = the relational hub can leave
+// Postgres. Returns a drop-in Prisma proxy routing all of these per-org.
 //
-// backend = { MnemeStore, MnemeMemoryBackend, MnemeRelationshipBackend } (the native binding +
-// amr-store-backend), injected so this module stays unit-testable without the .node on the test host.
+// backend = { openStore, MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend } (native
+// binding + amr-store-backend), injected so this module stays testable without the .node.
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 
+// memory's FK children + KB doc tables → sidecar records (no vectors needed for their queries).
+const SIDECAR_MODELS = ['sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata', 'knowledgeDocument', 'knowledgeSegment'];
+
 export function initMnemeStore({ realPrisma, orgId, dim = 1024, dataRoot, backend }) {
+  const dir = `${dataRoot}/org_${orgId}`;
   const store = backend.openStore(dataRoot, `org_${orgId}`, dim);
   const memBackend = new backend.MnemeMemoryBackend(store, dim);
   const relBackend = new backend.MnemeRelationshipBackend(store, memBackend);
 
-  // hydrate every record + edge from .amr (the relational state)
   const memories = memBackend.loadAll();
   const relationships = relBackend.loadAll();
 
-  const adapter = makeMnemeAdapter({
-    memories,
-    relationships,
-    segments: memories.filter((m) => m.layer === 'evidence'),
-    backends: { memory: memBackend, relationship: relBackend },
-  });
+  // sidecar-backed subgraph models
+  const backends = { memory: memBackend, relationship: relBackend };
+  const extra = {};
+  let segments = [];
+  for (const name of SIDECAR_MODELS) {
+    const sb = new backend.SidecarBackend(`${dir}/_${name}.json`);
+    backends[name] = sb;
+    if (name === 'knowledgeSegment') segments = sb.loadAll();
+    else extra[name] = sb.loadAll();
+  }
 
+  const adapter = makeMnemeAdapter({ memories, relationships, segments, extra, backends });
   const prisma = makeMnemePrisma(realPrisma, { amrOrg: orgId, adapter });
 
-  // Single unified write: the memory record + its embedding + its relationships → one .amr write.
-  // Called where the pipeline currently does prisma.memory.create + qdrant.storeMemory together.
+  // Single unified write: memory record + embedding + relationships → one .amr write. Called where
+  // the pipeline currently does qdrant.storeMemory (it has both the record and the vector).
   async function storeMemoryUnified(record, vector, rels = []) {
-    if (record.orgId !== orgId) return null; // only the .amr org goes here
+    if (record.orgId !== orgId) return null;
     await adapter.memory.upsert({
       where: { id: record.id },
       create: { ...record, _vector: Array.from(vector || []) },
@@ -40,5 +48,8 @@ export function initMnemeStore({ realPrisma, orgId, dim = 1024, dataRoot, backen
     return record.id;
   }
 
-  return { prisma, adapter, store, storeMemoryUnified, counts: { memories: memories.length, relationships: relationships.length } };
+  return {
+    prisma, adapter, store, storeMemoryUnified,
+    counts: { memories: memories.length, relationships: relationships.length, segments: segments.length },
+  };
 }

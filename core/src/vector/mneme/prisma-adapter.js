@@ -85,12 +85,26 @@ class MnemeModel {
     }
     return { count: rows.length };
   }
+  // resolve a record from a Prisma where that may use id, a @unique field (e.g. memoryId), or a
+  // compound @@id (e.g. {memoryId_projectId:{memoryId,projectId}}). Flattens compound keys.
+  _matchWhere(where = {}) {
+    if (where.id != null) return this.byId.get(where.id) || null;
+    let flat = where;
+    for (const v of Object.values(where)) {
+      if (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date) && !('equals' in v || 'in' in v || 'gt' in v || 'contains' in v)) {
+        flat = { ...where, ...v }; // compound key object → flatten its fields
+        delete flat[Object.keys(where).find((k) => where[k] === v)];
+        break;
+      }
+    }
+    return this.records.find((r) => evalWhere(r, flat, this._resolve)) || null;
+  }
   async upsert(args = {}) {
-    const existing = this.byId.get(args.where?.id);
-    return existing ? this.update({ where: args.where, data: args.update }) : this.create({ data: { ...args.where, ...args.create } });
+    const existing = this._matchWhere(args.where);
+    return existing ? this.update({ where: { id: existing.id }, data: args.update }) : this.create({ data: { ...args.where, ...args.create } });
   }
   async delete(args = {}) {
-    const rec = this.byId.get(args.where?.id);
+    const rec = this._matchWhere(args.where);
     if (!rec) throw new Error('mneme: delete target not found');
     this._remove(rec);
     return rec;
@@ -131,7 +145,7 @@ function applyData(rec, data) {
 // Build the adapter for one org's .amr store. memories/relationships/segments are the loaded record
 // sets; backends persist mutations. The relationship model resolves fromMemory/toMemory against the
 // memory set so `where: { fromMemory: { orgId } }` works exactly like Prisma's relation filter.
-export function makeMnemeAdapter({ memories = [], relationships = [], segments = [], backends = {} } = {}) {
+export function makeMnemeAdapter({ memories = [], relationships = [], segments = [], extra = {}, backends = {} } = {}) {
   const memModel = new MnemeModel({ records: memories, backend: backends.memory });
   const memById = memModel.byId;
   const relModel = new MnemeModel({
@@ -140,5 +154,16 @@ export function makeMnemeAdapter({ memories = [], relationships = [], segments =
     relations: { fromMemory: (rel) => memById.get(rel.fromId), toMemory: (rel) => memById.get(rel.toId) },
   });
   const segModel = new MnemeModel({ records: segments, backend: backends.knowledgeSegment });
-  return { memory: memModel, relationship: relModel, knowledgeSegment: segModel };
+  const adapter = { memory: memModel, relationship: relModel, knowledgeSegment: segModel };
+  // Option B subgraph: memory's FK children (sourceMetadata, memoryVersion, memoryProject,
+  // codeMemoryMetadata) + knowledgeDocument — sidecar-backed records so sai touches Postgres zero
+  // times. Each gets a `memory` relation resolver for relation filters that reference the parent.
+  for (const [name, recs] of Object.entries(extra)) {
+    adapter[name] = new MnemeModel({
+      records: recs,
+      backend: backends[name],
+      relations: { memory: (r) => memById.get(r.memoryId) },
+    });
+  }
+  return adapter;
 }

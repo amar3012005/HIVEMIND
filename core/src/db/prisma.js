@@ -56,10 +56,10 @@ async function ensureMnemeAdapter() {
   _mnemeInitStarted = true;
   try {
     const { initMnemeStore } = await import('../vector/mneme/mneme-init.js');
-    const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend } = await import('../vector/mneme/amr-store-backend.mjs');
+    const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend } = await import('../vector/mneme/amr-store-backend.mjs');
     const bindingPath = process.env.MNEME_BINDING || new URL('../vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url).pathname;
     const bind = loadBinding(bindingPath);
-    const backend = { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend };
+    const backend = { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend };
     const init = initMnemeStore({
       realPrisma: buildRealClient(),
       orgId: process.env.MNEME_PRISMA_ORG,
@@ -82,13 +82,16 @@ export function getPrismaClient() {
   }
   const real = buildRealClient();
   if (!process.env.MNEME_PRISMA_ORG) return real;
-  // .amr org set → memory stays in Postgres (relational hub: source_metadata, memory_project,
-  // embeddings all FK to it — moving it out breaks them). We DON'T route prisma writes to .amr.
-  // Instead we just open the org's .amr shard (sets globalThis.__mnemeInit) so the unified write
-  // mirrors records+vectors into it and recall serves from it. Postgres = relational store of
-  // truth + correct counts; .amr = the vector/graph/recall engine. Return the real client.
-  ensureMnemeAdapter(); // fire-and-forget; opens the shard for mirror-write + recall
-  return real;
+  // Option B — true PG=0 for the .amr org. getPrismaClient returns ONE stable proxy that routes the
+  // WHOLE memory subgraph (memory/relationship → .amr shard; sourceMetadata/memoryVersion/
+  // memoryProject/codeMemoryMetadata/knowledgeDocument/Segment → JSON sidecars) per-call by orgId.
+  // No FK enforcement off-Postgres = the relational hub leaves PG cleanly. Adapter loads async; until
+  // live the org falls through to Postgres (no error). Every other org → real client, untouched.
+  if (!_mnemeProxy) {
+    ensureMnemeAdapter(); // fire-and-forget; non-blocking
+    _mnemeProxy = makeMnemePrisma(real, { amrOrg: process.env.MNEME_PRISMA_ORG, getAdapter: () => _mnemeAdapter });
+  }
+  return _mnemeProxy;
 }
 
 // kept for back-compat with any external caller; no longer used by the boot path.

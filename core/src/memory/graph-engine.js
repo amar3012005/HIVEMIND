@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { isMnemeOrg, mnemeMode } from '../vector/mneme/driver.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -500,6 +501,13 @@ export class MemoryGraphEngine {
   }
 
   async ingestMemory(input) {
+    // Full data residency: run the whole ingest inside this org's context so every nested
+    // getPrismaClient() resolves to the org's store (customer Postgres for a self-host org). Re-entrancy
+    // guard: enter the context once, then proceed. Undefined org → central (managed), unchanged.
+    const _org = input?.org_id;
+    if (_org && currentOrg() !== _org) {
+      return runWithOrg(_org, () => this.ingestMemory(input));
+    }
     // Canonical gateway: if a router is attached AND the caller hasn't
     // pre-routed (no `_smart_routed` flag) AND the caller hasn't explicitly
     // opted out (smartIngest: false), route through SmartIngestRouter so

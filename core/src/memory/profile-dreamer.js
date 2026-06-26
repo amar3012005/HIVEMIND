@@ -23,6 +23,7 @@
  */
 
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 
 const PROFILE_DREAM_ENABLED = process.env.PROFILE_DREAM_ENABLED === 'true';
 const PROFILE_DREAM_APPLY   = process.env.PROFILE_DREAM_APPLY === 'true';
@@ -65,6 +66,7 @@ export class ProfileDreamer {
    * @param {{ apply?: boolean }} [opts]
    */
   async dreamProfilesForOrg(orgId, opts = {}) {
+    if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.dreamProfilesForOrg(orgId, opts)); // residency: org's store
     if (!PROFILE_DREAM_ENABLED) return { skipped: true, reason: 'PROFILE_DREAM_ENABLED!=true' };
     if (!this.prisma) return { skipped: true, reason: 'no prisma' };
     const apply = opts.apply === true && PROFILE_DREAM_APPLY;

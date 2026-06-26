@@ -1,6 +1,7 @@
 import { computeTokenSimilarity, tokenCountMap, cosineFromCounts } from './conflict-detector.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
@@ -785,7 +786,13 @@ function traversal(startId, relationships, depth = 2, types = ['Derives', 'Exten
   return nodes;
 }
 
-export async function queryPersistedMemories(store, { pattern, user_id, org_id, project, ...params }) {
+export async function queryPersistedMemories(store, opts) {
+  // Residency: run in the org's context so hydrate/listMemories hit the org's store (customer PG for
+  // a self-host org). Re-entrancy guard; undefined org → central (managed), unchanged.
+  if (opts?.org_id && currentOrg() !== opts.org_id) return runWithOrg(opts.org_id, () => queryPersistedMemories(store, opts));
+  return _queryPersistedMemoriesImpl(store, opts);
+}
+async function _queryPersistedMemoriesImpl(store, { pattern, user_id, org_id, project, ...params }) {
   const { memories } = await store.listMemories({
     user_id,
     org_id,
@@ -1195,7 +1202,13 @@ export function buildRecallSpine(flatMemories, synthesized) {
   }
 }
 
-export async function recallPersistedMemories(store, {
+export async function recallPersistedMemories(store, opts) {
+  // Residency: run the whole recall (incl. PG hydrate) in the org's context → customer PG for a
+  // self-host org. Re-entrancy guard; undefined org → central (managed), unchanged.
+  if (opts?.org_id && currentOrg() !== opts.org_id) return runWithOrg(opts.org_id, () => recallPersistedMemories(store, opts));
+  return _recallPersistedMemoriesImpl(store, opts);
+}
+async function _recallPersistedMemoriesImpl(store, {
   query_context,
   user_id,
   org_id,

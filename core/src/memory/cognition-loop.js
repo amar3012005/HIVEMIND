@@ -25,6 +25,7 @@
  */
 
 import crypto from 'crypto';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
@@ -511,7 +512,9 @@ export class CognitionLoop {
     }
   }
 
-  async runOnce(orgId, { skipCompaction = false, lookbackHours, trigger = 'manual', triggeredBy = null } = {}) {
+  async runOnce(orgId, opts = {}) {
+    if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.runOnce(orgId, opts)); // residency
+    const { skipCompaction = false, lookbackHours, trigger = 'manual', triggeredBy = null } = opts;
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
     }
@@ -632,6 +635,7 @@ export class CognitionLoop {
   // superseded rows keep their Postgres row for lineage, vector only is purged.
   // @param {{ apply?: boolean }} [opts] apply=false → dry-run count, no mutation.
   async dreamRetentionForOrg(orgId, opts = {}) {
+    if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.dreamRetentionForOrg(orgId, opts)); // residency
     if (!this.prisma?.memory) return { skipped: 'no_prisma' };
     const apply = opts.apply !== false;
     const grace = new Date(Date.now() - RETENTION_GRACE_DAYS * 24 * 3600 * 1000);

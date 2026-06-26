@@ -74,6 +74,14 @@ function shouldRoute(modelName, args, amrOrg, adapter) {
     const mid = memIdOf(args);
     return !!(mid && adapter.memory?.byId?.has(mid));
   }
+  // relationship.create/upsert carry fromId/toId (FK to memory) but no orgId — route if an endpoint
+  // belongs to the .amr org's memory set.
+  if (modelName === 'relationship') {
+    const d = Array.isArray(args?.data) ? args.data[0] || {} : args?.data || {};
+    const w = args?.where || {};
+    const fid = d.fromId || d.toId || w.fromId || w.toId;
+    return !!(fid && adapter.memory?.byId?.has(fid));
+  }
   return false; // unresolvable org on an org-scoped model → fail-safe to Postgres
 }
 

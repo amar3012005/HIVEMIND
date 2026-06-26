@@ -1,6 +1,12 @@
 import { PrismaClient } from '@prisma/client';
+import { makeMnemePrisma } from '../vector/mneme/prisma-proxy.js';
 
-let prisma;
+let prisma; // the real Postgres client (singleton)
+// Path B: per-org .amr routing. When MNEME_PRISMA_ORG is set, getPrismaClient() returns ONE stable
+// proxy that routes that org's memory/relationship to .amr per-call, everything else to Postgres.
+let _mnemeProxy = null;
+let _mnemeAdapter = null; // live .amr adapter (loaded async; null = not ready → falls back to PG)
+let _mnemeInitStarted = false;
 
 /**
  * Append connection pool tuning to DATABASE_URL if not already specified.
@@ -31,11 +37,7 @@ function tunedDatabaseUrl(rawUrl) {
   }
 }
 
-export function getPrismaClient() {
-  if (!process.env.DATABASE_URL) {
-    return null;
-  }
-
+function buildRealClient() {
   if (!prisma) {
     const tunedUrl = tunedDatabaseUrl(process.env.DATABASE_URL);
     prisma = new PrismaClient({
@@ -44,9 +46,53 @@ export function getPrismaClient() {
     });
     installTenantIsolationMiddleware(prisma);
   }
-
   return prisma;
 }
+
+// Load the .amr adapter for MNEME_PRISMA_ORG once, async (the native binding + shard hydrate). Until
+// it resolves, the proxy's getAdapter() returns null and the .amr org transparently uses Postgres.
+async function ensureMnemeAdapter() {
+  if (_mnemeAdapter || _mnemeInitStarted) return;
+  _mnemeInitStarted = true;
+  try {
+    const { initMnemeStore } = await import('../vector/mneme/mneme-init.js');
+    const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend } = await import('../vector/mneme/amr-store-backend.mjs');
+    const bindingPath = process.env.MNEME_BINDING || new URL('../vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url).pathname;
+    const bind = loadBinding(bindingPath);
+    const backend = { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend };
+    const init = initMnemeStore({
+      realPrisma: buildRealClient(),
+      orgId: process.env.MNEME_PRISMA_ORG,
+      dim: Number(process.env.EMBEDDING_DIMENSION || 1024),
+      dataRoot: process.env.MNEME_DATA_ROOT || '/app/data/mneme',
+      backend,
+    });
+    _mnemeAdapter = init.adapter;
+    globalThis.__mnemeInit = init;
+    console.log('[mneme] adapter LIVE org=' + process.env.MNEME_PRISMA_ORG, JSON.stringify(init.counts));
+  } catch (e) {
+    _mnemeInitStarted = false; // allow retry on next call
+    console.warn('[mneme] adapter init failed, org stays on Postgres:', e.message);
+  }
+}
+
+export function getPrismaClient() {
+  if (!process.env.DATABASE_URL) {
+    return null;
+  }
+  const real = buildRealClient();
+  if (!process.env.MNEME_PRISMA_ORG) return real;
+  // .amr org set → memory stays in Postgres (relational hub: source_metadata, memory_project,
+  // embeddings all FK to it — moving it out breaks them). We DON'T route prisma writes to .amr.
+  // Instead we just open the org's .amr shard (sets globalThis.__mnemeInit) so the unified write
+  // mirrors records+vectors into it and recall serves from it. Postgres = relational store of
+  // truth + correct counts; .amr = the vector/graph/recall engine. Return the real client.
+  ensureMnemeAdapter(); // fire-and-forget; opens the shard for mirror-write + recall
+  return real;
+}
+
+// kept for back-compat with any external caller; no longer used by the boot path.
+export function setMnemeProxy(p) { _mnemeProxy = p; }
 
 /**
  * Phase 1 tenant-isolation middleware.

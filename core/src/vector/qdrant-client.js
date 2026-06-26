@@ -13,7 +13,12 @@ import { getQdrantCollections } from './collections.js';
 // mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
 import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
 import { amrRecall, amrWrite, isMnemeOrg } from './mneme/driver.js';
+import { qdrantUrlFor } from './mneme/remote-backend.js';
+import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
+
+// Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
+const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -108,11 +113,11 @@ export class QdrantClient {
 
     try {
       const resolvedCollectionName = resolveCollectionName(collectionName);
-      const response = await fetch(`${QDRANT_URL}/collections/${resolvedCollectionName}`, { headers });
+      const response = await fetch(`${qbase()}/collections/${resolvedCollectionName}`, { headers });
       // getQdrantCollections takes positional args (url, apiKey, region) —
       // passing an object made `url` itself an object, blowing up later
       // with `url.startsWith is not a function`.
-      const collections = getQdrantCollections(QDRANT_URL, API_KEY);
+      const collections = getQdrantCollections(qbase(), API_KEY);
 
       if (response.ok) {
         await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
@@ -268,7 +273,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${collectionName}/points`,
+        `${qbase()}/collections/${collectionName}/points`,
         {
           method: 'PUT',
           headers,
@@ -439,7 +444,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${resolvedCollection}/points/search`,
+        `${qbase()}/collections/${resolvedCollection}/points/search`,
         {
           method: 'POST',
           headers,
@@ -555,7 +560,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points/${memoryId}`,
+        `${qbase()}/collections/${this.collectionName}/points/${memoryId}`,
         {
           headers,
           body: JSON.stringify({ with_payload: true, with_vector: false })
@@ -589,7 +594,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points/delete`,
+        `${qbase()}/collections/${this.collectionName}/points/delete`,
         {
           method: 'POST',
           headers,
@@ -655,7 +660,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points`,
+        `${qbase()}/collections/${this.collectionName}/points`,
         {
           method: 'PUT',
           headers,
@@ -708,7 +713,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}`,
+        `${qbase()}/collections/${this.collectionName}`,
         { headers }
       );
 
@@ -757,10 +762,10 @@ export class QdrantClient {
   async testConnection() {
     try {
       console.log('🔍 Testing Qdrant connection...');
-      const response = await fetch(`${QDRANT_URL}/`, { headers });
+      const response = await fetch(`${qbase()}/`, { headers });
       if (response.ok) {
         console.log('✅ Qdrant connection successful');
-        console.log(`   URL: ${QDRANT_URL}, Collection: ${this.collectionName}`);
+        console.log(`   URL: ${qbase()}, Collection: ${this.collectionName}`);
         return true;
       } else {
         console.error('❌ Qdrant responded with status:', response.status);

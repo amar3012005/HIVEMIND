@@ -13,14 +13,15 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, isRemoteReady } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, hasRemoteAgent } from './remote-backend.js';
 
-// A BYOD org is one with a registered hm-agent (data plane on the customer's box) — decided PER ORG,
-// so remote BYOD orgs and central dual/sole orgs coexist on one core. Cheap no-op unless a registry
-// is configured (MNEME_AGENT_REGISTRY_FILE / MNEME_AGENT_URLS).
+// A REMOTE (.amr-on-customer-box) org has an hm-agent HTTP endpoint that serves recall — decided PER
+// ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
+// agent) are NOT remote — core connects to their stores directly (per-org DATABASE_URL/QDRANT_URL).
+// Cheap no-op unless a registry is configured (MNEME_AGENT_REGISTRY_FILE / MNEME_AGENT_URLS).
 const _remoteConfigured = !!(process.env.MNEME_AGENT_REGISTRY_FILE || process.env.MNEME_AGENT_URLS);
 export function orgIsRemote(orgId) {
-  return _remoteConfigured && !!orgId && isRemoteReady(orgId);
+  return _remoteConfigured && !!orgId && hasRemoteAgent(orgId);
 }
 
 const SIDECAR_MODELS = [

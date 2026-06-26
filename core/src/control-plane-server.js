@@ -1341,6 +1341,43 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // ─── Self-host (BYOD) enrollment ─────────────────────────────
+  // A self-hosted DATA box validates its API key here → learns its org; then registers its tunnel
+  // endpoints (Postgres + Qdrant). We record them in the shared registry file the core reads, so core
+  // routes that org's memory data to the customer's box. Global user/org info stays in central PG.
+  if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register') && req.method === 'POST') {
+    const body = await parseBody(req).catch(() => null);
+    const apiKey = (body?.apiKey || '').toString();
+    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    const orgId = rec.orgId;
+    if (pathname === '/v1/selfhost/enroll') {
+      return jsonResponse(res, { ok: true, orgId });
+    }
+    // register: record the customer's tunnel endpoints into the shared registry file
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE;
+    if (!regFile) return jsonResponse(res, { error: 'self-host not enabled (no registry file)' }, 503);
+    if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl) return jsonResponse(res, { error: 'pgUrl/qdrantUrl/instanceUrl required' }, 400);
+    try {
+      const fs = await import('node:fs');
+      let reg = {};
+      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
+      reg[orgId] = {
+        url: (body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host); empty for hybrid
+        token: body.agentToken || '',
+        pgUrl: body.pgUrl || '',                          // customer Postgres (via tunnel)
+        qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)
+        kind: 'selfhost',
+      };
+      fs.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
+    } catch (e) {
+      return jsonResponse(res, { error: `registry write failed: ${e.message}` }, 500);
+    }
+    return jsonResponse(res, { ok: true, orgId });
+  }
+
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;

@@ -19,9 +19,8 @@ import { remoteRecall, remoteWrite, remoteAddEdge, hasRemoteAgent } from './remo
 // ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
 // agent) are NOT remote — core connects to their stores directly (per-org DATABASE_URL/QDRANT_URL).
 // Cheap no-op unless a registry is configured (MNEME_AGENT_REGISTRY_FILE / MNEME_AGENT_URLS).
-const _remoteConfigured = !!(process.env.MNEME_AGENT_REGISTRY_FILE || process.env.MNEME_AGENT_URLS);
 export function orgIsRemote(orgId) {
-  return _remoteConfigured && !!orgId && hasRemoteAgent(orgId);
+  return !!orgId && hasRemoteAgent(orgId); // hasRemoteAgent is cheap (throttled file check) when inert
 }
 
 const SIDECAR_MODELS = [

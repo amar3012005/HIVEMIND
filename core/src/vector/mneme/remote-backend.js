@@ -16,8 +16,11 @@ const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 
 const _registry = new Map();
-const REG_FILE = process.env.MNEME_AGENT_REGISTRY_FILE || '';
+// Default to a path on the shared core↔control volume. Self-host activates simply by the file existing
+// (the register route writes it) — no env flip needed. Empty/absent file → inert (all orgs managed).
+const REG_FILE = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
 let _fileMtime = 0;
+let _lastCheck = 0;
 
 function _loadEnv() {
   const raw = (process.env.MNEME_AGENT_URLS || '').trim();
@@ -30,6 +33,10 @@ function _loadEnv() {
   }
 }
 function _loadFile() {
+  // Throttle the filesystem check (getPrismaClient is hot): re-check at most every 2s.
+  const now = Date.now();
+  if (now - _lastCheck < 2000) return;
+  _lastCheck = now;
   if (!REG_FILE || !existsSync(REG_FILE)) return;
   try {
     const m = statSync(REG_FILE).mtimeMs;

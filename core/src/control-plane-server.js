@@ -1356,9 +1356,9 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/v1/selfhost/enroll') {
       return jsonResponse(res, { ok: true, orgId });
     }
-    // register: record the customer's tunnel endpoints into the shared registry file
-    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE;
-    if (!regFile) return jsonResponse(res, { error: 'self-host not enabled (no registry file)' }, 503);
+    // register: record the customer's tunnel endpoints into the shared registry file (defaults to the
+    // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl) return jsonResponse(res, { error: 'pgUrl/qdrantUrl/instanceUrl required' }, 400);
     try {
       const fs = await import('node:fs');

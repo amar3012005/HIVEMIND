@@ -48,6 +48,7 @@ services:
     build: { context: .., dockerfile: Dockerfile.production }
     image: hivemind/core-api:${VERSION:-latest}
     container_name: hm-core
+    env_file: [../.env]
     restart: unless-stopped
     environment:
       <<: *common-env
@@ -75,6 +76,7 @@ services:
     build: { context: .., dockerfile: Dockerfile.control-plane }
     image: hivemind/control-plane:${VERSION:-latest}
     container_name: hm-control
+    env_file: [../.env]
     restart: unless-stopped
     environment:
       <<: *common-env
@@ -91,6 +93,7 @@ services:
     build: { context: ../employees-service }
     image: hivemind/employees:${VERSION:-latest}
     container_name: hm-employees
+    env_file: [../.env]
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind

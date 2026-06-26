@@ -80,10 +80,15 @@ if [ ! -f "$ENV_FILE" ]; then
   chmod 600 "$ENV_FILE"
   log ".env written. Continuing to build — no re-run needed."
 fi
-# safe load: read KEY=VALUE literally (values may contain spaces/prose — never execute them)
+# safe load: read KEY=VALUE literally (values may hold spaces/prose — never execute them); skip names
+# that aren't valid shell identifiers (e.g. HIVEMIND_EMP_KEY_<uuid> has dashes). Compose --env-file
+# still passes every line to the containers; this loop is only for the vars setup.sh itself uses.
 set -a
 while IFS= read -r _line; do
-  case "$_line" in ''|\#*) continue ;; *=*) export "${_line%%=*}=${_line#*=}" ;; esac
+  case "$_line" in ''|\#*) continue ;; esac
+  _k=${_line%%=*}
+  case "$_k" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+  export "$_k=${_line#*=}"
 done < "$ENV_FILE"
 set +a
 grep -qE '^GROQ_API_KEY=.+' "$ENV_FILE" || die "GROQ_API_KEY empty — delete .env and re-run to re-enter"

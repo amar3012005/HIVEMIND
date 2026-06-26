@@ -40,42 +40,48 @@ need docker || die "docker install failed"
 
 # ── 2. env (secrets + arch-aware storage) ───────────────────────────────────
 if [ ! -f "$ENV_FILE" ]; then
-  log "generating .env (secrets + storage for this arch)…"
-  MNEME_ORGS_DEFAULT=""   # hybrid by default; set to "*" or an orgId to use .amr (x86 only)
-  cat > "$ENV_FILE" <<EOF
-# ── generated secrets ──
-POSTGRES_USER=hivemind_user
-POSTGRES_PASSWORD=$(gen 24)
-POSTGRES_DB=hivemind
-REDIS_PASSWORD=$(gen 24)
-QDRANT_API_KEY=$(gen 24)
-SESSION_SECRET=$(gen 32)
-HIVEMIND_ADMIN_SECRET=$(gen 32)
-HIVEMIND_MASTER_API_KEY=hm_master_$(gen 24)
-NANGO_SECRET_KEY=$(gen 24)
-# ── storage (arch=$ARCH) ──
-MNEME_ORGS=$MNEME_ORGS_DEFAULT
-MNEME_MODE=dual
-MNEME_DATA_ROOT=/app/data/mneme
-MNEME_BINDING=/app/src/vector/mneme/singulance-amr.linux-$([ "$ARCH" = arm64 ] && echo arm64 || echo x64)-gnu.node
-# ── domain (set to enable Caddy auto-TLS for all subdomains) ──
-DOMAIN=
-# ── frontend: "vercel" (default — FE hosted on Vercel, this script just prints the env to set there)
-#    or "container" (self-host the dashboard as a container at <domain> root) ──
-FE_MODE=vercel
-# ── model providers — FILL THESE ──
-GROQ_API_KEY=
-OPENROUTER_API_KEY=
-OPENAI_API_KEY=
-MISTRAL_API_KEY=
-ANTHROPIC_API_KEY=
-VERSION=latest
-EOF
-  warn ".env written. Fill GROQ_API_KEY + OPENROUTER_API_KEY (and DOMAIN if you have one). See infra/ENV-REFERENCE.txt for every key. Then re-run."
-  exit 0
+  [ -t 0 ] || die "no .env and not a TTY — run interactively, or pre-create .env from infra/defaults.env"
+  DEFAULTS="$ROOT/infra/defaults.env"; [ -f "$DEFAULTS" ] || die "missing infra/defaults.env"
+  log "Interactive setup. Everything else inherits the production config from infra/defaults.env —"
+  log "you only enter the domain + the sensitive provider keys. Press Enter to accept a [default]."
+  ask(){  local v; read -rp "  $1${2:+ [$2]}: " v </dev/tty; printf '%s' "${v:-$2}"; }
+  asks(){ local v; read -rsp "  $1: " v </dev/tty; printf '\n' >/dev/tty; printf '%s' "$v"; }
+  echo ""
+  DOMAIN_IN="$(ask 'Domain (e.g. singulancelabs.com; blank = ports only, no TLS)' '')"
+  FE_MODE_IN="$(ask 'Frontend — vercel (external, e.g. Cloudflare/Vercel) or container' 'vercel')"
+  echo "  — provider keys (sensitive; input hidden) —"
+  GROQ_IN="$(asks 'GROQ_API_KEY (required)')"
+  OR_IN="$(asks 'OPENROUTER_API_KEY (required)')"
+  OPENAI_IN="$(asks 'OPENAI_API_KEY (optional, Enter to skip)')"
+  ANTHROPIC_IN="$(asks 'ANTHROPIC_API_KEY (optional)')"
+  MISTRAL_IN="$(asks 'MISTRAL_API_KEY (optional)')"
+  CARTESIA_IN="$(asks 'CARTESIA_API_KEY (optional — Tara voice)')"
+  [ -n "$GROQ_IN" ] || die "GROQ_API_KEY is required"
+  CORS=""; [ -n "$DOMAIN_IN" ] && CORS="https://$DOMAIN_IN,https://www.$DOMAIN_IN"
+  BIND="/app/src/vector/mneme/singulance-amr.linux-$([ "$ARCH" = arm64 ] && echo arm64 || echo x64)-gnu.node"
+  log "writing .env (prod defaults + your answers + generated secrets)…"
+  {
+    cat "$DEFAULTS"
+    echo ""
+    echo "# ── generated secrets + your answers (override the blanks above) ──"
+    echo "POSTGRES_USER=hivemind_user"; echo "POSTGRES_PASSWORD=$(gen 24)"; echo "POSTGRES_DB=hivemind"
+    echo "REDIS_PASSWORD=$(gen 24)"; echo "QDRANT_API_KEY=$(gen 24)"
+    echo "SESSION_SECRET=$(gen 32)"; echo "HIVEMIND_ADMIN_SECRET=$(gen 32)"
+    echo "HIVEMIND_MASTER_API_KEY=hm_master_$(gen 24)"; echo "NANGO_SECRET_KEY=$(gen 24)"
+    echo "MNEME_ORGS="; echo "MNEME_MODE=dual"; echo "MNEME_DATA_ROOT=/app/data/mneme"; echo "MNEME_BINDING=$BIND"
+    echo "DOMAIN=$DOMAIN_IN"; echo "FE_MODE=$FE_MODE_IN"; echo "HIVEMIND_ALLOWED_ORIGINS=$CORS"
+    echo "GROQ_API_KEY=$GROQ_IN"; echo "OPENROUTER_API_KEY=$OR_IN"
+    [ -n "$OPENAI_IN" ]    && echo "OPENAI_API_KEY=$OPENAI_IN"
+    [ -n "$ANTHROPIC_IN" ] && echo "ANTHROPIC_API_KEY=$ANTHROPIC_IN"
+    [ -n "$MISTRAL_IN" ]   && echo "MISTRAL_API_KEY=$MISTRAL_IN"
+    [ -n "$CARTESIA_IN" ]  && echo "CARTESIA_API_KEY=$CARTESIA_IN"
+    echo "VERSION=latest"
+  } > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  log ".env written. Continuing to build — no re-run needed."
 fi
 set -a; . "$ENV_FILE"; set +a
-grep -qE '^GROQ_API_KEY=.+' "$ENV_FILE" || die "GROQ_API_KEY empty in .env — fill it, re-run"
+grep -qE '^GROQ_API_KEY=.+' "$ENV_FILE" || die "GROQ_API_KEY empty — delete .env and re-run to re-enter"
 if [ -n "${MNEME_ORGS:-}" ] && [ "$ARCH" = arm64 ] && [ "$AMR_OK" = 0 ]; then
   warn "MNEME_ORGS set on arm64 but no arm64 .amr binding — falling back to HYBRID (unset MNEME_ORGS)."
   warn "build the arm binding with infra/build-amr-arm64.sh to enable .amr on arm."

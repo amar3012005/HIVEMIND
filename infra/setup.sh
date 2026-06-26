@@ -103,7 +103,10 @@ log "building + starting the engine (this pulls images + compiles — first run 
 $COMPOSE up -d --build
 
 log "waiting for postgres…"; for i in $(seq 1 40); do $COMPOSE exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break; [ "$i" = 40 ] && die "postgres unhealthy — $COMPOSE logs postgres"; sleep 3; done
-log "applying schema…"; $COMPOSE exec -T core npx prisma migrate deploy 2>/dev/null || $COMPOSE exec -T core npx prisma db push --skip-generate 2>/dev/null || warn "run prisma migrate manually in hm-core"
+log "applying schema (db push — syncs schema.prisma directly; the migration history is drift-patched
+   for prod and isn't a clean fresh-install path)…"
+$COMPOSE exec -T core npx prisma db push --skip-generate --accept-data-loss 2>&1 | grep -iE "sync|error" | tail -2 \
+  || warn "schema push failed — run 'prisma db push' in hm-core manually"
 log "waiting for core /health…"; for i in $(seq 1 40); do $COMPOSE exec -T core node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null && break; [ "$i" = 40 ] && die "core unhealthy — $COMPOSE logs core"; sleep 3; done
 
 # ── 4. domain + subdomains (Caddy auto-TLS) ─────────────────────────────────
@@ -111,12 +114,13 @@ FE_MODE="${FE_MODE:-vercel}"
 if [ -n "${DOMAIN:-}" ]; then
   log "configuring Caddy for $DOMAIN + subdomains (auto-TLS)…"
   CADDY="$ROOT/infra/Caddyfile"
-  cat > "$CADDY" <<EOF
-# auto-HTTPS for all HIVEMIND subdomains. Point DNS A-records (or *.$DOMAIN) at this server's IP.
-core.$DOMAIN  { reverse_proxy localhost:${CORE_PORT:-2026} }
-api.$DOMAIN   { reverse_proxy localhost:${CONTROL_PORT:-2027} }
-nango.$DOMAIN { reverse_proxy localhost:${NANGO_PORT:-3003} }
-EOF
+  # multi-line blocks (inline `host { … }` heredocs are brittle — Caddy can misparse the braces)
+  {
+    printf '# auto-HTTPS for HIVEMIND subdomains. Point DNS A-records (or *.%s) at this server IP.\n' "$DOMAIN"
+    printf 'core.%s {\n\treverse_proxy localhost:%s\n}\n'  "$DOMAIN" "${CORE_PORT:-2026}"
+    printf 'api.%s {\n\treverse_proxy localhost:%s\n}\n'   "$DOMAIN" "${CONTROL_PORT:-2027}"
+    printf 'nango.%s {\n\treverse_proxy localhost:%s\n}\n' "$DOMAIN" "${NANGO_PORT:-3003}"
+  } > "$CADDY"
   # FE: container mode serves the dashboard at the root domain; vercel mode leaves the root to Vercel.
   if [ "$FE_MODE" = "container" ]; then
     log "building + serving the dashboard (container) at $DOMAIN…"

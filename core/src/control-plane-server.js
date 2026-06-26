@@ -1375,7 +1375,26 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return jsonResponse(res, { error: `registry write failed: ${e.message}` }, 500);
     }
-    return jsonResponse(res, { ok: true, orgId });
+    // Reuse PROD migrations to create the memory-subgraph schema in the customer's Postgres (the same
+    // `prisma migrate deploy` prod runs, just pointed at their DB via the tunnel). Idempotent; the
+    // global tables it also creates sit unused (global queries route to central). No rebuild.
+    let migrated = false;
+    if (body.pgUrl) {
+      try {
+        const { exec } = await import('node:child_process');
+        // create the `hivemind` schema first (prod uses multi-schema), then run prod migrations.
+        const cmd = "echo 'CREATE SCHEMA IF NOT EXISTS hivemind;' | node_modules/.bin/prisma db execute --schema=prisma/schema.prisma --stdin && node_modules/.bin/prisma migrate deploy --schema=prisma/schema.prisma";
+        await new Promise((resolve, reject) => {
+          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 180000, shell: '/bin/sh' },
+            (err) => (err ? reject(err) : resolve()));
+        });
+        migrated = true;
+        console.log(`[selfhost] customer PG migrated org=${orgId}`);
+      } catch (e) {
+        console.warn(`[selfhost] customer PG migrate failed org=${orgId}: ${e.message}`);
+      }
+    }
+    return jsonResponse(res, { ok: true, orgId, migrated });
   }
 
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────

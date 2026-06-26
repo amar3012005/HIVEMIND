@@ -1,43 +1,45 @@
-# HIVEMIND BYOD — runs on the CUSTOMER's box. Holds their .amr (and optional Postgres). The agent
-# dials OUT through cloudflared (no inbound port); our central engine reaches it over that tunnel.
-# Customer data never leaves this box — only ranked results / requested rows traverse the TLS link.
-name: hivemind-byod
+# HIVEMIND BYOD — DATA-ONLY, runs on the CUSTOMER's box. Just the stores that hold their memory data
+# (Postgres + Qdrant) + an outbound tunnel. NO engine here — the engine, control, dashboard all stay
+# central. HIVEMIND's core reaches these two stores through the tunnel for this org only. Customer
+# memory never leaves the box; only query results traverse the encrypted link.
+name: hivemind-byod-data
 
 services:
-  agent:
-    build: ./agent
-    container_name: hm-agent
-    restart: unless-stopped
-    environment:
-      ORG_ID: ${ORG_ID:-}                 # filled by setup.sh after key validation (or leave blank, agent reads from enrollment)
-      AGENT_TOKEN: ${AGENT_TOKEN}
-      AGENT_PORT: "8787"
-      MNEME_DIM: ${MNEME_DIM:-1024}
-      MNEME_DATA_ROOT: /data/mneme
-      MNEME_BINDING: ./mneme/singulance-amr.linux-x64-gnu.node
-      DATABASE_URL: ${DATABASE_URL:-}     # optional local Postgres for /v1/hydrate
-    volumes:
-      - ./data:/data                       # the .amr files live HERE on the customer disk
-    expose:
-      - "8787"
-
-  # outbound-only tunnel: dials cloudflare, exposes the agent at a public https URL, no inbound port.
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: hm-agent-tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://agent:8787
-    depends_on: [agent]
-
-  # OPTIONAL: the customer's own Postgres (enable with: docker compose --profile pg up -d).
   postgres:
-    image: postgres:16-alpine
+    image: hivemind/postgres-age:15-age-custom   # PG15 + Apache AGE (same as central) — or postgres:16-alpine
     container_name: hm-byod-postgres
-    profiles: ["pg"]
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-byod}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-byod}
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-hivemind}
     volumes:
-      - ./data/pg:/var/lib/postgresql/data
+      - ./data/pg:/var/lib/postgresql/data       # the memory subgraph lives HERE on the customer disk
+    expose: ["5432"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: hm-byod-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - ./data/qdrant:/qdrant/storage            # the vectors live HERE
+    expose: ["6333"]
+
+  # Outbound tunnel — exposes Postgres + Qdrant to HIVEMIND central with NO inbound port.
+  # Recommended: Tailscale (WireGuard, E2E, raw TCP for Postgres). cloudflared works for the Qdrant
+  # HTTP port; Postgres (raw TCP) needs Tailscale or `cloudflared access tcp`. Pick per your network.
+  tunnel:
+    image: tailscale/tailscale:latest
+    container_name: hm-byod-tunnel
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-hivemind-byod}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}                 # your Tailscale auth key (so central can reach pg/qdrant)
+      TS_EXTRA_ARGS: --advertise-tags=tag:hivemind-byod
+      TS_STATE_DIR: /var/lib/tailscale
+    volumes:
+      - ./data/ts:/var/lib/tailscale
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    depends_on: [postgres, qdrant]

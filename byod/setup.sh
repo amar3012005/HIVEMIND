@@ -1,58 +1,68 @@
 #!/usr/bin/env bash
-# HIVEMIND BYOD one-command setup. Run on YOUR server:
+# HIVEMIND BYOD (data-only) setup. Runs on YOUR server. Stands up Postgres + Qdrant (your memory data)
+# + an outbound tunnel, validates your API key with HIVEMIND, and registers the two stores so the
+# central engine routes ONLY your org's memory data here. Engine + dashboard stay central; you use
+# the normal dashboard. Your data never leaves this box.
 #   git clone --branch byod --single-branch <repo> hivemind-byod && cd hivemind-byod && ./setup.sh
-# Asks for your dashboard API key, starts the local data plane (your .amr on your disk), opens an
-# OUTBOUND tunnel, and connects it to HIVEMIND. Your memory stays on this box; you use the normal
-# dashboard. No inbound ports opened.
 set -euo pipefail
 cd "$(dirname "$0")"
 COMPOSE="docker compose -f docker-compose.byod.yml"
-BROKER_URL="${BROKER_URL:-https://api.davinciai.eu}"   # our central broker
+CENTRAL="${HIVEMIND_CENTRAL_URL:-https://api.hivemind.davinciai.eu}"   # control-plane (where you minted the key)
 log(){ printf '\033[1;36m[byod]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[byod] %s\033[0m\n' "$*" >&2; exit 1; }
-
 command -v docker >/dev/null || die "install Docker first (curl -fsSL https://get.docker.com | sh)"
+gen(){ openssl rand -hex "${1:-24}"; }
 
-# 1. API key + agent token
 if [ ! -f .env ]; then
-  printf 'Paste your HIVEMIND API key (from the dashboard → Settings → BYOD): '
-  read -r API_KEY
-  [ -n "$API_KEY" ] || die "no key entered"
-  AGENT_TOKEN="$(openssl rand -hex 24)"
+  printf 'Paste your HIVEMIND API key (dashboard → Settings → Self-host): '
+  read -r API_KEY; [ -n "$API_KEY" ] || die "no key entered"
+  log "validating key with $CENTRAL …"
+  RESP="$(curl -fsS -X POST "$CENTRAL/v1/selfhost/enroll" -H 'content-type: application/json' -d "{\"apiKey\":\"$API_KEY\"}")" \
+    || die "key validation failed — check the key + that $CENTRAL is reachable"
+  ORG="$(printf '%s' "$RESP" | grep -oE '"orgId":"[^"]+"' | cut -d'"' -f4)"; [ -n "$ORG" ] || die "no org for key: $RESP"
+  log "key OK → org $ORG"
   cat > .env <<EOF
 HIVEMIND_API_KEY=$API_KEY
-AGENT_TOKEN=$AGENT_TOKEN
-MNEME_DIM=1024
-# DATABASE_URL=postgresql://byod:byod@postgres:5432/hivemind   # uncomment + 'docker compose --profile pg up -d' for local PG
+HIVEMIND_ORG_ID=$ORG
+POSTGRES_USER=hivemind
+POSTGRES_PASSWORD=$(gen)
+POSTGRES_DB=hivemind
+QDRANT_API_KEY=$(gen)
+# Tailscale auth key (so HIVEMIND central can reach your pg/qdrant over the tunnel). Get one at
+# https://login.tailscale.com/admin/settings/keys  — leave blank to wire your own tunnel + set the
+# reachable hostnames below manually.
+TS_AUTHKEY=
+TS_HOSTNAME=hivemind-byod
+# Filled after the tunnel is up (or set manually if you bring your own):
+PG_TUNNEL_HOST=
+QDRANT_TUNNEL_HOST=
 EOF
-  log ".env written (key + agent token)."
+  log ".env written. Add TS_AUTHKEY (Tailscale) to .env, then re-run ./setup.sh"
+  exit 0
 fi
 set -a; . ./.env; set +a
 
-# 2. bring up the agent + outbound tunnel
-log "starting local data plane (.amr) + outbound tunnel…"
-$COMPOSE up -d --build
+# 1. up the stores + tunnel
+log "starting Postgres + Qdrant + tunnel…"
+$COMPOSE up -d
 
-# 3. discover the public tunnel URL (cloudflared prints it)
-log "waiting for the tunnel URL…"
-TUNNEL_URL=""
-for i in $(seq 1 30); do
-  TUNNEL_URL="$($COMPOSE logs tunnel 2>/dev/null | grep -oE 'https://[a-z0-9.-]+\.trycloudflare\.com' | tail -1 || true)"
-  [ -n "$TUNNEL_URL" ] && break; sleep 2
-done
-[ -n "${AGENT_PUBLIC_URL:-}" ] && TUNNEL_URL="$AGENT_PUBLIC_URL"   # or bring your own domain
-[ -n "$TUNNEL_URL" ] || die "tunnel URL not found — check: $COMPOSE logs tunnel"
-log "tunnel: $TUNNEL_URL"
+# 2. resolve the tunnel-reachable hostnames (Tailscale assigns a stable name; or use what you set)
+if [ -z "${PG_TUNNEL_HOST:-}" ] && [ -n "${TS_AUTHKEY:-}" ]; then
+  log "waiting for tailscale…"; for i in $(seq 1 20); do
+    TSHOST="$($COMPOSE exec -T tunnel tailscale status --json 2>/dev/null | grep -oE '"DNSName":"[^"]+"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')" || true
+    [ -n "${TSHOST:-}" ] && break; sleep 3; done
+  PG_TUNNEL_HOST="${TSHOST:-}"; QDRANT_TUNNEL_HOST="${TSHOST:-}"
+fi
+[ -n "${PG_TUNNEL_HOST:-}" ] || die "no tunnel host — set PG_TUNNEL_HOST + QDRANT_TUNNEL_HOST in .env (your tunnel's reachable address)"
 
-# 4. enroll with the central broker (validates the key → binds this agent to your org)
-log "connecting to HIVEMIND…"
-RESP="$(curl -fsS -X POST "$BROKER_URL/v1/byod/enroll" -H 'content-type: application/json' \
-  -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"agentUrl\":\"$TUNNEL_URL\",\"agentToken\":\"$AGENT_TOKEN\"}")" \
-  || die "enrollment failed — check the API key + that $BROKER_URL is reachable"
-ORG="$(printf '%s' "$RESP" | grep -oE '"orgId":"[^"]+"' | cut -d'"' -f4 || true)"
+PG_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${PG_TUNNEL_HOST}:5432/${POSTGRES_DB}?sslmode=disable"
+QDRANT_URL_FULL="http://${QDRANT_TUNNEL_HOST}:6333"
 
-log "✅ connected. org=$ORG"
-log "Your memory lives on THIS box ($PWD/data). Use the HIVEMIND dashboard as normal —"
-log "recall, ingest, HyperAgents all work; your data never leaves here."
-log "Stop:  $COMPOSE down     |    Logs: $COMPOSE logs -f agent"
-log "BACK UP ./data — it is the sole copy of your .amr memory."
+# 3. (schema) the central engine migrates the memory-subgraph tables into your PG on first connect.
+log "registering your stores with HIVEMIND…"
+curl -fsS -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' \
+  -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"pgUrl\":\"$PG_URL\",\"qdrantUrl\":\"$QDRANT_URL_FULL\"}" >/dev/null \
+  || die "registration failed"
+
+log "✅ connected. org $HIVEMIND_ORG_ID — your memory data lives on THIS box ($PWD/data)."
+log "Use the HIVEMIND dashboard as normal. Stop: $COMPOSE down  |  BACK UP ./data."

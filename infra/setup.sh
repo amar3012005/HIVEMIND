@@ -80,7 +80,12 @@ if [ ! -f "$ENV_FILE" ]; then
   chmod 600 "$ENV_FILE"
   log ".env written. Continuing to build — no re-run needed."
 fi
-set -a; . "$ENV_FILE"; set +a
+# safe load: read KEY=VALUE literally (values may contain spaces/prose — never execute them)
+set -a
+while IFS= read -r _line; do
+  case "$_line" in ''|\#*) continue ;; *=*) export "${_line%%=*}=${_line#*=}" ;; esac
+done < "$ENV_FILE"
+set +a
 grep -qE '^GROQ_API_KEY=.+' "$ENV_FILE" || die "GROQ_API_KEY empty — delete .env and re-run to re-enter"
 if [ -n "${MNEME_ORGS:-}" ] && [ "$ARCH" = arm64 ] && [ "$AMR_OK" = 0 ]; then
   warn "MNEME_ORGS set on arm64 but no arm64 .amr binding — falling back to HYBRID (unset MNEME_ORGS)."

@@ -79,6 +79,8 @@ services:
     environment:
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+    volumes:
+      - hivemind-data:/app/data        # share the BYOD registry file with core (selfhost/register writes it)
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }

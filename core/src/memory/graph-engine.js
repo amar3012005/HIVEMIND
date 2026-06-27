@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
-import { isMnemeOrg, mnemeMode, amrUpdateTags } from '../vector/mneme/driver.js';
+import { isMnemeOrg, mnemeMode, amrUpdateTags, orgIsRemote, amrListRecent } from '../vector/mneme/driver.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
@@ -2250,37 +2250,51 @@ OUTPUT JSON only.`;
     // strong heuristic for coreference candidates.
     if (candidates.length === 0) {
       try {
-        const prismaClient = (store && store.client) || this.store.client;
-        if (prismaClient && prismaClient.memory) {
-          const recent = await prismaClient.memory.findMany({
-            where: {
-              userId: baseMemory.user_id,
-              orgId: baseMemory.org_id,
-              deletedAt: null,
-              isLatest: true,
-              id: { not: baseMemory.id },
-            },
-            select: { id: true, title: true, content: true, tags: true },
-            orderBy: { createdAt: 'desc' },
-            take: 15,
-          });
-          candidates = recent.map(r => ({
-            id: r.id,
-            title: r.title,
-            content: r.content,
-            tags: r.tags,
-            _searchMethod: 'recent_fallback',
-          })).slice(0, 8);
-          console.log(`[entity-co-mention] recall empty → recency fallback: ${candidates.length} candidates`);
+        if (orgIsRemote(baseMemory.org_id)) {
+          // Remote (self-host) orgs have NO central rows — the candidate pool lives on the agent.
+          // Pull recent peers over HTTP so co-mention edges can form on self-host too.
+          const recent = await amrListRecent(baseMemory.org_id, baseMemory.user_id, 15);
+          candidates = recent
+            .filter((r) => r.id && r.id !== baseMemory.id)
+            .map((r) => ({ id: r.id, title: r.title, content: r.content, tags: r.tags, _searchMethod: 'remote_recent_fallback' }))
+            .slice(0, 8);
+          console.log(`[entity-co-mention] remote recall empty → agent recency fallback: ${candidates.length} candidates`);
+        } else {
+          const prismaClient = (store && store.client) || this.store.client;
+          if (prismaClient && prismaClient.memory) {
+            const recent = await prismaClient.memory.findMany({
+              where: {
+                userId: baseMemory.user_id,
+                orgId: baseMemory.org_id,
+                deletedAt: null,
+                isLatest: true,
+                id: { not: baseMemory.id },
+              },
+              select: { id: true, title: true, content: true, tags: true },
+              orderBy: { createdAt: 'desc' },
+              take: 15,
+            });
+            candidates = recent.map(r => ({
+              id: r.id,
+              title: r.title,
+              content: r.content,
+              tags: r.tags,
+              _searchMethod: 'recent_fallback',
+            })).slice(0, 8);
+            console.log(`[entity-co-mention] recall empty → recency fallback: ${candidates.length} candidates`);
+          }
         }
       } catch (fallbackErr) {
         console.warn('[entity-co-mention] recency fallback failed:', fallbackErr.message);
       }
     }
 
+    // NOTE: candidates may still be 0 here (genuinely first memory in the org). We do NOT bail —
+    // the linker LLM ALSO extracts this memory's own entity:* + temporal tags from its content, and
+    // those tags must land regardless of peers (they're the overlap signal for the NEXT ingest).
+    // With an empty candidate block the prompt simply returns links:[]; the edge loop no-ops.
     if (candidates.length === 0) {
-      console.log('[entity-co-mention] no candidates at all — skipping');
-      return;
+      console.log('[entity-co-mention] no candidates — extracting self-tags only (no edges)');
     }
 
     const candidateBlock = candidates.map((c, i) =>

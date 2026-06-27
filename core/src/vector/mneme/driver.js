@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteList, hasRemoteAgent } from './remote-backend.js';
 
 // A REMOTE (.amr-on-customer-box) org has an hm-agent HTTP endpoint that serves recall — decided PER
 // ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
@@ -194,6 +194,25 @@ export function amrRecall(orgId, vector, filter, limit, scoreThreshold) {
   const h = orgStore(orgId);
   if (!h) return null;
   return amrVectorSearch(h.store, vector, filter, limit, scoreThreshold);
+}
+
+// Recent-memory list for a remote (agent) org — the candidate pool the entity-co-mention linker
+// pulls from. Central orgs query Postgres directly; remote orgs have NO central rows, so without
+// this the linker always sees 0 candidates → never forms graph edges on self-host. Returns the
+// agent's recent rows (mapped to {id,title,content,tags}); [] for non-remote or on any failure.
+export async function amrListRecent(orgId, userId, limit = 15) {
+  if (!orgIsRemote(orgId)) return [];
+  // /v1/list takes a FLAT filter (not the Qdrant must/match shape recall uses). org_id is forced
+  // agent-side from its own ORG env, so we only pass is_latest + optional user scoping.
+  const filter = { is_latest: true };
+  if (userId) filter.user_id = userId;
+  const out = await remoteList(orgId, filter, null, limit);
+  return (out?.memories || []).map((m) => ({
+    id: m.memory_id || m.id,
+    title: m.title || null,
+    content: m.content || '',
+    tags: Array.isArray(m.tags) ? m.tags : [],
+  }));
 }
 
 // unified write (record + vector) for an .amr org (or null → caller uses Qdrant/PG path only).

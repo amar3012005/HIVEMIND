@@ -26,8 +26,26 @@ const LITELLM_BASE_URL = (process.env.LITELLM_BASE_URL
   || process.env.OPENAI_API_BASE_URL
   || 'https://api.blaiq.ai/v1').replace(/\/+$/, '');
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+// LLM_PRIMARY=openrouter forces all extract/cognition LLM calls onto OpenRouter (used when the Groq
+// account is unavailable). Groq model ids are remapped to their OpenRouter equivalents.
+const LLM_PRIMARY = (process.env.LLM_PRIMARY || '').toLowerCase();
+const OPENROUTER_MODEL_MAP = {
+  'llama-3.3-70b-versatile': 'meta-llama/llama-3.3-70b-instruct',
+  'openai/gpt-oss-20b': 'openai/gpt-oss-20b',
+  'openai/gpt-oss-120b': 'openai/gpt-oss-120b',
+};
+function mapModelForOpenRouter(model) {
+  if (OPENROUTER_MODEL_MAP[model]) return OPENROUTER_MODEL_MAP[model];
+  if (/^(llama-|mixtral-|gemma|qwen)/i.test(model)) return `meta-llama/${model}`;
+  return model;
+}
 
 function pickRoute(model) {
+  if (LLM_PRIMARY === 'openrouter' && OPENROUTER_KEY) {
+    return { base: OPENROUTER_BASE_URL, key: OPENROUTER_KEY, provider: 'openrouter' };
+  }
   if (GROQ_KEY && FORCE_GROQ_FOR_MODELS.test(model || '')) {
     return { base: GROQ_BASE_URL, key: GROQ_KEY, provider: 'groq' };
   }
@@ -57,6 +75,8 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   };
 
   const route = pickRoute(model);
+  // On OpenRouter, remap Groq model ids to their OpenRouter equivalents.
+  if (route.provider === 'openrouter') body.model = mapModelForOpenRouter(model);
   // Groq's strict json_object mode rejects empty/invalid generations with
   // a 400. Skip strict mode there and rely on the salvage parser below.
   if (json_mode && route.provider !== 'groq') {

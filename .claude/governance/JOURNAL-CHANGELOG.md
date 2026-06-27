@@ -162,3 +162,17 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - Fixed self-host Memories 'stuck at 20': FE pages by offset, agent /v1/list only honored cursor →
   threaded offset through listMemories→remoteList→agent (LIMIT/OFFSET). Verified page1=20, page2=9 (=29).
 - Skip central Qdrant collection provisioning for self_host orgs (data lives on agent).
+
+## 2026-06-27 — Loop Phase 1 (matrix) + Phase 1.5 (managed per-tenant isolation fix) — GREEN
+- commits: 2e07d0a3 (matrix) · eabad195 (routing) · 50f9ff62 (qdrant ulimit)
+- Phase 1: tested 3 org types (personal 33db5150 / managed 1eda3825 / self-host b30ead1b). Found GAP-1
+  (managed vectors → shared HIVEMIND_PERSONAL not org_<id>), GAP-2 (21 stale self-host central vectors),
+  GAP-3 (self-host KB upload 200-then-async-block UX).
+- Phase 1.5 — GAP-1 root causes (TWO): (1) resolveCollectionForOrg read org.plan via the org-context
+  proxy + cached a PERSONAL fallback 5min → fixed: read plan from CENTRAL client, cache only definitive
+  answers. (2) hm-qdrant nofile=1024 → per-tenant collections hit "Too many open files" → createCollection
+  500 → managed fell back to shared/in-mem → fixed: ulimits nofile 65536 in compose, recreated.
+- VERIFIED: managed save → org_1eda3825 created + vector lands there; HIVEMIND_PERSONAL holds ONLY the
+  personal org; self-host on agent. GAP-2 cleaned (deleted stale central org_b30ead1b + purged mis-placed
+  managed vectors from the shared pool). Per-tenant model now correct for all 3 types.
+- GAP-3 folds into Phase 2 (KB-on-agent). Next: Phase 2.

@@ -24,12 +24,12 @@ changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
 ---
 
 ## Phase 1 — Feature-matrix ground truth (TEST, no build)
-- [ ] Exercise every feature for all 3 orgs; record PASS/GAP per (feature × type): save, recall, graph,
+- [x] Exercise every feature for all 3 orgs; record PASS/GAP per (feature × type): save, recall, graph,
   relationships, profile counts, KB upload, connectors, meeting notes, HyperAgents room+turn, Web Intel,
   TARA, MCP, cognition. Commit the matrix. GATE: matrix file committed; gaps feed Phases 2-5.
 
 ## Phase 1.5 — FIX GAP-1 (managed per-tenant vector isolation) — URGENT
-- [ ] Managed-enterprise vectors write to shared HIVEMIND_PERSONAL, not their org_<id> collection
+- [x] Managed-enterprise vectors write to shared HIVEMIND_PERSONAL, not their org_<id> collection
   (resolveCollectionForOrg returns the right name but plan-lookup/cache returns personal at write time).
   Enterprise tenants' vectors are co-mingled = isolation bug. Fix the plan-resolution/cache so the WRITE
   routes to org_<id>; backfill/migrate any mis-placed vectors. Also clean GAP-2 (21 stale central vectors

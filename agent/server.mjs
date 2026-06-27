@@ -211,6 +211,7 @@ const routes = {
     if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
     if (f.cognitive_layer_role === null) conds.push('cognitive_layer_role IS NULL');
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
+    if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
     if (f.created_after) { args.push(f.created_after); conds.push(`created_at >= $${args.length}::timestamptz`); }
     if (b.cursor) { args.push(b.cursor); conds.push(`created_at < $${args.length}::timestamptz`); }
     args.push(Math.min(b.limit || 100, 500));

@@ -7260,6 +7260,26 @@ exit \$RC
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
 
+      // ── HyperAgents director LLM-usage report (cross-service metering bridge) ──
+      // The HyperAgents director runs in the Python employees-service, off core's JS metering
+      // chokepoint. It POSTs its per-turn token spend here so usage records against the org's HIVEMIND
+      // API key — org from the principal/emulation headers, api key from principal.keyId via the ALS
+      // context set above (master-key engine calls → null → sentinel). Best-effort: never 5xx a meter.
+      if (pathname === '/api/usage/llm-report' && req.method === 'POST') {
+        try {
+          const total = Number(body?.total_tokens || 0);
+          if (planEnforcer && orgId && total > 0) {
+            planEnforcer.recordUsage(orgId, 'tokens', total, {
+              model: String(body?.model || 'hyperagents-director').slice(0, 128),
+              feature: String(body?.feature || 'hyperagents-room').slice(0, 64),
+            });
+          }
+          return jsonResponse(res, { ok: true, recorded: total }, 200);
+        } catch (e) {
+          return jsonResponse(res, { ok: false, error: e.message }, 200);
+        }
+      }
+
       // ── Consumer URL generation (authenticated) ──
       if (pathname === '/api/mcp/consumer-url' && req.method === 'POST') {
         // Check if user already has a consumer URL

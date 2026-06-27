@@ -36,6 +36,7 @@ from ..hivemind_client import (
     google_exec_emulated,
     org_members_emulated,
     recall_emulated,
+    report_llm_usage,
     web_search_emulated,
 )
 
@@ -1591,6 +1592,20 @@ class Director:
         log.info("[hyper-engine] done plan+gather=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
                  tool_calls_made, self._round_seq, self.tokens, int((time.time() - t0) * 1000),
                  self.gather_count, self.tok_by, self.director_iters)
+        # Report this turn's director LLM spend to core so it records against the org's HIVEMIND API key
+        # (the director runs in this Python service, off core's JS metering chokepoint). Fire-and-forget.
+        try:
+            await report_llm_usage(
+                user_id=self.user_id, org_id=self.org_id,
+                api_key=getattr(self, "api_key", "") or "",
+                model="hyperagents-director",
+                total_tokens=int(self.tokens or 0),
+                prompt_tokens=int(self.io.get("input", 0) or 0),
+                completion_tokens=int(self.io.get("output", 0) or 0),
+                feature="hyperagents-room",
+            )
+        except Exception:
+            pass
         return {
             "cost_tokens": self.tokens,
             "final_text": final_text,

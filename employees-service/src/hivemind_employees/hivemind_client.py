@@ -43,6 +43,37 @@ def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str
     return headers
 
 
+async def report_llm_usage(*, user_id: Optional[str], org_id: Optional[str], api_key: str = "",
+                           model: str = "hyperagents-director", total_tokens: int = 0,
+                           prompt_tokens: int = 0, completion_tokens: int = 0,
+                           feature: str = "hyperagents-room") -> None:
+    """Report the director's LLM token spend to HIVEMIND core so it records against the org's
+    HIVEMIND API key (org_id + key from the emulation headers + model + feature). The director runs
+    in this Python service — its LLM calls never touch core's JS metering chokepoint, so without this
+    bridge HyperAgents spend is invisible to per-key accounting. Fire-and-forget: never raise into a
+    room turn. No-op when there are no tokens or no org."""
+    if not org_id or not total_tokens or total_tokens <= 0:
+        return
+    try:
+        settings = get_settings()
+        headers = _emulated_headers(api_key, user_id, org_id)
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(8.0, connect=4.0),
+            headers=headers,
+        ) as c:
+            await c.post("/api/usage/llm-report", json={
+                "model": model,
+                "total_tokens": int(total_tokens),
+                "prompt_tokens": int(prompt_tokens or 0),
+                "completion_tokens": int(completion_tokens or 0),
+                "feature": feature,
+            })
+    except Exception:
+        # Metering must never break a turn — swallow transport/auth errors silently.
+        return
+
+
 async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                           api_key: str = "", max_memories: int = 8,
                           project_id: Optional[str] = None) -> Dict[str, Any]:

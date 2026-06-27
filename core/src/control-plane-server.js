@@ -800,7 +800,8 @@ async function buildBootstrapPayload(user) {
       id: org.id,
       name: org.name,
       slug: org.slug,
-      plan: org.plan || 'free'
+      plan: org.plan || 'free',
+      hosting_mode: org.hostingMode || 'managed'
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -2117,12 +2118,16 @@ const server = http.createServer(async (req, res) => {
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
     const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
+    // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
+    const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
+      ? 'self_host' : 'managed';
     const org = await prisma.organization.create({
       data: {
         zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
         name: body.name,
         slug,
-        plan: requestedPlan
+        plan: requestedPlan,
+        hostingMode,
       }
     });
 
@@ -2174,7 +2179,8 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: org.plan || requestedPlan
+        plan: org.plan || requestedPlan,
+        hosting_mode: org.hostingMode || hostingMode
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)

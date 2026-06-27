@@ -58,6 +58,10 @@ model Organization {
   createdAt                    DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                    DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   plan                         String?            @default("free") @map("plan") @db.VarChar(50)
+  // Where this org's memory data plane lives: 'managed' (we host) | 'self_host' (their agent box).
+  // Captured at onboarding so the dashboard can gate self-host orgs into the connect-your-agent flow
+  // before showing the workspace — independent of whether the agent has registered yet.
+  hostingMode                  String?            @default("managed") @map("hosting_mode") @db.VarChar(20)
   // Stripe billing state — populated on first checkout, sync'd via webhook.
   stripeCustomerId             String?            @unique @map("stripe_customer_id") @db.VarChar(64)
   stripeSubscriptionId         String?            @map("stripe_subscription_id") @db.VarChar(64)

@@ -22,10 +22,12 @@ let _enqueuePush = null;
 async function _getEnqueuePush() {
   if (_enqueuePush) return _enqueuePush;
   try {
-    const mod = await import('../memory/outbox.js');
+    const mod = await import('../../memory/outbox.js'); // driver is at vector/mneme/ → outbox at src/memory/
     _enqueuePush = mod.enqueuePush;
-  } catch {
-    // outbox module unavailable (e.g. test environment without Redis)
+  } catch (e) {
+    // outbox module unavailable (e.g. test environment without Redis). Log once — a silent null here
+    // means failed pushes are dropped instead of durably retried (the bug this path is meant to fix).
+    console.warn('[driver] outbox module load failed — pushes will NOT be durable:', e?.message);
     _enqueuePush = null;
   }
   return _enqueuePush;

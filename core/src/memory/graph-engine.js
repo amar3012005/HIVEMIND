@@ -1940,7 +1940,31 @@ OUTPUT JSON only.`;
       return null;
     }
 
-    // Persist on source_metadata.metadata.enrichment + mark status=done.
+    // Distilled high-signal tags from enrichment (independent of where the row lives).
+    const enrichTags = [];
+    if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
+    if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
+    if (Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
+      enrichTags.push(`has-action:${parsed.action_items.length}`);
+      for (const a of parsed.action_items.slice(0, 3)) {
+        if (a.owner) enrichTags.push(`owner:${String(a.owner).slice(0, 40).replace(/\s+/g, '_')}`);
+      }
+    }
+    if (Array.isArray(parsed.open_questions) && parsed.open_questions.length > 0) enrichTags.push(`open:${parsed.open_questions.length}`);
+    if (Array.isArray(parsed.blockers) && parsed.blockers.length > 0) enrichTags.push(`blocked:${parsed.blockers.length}`);
+
+    // Remote (self-host): no central source_metadata row — apply enrich tags to the AGENT (durable via
+    // the outbox) and return; the enrichment blob lives implicitly in the tags. Compute ran centrally.
+    const _enrichOrg = currentOrg();
+    if (orgIsRemote(_enrichOrg)) {
+      if (enrichTags.length > 0) {
+        const newTags = Array.from(new Set([...(tags || []), ...enrichTags]));
+        try { amrUpdateTags(_enrichOrg, memoryId, newTags); } catch { /* best-effort */ }
+      }
+      return parsed;
+    }
+
+    // Central: persist on source_metadata.metadata.enrichment + mark status=done, then apply tags.
     try {
       if (!client) return parsed;
       const fresh = await client.sourceMetadata.findFirst({
@@ -1962,22 +1986,6 @@ OUTPUT JSON only.`;
         data: { metadata: merged },
       });
 
-      // Distilled high-signal tags from enrichment.
-      const enrichTags = [];
-      if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
-      if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
-      if (Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
-        enrichTags.push(`has-action:${parsed.action_items.length}`);
-        for (const a of parsed.action_items.slice(0, 3)) {
-          if (a.owner) enrichTags.push(`owner:${String(a.owner).slice(0, 40).replace(/\s+/g, '_')}`);
-        }
-      }
-      if (Array.isArray(parsed.open_questions) && parsed.open_questions.length > 0) {
-        enrichTags.push(`open:${parsed.open_questions.length}`);
-      }
-      if (Array.isArray(parsed.blockers) && parsed.blockers.length > 0) {
-        enrichTags.push(`blocked:${parsed.blockers.length}`);
-      }
       if (enrichTags.length > 0) {
         const cur = (tags || []);
         const newTags = Array.from(new Set([...cur, ...enrichTags]));

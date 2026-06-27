@@ -24,7 +24,6 @@
  *   q.stats();         // { pending, running, completed, failed, total }
  */
 
-import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const DEFAULT_CONCURRENCY = Number(process.env.ENRICHMENT_CONCURRENCY || 2);
 const MAX_QUEUE_SIZE = Number(process.env.ENRICHMENT_MAX_QUEUE || 10000);
@@ -101,10 +100,10 @@ export class EnrichmentQueue {
 
   async _runJob(job) {
     const startedAt = Date.now();
-    // RESIDENCY: structured enrichment writes back to central source_metadata/memory rows, which don't
-    // exist for an agent-org. Skip for remote orgs (agent-side enrichment is a tracked follow-up). The
-    // memory + recall are unaffected. Managed/personal → enrich as normal.
-    if (job.orgId && orgIsRemote(job.orgId)) { this.counters.completed += 1; return; }
+    // Structured enrichment runs CENTRALLY for every org type (compute is central). For remote orgs
+    // enrichMemoryStructured skips the central source_metadata persist and pushes the distilled
+    // urgency/kind/owner tags to the AGENT (amrUpdateTags → durable via the outbox). Managed/personal
+    // persist centrally as before. (Was previously skipped for remote.)
     try {
       const ctx = globalThis.__hivemindOrgCtx;
       const run = job.orgId && ctx?.runWithOrg

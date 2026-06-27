@@ -638,9 +638,6 @@ export class MemoryGraphEngine {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
-        if (orgIsRemote(baseMemory.org_id)) {
-          console.log(`[residency-diag] listLatestMemories(remote) org=${String(baseMemory.org_id).slice(0,8)} → ${latestMemories.length} rows; base_ents=[${(baseMemory.tags||[]).filter(t=>typeof t==='string'&&t.startsWith('entity:')).join('|')}]`);
-        }
 
         // Hoisted so the post-save entity-link LLM step can re-use the
         // recall set instead of re-querying. Populated inside the
@@ -1427,9 +1424,6 @@ export class MemoryGraphEngine {
           || input.skipContradictionDetection === true;
         const strictMode = input.strict_contradictions === true
           || input.strictContradictions === true;
-        if (orgIsRemote(baseMemory.org_id)) {
-          console.log(`[residency-diag] contradiction-gate org=${String(baseMemory.org_id).slice(0,8)} hasDetector=${!!this.conflictDetector} latest=${latestMemories.length} skip=${skipContradictions}`);
-        }
         if (this.conflictDetector && latestMemories.length > 0 && !skipContradictions) {
           try {
             const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;

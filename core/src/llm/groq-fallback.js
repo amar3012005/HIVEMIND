@@ -192,6 +192,14 @@ export async function groqFetch(url, options = {}, cfg = {}) {
   // what makes groqFetch a perfect superset of fetch for every call shape.
   const isStreaming = !!(reqBody && reqBody.stream === true);
 
+  // OpenRouter-primary mode (LLM_PRIMARY=openrouter): skip the Groq attempt entirely — used when the
+  // Groq account is down/restricted. Go straight to OpenRouter; only if OpenRouter fails do we fall
+  // through to Groq as a last resort. Streaming still goes direct to Groq (cannot be buffered-replayed).
+  if (process.env.LLM_PRIMARY === 'openrouter' && !isStreaming && reqBody) {
+    const fb = await openrouterReplay(reqBody, timeoutMs).catch(() => null);
+    if (fb && fb.ok) { logFallback(reqBody.model, 'openrouter-primary'); return fb; }
+  }
+
   try {
     const res = await _fetch(url, options);
     if (res.ok) return res; // healthy path — untouched

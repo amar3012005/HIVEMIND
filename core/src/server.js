@@ -17,6 +17,20 @@ import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
 
+// Global resilience: route EVERY Groq chat call (incl. the ~25 hardcoded api.groq.com sites) through
+// groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
+// blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
+// fetches are untouched. One seam → the whole engine survives a Groq provider failure.
+if (!globalThis.__hmGroqFetchWrapped) {
+  globalThis.__hmGroqFetchWrapped = true;
+  const _nativeFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (input, init) => {
+    const u = typeof input === 'string' ? input : (input && input.url) || '';
+    if (u.includes('api.groq.com') && u.includes('/chat/completions')) return groqFetch(input, init);
+    return _nativeFetch(input, init);
+  };
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');

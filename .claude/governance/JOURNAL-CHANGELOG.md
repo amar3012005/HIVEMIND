@@ -114,3 +114,19 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   all 5 landed on agent, central=0. Durable replay proven.
 - deploy: memory_outbox created via raw SQL on central (box uses prisma db push; client regenerated in
   the image build — verified prisma.memoryOutbox present).
+
+## 2026-06-27 — Compass Phases 7, 9, 10 (deletion / data-plane security / observability)
+- commits: 26d15d3f, 09a78a5b   verdict: GREEN
+- P7 deletion saga: account-delete POSTs /v1/purge to each remote agent (full erasure rows+rels+Qdrant)
+  BEFORE severing the registry route; best-effort + recorded (self-host physical destruction = customer).
+- P9 data-plane security: self-host registration rejects cleartext http:// to a PUBLIC host (would
+  expose memory + token); allows https + private/Tailscale(100.64/10,*.ts.net)/RFC1918. Gate verified
+  (public-http→400, tailscale-http/https→ok). DEPLOY LESSON: hm-control is a SEPARATE image
+  (hivemind/control-plane:latest) — control-plane-server.js changes need `build control-plane`, not core.
+- P10 observability: getOutboxStats(org) → /v1/selfhost/status.outbox {pending, dead, oldestUnackedAgeMs,
+  lastAckedAt} so the view shows push lag + DLQ, not just green/red. Verified live.
+- COMPASS STATUS: ✅ P1 P2 P3 P4(spine, gate-passed) P7 P9 P10 + security/residency audit. Remaining:
+  P5 cognition-on-remote (reverses the current safety-skip; P4 outbox now unblocks it — real build),
+  P6 migration saga (only when moving a REAL central org → agent; none exist, test org born remote),
+  P8 backups+restore drill (ops/cron, before any PG=0), P11 managed density (capacity/pricing DECISION),
+  P12 .amr swap (intentionally LATE — transparent swap behind the frozen §4 contract).

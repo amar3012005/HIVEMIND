@@ -37,7 +37,7 @@ changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
   org_<id> point count grows; HIVEMIND_PERSONAL only holds free-tier vectors.
 
 ## Phase 2 — KB-on-agent (unblock KB for self-host)
-- [ ] Agent knowledge_documents + knowledge_segments tables + segment vectors; route doc+segment
+- [x] Agent knowledge_documents + knowledge_segments tables + segment vectors; route doc+segment
   write/read/recall to the agent via outbox; lift the KB-upload assertKbAllowedForOrg block.
   GATE: PDF upload to b30ead1b → segments+memories on agent, central=0, recall returns the doc.
 

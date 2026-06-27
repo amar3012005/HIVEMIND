@@ -176,3 +176,15 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   personal org; self-host on agent. GAP-2 cleaned (deleted stale central org_b30ead1b + purged mis-placed
   managed vectors from the shared pool). Per-tenant model now correct for all 3 types.
 - GAP-3 folds into Phase 2 (KB-on-agent). Next: Phase 2.
+
+## 2026-06-27 — Loop Phase 2: KB-on-agent — GREEN (KB now works for ALL 3 org types)
+- commit: a69a108b
+- Agent: knowledge_documents + knowledge_segments tables; /v1/kb-doc, /v1/kb-segment (row+vector
+  layer='segment' in the shared QCOLL), /v1/kb-recall (vector search), /v1/kb-hydrate; /v1/purge clears KB.
+- Core seam: remoteKb*/amrKb* helpers. document-first-ingestion: for remote orgs, lift the KB-upload
+  guard + route doc+segment writes to the agent (embed centrally → push row+vector), skip central
+  source_artifact. evidence-retrieval: remote → query embed → amrKbRecall → amrKbHydrate (same shape).
+- VERIFIED: self-host KB upload → agent 1 doc/1 seg/vector-synced, central 0/0 (residency); recall returns
+  the doc content from the agent. Regression: managed KB still lands central (2/2). GAP-3 closed.
+- Central/managed/personal byte-unchanged (all branches orgIsRemote-guarded). Next: Phase 3 (enrichment
+  + cognition for self-host).

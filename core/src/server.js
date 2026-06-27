@@ -14320,6 +14320,14 @@ exit \$RC
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
+            // Plan limit — monthly KB uploads (free: 10/mo). Enforce BEFORE accepting the file (the
+            // 'uploads' cap was recorded but never checked → free-tier limit was a no-op).
+            if (planEnforcer && orgId) {
+              const upCheck = await planEnforcer.checkLimit(orgId, 'uploads', 1);
+              if (!upCheck.allowed) {
+                return jsonResponse(res, { error: 'Plan limit exceeded', message: upCheck.reason, limit: upCheck.limit, current: upCheck.current, plan: upCheck.plan }, 403);
+              }
+            }
             try { planEnforcer?.recordUsage(orgId, 'uploads', 1); } catch { /* meter */ }
 
             try {
@@ -14979,9 +14987,11 @@ exit \$RC
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
               }
               if (planEnforcer && orgId) {
-                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
-                if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, { error: 'Plan limit exceeded', message: webIntelCheck.reason, limit: webIntelCheck.limit, current: webIntelCheck.current, plan: webIntelCheck.plan }, 403);
+                // Deep research has its OWN monthly budget (deepResearchPerMonth) — was wrongly checking
+                // 'webIntel', so the per-month cap never fired. Check the right type.
+                const drCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
+                if (!drCheck.allowed) {
+                  return jsonResponse(res, { error: 'Plan limit exceeded', message: drCheck.reason, limit: drCheck.limit, current: drCheck.current, plan: drCheck.plan }, 403);
                 }
               }
               // Reuse the search quota (research counts as a heavier search).

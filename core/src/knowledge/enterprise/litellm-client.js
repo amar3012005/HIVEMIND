@@ -8,6 +8,8 @@
  */
 
 import fetch from 'node-fetch';
+import { meterTokens } from '../../billing/usage-tracker.js';
+import { currentOrg } from '../../db/prisma.js';
 
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
@@ -123,6 +125,11 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   const content = msg.content || msg.reasoning_content || '';
 
   console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens}`);
+  // METER AT THE GATEWAY — every org-context LLM call (cognition, dreamer, synthesizer, KB distill,
+  // recall expansion, …) routes through here, so this single meter captures the platform's background
+  // token spend that per-endpoint metering misses. orgId from AsyncLocalStorage (callers run inside
+  // runWithOrg); no-op when there's no org context (system/boot calls). meterTokens is best-effort.
+  try { meterTokens(currentOrg(), Number(usage?.total_tokens || 0)); } catch { /* never let metering break a completion */ }
 
   if (json_mode) {
     // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]

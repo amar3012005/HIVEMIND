@@ -41,6 +41,7 @@ export const PLANS = {
       maxUsers: 1,
       maxConnectors: 3,
       knowledgeBaseUploadsPerMonth: 10,
+      maxHyperRooms: 1,
     },
     features: {
       ...BASE_FEATURES,
@@ -66,6 +67,7 @@ export const PLANS = {
       maxUsers: 5,
       maxConnectors: 10,
       knowledgeBaseUploadsPerMonth: -1, // unlimited
+      maxHyperRooms: 5,
     },
     features: {
       ...BASE_FEATURES,
@@ -89,6 +91,7 @@ export const PLANS = {
       maxUsers: 25,
       maxConnectors: -1, // unlimited
       knowledgeBaseUploadsPerMonth: -1,
+      maxHyperRooms: 25,
     },
     features: {
       ...BASE_FEATURES,
@@ -117,6 +120,7 @@ export const PLANS = {
       maxUsers: -1,
       maxConnectors: -1,
       knowledgeBaseUploadsPerMonth: -1,
+      maxHyperRooms: -1,
     },
     features: {
       ...BASE_FEATURES,

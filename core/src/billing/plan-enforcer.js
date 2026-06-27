@@ -246,6 +246,40 @@ export class PlanEnforcer {
       }
     }
 
+    if (type === 'hyperRooms') {
+      const limit = limits.maxHyperRooms;
+      if (!limit || limit === -1) return { allowed: true };
+      try {
+        const count = await this.prisma.hyperRoom.count({ where: { orgId } });
+        if (count + amount > limit) {
+          return {
+            allowed: false,
+            reason: `HyperAgents room limit reached (${planDef.name} plan: ${limit} rooms). Archive a room or upgrade.`,
+            limit,
+            current: count,
+            plan: planDef.id,
+          };
+        }
+      } catch { /* model absent → skip */ }
+    }
+
+    if (type === 'users') {
+      const limit = limits.maxUsers;
+      if (!limit || limit === -1) return { allowed: true };
+      try {
+        const count = await this.prisma.userOrganization.count({ where: { orgId } });
+        if (count + amount > limit) {
+          return {
+            allowed: false,
+            reason: `Seat limit reached (${planDef.name} plan: ${limit} ${limit === 1 ? 'user' : 'users'}). Upgrade to invite more.`,
+            limit,
+            current: count,
+            plan: planDef.id,
+          };
+        }
+      } catch { /* skip */ }
+    }
+
     return { allowed: true };
   }
 
@@ -305,6 +339,12 @@ export class PlanEnforcer {
       ? await this.usageTracker.getWebIntelToday(orgId).catch(() => 0)
       : 0;
 
+    // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
+    let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
+    try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizationMemberships: { some: { organizationId: orgId } } }, isActive: true } }); } catch { /* skip */ }
+    try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId } }); } catch { /* skip */ }
+    try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId } }); } catch { /* skip */ }
+
     return {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
@@ -317,8 +357,9 @@ export class PlanEnforcer {
       webIntel: { used: Number(webIntelToday) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
       graphQueries: { used: Number(dbUsage.graphQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
       tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 }, // tracked, not limited
-      connectors: { limit: limits.maxConnectors ?? -1 },
-      users: { limit: limits.maxUsers ?? -1 },
+      connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
+      hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
+      users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
       // honest scope: tokens are metered at chat + TARA today (full coverage =
       // the granular gateway). FE surfaces this so the number isn't mistaken
       // for total platform spend.

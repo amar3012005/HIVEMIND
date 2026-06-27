@@ -6042,6 +6042,16 @@ Write the persona now.`;
         : [];
       if (!name) return jsonResponse(res, { error: 'name is required' }, 400);
       if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
+      // Plan limit — HyperAgents rooms per org (heaviest LLM feature; cap by tier).
+      try {
+        const _org = await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { plan: true } });
+        const _plan = PLANS[_org?.plan] || PLANS.free;
+        const _lim = _plan?.limits?.maxHyperRooms ?? -1;
+        if (_lim !== -1) {
+          const _n = await prisma.hyperRoom.count({ where: { orgId: current.session.orgId } });
+          if (_n >= _lim) return jsonResponse(res, { error: `HyperAgents room limit reached (${_plan.name} plan: ${_lim} ${_lim === 1 ? 'room' : 'rooms'}). Archive a room or upgrade.`, code: 'PLAN_LIMIT', limit: _lim, current: _n }, 402);
+        }
+      } catch { /* never block creation on a metering hiccup */ }
       try {
         // Restrict participants to employees in this org
         const valid = participantIds.length
@@ -6957,6 +6967,16 @@ Write the persona now.`;
             costTokens: body.event.cost_tokens || 0,
             event: body.event,
           });
+          // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
+          // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.
+          try {
+            const _ct = Number(body.event.cost_tokens || 0);
+            if (_ct > 0) {
+              const _t = await prisma.hyperTurn.findUnique({ where: { id: body.turn_id }, select: { roomId: true } });
+              const _r = _t && await prisma.hyperRoom.findUnique({ where: { id: _t.roomId }, select: { orgId: true } });
+              if (_r?.orgId) { const { UsageTracker } = await import('./billing/usage-tracker.js'); await new UsageTracker(prisma).recordTokens(_r.orgId, _ct); }
+            }
+          } catch { /* never break the seal on a metering error */ }
         } else {
           await appendTurnEvent(prisma, body.turn_id, {
             ...body.event,

@@ -2168,17 +2168,20 @@ const server = http.createServer(async (req, res) => {
     });
 
     // Route the org to its Qdrant home by PLAN:
-    //   enterprise (paid) → own container org_<id> (provisioned now, fire-and-forget)
-    //   free (personal)   → shared HIVEMIND_PERSONAL pool (no container created)
+    //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)
+    //   free (personal)    → shared HIVEMIND_PERSONAL pool (no collection created)
+    //   self-host          → NO central collection (data lives on the customer's agent) — skip.
     // Persist the decision on the org row so the hot path resolves without a plan
     // lookup. Signup must never block/fail on the vector store.
-    provisionForPlan(org.id, requestedPlan)
-      .then((vectorContainer) =>
-        prisma.organization.update({ where: { id: org.id }, data: { vectorContainer } })
-      )
-      .catch((err) =>
-        console.error('[org-create] vector container provisioning failed', { orgId: org.id, plan: requestedPlan, error: err?.message })
-      );
+    if (hostingMode !== 'self_host') {
+      provisionForPlan(org.id, requestedPlan)
+        .then((vectorContainer) =>
+          prisma.organization.update({ where: { id: org.id }, data: { vectorContainer } })
+        )
+        .catch((err) =>
+          console.error('[org-create] vector container provisioning failed', { orgId: org.id, plan: requestedPlan, error: err?.message })
+        );
+    }
 
     // Managed-enterprise data plane (flag-gated, dormant unless MANAGED_AGENT_PROVISION=true):
     // for paid/managed enterprise plans, also spin up the org's OWN .amr agent

@@ -109,10 +109,12 @@ export class MnemeRelationshipBackend {
   insert(rel) {
     const fromSlot = this.mem.idToSlot.get(rel.fromId);
     const toSlot = this.mem.idToSlot.get(rel.toId);
+    if (process.env.AGENT_DEBUG) console.log('[agent.edge] from', rel.fromId?.slice(0,8), '→slot', fromSlot, '| to', rel.toId?.slice(0,8), '→slot', toSlot, '| idToSlot size', this.mem.idToSlot.size);
     if (fromSlot != null && toSlot != null) {
       const et = REL_TYPE[rel.type] || 1;
       this.store.addEdge(fromSlot, toSlot, et, Math.max(1, Math.min(255, Math.round((rel.confidence ?? 1) * 255))));
       this.store.flush();
+      if (process.env.AGENT_DEBUG) console.log('[agent.edge] addEdge done; shard flushed');
     }
   }
   update() { /* edges are immutable identity; supersession handled via memory versions */ }

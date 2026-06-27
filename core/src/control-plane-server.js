@@ -1398,6 +1398,48 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { ok: true, orgId, migrated });
   }
 
+  // Self-host connection status — the FE polls this during onboarding to show "waiting → connected".
+  // POST { apiKey } (key in body, never the URL). Resolves org → reads the shared registry → reports
+  // whether an agent is registered and (best-effort) reachable.
+  if (pathname === '/v1/selfhost/status' && req.method === 'POST') {
+    const body = await parseBody(req).catch(() => null);
+    const apiKey = (body?.apiKey || '').toString();
+    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    let entry = null;
+    try {
+      const fs = await import('node:fs');
+      const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+      entry = reg[rec.orgId] || null;
+    } catch { /* no registry yet */ }
+    if (!entry || !(entry.url || entry.pgUrl || entry.qdrantUrl)) {
+      return jsonResponse(res, { registered: false, reachable: false });
+    }
+    // Best-effort reachability ping (Model B agent /health), 2.5s budget — never blocks the answer.
+    let reachable = false;
+    if (entry.url) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2500);
+        const r = await fetch(`${entry.url}/health`, {
+          headers: entry.token ? { authorization: `Bearer ${entry.token}` } : {},
+          signal: ctrl.signal,
+        }).catch(() => null);
+        clearTimeout(t);
+        reachable = !!(r && r.ok);
+      } catch { /* unreachable */ }
+    }
+    return jsonResponse(res, {
+      registered: true,
+      reachable,
+      kind: entry.kind || 'selfhost',
+      transport: entry.url ? 'agent' : (entry.pgUrl ? 'postgres' : 'qdrant'),
+    });
+  }
+
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;

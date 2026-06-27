@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
+import { orgIsRemote } from './vector/mneme/driver.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
@@ -5376,6 +5377,13 @@ exit \$RC
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
+      // RESIDENCY: meetings + tara persist content (transcripts, calls) to CENTRAL tables (raw SQL,
+      // not the agent-routed store). For a self-host org that is a leak. Block content WRITES for
+      // remote orgs until these are routed to the agent; GET/list reads stay (they hit central and
+      // return empty for a remote org — no leak). Mirrors assertKbAllowedForOrg for KB ingestion.
+      if (_mOrgId && req.method !== 'GET' && /^\/api\/(meetings|tara)(\/|$)/.test(pathname) && orgIsRemote(_mOrgId)) {
+        return jsonResponse(res, { error: 'Meetings and TARA calls are not yet available for self-hosted orgs — coming soon. Your memories (chat, API) work normally and stay on your server.', code: 'FEATURE_SELFHOST_UNSUPPORTED' }, 501);
+      }
 
       // ── AI Meeting Notes ──────────────────────────────────────────────
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.

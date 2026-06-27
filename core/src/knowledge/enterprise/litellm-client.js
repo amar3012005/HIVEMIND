@@ -33,12 +33,15 @@ const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const LLM_PRIMARY = (process.env.LLM_PRIMARY || '').toLowerCase();
 const OPENROUTER_MODEL_MAP = {
   'llama-3.3-70b-versatile': 'meta-llama/llama-3.3-70b-instruct',
+  'llama-3.1-8b-instant': 'meta-llama/llama-3.1-8b-instruct',
+  'llama-3.1-70b-versatile': 'meta-llama/llama-3.1-70b-instruct',
   'openai/gpt-oss-20b': 'openai/gpt-oss-20b',
   'openai/gpt-oss-120b': 'openai/gpt-oss-120b',
 };
 function mapModelForOpenRouter(model) {
   if (OPENROUTER_MODEL_MAP[model]) return OPENROUTER_MODEL_MAP[model];
-  if (/^(llama-|mixtral-|gemma|qwen)/i.test(model)) return `meta-llama/${model}`;
+  // Groq uses -versatile/-instant suffixes; OpenRouter uses -instruct. Normalize, else leave as-is.
+  if (/^llama-/i.test(model)) return `meta-llama/${model.replace(/-(versatile|instant)$/i, '-instruct')}`;
   return model;
 }
 

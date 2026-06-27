@@ -12,7 +12,7 @@ import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
 // mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
 import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
-import { amrRecall, amrWrite, isMnemeOrg } from './mneme/driver.js';
+import { amrRecall, amrWrite, isMnemeOrg, orgIsRemote } from './mneme/driver.js';
 import { qdrantUrlFor } from './mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
@@ -270,6 +270,26 @@ export class QdrantClient {
         metadata: memory.metadata || {}
       }
     };
+
+    // Remote .amr org (Model B, self-host): the vector + record belong on the CUSTOMER's hm-agent .amr,
+    // NOT central Qdrant. Write to the agent and return — never touch central Qdrant for this org's data.
+    if (orgIsRemote(memory.org_id)) {
+      const _rrec = {
+        id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+        content: memory.content, title: memory.title || null, tags: memory.tags || [],
+        memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
+        layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
+        cognitiveLayerRole: memory.cognitive_layer_role || null,
+        confidence: memory.importance_score ?? memory.strength ?? null,
+        createdAt: memory.created_at || new Date().toISOString(),
+        project: memory.project || null, projectIds: memory.project_ids || [],
+        validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
+        metadata: memory.metadata || {},
+      };
+      try { await amrWrite(memory.org_id, _rrec, point.vector); }
+      catch (e) { console.warn('[mneme] remote .amr write failed:', e.message); }
+      return { id: memory.id, status: 'amr-remote' };
+    }
 
     try {
       const response = await fetch(

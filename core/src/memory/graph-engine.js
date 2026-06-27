@@ -2162,6 +2162,31 @@ OUTPUT JSON only.`;
       });
       existingIds.add(h.id);
     }
+    // RESIDENCY: remote (self-host) orgs need a RELIABLE candidate pool. The agent's vector recall leg
+    // is eventually-consistent — embeddings lag the row write (mid-ingest, the just-saved peer often has
+    // no vector yet), so `similar` arrives empty or thin and the linker would degrade to an 8-row recency
+    // fallback (cross-person noise, missed same-entity supersessions). Pull the org's latest memories from
+    // the agent (PG-backed via listLatestMemories → /v1/list, always current + carries entity:* tags) and
+    // merge them in, freshest-first. This gives the co-mention LLM the same same-entity peers central gets
+    // from vector recall, so Updates/Extends/Contradicts/Mentions classify identically across org types.
+    if (orgIsRemote(baseMemory.org_id)) {
+      try {
+        const REMOTE_LINK_CANDIDATES = Number(process.env.REMOTE_LINK_CANDIDATES || 12);
+        const latest = await (store || this.store).listLatestMemories({
+          user_id: baseMemory.user_id,
+          org_id: baseMemory.org_id,
+        });
+        for (const m of (latest || [])) {
+          if (candidates.length >= REMOTE_LINK_CANDIDATES) break;
+          if (!m?.id || m.id === baseMemory.id || existingIds.has(m.id) || !(m.content || m.title)) continue;
+          candidates.push({ id: m.id, title: m.title, content: m.content, tags: m.tags || [], _searchMethod: 'remote_latest' });
+          existingIds.add(m.id);
+        }
+      } catch (e) {
+        console.warn('[entity-co-mention] remote latest augmentation failed:', e.message);
+      }
+    }
+
     const deriveCandidates = Array.isArray(baseMemory.metadata?._llm_derive_candidates)
       ? baseMemory.metadata._llm_derive_candidates
       : [];

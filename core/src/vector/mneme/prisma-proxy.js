@@ -16,7 +16,7 @@
 // Everything else (User, Organization, ApiKey, memberships, billing, settings = "data information")
 // stays in the ONE global central Postgres for ALL users, exactly like the current version.
 export const ROUTED_MODELS = new Set([
-  'memory', 'relationship', 'sourceMetadata', 'memoryVersion', 'memoryProject',
+  'memory', 'relationship', 'sourceMetadata', 'sourceArtifact', 'memoryVersion', 'memoryProject',
   'codeMemoryMetadata', 'derivationJob', 'memoryDerivation', 'memoryEvidenceLink',
   'vectorEmbedding', 'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',
 ]);

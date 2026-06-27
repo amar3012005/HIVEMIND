@@ -586,6 +586,20 @@ export class PrismaGraphStore {
   }
 
   async listLatestMemories({ user_id, org_id, project, scope = 'personal', access_context = null }) {
+    // RESIDENCY: remote (self-host) orgs keep their latest-memory set on the agent, not central.
+    // Without this branch latestMemories=[] for remote → contradiction reconciliation (graph-engine
+    // 1427) and conflictDetector candidate paths never fire → self-host loses Contradicts edges and
+    // the algorithmic Updates supersession, leaving only the co-mention LLM. Route to the agent so the
+    // full relationship machinery runs identically for all org types. Bounded to the most-recent latest
+    // rows (recency-biased, matching how conflictDetector ranks candidates) to keep the save hot path cheap.
+    const _org = org_id || currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const filter = { is_latest: true };
+      if (user_id) filter.user_id = user_id;
+      const REMOTE_LATEST_CAP = Number(process.env.REMOTE_LATEST_CAP || 500);
+      const { memories } = await remoteList(_org, filter, null, REMOTE_LATEST_CAP, 0);
+      return (memories || []).map(mapAgentRow);
+    }
     const records = await this.client.memory.findMany({
       where: { ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }), isLatest: true },
       include: {

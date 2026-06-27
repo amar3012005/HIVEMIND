@@ -27,12 +27,13 @@ globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, enterOrgContext };
 
 // Proxy for a self-host org's split client:
 //   • memory-subgraph models (ROUTED_MODELS)            → customer PG (the data plane)
-//   • raw SQL + transactions ($transaction/$queryRaw/…) → customer PG, because the memory graph store
-//     writes (advisory locks, atomic inserts, version/edge SQL) all target the memory tables that live
-//     on the customer box. Global tables are reached via Prisma MODELS (user/organization/apiKey), which
-//     are NOT in ROUTED_MODELS and so still resolve to central — global identity never hits the customer.
+//   • raw SQL + transactions ($transaction/$queryRaw/…) → CENTRAL. Under Model B (current arch) a
+//     self-host org's memory data lives in its .amr (served by the driver seam), NOT the customer PG, so
+//     raw memory-graph SQL is not on the remote path. Routing raw → customer (the abandoned Model-A
+//     assumption) broke raw reads of CENTRAL tables (organizations cognition flags, retrieval_config,
+//     OrgUsage) which have no row on the customer box. Global tables are central; raw stays central.
 //   • everything else                                   → central global client.
-const CUSTOMER_RAW = new Set(['$transaction', '$queryRaw', '$queryRawUnsafe', '$executeRaw', '$executeRawUnsafe']);
+const CUSTOMER_RAW = new Set();
 function makeSplitClient(central, customer) {
   return new Proxy(central, {
     get(target, prop) {

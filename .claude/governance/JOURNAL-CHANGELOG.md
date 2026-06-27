@@ -210,3 +210,16 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - VERIFIED: synthesize-now on b30ead1b → 4 dreams on agent, central=0; recall TOP hit is a canonical dream
   (cognition layer boost). 3-layer agentic recall (memory vector+lexical / evidence / cognition) FULLY
   ACTIVE for self-host. Minor: synth count returns 0 for remote (cosmetic — counts central inserts).
+
+## 2026-06-28 — Loop: connector-KB + P5 meetings/TARA on agent — FULLY-UNIFORM MODEL REACHED
+- commits: 64ef4ac0 (connector-KB), f5f48963 (P5 meetings/TARA)
+- connector-KB: ingestConnectorRecord routes doc+segment to the agent (mirror P2); guard lifted for
+  remote; central artifact/doc/segment skipped. (e2e pending a configured connector.)
+- P5: agent meetings/tara_calls/tara_turns tables + /v1/meeting-{write,list,get,delete,patch} +
+  /v1/tara-call; core routes all meeting+tara endpoints to the agent for remote; the
+  FEATURE_SELFHOST_UNSUPPORTED 501 is GONE. VERIFIED: self-host meeting POST→201, row on agent, central=0,
+  GET lists from agent. Regression: managed meeting→central. Tradeoffs: meeting-list scope simplified
+  (org-wide) + tara call-history empty + tara /end LLM-insight skipped for remote (turns not stored).
+- CONVERGENCE: all self-host feature-guards removed. Engine is now uniform for all 3 org types; type
+  matters ONLY at the storage seam (memoryBackend/getOrgCounts/amrGraph/amrKb*/amrMeeting*). 3-layer
+  agentic recall (memory vector+lexical / evidence / cognition-dreams) FULLY ACTIVE for self-host.

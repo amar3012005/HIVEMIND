@@ -56,7 +56,7 @@ changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
   GATE: free org hits each cap → 402/403 with used/left; Usage shows all counters for all 3 types.
 
 ## Phase 5 — Meetings + TARA for self-host
-- [ ] Route meeting + tara rows to the agent so the 501 blocks lift. GATE: record a meeting on
+- [x] Route meeting + tara rows to the agent so the 501 blocks lift. GATE: record a meeting on
   b30ead1b → lands on agent, central=0.
 
 ## Phase 6 — Uniform-count sweep + cosmetic parity

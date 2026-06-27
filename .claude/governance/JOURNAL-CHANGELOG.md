@@ -188,3 +188,12 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   the doc content from the agent. Regression: managed KB still lands central (2/2). GAP-3 closed.
 - Central/managed/personal byte-unchanged (all branches orgIsRemote-guarded). Next: Phase 3 (enrichment
   + cognition for self-host).
+
+## 2026-06-27 — Loop Phase 3a: structured enrichment for self-host — GREEN
+- commit: a7b7c0da
+- enrichMemoryStructured: remote orgs skip the central source_metadata persist + push distilled
+  urgency:/kind:/owner:/open:/blocked: tags to the agent (amrUpdateTags→outbox). enrichment-queue:
+  removed the remote skip (compute runs centrally for all types). VERIFIED: self-host memory →
+  urgency:high,kind:issue,has-action:1,owner:Petra_Vogel,blocked:1 on the agent.
+- Phase 3 split: 3a done; 3b (cognition/dreaming on remote — pull working set from agent, synthesize,
+  push via outbox, SKIP drift-compaction) deferred to its own careful unit (cognition is incident-prone).

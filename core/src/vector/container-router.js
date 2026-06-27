@@ -80,23 +80,24 @@ export async function resolveCollectionForOrg(orgId) {
   const cached = _orgContainerCache.get(orgId);
   if (cached && Date.now() - cached.ts < ORG_CACHE_TTL_MS) return cached.container;
 
-  let container = PERSONAL_COLLECTION;
   try {
-    const { getPrismaClient } = await import('../db/prisma.js');
-    const prisma = getPrismaClient();
-    // Select ONLY plan — container is fully derivable from it (enterprise →
-    // org_<id>, free → personal pool). Avoids depending on the vector_container
-    // column being present in the generated Prisma client (it can lag the DB).
-    const org = await prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { plan: true },
-    });
-    container = (org && isEnterprisePlan(org.plan)) ? orgContainerName(orgId) : PERSONAL_COLLECTION;
+    // CENTRAL client — the organizations table is ALWAYS central (B1). getPrismaClient() returns the
+    // org-context proxy; under a write running inside runWithOrg(org) that can mis-resolve and a
+    // PERSONAL fallback would then be CACHED for 5min → enterprise vectors land in the shared pool
+    // (the managed per-tenant isolation bug). Read plan from central, deterministically.
+    const { getCentralPrismaClient } = await import('../db/prisma.js');
+    const prisma = getCentralPrismaClient();
+    const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+    if (!org) return PERSONAL_COLLECTION; // unknown org → personal, but DON'T cache (so it retries)
+    const container = isEnterprisePlan(org.plan) ? orgContainerName(orgId) : PERSONAL_COLLECTION;
+    _orgContainerCache.set(orgId, { container, ts: Date.now() }); // cache only a DEFINITIVE answer
+    return container;
   } catch (err) {
-    logger.warn('resolveCollectionForOrg lookup failed; defaulting to personal pool', { orgId, error: err.message });
+    // Lookup failed — return personal as a safe default but do NOT cache it, so the next write
+    // re-resolves instead of pinning an enterprise org to the shared pool for the cache TTL.
+    logger.warn('resolveCollectionForOrg lookup failed; defaulting to personal (not cached)', { orgId, error: err.message });
+    return PERSONAL_COLLECTION;
   }
-  _orgContainerCache.set(orgId, { container, ts: Date.now() });
-  return container;
 }
 
 /**

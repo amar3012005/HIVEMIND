@@ -163,6 +163,12 @@ export function getPrismaClient() {
   return _ctxProxy;
 }
 
+// The RAW central client — bypasses ALL org routing (.amr proxy / customer-PG split). Use for tables
+// that are ALWAYS central regardless of the current org context (B1): the agent registry, org-config,
+// and the memory_outbox (Phase 4). enqueuePush runs INSIDE a remote org's runWithOrg() context, so
+// getPrismaClient() there would return the mneme proxy and silently drop a central-only write.
+export function getCentralPrismaClient() { return buildRealClient(); }
+
 // kept for back-compat with any external caller; no longer used by the boot path.
 export function setMnemeProxy(p) { _mnemeProxy = p; }
 

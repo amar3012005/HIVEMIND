@@ -26,7 +26,7 @@
  */
 
 import { createRequire } from 'node:module';
-import { getPrismaClient, runWithOrg } from '../db/prisma.js';
+import { getCentralPrismaClient, runWithOrg } from '../db/prisma.js';
 import {
   remoteWrite,
   remoteAddEdge,
@@ -161,7 +161,7 @@ function tryLoadIORedis() {
  * @returns {Promise<string>} outboxId
  */
 export async function enqueuePush(orgId, op, recordId, payload) {
-  const prisma = getPrismaClient();
+  const prisma = getCentralPrismaClient();
   // Compute next seq for this recordId atomically via raw SQL (Prisma lacks
   // a SQL-level max()+1 in a single upsert without raw).  COALESCE so the
   // first row for a recordId starts at 1.
@@ -208,7 +208,7 @@ async function processJob(job) {
   const { outboxId } = job.data;
   if (!outboxId) return;
 
-  const prisma = getPrismaClient();
+  const prisma = getCentralPrismaClient();
   const row = await prisma.memoryOutbox.findUnique({ where: { id: outboxId } });
   if (!row || row.status !== 'pending') return; // already acked/dead or not found
 
@@ -323,7 +323,7 @@ export async function sweepStuckOutbox() {
   if (!PUSH_OUTBOX_ENABLED) return;
   if (!_queue) return; // BullMQ not initialised — nothing to re-enqueue into
   try {
-    const prisma = getPrismaClient();
+    const prisma = getCentralPrismaClient();
     const stuck = await prisma.memoryOutbox.findMany({
       where: {
         status: 'pending',

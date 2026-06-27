@@ -16,6 +16,20 @@ log(){ printf '\033[1;36m[byod]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[byod] %s\033[0m\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die "install Docker first (curl -fsSL https://get.docker.com | sh)"
 gen(){ openssl rand -hex "${1:-24}"; }
+C='\033[1;36m'; D='\033[0;90m'; G='\033[1;32m'; Z='\033[0m'
+step(){ printf "  ${C}◆${Z} %-22s ${D}%s${Z}\n" "$1" "$2"; }
+ok(){   printf "  ${G}✓${Z} %-22s ${D}%s${Z}\n" "$1" "$2"; }
+banner(){ printf "
+${C}  ███████╗██╗███╗   ██╗ ██████╗ ██╗   ██╗██╗      █████╗ ███╗   ██╗ ██████╗███████╗
+  ██╔════╝██║████╗  ██║██╔════╝ ██║   ██║██║     ██╔══██╗████╗  ██║██╔════╝██╔════╝
+  ███████╗██║██╔██╗ ██║██║  ███╗██║   ██║██║     ███████║██╔██╗ ██║██║     █████╗
+  ╚════██║██║██║╚██╗██║██║   ██║██║   ██║██║     ██╔══██║██║╚██╗██║██║     ██╔══╝
+  ███████║██║██║ ╚████║╚██████╔╝╚██████╔╝███████╗██║  ██║██║ ╚████║╚██████╗███████╗
+  ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝${Z}
+  ${D}self-hosted agent · your server · your data · connected to the SINGULANCE engine${Z}
+
+"; }
+banner
 
 # Idempotent re-run: .env already exists → just bring everything up and re-register.
 if [ -f .env ]; then
@@ -105,5 +119,14 @@ curl -fsS -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/
   -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"agentUrl\":\"$AGENT_URL\",\"agentToken\":\"$AGENT_TOKEN\"}" >/dev/null \
   || die "registration failed"
 
-log "✅ connected. org $HIVEMIND_ORG_ID — your memory data lives in the .amr on THIS box ($PWD/data)."
-log "Start using the HIVEMIND dashboard now. The Self-host page will flip to 'Agent connected'. BACK UP ./data."
+ok "agent registered" "$AGENT_URL"
+printf "
+  ${C}→ connected to SINGULANCE${Z}
+
+     ${D}org${Z}        %s
+     ${D}agent${Z}      %s
+     ${D}data${Z}       %s  ${D}(content + vectors + graph — never leaves this box)${Z}
+     ${D}status${Z}     ${G}live${Z} · the dashboard flips to 'Agent connected' automatically
+
+" "$HIVEMIND_ORG_ID" "$AGENT_URL" "$PWD/data"
+log "Use the SINGULANCE dashboard now. BACK UP ./data."

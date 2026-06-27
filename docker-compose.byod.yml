@@ -1,12 +1,19 @@
-# HIVEMIND BYOD — DATA-ONLY, runs on the CUSTOMER's box. Just the stores that hold their memory data
-# (Postgres + Qdrant) + an outbound tunnel. NO engine here — the engine, control, dashboard all stay
-# central. HIVEMIND's core reaches these two stores through the tunnel for this org only. Customer
-# memory never leaves the box; only query results traverse the encrypted link.
-name: hivemind-byod-data
+# HIVEMIND BYOD — DATA PLANE, runs on the CUSTOMER's box. Two parts, both on-box:
+#   • hm-agent  — the .amr engine (memories + vectors + relationship graph) + an HTTP API the central
+#                 engine POSTs finished memories to (/v1/write) and recalls from (/v1/recall).
+#   • postgres  — local store the agent uses for content hydration (/v1/hydrate) so raw content stays on-box.
+# NO engine/LLM here — the central engine does the canonical processing, then ships the finished memory
+# to this agent. Memory data never leaves the box; only query results traverse the link.
+#
+# Exposure (pick one, set in .env):
+#   • Direct HTTPS  — AGENT_PUBLIC_URL=https://agent.<your-domain>; put Caddy/your proxy in front for TLS.
+#                     The AGENT_TOKEN + TLS secure it. Simplest; no tunnel.
+#   • Tailscale     — set TS_AUTHKEY; central reaches the agent over the private tailnet. Enable the tunnel profile.
+name: hivemind-byod
 
 services:
   postgres:
-    image: postgres:16-alpine   # public image; the curated memory schema is plain tables (no AGE needed) — verified
+    image: postgres:16-alpine
     container_name: hm-byod-postgres
     restart: unless-stopped
     environment:
@@ -14,32 +21,45 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-hivemind}
     volumes:
-      - ./data/pg:/var/lib/postgresql/data       # the memory subgraph lives HERE on the customer disk
+      - ./data/pg:/var/lib/postgresql/data        # content hydration store — on the customer disk
     expose: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind} -d ${POSTGRES_DB:-hivemind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
-  qdrant:
-    image: qdrant/qdrant:v1.12.4
-    container_name: hm-byod-qdrant
+  agent:
+    build: { context: ./agent }
+    image: hivemind/hm-agent:${VERSION:-latest}
+    container_name: hm-byod-agent
     restart: unless-stopped
     environment:
-      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+      ORG_ID: ${HIVEMIND_ORG_ID}
+      MNEME_DIM: ${EMBEDDING_DIMENSION:-1024}
+      MNEME_DATA_ROOT: /data/mneme                 # the .amr shard — memories+vectors+graph, on-box
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
+      AGENT_PORT: "8787"
+      AGENT_TOKEN: ${AGENT_TOKEN}                   # bearer the central engine must present
     volumes:
-      - ./data/qdrant:/qdrant/storage            # the vectors live HERE
-    expose: ["6333"]
+      - ./data/mneme:/data/mneme                    # .amr persisted on the customer disk
+    ports:
+      - "${AGENT_BIND:-0.0.0.0}:${AGENT_PORT:-8787}:8787"
+    depends_on:
+      postgres: { condition: service_healthy }
 
-  # Outbound tunnel — exposes Postgres + Qdrant to HIVEMIND central with NO inbound port.
-  # Recommended: Tailscale (WireGuard, E2E, raw TCP for Postgres). cloudflared works for the Qdrant
-  # HTTP port; Postgres (raw TCP) needs Tailscale or `cloudflared access tcp`. Pick per your network.
+  # Optional private transport (alternative to direct HTTPS). Enable with: --profile tailnet
   tunnel:
     image: tailscale/tailscale:latest
     container_name: hm-byod-tunnel
     restart: unless-stopped
+    profiles: ["tailnet"]
     hostname: ${TS_HOSTNAME:-hivemind-byod}
     environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:-}                 # your Tailscale auth key (so central can reach pg/qdrant)
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_EXTRA_ARGS: --advertise-tags=tag:hivemind-byod
       TS_STATE_DIR: /var/lib/tailscale
     volumes:
       - ./data/ts:/var/lib/tailscale
     cap_add: [NET_ADMIN, SYS_MODULE]
-    depends_on: [postgres, qdrant]
+    depends_on: [agent]

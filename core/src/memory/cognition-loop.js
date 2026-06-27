@@ -480,6 +480,16 @@ export class CognitionLoop {
       return { run: false, reason: 'cognition_disabled_for_org' };
     }
     const since = win.since;
+    // Remote (self-host): the working set lives on the agent — central count is 0 and would always gate
+    // out. Count fact/decision memories from the agent instead (bounded recent list).
+    if (orgIsRemote(orgId)) {
+      const _excl = ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized'];
+      const rows = await amrListRecent(orgId, null, 400).catch(() => []);
+      const windowCount = rows.filter((r) => ['fact', 'decision'].includes(r.memory_type || r.memoryType)
+        && !(r.tags || []).some((t) => _excl.includes(t))).length;
+      if (windowCount < MIN) return { run: false, reason: `below_min_window_memories(${windowCount}<${MIN})` };
+      return { run: true, reason: null };
+    }
     const baseWhere = {
       orgId,
       deletedAt: null,

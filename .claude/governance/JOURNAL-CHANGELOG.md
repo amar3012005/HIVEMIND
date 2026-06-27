@@ -197,3 +197,16 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   urgency:high,kind:issue,has-action:1,owner:Petra_Vogel,blocked:1 on the agent.
 - Phase 3 split: 3a done; 3b (cognition/dreaming on remote — pull working set from agent, synthesize,
   push via outbox, SKIP drift-compaction) deferred to its own careful unit (cognition is incident-prone).
+
+## 2026-06-27 — Loop: 3-layer recall + P3b cognition-on-remote — GREEN
+- commits: c1d113bd (lexical leg), 3934d3e2/08f33912/7283023e (cognition)
+- RECALL: wired the lexical (FTS) leg to the agent (remoteLexical→/v1/lexical) — self-host recall was
+  vector-only; now hybrid vector+lexical union. Verified "SOC2" exact-term surfaces.
+- P3b cognition-on-remote: loop loads working set from agent (amrListRecent, fact/decision), synthesizes
+  centrally, pushes dreams (layer='cognitive', cognitive_layer_role) + Derives edges to the agent via
+  amrWrite/amrAddEdge; SKIPS drift-compaction/principles/reweight for remote (incident-prone + central-
+  coupled). Gate (_shouldRunForOrg) + member-load both count from the agent. amrListRecent now surfaces
+  memory_type (was dropping it → fact/decision filter excluded all).
+- VERIFIED: synthesize-now on b30ead1b → 4 dreams on agent, central=0; recall TOP hit is a canonical dream
+  (cognition layer boost). 3-layer agentic recall (memory vector+lexical / evidence / cognition) FULLY
+  ACTIVE for self-host. Minor: synth count returns 0 for remote (cosmetic — counts central inserts).

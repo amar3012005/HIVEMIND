@@ -44,7 +44,7 @@ changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
 ## Phase 3 — Structured enrichment + cognition for self-host (compass P5)
 - [x] 3a — enrichMemoryStructured runs centrally for remote; urgency/kind/owner/blocked tags pushed to
   agent via amrUpdateTags→outbox. VERIFIED on b30ead1b.
-- [ ] 3b — cognition-loop / dreaming for remote: pull working set from the agent (/v1/list+/v1/recall),
+- [x] 3b — cognition-loop / dreaming for remote: pull working set from the agent (/v1/list+/v1/recall),
   synthesize centrally, push syntheses via store.createMemory→outbox, SKIP drift-compaction on remote
   (destructive; needs the snapshot rails). Own careful unit — cognition is incident-prone. GATE:
   synthesize-now on b30ead1b → synthesis lands on agent, central=0, no compaction.

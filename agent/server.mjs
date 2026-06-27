@@ -26,13 +26,16 @@ function die(m) { console.error(`[hm-agent] ${m}`); process.exit(1); }
 
 // ── Postgres (rows + lexical) ───────────────────────────────────────────────────────────────────
 const { default: Pg } = await import('pg');
-const pg = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'), max: 8 });
+// Pin the session to the agent's OWN schema `hm` so it never collides with leftover tables (e.g. a
+// prior Prisma `hivemind.memories`) — fully self-contained on fresh and dirty boxes alike.
+const pg = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'), max: 8, options: '-c search_path=hm,public' });
 
 // The agent's OWN schema — minimal, plain types, no enums, no FKs to global tables. content_tsv is a
-// generated column so lexical search is always in sync. Idempotent; created on boot.
+// generated column so lexical search is always in sync. Idempotent; created on boot in schema `hm`.
 async function ensureSchema() {
   await pg.query(`
-    CREATE TABLE IF NOT EXISTS memories (
+    CREATE SCHEMA IF NOT EXISTS hm;
+    CREATE TABLE IF NOT EXISTS hm.memories (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
       user_id uuid,

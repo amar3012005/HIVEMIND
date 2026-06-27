@@ -3,7 +3,8 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, amrLexical, withAmrLock, amrAddEdge, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, withAmrLock, amrAddEdge, mnemeMode } from '../vector/mneme/driver.js';
+import { pgUrlFor } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
 /**
@@ -255,7 +256,7 @@ export class PrismaGraphStore {
   async advisoryLock(userId, fn, orgId) {
     // .amr org: no Postgres to pg_advisory_lock against. Serialize per-user IN-PROCESS and run the
     // body directly against the routing client (the .amr writes apply immediately). No PG tx opened.
-    if (orgId && isMnemeOrg(orgId) && mnemeMode() === 'sole') {
+    if (orgId && (orgIsRemote(orgId) || pgUrlFor(orgId) || (isMnemeOrg(orgId) && mnemeMode() === 'sole'))) {
       return withAmrLock(orgId, `mem:${userId}`, () => fn(new PrismaGraphStore(this.client, { inTransaction: true })));
     }
     if (this.inTransaction) {
@@ -283,7 +284,7 @@ export class PrismaGraphStore {
     // .amr org: no Postgres transaction — run against the routing client (the .amr store is not part
     // of a PG ACID tx anyway; writes apply immediately). Removes the empty-PG-tx dependency so an
     // .amr org functions with Postgres entirely absent.
-    if (orgId && isMnemeOrg(orgId) && mnemeMode() === 'sole') {
+    if (orgId && (orgIsRemote(orgId) || pgUrlFor(orgId) || (isMnemeOrg(orgId) && mnemeMode() === 'sole'))) {
       return fn(new PrismaGraphStore(this.client, { inTransaction: true }));
     }
 

@@ -32,6 +32,26 @@ if (process.env.DATABASE_URL) {
   if (Pg) { pg = new Pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 }); }
 }
 
+// optional Qdrant hot-backup mirror (best-effort; agent works pure-.amr if unset/down)
+const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
+const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
+const qFetch = (path, opts = {}, ms = 1500) => {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
+  return fetch(`${QDRANT_URL}${path}`, { ...opts, signal: ac.signal }).finally(() => clearTimeout(t));
+};
+async function ensureQdrant() {
+  if (!QDRANT_URL) return;
+  try {
+    await qFetch(`/collections/${QCOLL}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vectors: { size: DIM, distance: 'Cosine' } }),
+    }, 4000);
+    console.log(`[hm-agent] qdrant mirror ready: ${QDRANT_URL}/collections/${QCOLL}`);
+  } catch (e) { console.warn(`[hm-agent] qdrant ensure skipped: ${e.message}`); }
+}
+await ensureQdrant();
+
 const bind = loadBinding(BINDING);
 const backend = { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend };
 const realPrisma = {}; // agent uses the adapter directly — no proxy
@@ -42,10 +62,40 @@ const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'applic
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
 
 const routes = {
-  // vector recall over the local .amr — returns Qdrant-shaped hits (content in payload)
-  '/v1/recall': async (b) => ({ results: mnemeSearch(store, b.vector, b.filter || {}, b.limit || 10, b.scoreThreshold ?? 0.0) || [] }),
-  // unified write: memory record + vector (+ rels)
-  '/v1/write': async (b) => { await storeMemoryUnified(b.record, b.vector, b.rels || []); return { ok: true }; },
+  // vector recall over the local .amr — returns Qdrant-shaped hits (content in payload).
+  // .amr is PRIMARY; on throw/empty fall back to the Qdrant mirror (same {id,score,payload} shape).
+  '/v1/recall': async (b) => {
+    const limit = b.limit || 10, thr = b.scoreThreshold ?? 0.0;
+    let results = null;
+    try { results = mnemeSearch(store, b.vector, b.filter || {}, limit, thr); } catch (e) { console.warn(`[hm-agent] recall .amr failed: ${e.message}`); }
+    if (results && results.length) return { results };
+    if (QDRANT_URL && Array.isArray(b.vector)) {
+      try {
+        const r = await qFetch(`/collections/${QCOLL}/points/search`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ vector: b.vector, limit, with_payload: true, score_threshold: thr }),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const hits = (j.result || []).map((h) => ({ id: h.id, score: h.score, payload: h.payload || {} }));
+          if (hits.length) return { results: hits };
+        }
+      } catch (e) { console.warn(`[hm-agent] recall qdrant fallback failed: ${e.message}`); }
+    }
+    return { results: results || [] };
+  },
+  // unified write: memory record + vector (+ rels). Mirror to Qdrant best-effort (fire-and-forget).
+  '/v1/write': async (b) => {
+    await storeMemoryUnified(b.record, b.vector, b.rels || []);
+    if (QDRANT_URL && b.record?.id && Array.isArray(b.vector)) {
+      qFetch(`/collections/${QCOLL}/points`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ points: [{ id: b.record.id, vector: b.vector, payload: { memory_id: b.record.id, org_id: ORG } }], wait: false }),
+      }).then((r) => { if (!r.ok) console.warn(`[hm-agent] qdrant upsert ${r.status}`); })
+        .catch((e) => console.warn(`[hm-agent] qdrant upsert failed: ${e.message}`));
+    }
+    return { ok: true };
+  },
   // typed edge into the local graph
   '/v1/edge': async (b) => { if (b.rel?.fromId && b.rel?.toId) await adapter.relationship.create({ data: { id: b.rel.id, fromId: b.rel.fromId, toId: b.rel.toId, type: b.rel.type, confidence: b.rel.confidence ?? 1 } }); return { ok: true }; },
   // tag resync: entity:* tags attach AFTER the initial write (deferred entity-linking). Update the
@@ -66,7 +116,11 @@ const routes = {
 };
 
 http.createServer(async (req, res) => {
-  if (req.url === '/health') return send(res, 200, { ok: true, org: ORG, store: 'amr', pg: !!pg });
+  if (req.url === '/health') {
+    let qdrant = false;
+    if (QDRANT_URL) { try { const r = await qFetch(`/collections/${QCOLL}`, {}, 1500); qdrant = r.ok; } catch { qdrant = false; } }
+    return send(res, 200, { ok: true, org: ORG, store: 'amr', pg: !!pg, qdrant });
+  }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(res, 401, { error: 'unauthorized' });
   if (req.headers['x-org-id'] && req.headers['x-org-id'] !== ORG) return send(res, 403, { error: 'org mismatch' });

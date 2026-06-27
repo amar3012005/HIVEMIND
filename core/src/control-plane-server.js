@@ -1395,23 +1395,27 @@ const server = http.createServer(async (req, res) => {
     // `prisma migrate deploy` prod runs, just pointed at their DB via the tunnel). Idempotent; the
     // global tables it also creates sit unused (global queries route to central). No rebuild.
     let migrated = false;
+    let migrateError = null;
     if (body.pgUrl) {
       try {
         const { exec } = await import('node:child_process');
-        // Apply the CURATED memory-subgraph schema (14 tables, FKs to global tables relaxed, triggers
-        // stripped) — clean on a fresh customer PG. Global info stays central. Ships at /app/byod-memory-schema.sql.
-        const cmd = 'node_modules/.bin/prisma db execute --file=byod-memory-schema.sql --schema=prisma/schema.prisma';
+        // Apply the CURRENT Prisma schema to the customer/agent Postgres via `db push` — always in
+        // sync with the live client (no stale hand-maintained DDL, no schema drift). The pgUrl carries
+        // ?schema=hivemind so tables land in the hivemind schema; global tables it also creates sit
+        // unused (global queries route to central). Idempotent.
+        const cmd = 'node_modules/.bin/prisma db push --skip-generate --accept-data-loss --schema=prisma/schema.prisma';
         await new Promise((resolve, reject) => {
-          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 120000, shell: '/bin/sh' },
-            (err) => (err ? reject(err) : resolve()));
+          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 180000, shell: '/bin/sh' },
+            (err, stdout, stderr) => (err ? reject(new Error((stderr || stdout || err.message).slice(0, 400))) : resolve()));
         });
         migrated = true;
-        console.log(`[selfhost] customer PG migrated org=${orgId}`);
+        console.log(`[selfhost] customer PG schema synced (db push) org=${orgId}`);
       } catch (e) {
+        migrateError = e.message;
         console.warn(`[selfhost] customer PG migrate failed org=${orgId}: ${e.message}`);
       }
     }
-    return jsonResponse(res, { ok: true, orgId, migrated });
+    return jsonResponse(res, { ok: true, orgId, migrated, ...(migrateError ? { migrateError } : {}) });
   }
 
   // Self-host connection status — the FE polls this during onboarding to show "waiting → connected".
@@ -2134,6 +2138,20 @@ const server = http.createServer(async (req, res) => {
       .catch((err) =>
         console.error('[org-create] vector container provisioning failed', { orgId: org.id, plan: requestedPlan, error: err?.message })
       );
+
+    // Managed-enterprise data plane (flag-gated, dormant unless MANAGED_AGENT_PROVISION=true):
+    // for paid/managed enterprise plans, also spin up the org's OWN .amr agent
+    // (agent + Postgres + Qdrant) in our cloud and register it — so managed
+    // enterprise uses the SAME data plane as self-host (Model B). Fire-and-forget;
+    // the provisioner never throws and never blocks/fails org creation.
+    if (requestedPlan === 'enterprise' || requestedPlan === 'managed') {
+      import('./selfhost/managed-provisioner.js')
+        .then((m) => m.provisionManagedAgent({ orgId: org.id }))
+        .then((r) => console.log('[org-create] managed agent provision', { orgId: org.id, ...r }))
+        .catch((err) =>
+          console.error('[org-create] managed agent provisioning failed', { orgId: org.id, error: err?.message })
+        );
+    }
 
     await prisma.userOrganization.create({
       data: {

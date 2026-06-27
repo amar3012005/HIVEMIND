@@ -6371,7 +6371,7 @@ exit \$RC
 
             // Structured enrichment on the parent (fire-and-forget).
             if (parentId && enrichmentQueue) {
-              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags });
+              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags, orgId: mOrg });
             }
             // Link the meeting row back to the parent memory (idempotent).
             if (parentId) {
@@ -11984,6 +11984,7 @@ exit \$RC
                         content: parent.content,
                         title: parent.title,
                         tags: parent.tags,
+                        orgId: parent.org_id,
                       });
                     }
                     // Skip residual summary memory if adapter also produced one.
@@ -12004,6 +12005,7 @@ exit \$RC
                         content: p.content,
                         title: p.title,
                         tags: p.tags,
+                        orgId: p.org_id,
                       });
                     }
                   }
@@ -16760,6 +16762,7 @@ exit \$RC
                             content: p.parent?.content || p.content,
                             title: p.parent?.title || p.title,
                             tags: p.parent?.tags || p.tags,
+                            orgId,
                           });
                         }
                         // Deferred entity-link → global bounded queue (parent + children).
@@ -16801,14 +16804,15 @@ exit \$RC
                           content: p.content,
                           title: p.title,
                           tags: p.tags,
+                          orgId,
                         });
                       }
 
                       // Auto-extract profile facts from ingested content
                       if (profileStore && p.content) {
-                        profileStore.extractAndStore(p.content, {
+                        runWithOrg(orgId, () => profileStore.extractAndStore(p.content, {
                           userId, orgId, memoryId: result.memoryId,
-                        }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                        })).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
                       }
 
                       // Embed fact-memories in Qdrant
@@ -16920,9 +16924,9 @@ exit \$RC
 
                 // Auto-extract profile facts from ingested content
                 if (profileStore && p.content) {
-                  profileStore.extractAndStore(p.content, {
+                  runWithOrg(orgId, () => profileStore.extractAndStore(p.content, {
                     userId, orgId, memoryId: result.memoryId,
-                  }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                  })).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
                 }
 
                 // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)

@@ -29,6 +29,21 @@ services:
       timeout: 5s
       retries: 10
 
+  # Local Qdrant backup — every .amr agent mirrors its vectors here as a second on-box copy.
+  # Internal only (not published); only the agent talks to it over the compose network.
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hm-byod-qdrant
+    restart: unless-stopped
+    volumes:
+      - ./data/qdrant:/qdrant/storage             # vector backup persisted on the customer disk
+    expose: ["6333"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   agent:
     build: { context: ./agent }
     image: hivemind/hm-agent:${VERSION:-latest}
@@ -39,6 +54,7 @@ services:
       MNEME_DIM: ${EMBEDDING_DIMENSION:-1024}
       MNEME_DATA_ROOT: /data/mneme                 # the .amr shard — memories+vectors+graph, on-box
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
+      QDRANT_URL: http://qdrant:6333               # local Qdrant backup the agent mirrors vectors to
       AGENT_PORT: "8787"
       AGENT_TOKEN: ${AGENT_TOKEN}                   # bearer the central engine must present
     volumes:
@@ -47,6 +63,7 @@ services:
       - "${AGENT_BIND:-0.0.0.0}:${AGENT_PORT:-8787}:8787"
     depends_on:
       postgres: { condition: service_healthy }
+      qdrant: { condition: service_started }
 
   # Optional private transport (alternative to direct HTTPS). Enable with: --profile tailnet
   tunnel:

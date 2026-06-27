@@ -576,7 +576,7 @@ export class SyncEngine {
     const platform = payload.source_metadata?.source_type || provider;
     const agentId = `connector_${platform}`;
 
-    setImmediate(async () => {
+    setImmediate(() => runWithOrg(orgId, async () => {
       try {
         await this.trailExecutor.execute('capture_decision', agentId, {
           maxSteps: 2,
@@ -603,7 +603,7 @@ export class SyncEngine {
         // Non-fatal — decision capture should never block sync
         console.warn(`[sync-engine] Decision capture failed for ${platform}:${userId}:`, err.message);
       }
-    });
+    }));
   }
 
   async _isDuplicate(dedupeKey, userId, provider, orgId) {

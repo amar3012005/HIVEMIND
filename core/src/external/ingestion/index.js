@@ -2,6 +2,13 @@ const { createIngestionQueue, ingest, validatePayload } = require('./queue');
 const { IngestionPipelineOrchestrator } = require('./pipeline-orchestrator');
 const { IngestionAuditLogger } = require('./audit-logger');
 
+const _withOrg = (job, fn) => {
+  const o = job && job.data && (job.data.org_id || (job.data.payload && job.data.payload.org_id));
+  const ctx = globalThis.__hivemindOrgCtx;
+  if (o && ctx && ctx.runWithOrg) return ctx.runWithOrg(o, fn);
+  return fn();
+};
+
 function createIngestionPipeline(options = {}) {
   const queueSystem = createIngestionQueue(options.queue || {});
   const orchestrator = new IngestionPipelineOrchestrator({
@@ -14,12 +21,12 @@ function createIngestionPipeline(options = {}) {
   });
 
   if (queueSystem.mode === 'in-memory') {
-    queueSystem.queue.process(async (job) => orchestrator.process(job));
+    queueSystem.queue.process(async (job) => _withOrg(job, () => orchestrator.process(job)));
   } else {
     const { Worker } = require('bullmq');
     const worker = new Worker(
       options.queue?.queueName || 'hivemind-ingestion',
-      async (job) => orchestrator.process(job),
+      async (job) => _withOrg(job, () => orchestrator.process(job)),
       {
         connection: queueSystem.connection,
         concurrency: options.queue?.concurrency || 4,

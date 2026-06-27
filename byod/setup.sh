@@ -24,9 +24,9 @@ else
   # ── 1. WARM IN BACKGROUND ──────────────────────────────────────────────────────────────────────
   # Build the agent image + pull Postgres while you fetch/paste your key. This is the slow part; doing
   # it now means the agent starts instantly once the key is in.
-  log "warming up (building the .amr agent + pulling Postgres in the background while you grab your key)…"
+  log "warming up (building the .amr agent + pulling Postgres + Qdrant in the background while you grab your key)…"
   : > .byod-warm.log
-  ( $COMPOSE build agent >>.byod-warm.log 2>&1 && docker pull postgres:16-alpine >>.byod-warm.log 2>&1 ) &
+  ( $COMPOSE build agent >>.byod-warm.log 2>&1 && docker pull postgres:16-alpine >>.byod-warm.log 2>&1 && docker pull qdrant/qdrant:latest >>.byod-warm.log 2>&1 ) &
   WARM_PID=$!
 
   # ── 2. KEY ─────────────────────────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ else
   fi
 
   # ── 4. WAIT FOR WARM ───────────────────────────────────────────────────────────────────────────
-  log "finishing warm-up (image build + Postgres pull)…"
+  log "finishing warm-up (image build + Postgres + Qdrant pull)…"
   if ! wait "$WARM_PID"; then die "warm-up failed — see $(pwd)/.byod-warm.log"; fi
   log "warm-up done — box is primed."
 
@@ -77,11 +77,11 @@ fi
 
 set -a; . ./.env; set +a
 
-# ── 6. BRING UP (fast — image already built + Postgres pulled during warm) ──────────────────────────
+# ── 6. BRING UP (fast — image already built + Postgres/Qdrant pulled during warm) ────────────────────
 if [ -n "${TS_AUTHKEY:-}" ]; then
-  log "starting Postgres + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
+  log "starting Postgres + Qdrant + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
 else
-  log "starting Postgres + .amr agent…"; $COMPOSE up -d
+  log "starting Postgres + Qdrant + .amr agent…"; $COMPOSE up -d
 fi
 
 # ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────

@@ -35,7 +35,7 @@ export class EnrichmentQueue {
     this.engine = engine;
     this.concurrency = Math.max(1, concurrency);
     this.logger = logger;
-    this.pending = []; // [{ memoryId, payload, enqueuedAt }]
+    this.pending = []; // [{ memoryId, payload, orgId, enqueuedAt }]
     this.running = new Set(); // memoryIds in flight (dedup)
     this.counters = { enqueued: 0, completed: 0, failed: 0, dropped: 0 };
   }
@@ -54,7 +54,8 @@ export class EnrichmentQueue {
       this.logger.warn?.(`[enrichment-queue] full (${MAX_QUEUE_SIZE}) — dropping ${memoryId.slice(0, 8)}`);
       return false;
     }
-    this.pending.push({ memoryId, payload, enqueuedAt: Date.now() });
+    const orgId = payload?.orgId || payload?.org_id || null;
+    this.pending.push({ memoryId, payload, orgId, enqueuedAt: Date.now() });
     this.counters.enqueued += 1;
     setImmediate(() => this._drain());
     return true;
@@ -99,7 +100,11 @@ export class EnrichmentQueue {
   async _runJob(job) {
     const startedAt = Date.now();
     try {
-      const result = await this.engine.enrichMemoryStructured(job.memoryId, job.payload);
+      const ctx = globalThis.__hivemindOrgCtx;
+      const run = job.orgId && ctx?.runWithOrg
+        ? (fn) => ctx.runWithOrg(job.orgId, fn)
+        : (fn) => fn();
+      const result = await run(() => this.engine.enrichMemoryStructured(job.memoryId, job.payload));
       const dur = Date.now() - startedAt;
       if (result) {
         this.counters.completed += 1;

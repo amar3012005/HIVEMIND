@@ -4,6 +4,7 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 import { isMnemeOrg, amrLexical, withAmrLock, amrAddEdge, mnemeMode } from '../vector/mneme/driver.js';
+import { currentOrg } from '../db/prisma.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -956,7 +957,7 @@ export class PrismaGraphStore {
     // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
     // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
     if (mnemeMode() === 'dual') {
-      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: edge.org_id });
+      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: edge.org_id || currentOrg() });
     }
 
     return mapRelationshipRecord(created);

@@ -92,7 +92,14 @@ export class EntityLinkQueue {
       // similar=[] — _attachEntityCoMentionEdges self-fetches tag-overlap
       // candidates; entity TAG extraction works from the memory's own content
       // regardless of candidates. Its internal 3x retry/backoff handles 429.
-      await this.engine._attachEntityCoMentionEdges(memory, this.engine.store, []);
+      // Re-establish the org context (this is a detached setImmediate drain — the request-scope
+      // context is gone), so the split client + .amr edge/tag routing resolve to the org's store.
+      const _org = memory.org_id || memory.orgId;
+      const _ctx = globalThis.__hivemindOrgCtx;
+      const _run = (_org && _ctx && _ctx.runWithOrg)
+        ? (fn) => _ctx.runWithOrg(_org, fn)
+        : (fn) => fn();
+      await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, []));
       this.counters.completed += 1;
     } catch (err) {
       this.counters.failed += 1;

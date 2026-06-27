@@ -35,3 +35,12 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - verified: sai recall (vector+lexical) on `.amr`; managed intact.
 - state: deployed.
 - refs: `CHANGELOG/2026-06-26-mneme-amr-engine.md`.
+
+## 2026-06-27 — Phase 1+2: push-model data plane (PG+Qdrant agent) + central=0 for remote
+- type: feature   verdict: GREEN (residuals)
+- decided: agent = pure Postgres+Qdrant with its OWN `hm` schema (no .amr/Prisma/enums) → kills schema-drift class. Engine PUSHES finished memory over bearer HTTP; never touches customer DB. .amr is a later swap behind the same API.
+- built: P1 — rewrote byod/agent/server.mjs (write/recall/lexical/hydrate/list/edge/update-tags/delete/purge/health, atomic-ish row+vector, dedicated hm schema). P2a — engine→agent push lands (storeMemory orgIsRemote → amrWrite). P2b — central=0: createMemory pushes row to agent immediately (vector later); subgraph writes (sourceMetadata/version/relationship) skip central for remote; getMemory/getMemories/listMemories route to agent (remoteHydrate/remoteList + mapAgentRow).
+- verified: all 8 agent routes curl-green; save → central Δ0 / agent Δ+1 (vector_synced=t) / recall+list from agent; ingest completes; managed structurally unaffected (only the registered remote org branches).
+- state: deployed via docker cp to hm-core (EPHEMERAL — needs git pull+rebuild for durability, per E1). Committed to feat/mneme-foundation + byod branch.
+- residuals: enrichment-queue central source_metadata write for remote (non-fatal, gate next); stale agent Qdrant test points (purge); registry must be agentUrl+token ONLY (pgUrl empty — stale pgUrl revives dead direct-PG path).
+- refs: docs/PRODUCTION_COMPASS.md, byod/agent/server.mjs, core/src/memory/prisma-graph-store.js, core/src/vector/mneme/remote-backend.js.

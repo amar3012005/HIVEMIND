@@ -3,8 +3,8 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, withAmrLock, amrAddEdge, mnemeMode } from '../vector/mneme/driver.js';
-import { pgUrlFor } from '../vector/mneme/remote-backend.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, withAmrLock, amrAddEdge, amrWrite, mnemeMode } from '../vector/mneme/driver.js';
+import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
 /**
@@ -62,6 +62,39 @@ function findJsonbCulprit(obj) {
     return null;
   };
   try { return walk(obj, ''); } catch { return null; }
+}
+
+// Map an agent (hm.memories) row → the same snake_case shape mapMemoryRecord emits, so remote-org
+// reads (getMemory/getMemories/listMemories) are shape-identical to central reads. The agent owns the
+// row; we only reshape what crossed the link.
+function mapAgentRow(r) {
+  if (!r) return null;
+  return {
+    id: r.id,
+    user_id: r.user_id || null,
+    owner: r.user_id ? { id: r.user_id, name: null } : null,
+    owner_name: null,
+    org_id: r.org_id || null,
+    project: r.project || null,
+    project_id: (Array.isArray(r.project_ids) && r.project_ids[0]) || null,
+    project_ids: r.project_ids || [],
+    visibility: r.visibility || 'private',
+    scope: r.scope || 'personal',
+    content: r.content || '',
+    title: r.title || null,
+    tags: r.tags || [],
+    memory_type: r.memory_type || 'fact',
+    is_latest: r.is_latest ?? true,
+    layer: r.layer || 'memory',
+    cognitive_layer_role: r.cognitive_layer_role || null,
+    importance_score: r.confidence ?? 0.5,
+    created_at: r.created_at,
+    updated_at: r.created_at,
+    valid_from: r.valid_from || null,
+    document_date: r.document_date || null,
+    metadata: r.metadata || {},
+    source_metadata: {},
+  };
 }
 
 function mapMemoryRecord(record) {
@@ -294,6 +327,22 @@ export class PrismaGraphStore {
   }
 
   async createMemory(memory) {
+    // RESIDENCY: agent-org rows are NOT written centrally. Push the row to the org's agent NOW (vector
+    // is added later by storeMemory → same-id upsert) so mid-ingest reads (getMemory in extends/versions)
+    // find it on the agent. Central keeps identity only. Managed/personal (orgIsRemote=false) → unchanged.
+    if (orgIsRemote(memory.org_id)) {
+      await amrWrite(memory.org_id, {
+        id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+        content: stripNullBytes(memory.content), title: stripNullBytes(memory.title) || null,
+        tags: memory.tags || [], memoryType: memory.memory_type || 'fact', isLatest: memory.is_latest ?? true,
+        layer: memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
+        cognitiveLayerRole: memory.cognitive_layer_role || null, confidence: memory.importance_score ?? null,
+        createdAt: memory.created_at || new Date().toISOString(),
+        project: memory.project || null, projectIds: memory.project_ids || [],
+        validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
+      }, null, []);
+      return;
+    }
     // Strip null bytes (\u0000) — common in web-scraped content, rejected by Postgres text columns
     const content = stripNullBytes(memory.content);
     const title = stripNullBytes(memory.title) || null;
@@ -433,6 +482,11 @@ export class PrismaGraphStore {
   }
 
   async getMemory(id) {
+    const _org = currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const rows = await remoteHydrate(_org, [id]);
+      return rows.length ? mapAgentRow(rows[0]) : null;
+    }
     const record = await this.client.memory.findUnique({
       where: { id },
       include: {
@@ -458,6 +512,13 @@ export class PrismaGraphStore {
   async getMemories(ids) {
     if (!Array.isArray(ids) || ids.length === 0) return new Map();
     const uniq = [...new Set(ids.filter(Boolean))];
+    const _org = currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const rows = await remoteHydrate(_org, uniq);
+      const out = new Map();
+      for (const r of rows) out.set(r.id, mapAgentRow(r));
+      return out;
+    }
     const records = await this.client.memory.findMany({
       where: { id: { in: uniq } },
       include: {
@@ -528,6 +589,16 @@ export class PrismaGraphStore {
   }
 
   async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, hide_noise = false, limit = 50, offset = 0, scope = 'personal', access_context = null, owner_only = false }) {
+    // RESIDENCY: agent-org memory rows live on the org's agent, not central → enumerate from the agent.
+    const _org = org_id || currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const filter = {};
+      if (memory_type) filter.memory_type = Array.isArray(memory_type) ? memory_type : [memory_type];
+      if (is_latest !== undefined) filter.is_latest = is_latest;
+      const { memories } = await remoteList(_org, filter, null, limit);
+      const mapped = memories.map(mapAgentRow);
+      return { memories: mapped, total: mapped.length };
+    }
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
@@ -932,6 +1003,13 @@ export class PrismaGraphStore {
 
   async createRelationship(edge) {
     const type = normalizeRelationshipType(edge.type) || edge.type;
+    // RESIDENCY: remote-org edges live on the agent (no central memory rows to FK to). Push the typed
+    // edge to the agent and skip the central upsert. Managed/personal → central upsert below.
+    const _remoteOrg = edge.org_id || currentOrg();
+    if (orgIsRemote(_remoteOrg)) {
+      amrAddEdge({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
+      return mapRelationshipRecord({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
+    }
     const created = await this.client.relationship.upsert({
       where: {
         fromId_toId_type: {
@@ -965,6 +1043,7 @@ export class PrismaGraphStore {
   }
 
   async createMemoryVersion(version) {
+    if (orgIsRemote(currentOrg())) return null; // remote-org versions live on the agent, not central
     return this.client.memoryVersion.create({
       data: {
         id: version.id,
@@ -981,6 +1060,9 @@ export class PrismaGraphStore {
   }
 
   async createSourceMetadata(source) {
+    // RESIDENCY: remote-org subgraph children are not written centrally (no central parent row to FK to);
+    // they travel with the push envelope to the agent. Managed/personal unchanged.
+    if (orgIsRemote(currentOrg())) return;
     const buildArgs = (s) => ({
       where: { memoryId: s.memory_id },
       update: {

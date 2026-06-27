@@ -130,3 +130,9 @@ export async function remoteHydrate(orgId, ids) {
   try { const out = await _call(orgId, '/v1/hydrate', { ids }); return out?.memories || []; }
   catch (e) { console.warn(`[mneme/remote] hydrate failed org=${orgId}: ${e.message}`); return []; }
 }
+
+// Filtered enumeration from the agent (listMemories for remote orgs). Returns { memories, cursor }.
+export async function remoteList(orgId, filter, cursor, limit) {
+  try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit }); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
+  catch (e) { console.warn(`[mneme/remote] list failed org=${orgId}: ${e.message}`); return { memories: [], cursor: null }; }
+}

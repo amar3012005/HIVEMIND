@@ -15,3 +15,8 @@ FILES: db/prisma.js (runWithOrg, clientForOrg, makeSplitClient), prisma-proxy.js
 FLAG/GATE: split only for orgs with a registered pgUrl; memory models → customer PG, rest → central.
 LOCAL TEST: self-host memory→customer, user/org/apiKey→central; managed→central. conformance 16/16.
 COMMIT: feat(residency): split client — memory→customer PG, global info→ONE central Postgres.
+
+## 2026-06-27 — Phase 2b
+- files: core/src/memory/prisma-graph-store.js (createMemory skip + getMemory/getMemories/listMemories remote gates + mapAgentRow), core/src/vector/mneme/remote-backend.js (+remoteList).
+- flag: orgIsRemote(org)/orgIsRemote(currentOrg()). Default path (managed/personal) untouched.
+- local: node --check clean on both files.

@@ -26,6 +26,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
@@ -514,6 +515,10 @@ export class CognitionLoop {
 
   async runOnce(orgId, opts = {}) {
     if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.runOnce(orgId, opts)); // residency
+    // Self-host orgs: synthesis writes (syntheses, drift-compaction, Derives edges) go through direct
+    // prisma.* writes, not the agent-routed store — running this for a remote org would persist
+    // derived content centrally. Skip entirely; their data + cognition belong on their box.
+    if (orgIsRemote(orgId)) return { skipped: true, reason: 'remote_org_cognition_runs_on_agent' };
     const { skipCompaction = false, lookbackHours, trigger = 'manual', triggeredBy = null } = opts;
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };

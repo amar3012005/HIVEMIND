@@ -909,6 +909,7 @@ Output the JSON object and nothing else.`;
    */
   async ingestConnectorRecord(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestConnectorRecord(opts)); // residency
+    assertKbAllowedForOrg(opts?.orgId); // connector records persist knowledge_segments/source_artifacts centrally — block for self-host until KB-on-agent ships
     const { userId, orgId, providerKey, sourceId, title, content, sourceUrl = null, documentDate = null, metadata = {} } = opts;
     if (!content || typeof content !== 'string' || content.trim() === '') {
       return { skipped: true, reason: 'empty_content' };

@@ -13,9 +13,20 @@
 //   AGENT_PORT    listen port (default 8787)
 //   MNEME_DIM     embedding dim (default 1024)
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 
 const ORG = process.env.ORG_ID || die('ORG_ID required');
 const TOKEN = process.env.AGENT_TOKEN || die('AGENT_TOKEN required');
+// Optional: pin the engine origin. The engine calls server-to-server (no Origin header), so ANY
+// request bearing an Origin/Referer is a browser and is rejected outright (blocks CSRF/SSRF from a
+// page the operator visits). If ALLOWED_ENGINE_ORIGIN is set, a present Origin must match it exactly.
+const ALLOWED_ENGINE_ORIGIN = (process.env.ALLOWED_ENGINE_ORIGIN || '').replace(/\/+$/, '');
+const TOKEN_BUF = Buffer.from(`Bearer ${TOKEN}`);
+function tokenOk(header) {
+  if (typeof header !== 'string') return false;
+  const h = Buffer.from(header);
+  return h.length === TOKEN_BUF.length && timingSafeEqual(h, TOKEN_BUF);
+}
 const PORT = Number(process.env.AGENT_PORT || 8787);
 const DIM = Number(process.env.MNEME_DIM || 1024);
 const SCHEMA_VERSION = 1; // bump when the agent's local schema changes
@@ -294,7 +305,17 @@ http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
-  if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(res, 401, { error: 'unauthorized' });
+  // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
+  // is calling the agent → reject (CSRF/SSRF guard). If ALLOWED_ENGINE_ORIGIN is set, it must match.
+  const origin = req.headers.origin || req.headers.referer;
+  if (origin) {
+    const o = String(origin).replace(/\/+$/, '');
+    if (!ALLOWED_ENGINE_ORIGIN || o !== ALLOWED_ENGINE_ORIGIN) return send(res, 403, { error: 'forbidden_origin' });
+  }
+  // Bearer token — timing-safe constant-time compare (only the engine holds this org's token).
+  if (!tokenOk(req.headers.authorization)) return send(res, 401, { error: 'unauthorized' });
+  // The engine always stamps x-org-id; if present it MUST be this agent's org (defense in depth — the
+  // agent also hard-scopes every query to ORG server-side regardless).
   if (req.headers['x-org-id'] && req.headers['x-org-id'] !== ORG) return send(res, 403, { error: 'org mismatch' });
   try { send(res, 200, await routes[req.url](await readBody(req))); }
   catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, 500, { error: e.message }); }

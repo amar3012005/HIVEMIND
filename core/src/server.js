@@ -5361,6 +5361,22 @@ exit \$RC
           .sort((a, b) => b.seconds - a.seconds);
       };
 
+      // ── Mandatory auth gate for write families that sit above the global gate ──
+      // /api/meetings*, /api/tara*, /api/autofill* handlers live ABOVE the global
+      // authenticateApiKey check (~line 7062). Without this gate they fall back to a
+      // spoofable x-hm-org-id header → unauthenticated cross-tenant writes. We require
+      // auth here and pin the tenant strictly to the authenticated principal.
+      // Master-key callers: authenticateApiKey folds x-hm-org-id/x-hm-user-id INTO
+      // principal (line ~3191-3194), so control-plane proxy calls keep working.
+      // NOTE: do NOT add any public webhook paths (/api/connectors/*/webhook etc.) here.
+      let _mAuth = null;
+      if (/^\/api\/(meetings|tara|autofill)(\/|$)/.test(pathname)) {
+        _mAuth = await authenticateApiKey(req).catch(() => null);
+        if (!_mAuth?.ok) return jsonResponse(res, { error: 'unauthorized' }, 401);
+      }
+      const _mUserId = _mAuth?.principal?.userId || null;
+      const _mOrgId  = _mAuth?.principal?.orgId  || null;
+
       // ── AI Meeting Notes ──────────────────────────────────────────────
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
       // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
@@ -5542,24 +5558,18 @@ exit \$RC
 
       // ── Persistent org-level meetings (Postgres `meetings` table) ──────────
       // Raw SQL so it works without a Prisma client regen on the running image.
-      // Resolve the real tenant from the authenticated API key (the FE's
-      // apiClient.core sends only X-API-Key — no x-hm-* headers — so without
-      // this every meeting fell back to the placeholder DEFAULT tenant and
-      // meeting-intelligence recall hit an empty org. Named _mAuth to avoid
-      // the `principal` TDZ (a const principal is declared later in this scope).
-      const _mAuth = await authenticateApiKey(req).catch(() => null);
-      const _mUserId = _mAuth?.principal?.userId || null;
-      const _mOrgId = _mAuth?.principal?.orgId || null;
+      // _mAuth/_mUserId/_mOrgId are declared above in the mandatory auth gate
+      // (they are null for non-meetings/tara/autofill paths, populated + validated
+      // for these families). No duplicate declaration here.
       // GET  /api/meetings        → list org's meetings (newest first)
       // POST /api/meetings        → persist a meeting + its insights
       if (pathname === '/api/meetings' && req.method === 'GET') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        // userId/orgId from the control-plane-injected headers (principal is
-        // initialized later in this handler — avoid the TDZ).
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        // tenant pinned to authenticated principal (mandatory auth gate above)
+        const mOrg = _mOrgId;
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mUser = _mUserId;
           // Scope-aware Past list: a meeting shows for a user if they are the
           // creator, a selected participant (member id in participants jsonb),
           // or the scope grants access (organization/team → all org members;
@@ -5593,8 +5603,8 @@ exit \$RC
 
       if (pathname === '/api/meetings' && req.method === 'POST') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const mUser = _mUserId;
+        const mOrg = _mOrgId;
         const ins = body.insights || {};
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
         const transcript = (body.transcript || '').toString();
@@ -5639,7 +5649,7 @@ exit \$RC
       // (fires when the organizer clicks Start with externals entered). Org
       // members are NOT emailed — only externals with a valid email address.
       if (pathname === '/api/meetings/invite' && req.method === 'POST') {
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const mOrg = _mOrgId;
         const externals = Array.isArray(body.participants)
           ? body.participants
               .filter((p) => p && p.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(p.email)))
@@ -5676,8 +5686,8 @@ exit \$RC
         const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mGet && req.method === 'GET') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           try {
             // Same access predicate as the list: creator / participant / scope.
             let myProjectIds = [];
@@ -5723,8 +5733,8 @@ exit \$RC
         const mPrev = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/delete-preview$/);
         if (mPrev && req.method === 'GET') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
@@ -5768,8 +5778,8 @@ exit \$RC
         const mDel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mDel && req.method === 'DELETE') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           const id = mDel[1];
           const scope = (url.searchParams.get('scope') || 'both').toLowerCase();
           const hard = url.searchParams.get('hard') === 'true';
@@ -5838,8 +5848,8 @@ exit \$RC
         const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);
         if (mIntel && req.method === 'POST') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -5854,9 +5864,9 @@ exit \$RC
       if (pathname === '/api/autofill/plan' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'vision_unavailable' }, 503);
         try {
-          const auth = await authenticateApiKey(req).catch(() => null);
-          const afUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-          const afOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          // tenant pinned to authenticated principal from mandatory auth gate above
+          const afUser = _mUserId;
+          const afOrg = _mOrgId;
           const screenshot = (body.screenshot_b64 || '').toString();
           const afPrompt = (body.prompt || '').toString().slice(0, 600);
           const fields = Array.isArray(body.fields) ? body.fields.slice(0, 60) : [];
@@ -5928,9 +5938,9 @@ exit \$RC
       if (pathname === '/api/autofill/table' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
         try {
-          const auth = await authenticateApiKey(req).catch(() => null);
-          const tUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-          const tOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          // tenant pinned to authenticated principal from mandatory auth gate above
+          const tUser = _mUserId;
+          const tOrg = _mOrgId;
           const tPrompt = (body.prompt || '').toString().slice(0, 600);
           if (!tPrompt.trim()) return jsonResponse(res, { error: 'no_prompt' }, 400);
 
@@ -5994,7 +6004,7 @@ exit \$RC
         const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mPatch && req.method === 'PATCH') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mOrg = _mOrgId;
           const id = mPatch[1];
           const sets = [];
           const vals = [];
@@ -6168,8 +6178,8 @@ exit \$RC
         if (mIngest && req.method === 'POST') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           const id = mIngest[1];
           try {
             const rows = await prisma.$queryRawUnsafe(
@@ -6503,8 +6513,8 @@ exit \$RC
 
       // ── TARA call history / turns / insights / usage (org-scoped, real-time) ──
       if (pathname.startsWith('/api/tara/calls')) {
-        const tOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const tUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const tOrg = _mOrgId;
+        const tUser = _mUserId;
 
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
@@ -6616,8 +6626,8 @@ exit \$RC
       // skill's prompts into the live config; runtime is unchanged. ──
       if (pathname.startsWith('/api/tara/skills')) {
         if (!taraHandler?.skillsStore) return jsonResponse(res, { error: 'TARA not available' }, 503);
-        const sOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const sUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const sOrg = _mOrgId;
+        const sUser = _mUserId;
         const ss = taraHandler.skillsStore;
         const ctx = { userId: sUser, orgId: sOrg };
         try {

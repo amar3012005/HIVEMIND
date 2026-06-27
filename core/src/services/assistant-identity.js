@@ -98,6 +98,11 @@ export async function hasShownOnboardingIntro(store, { userId, orgId }) {
  */
 export async function markOnboardingShown(store, { userId, orgId }) {
   if (!userId) return;
+  // Self-host orgs: this sentinel writes a central memory row directly (bypassing the agent-routed
+  // createMemory). Skip it for remote orgs — keeps central free of their rows (residency) and avoids
+  // planting a row that could wake the central cognition scheduler.
+  const { orgIsRemote } = await import('../vector/mneme/driver.js');
+  if (orgIsRemote(orgId)) return;
   const prisma = store?.client || store?.prisma || null;
   if (!prisma) return;
   try {

@@ -44,3 +44,12 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - state: deployed via docker cp to hm-core (EPHEMERAL — needs git pull+rebuild for durability, per E1). Committed to feat/mneme-foundation + byod branch.
 - residuals: enrichment-queue central source_metadata write for remote (non-fatal, gate next); stale agent Qdrant test points (purge); registry must be agentUrl+token ONLY (pgUrl empty — stale pgUrl revives dead direct-PG path).
 - refs: docs/PRODUCTION_COMPASS.md, byod/agent/server.mjs, core/src/memory/prisma-graph-store.js, core/src/vector/mneme/remote-backend.js.
+
+## 2026-06-27 — Self-host onboarding e2e: auto-connect + residency + recall (fresh org)
+- type: feature   verdict: GREEN
+- decided: production model = Option B (creds embedded in the curl; agent self-registers on boot; engine stateless, registry = connection state; FE polls status, survives tab close). Beats Option A (agent-asks/user-accepts = friction).
+- built: hosting_mode persisted on org (managed|self_host) + surfaced in payloads; FE AppShell gate (self_host & !connected → SelfHostSetup before overview, auto-flips on connect); onboarding ask-once (consume login-page choice, auto-create); PrismaGraphStore.searchMemories remote branch (embed→amrRecall→agent) — THE real API recall entry (gate was in the wrong searchMemories); SINGULANCE-branded setup.sh terminal UX (banner + connected box); registry perms fix.
+- verified e2e on fresh self-host org d39518cb (myserver agent → singulance engine): non-interactive setup → agent boots → auto-registers → status reachable; save → central Δ0 / agent Δ+1 (vector_synced); RECALL returns agent content ("Skyforge…Bremen"); baked durable; managed/personal central path unaffected (orgIsRemote=false).
+- 3 types resolved: Personal→central pool; Enterprise-managed→central + per-org Qdrant collection (provisionForPlan); Enterprise-self-host→agent (PG+Qdrant). One seam: memoryBackend(org).
+- residuals: phantom-org in logs = RECALL_WARMUP_ORG hardcoded default (harmless warmup, set RECALL_WARMUP_ORG or ignore); FE deploy to singulance is docker-cp (box submodule inaccessible → image can't rebuild) — live but not durable; agent-side enrichment for remote deferred.
+- next: production compass phases (outbox spine, etc.).

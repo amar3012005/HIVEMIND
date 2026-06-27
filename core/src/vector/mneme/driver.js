@@ -163,6 +163,7 @@ export function amrUpdateTags(orgId, id, tags) {
   }
 }
 export function amrAddEdge(rel) {
+  if (process.env.MNEME_DEBUG_ROUTING) console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');
   if (!rel?.fromId || !rel?.toId) return;
   if (rel.orgId && orgIsRemote(rel.orgId)) { remoteAddEdge(rel.orgId, rel); return; }
   if (!anyMnemeOrg()) return;

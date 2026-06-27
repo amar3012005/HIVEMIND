@@ -1019,6 +1019,22 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       } catch (error) {
         console.warn('[account-delete] ⚠ Orphan org cleanup skipped:', error.message);
       }
+      // Self-host: drop the agent registry entries so a deleted org never leaves a stale route in
+      // byod-agents.json (core reads this to route memory ops). The customer's OWN data (.amr + their
+      // Postgres on their box) is untouched — we don't control it; deletion only severs the central link.
+      try {
+        const fs = await import('node:fs');
+        const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+        let reg = {};
+        try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { reg = null; }
+        if (reg && typeof reg === 'object') {
+          let changed = false;
+          for (const oid of orgIdsToDelete) { if (oid in reg) { delete reg[oid]; changed = true; } }
+          if (changed) fs.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
+        }
+      } catch (error) {
+        console.warn('[account-delete] ⚠ self-host registry cleanup skipped:', error.message);
+      }
     }
 
     emit(100, 'Account deleted');
@@ -1404,16 +1420,29 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/v1/selfhost/status' && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
     const apiKey = (body?.apiKey || '').toString();
-    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
-    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
-    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    // Resolve org by API key (onboarding poll) OR by session (Settings, no raw key on hand).
+    let statusOrgId = null;
+    if (apiKey) {
+      const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+      const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+      if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+      statusOrgId = rec.orgId;
+    } else {
+      const current = await requireSession(req, res);
+      if (!current) return; // requireSession already responded
+      const m = await prisma.userOrganization.findFirst({
+        where: { userId: current.session.userId, role: 'owner' },
+        select: { orgId: true },
+      }).catch(() => null);
+      if (!m?.orgId) return jsonResponse(res, { registered: false, reachable: false });
+      statusOrgId = m.orgId;
+    }
     const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     let entry = null;
     try {
       const fs = await import('node:fs');
       const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
-      entry = reg[rec.orgId] || null;
+      entry = reg[statusOrgId] || null;
     } catch { /* no registry yet */ }
     if (!entry || !(entry.url || entry.pgUrl || entry.qdrantUrl)) {
       return jsonResponse(res, { registered: false, reachable: false });

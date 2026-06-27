@@ -117,6 +117,61 @@ async function ensureSchema() {
     CREATE INDEX IF NOT EXISTS kbseg_org_idx  ON knowledge_segments(org_id);
     CREATE INDEX IF NOT EXISTS kbseg_doc_idx  ON knowledge_segments(document_id);
     CREATE INDEX IF NOT EXISTS kbseg_tsv_idx  ON knowledge_segments USING gin(content_tsv);
+    -- Meetings layer (self-host): full meeting rows live here, never central.
+    CREATE TABLE IF NOT EXISTS meetings (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id uuid NOT NULL,
+      user_id uuid,
+      project_id uuid,
+      title text,
+      summary text,
+      transcript text,
+      language text,
+      duration_sec int,
+      multi_speaker boolean NOT NULL DEFAULT false,
+      speaker_count int,
+      action_items jsonb NOT NULL DEFAULT '[]',
+      decisions jsonb NOT NULL DEFAULT '[]',
+      key_points jsonb NOT NULL DEFAULT '[]',
+      questions jsonb NOT NULL DEFAULT '[]',
+      segments jsonb,
+      topics text[] NOT NULL DEFAULT '{}',
+      sentiment text,
+      source_memory_id uuid,
+      notes text,
+      insights jsonb NOT NULL DEFAULT '{}',
+      participants jsonb NOT NULL DEFAULT '[]',
+      scope text,
+      intelligence jsonb,
+      intelligence_status text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      deleted_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS meetings_org_idx ON meetings(org_id) WHERE deleted_at IS NULL;
+    -- TARA call ledger (self-host): call rows + turns live here, never central.
+    CREATE TABLE IF NOT EXISTS tara_calls (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id uuid NOT NULL,
+      user_id uuid,
+      session_id text UNIQUE NOT NULL,
+      status text NOT NULL DEFAULT 'active',
+      turn_count int NOT NULL DEFAULT 0,
+      prompt_tokens bigint NOT NULL DEFAULT 0,
+      completion_tokens bigint NOT NULL DEFAULT 0,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS tara_calls_org_idx ON tara_calls(org_id);
+    CREATE TABLE IF NOT EXISTS tara_turns (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id uuid NOT NULL,
+      call_id uuid NOT NULL,
+      role text,
+      content text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS tara_turns_org_idx  ON tara_turns(org_id);
+    CREATE INDEX IF NOT EXISTS tara_turns_call_idx ON tara_turns(call_id);
   `);
   console.log('[hm-agent] postgres schema ready');
 }
@@ -415,9 +470,174 @@ const routes = {
     await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]);
     await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1', [ORG]);
     await pg.query('DELETE FROM knowledge_documents WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM meetings WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM tara_turns WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM tara_calls WHERE org_id=$1', [ORG]);
     await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
     await ensureQdrant();
     return { ok: true, deleted: m.rowCount };
+  },
+
+  // ── Meetings layer (self-host) ──────────────────────────────────────────────
+  // Upsert a meeting row. All fields optional except org_id (forced server-side).
+  '/v1/meeting-write': async (b) => {
+    const m = b.meeting || {};
+    const id = m.id || (await pg.query('SELECT gen_random_uuid() AS id')).rows[0].id;
+    const J = (v, def = '[]') => JSON.stringify(Array.isArray(v) ? v : (v != null && typeof v === 'object' && !Array.isArray(v) ? v : JSON.parse(def)));
+    await pg.query(
+      `INSERT INTO meetings
+         (id, org_id, user_id, project_id, title, summary, transcript, language, duration_sec,
+          multi_speaker, speaker_count, action_items, decisions, key_points, questions, segments,
+          topics, sentiment, source_memory_id, notes, insights, participants, scope,
+          intelligence, intelligence_status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+               $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,
+               $19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,$25,
+               coalesce($26::timestamptz,now()))
+       ON CONFLICT (id) DO UPDATE SET
+         title=EXCLUDED.title, summary=EXCLUDED.summary, transcript=EXCLUDED.transcript,
+         language=EXCLUDED.language, duration_sec=EXCLUDED.duration_sec,
+         multi_speaker=EXCLUDED.multi_speaker, speaker_count=EXCLUDED.speaker_count,
+         action_items=EXCLUDED.action_items, decisions=EXCLUDED.decisions,
+         key_points=EXCLUDED.key_points, questions=EXCLUDED.questions,
+         segments=EXCLUDED.segments, topics=EXCLUDED.topics, sentiment=EXCLUDED.sentiment,
+         source_memory_id=EXCLUDED.source_memory_id, notes=EXCLUDED.notes,
+         insights=EXCLUDED.insights, participants=EXCLUDED.participants, scope=EXCLUDED.scope,
+         intelligence=EXCLUDED.intelligence, intelligence_status=EXCLUDED.intelligence_status,
+         deleted_at=NULL`,
+      [id, ORG, m.user_id || null, m.project_id || null, m.title || null, m.summary || null,
+       m.transcript || null, m.language || null,
+       Number.isFinite(m.duration_sec) ? m.duration_sec : null,
+       !!m.multi_speaker, Number.isFinite(m.speaker_count) ? m.speaker_count : null,
+       J(m.action_items), J(m.decisions), J(m.key_points), J(m.questions),
+       m.segments != null ? JSON.stringify(m.segments) : null,
+       Array.isArray(m.topics) ? m.topics.slice(0, 20) : [],
+       m.sentiment || null, m.source_memory_id || null,
+       m.notes ? String(m.notes).slice(0, 8000) : null,
+       J(m.insights, '{}'),
+       J(m.participants), m.scope || null,
+       m.intelligence != null ? JSON.stringify(m.intelligence) : null,
+       m.intelligence_status || null, m.created_at || null]);
+    const { rows } = await pg.query('SELECT id, created_at FROM meetings WHERE id=$1', [id]);
+    return { ok: true, id: rows[0]?.id, created_at: rows[0]?.created_at };
+  },
+
+  // List org's non-deleted meetings, newest first. Scope filter is simplified to
+  // org + deleted_at + limit (no project-membership join on the agent; the central
+  // server applies the rich scope predicate for managed orgs).
+  '/v1/meeting-list': async (b) => {
+    const f = b.filter || {};
+    const limit = Math.min(Number(f.limit) || 40, 200);
+    const { rows } = await pg.query(
+      `SELECT id, user_id, org_id, project_id, title, summary, language, duration_sec,
+              multi_speaker, speaker_count, action_items, decisions, key_points, questions,
+              segments, topics, sentiment, source_memory_id, participants, scope, created_at
+       FROM meetings
+       WHERE org_id=$1 AND deleted_at IS NULL
+       ORDER BY created_at DESC LIMIT $2`,
+      [ORG, limit]);
+    return { meetings: rows };
+  },
+
+  // Fetch one meeting row by id (full detail including transcript/notes/insights).
+  '/v1/meeting-get': async (b) => {
+    if (!b.id) return { meeting: null };
+    const { rows } = await pg.query(
+      `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
+              duration_sec, multi_speaker, speaker_count, action_items, decisions,
+              key_points, questions, segments, topics, sentiment, notes, insights,
+              participants, scope, intelligence, intelligence_status, source_memory_id, created_at
+       FROM meetings WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`,
+      [b.id, ORG]);
+    return { meeting: rows[0] || null };
+  },
+
+  // Soft or hard delete a meeting row.
+  '/v1/meeting-delete': async (b) => {
+    if (!b.id) return { ok: false, error: 'id required' };
+    if (b.hard) {
+      const r = await pg.query('DELETE FROM meetings WHERE id=$1 AND org_id=$2', [b.id, ORG]);
+      return { ok: true, deleted: r.rowCount };
+    }
+    const r = await pg.query('UPDATE meetings SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, ORG]);
+    return { ok: true, deleted: r.rowCount };
+  },
+
+  // Patch selected fields on a meeting row (source_memory_id, title, summary,
+  // intelligence, intelligence_status). Used by ingest and intelligence runner.
+  '/v1/meeting-patch': async (b) => {
+    if (!b.id) return { ok: false, error: 'id required' };
+    const fields = b.fields || {};
+    const sets = []; const args = [b.id, ORG];
+    if (fields.source_memory_id !== undefined) {
+      args.push(fields.source_memory_id || null);
+      sets.push(`source_memory_id=$${args.length}::uuid`);
+    }
+    if (typeof fields.title === 'string' && fields.title.trim()) {
+      args.push(fields.title.slice(0, 300)); sets.push(`title=$${args.length}`);
+    }
+    if (typeof fields.summary === 'string') {
+      args.push(fields.summary); sets.push(`summary=$${args.length}`);
+    }
+    if (fields.intelligence !== undefined) {
+      args.push(JSON.stringify(fields.intelligence)); sets.push(`intelligence=$${args.length}::jsonb`);
+    }
+    if (typeof fields.intelligence_status === 'string') {
+      args.push(fields.intelligence_status); sets.push(`intelligence_status=$${args.length}`);
+    }
+    if (!sets.length) return { ok: true };
+    const r = await pg.query(
+      `UPDATE meetings SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL RETURNING id`,
+      args);
+    return { ok: true, updated: r.rowCount };
+  },
+
+  // ── TARA call ledger (self-host) ──────────────────────────────────────────
+  // op: 'upsert'  → create-or-update a call row (session start / reconnect).
+  // op: 'get'     → fetch by session_id.
+  // op: 'update'  → increment turn_count/prompt_tokens/completion_tokens or set status.
+  '/v1/tara-call': async (b) => {
+    const op = b.op || 'upsert';
+    if (op === 'upsert') {
+      const sid = b.session_id;
+      if (!sid) return { ok: false, error: 'session_id required' };
+      await pg.query(
+        `INSERT INTO tara_calls (org_id, user_id, session_id, status, metadata)
+         VALUES ($1,$2,$3,$4,$5::jsonb)
+         ON CONFLICT (session_id) DO UPDATE SET
+           status=$4, metadata=EXCLUDED.metadata`,
+        [ORG, b.user_id || null, sid, b.status || 'active',
+         JSON.stringify(b.metadata || {})]);
+      const { rows } = await pg.query('SELECT id FROM tara_calls WHERE session_id=$1 AND org_id=$2', [sid, ORG]);
+      return { ok: true, id: rows[0]?.id };
+    }
+    if (op === 'get') {
+      const sid = b.session_id;
+      if (!sid) return { call: null };
+      const { rows } = await pg.query(
+        'SELECT id, org_id, user_id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at FROM tara_calls WHERE session_id=$1 AND org_id=$2',
+        [sid, ORG]);
+      return { call: rows[0] || null };
+    }
+    if (op === 'update') {
+      const sid = b.session_id;
+      if (!sid) return { ok: false, error: 'session_id required' };
+      const sets = []; const args = [sid, ORG];
+      if (Number.isFinite(b.turn_count_inc) && b.turn_count_inc !== 0) {
+        args.push(b.turn_count_inc); sets.push(`turn_count=turn_count+$${args.length}`);
+      }
+      if (Number.isFinite(b.prompt_tokens_inc) && b.prompt_tokens_inc !== 0) {
+        args.push(b.prompt_tokens_inc); sets.push(`prompt_tokens=prompt_tokens+$${args.length}`);
+      }
+      if (Number.isFinite(b.completion_tokens_inc) && b.completion_tokens_inc !== 0) {
+        args.push(b.completion_tokens_inc); sets.push(`completion_tokens=completion_tokens+$${args.length}`);
+      }
+      if (typeof b.status === 'string') { args.push(b.status); sets.push(`status=$${args.length}`); }
+      if (!sets.length) return { ok: true };
+      await pg.query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
+      return { ok: true };
+    }
+    return { ok: false, error: `unknown op: ${op}` };
   },
 };
 

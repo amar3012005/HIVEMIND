@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall } from './vector/mneme/driver.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -5376,13 +5376,9 @@ exit \$RC
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
-      // RESIDENCY: meetings + tara persist content (transcripts, calls) to CENTRAL tables (raw SQL,
-      // not the agent-routed store). For a self-host org that is a leak. Block content WRITES for
-      // remote orgs until these are routed to the agent; GET/list reads stay (they hit central and
-      // return empty for a remote org — no leak). Mirrors assertKbAllowedForOrg for KB ingestion.
-      if (_mOrgId && req.method !== 'GET' && /^\/api\/(meetings|tara)(\/|$)/.test(pathname) && orgIsRemote(_mOrgId)) {
-        return jsonResponse(res, { error: 'Meetings and TARA calls are not yet available for self-hosted orgs — coming soon. Your memories (chat, API) work normally and stay on your server.', code: 'FEATURE_SELFHOST_UNSUPPORTED' }, 501);
-      }
+      // RESIDENCY: meetings + tara are now routed to the org's agent for remote (self-host) orgs.
+      // The 501 block is gone — each endpoint below branches on orgIsRemote(_mOrgId) and calls
+      // amrMeeting*/amrTaraCall instead of Prisma/raw-SQL. Central/managed orgs are BYTE-UNCHANGED.
 
       // ── AI Meeting Notes ──────────────────────────────────────────────
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
@@ -5571,9 +5567,15 @@ exit \$RC
       // GET  /api/meetings        → list org's meetings (newest first)
       // POST /api/meetings        → persist a meeting + its insights
       if (pathname === '/api/meetings' && req.method === 'GET') {
-        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         // tenant pinned to authenticated principal (mandatory auth gate above)
         const mOrg = _mOrgId;
+        // Remote (self-host) orgs: list from agent (simplified scope — org + deleted_at + limit).
+        if (orgIsRemote(mOrg)) {
+          const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
+          const rows = await amrMeetingList(mOrg, { limit });
+          return jsonResponse(res, { meetings: rows || [] });
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
           const mUser = _mUserId;
@@ -5609,7 +5611,6 @@ exit \$RC
       }
 
       if (pathname === '/api/meetings' && req.method === 'POST') {
-        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         const mUser = _mUserId;
         const mOrg = _mOrgId;
         const ins = body.insights || {};
@@ -5617,9 +5618,40 @@ exit \$RC
         const transcript = (body.transcript || '').toString();
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
+        const SCOPES = ['personal', 'project', 'team', 'organization'];
+        const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
+        // Remote (self-host) orgs: write to agent instead of central Postgres.
+        if (orgIsRemote(mOrg)) {
+          try {
+            const meeting = {
+              user_id: mUser, project_id: body.project_id || null, title,
+              summary: ins.summary || null, transcript,
+              language: body.language || null,
+              duration_sec: Number.isFinite(body.duration_sec) ? body.duration_sec : null,
+              multi_speaker: !!body.multi_speaker,
+              speaker_count: Number.isFinite(body.speaker_count) ? body.speaker_count : null,
+              action_items: ins.action_items || [], decisions: ins.decisions || [],
+              key_points: ins.key_points || [], questions: ins.questions || [],
+              segments: body.segments || null,
+              topics: Array.isArray(ins.topics) ? ins.topics.slice(0, 20) : [],
+              sentiment: ins.sentiment || null,
+              source_memory_id: body.source_memory_id || null,
+              notes: (body.notes || '').toString().slice(0, 8000) || null,
+              insights: (ins != null && typeof ins === 'object' && !Array.isArray(ins)) ? ins : {},
+              participants: Array.isArray(body.participants) ? body.participants.slice(0, 50) : [],
+              scope: mScope,
+            };
+            const result = await amrMeetingWrite(mOrg, meeting);
+            if (!result?.ok) return jsonResponse(res, { error: 'meetings_save_error' }, 500);
+            const _newId = result.id;
+            if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
+            return jsonResponse(res, { ok: true, id: result.id, created_at: result.created_at }, 201);
+          } catch (e) {
+            return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
-          const SCOPES = ['personal', 'project', 'team', 'organization'];
-          const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
           const rows = await prisma.$queryRawUnsafe(
             `INSERT INTO meetings
                (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
@@ -5692,9 +5724,15 @@ exit \$RC
       {
         const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mGet && req.method === 'GET') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
+          // Remote (self-host) orgs: fetch from agent.
+          if (orgIsRemote(mOrg)) {
+            const meeting = await amrMeetingGet(mOrg, mGet[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: { ...meeting, intelligence: meeting.intelligence || null, intelligence_status: meeting.intelligence_status || 'none', intelligence_generated_at: null } });
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             // Same access predicate as the list: creator / participant / scope.
             let myProjectIds = [];
@@ -5739,9 +5777,17 @@ exit \$RC
       {
         const mPrev = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/delete-preview$/);
         if (mPrev && req.method === 'GET') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
+          // Remote (self-host) orgs: fetch from agent. Memory cluster preview is skipped
+          // (memories already live on the agent; the delete flow still works correctly).
+          if (orgIsRemote(mOrg)) {
+            const meeting = await amrMeetingGet(mOrg, mPrev[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+            const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: (meeting.user_id === mUser) || !!isAdmin, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
@@ -5784,12 +5830,30 @@ exit \$RC
       {
         const mDel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mDel && req.method === 'DELETE') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
           const id = mDel[1];
           const scope = (url.searchParams.get('scope') || 'both').toLowerCase();
           const hard = url.searchParams.get('hard') === 'true';
+          // Remote (self-host) orgs: memory cluster lives on agent; delete via agent.
+          if (orgIsRemote(mOrg)) {
+            try {
+              const meeting = await amrMeetingGet(mOrg, id);
+              if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+              const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner' }, 403);
+              if (scope === 'both') {
+                await amrMeetingDelete(mOrg, id, hard);
+              } else {
+                // memories-only → clear the cluster link, keep the row.
+                await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+              }
+              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: 0, meeting_deleted: scope === 'both' });
+            } catch (e) {
+              return jsonResponse(res, { error: 'meeting_delete_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            }
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, org_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`,
@@ -5854,9 +5918,9 @@ exit \$RC
       {
         const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);
         if (mIntel && req.method === 'POST') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
+          if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -6010,16 +6074,30 @@ exit \$RC
       {
         const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mPatch && req.method === 'PATCH') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId;
           const id = mPatch[1];
+          const patchFields = {};
+          if (typeof body.source_memory_id === 'string' && body.source_memory_id) patchFields.source_memory_id = body.source_memory_id;
+          if (typeof body.title === 'string' && body.title.trim()) patchFields.title = body.title.slice(0, 300);
+          if (typeof body.summary === 'string') patchFields.summary = body.summary;
+          if (!Object.keys(patchFields).length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          // Remote (self-host) orgs: patch on agent.
+          if (orgIsRemote(mOrg)) {
+            try {
+              const r = await amrMeetingPatch(mOrg, id, patchFields);
+              if (!r?.ok) return jsonResponse(res, { error: 'not_found' }, 404);
+              return jsonResponse(res, { ok: true, id });
+            } catch (e) {
+              return jsonResponse(res, { error: 'meetings_update_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            }
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const sets = [];
           const vals = [];
           let i = 1;
-          if (typeof body.source_memory_id === 'string' && body.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(body.source_memory_id); }
-          if (typeof body.title === 'string' && body.title.trim()) { sets.push(`title = $${i++}`); vals.push(body.title.slice(0, 300)); }
-          if (typeof body.summary === 'string') { sets.push(`summary = $${i++}`); vals.push(body.summary); }
-          if (!sets.length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          if (patchFields.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(patchFields.source_memory_id); }
+          if (patchFields.title) { sets.push(`title = $${i++}`); vals.push(patchFields.title); }
+          if (patchFields.summary !== undefined) { sets.push(`summary = $${i++}`); vals.push(patchFields.summary); }
           vals.push(id, mOrg);
           try {
             const rows = await prisma.$queryRawUnsafe(
@@ -6041,12 +6119,17 @@ exit \$RC
       // persists the result to the meeting row. Best-effort, never throws.
       async function runMeetingIntelligence(meetingId, mUser, mOrg) {
         try {
-          const rows = await prisma.$queryRawUnsafe(
-            `SELECT id, title, insights, summary, topics, decisions, action_items, key_points
-               FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
-            meetingId, mOrg,
-          );
-          const meeting = rows?.[0];
+          let meeting;
+          if (orgIsRemote(mOrg)) {
+            meeting = await amrMeetingGet(mOrg, meetingId);
+          } else {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, title, insights, summary, topics, decisions, action_items, key_points
+                 FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+              meetingId, mOrg,
+            );
+            meeting = rows?.[0];
+          }
           if (!meeting) return;
           // Normalize: many meetings store structure in the dedicated COLUMNS
           // (topics/decisions/...) with an EMPTY insights blob. Merge columns
@@ -6085,9 +6168,13 @@ exit \$RC
             }
             meeting.insights = { ...baseIns, topics, decisions, entities: entities || { people: [], organizations: [] } };
           }
-          await prisma.$executeRawUnsafe(
-            `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
-          );
+          if (orgIsRemote(mOrg)) {
+            await amrMeetingPatch(mOrg, meetingId, { intelligence_status: 'pending' }).catch(() => {});
+          } else {
+            await prisma.$executeRawUnsafe(
+              `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
+            );
+          }
           const { generateIntelligence } = await import('./knowledge/meeting-intelligence.js');
           const recall = async (query, opts = {}) => {
             // recallPersistedMemories takes SNAKE_CASE params (query_context,
@@ -6135,13 +6222,20 @@ exit \$RC
           // items + risks become the precise "still-open from before" source.
           let priorItems = [];
           try {
-            const priorRows = await prisma.$queryRawUnsafe(
-              `SELECT id, title, created_at, action_items, insights
-                 FROM meetings
-                WHERE org_id=$1::uuid AND deleted_at IS NULL AND id <> $2::uuid
-                ORDER BY created_at DESC LIMIT 10`,
-              mOrg, meetingId,
-            );
+            let priorRows;
+            if (orgIsRemote(mOrg)) {
+              // Simplified: fetch recent meetings from agent and filter self out.
+              const agentMeetings = await amrMeetingList(mOrg, { limit: 11 }) || [];
+              priorRows = agentMeetings.filter((r) => r.id !== meetingId).slice(0, 10);
+            } else {
+              priorRows = await prisma.$queryRawUnsafe(
+                `SELECT id, title, created_at, action_items, insights
+                   FROM meetings
+                  WHERE org_id=$1::uuid AND deleted_at IS NULL AND id <> $2::uuid
+                  ORDER BY created_at DESC LIMIT 10`,
+                mOrg, meetingId,
+              );
+            }
             for (const pr of (priorRows || [])) {
               const ins = (pr.insights && typeof pr.insights === 'object') ? pr.insights : {};
               const acts = Array.isArray(pr.action_items) && pr.action_items.length ? pr.action_items
@@ -6159,13 +6253,23 @@ exit \$RC
           } catch (pe) { console.warn('[meeting-intel] prior-loops fetch failed:', pe.message); }
 
           const intel = await generateIntelligence(meeting, { recall, judge, priorItems });
-          await prisma.$executeRawUnsafe(
-            `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
-            JSON.stringify(intel), intel.status, meetingId,
-          );
+          if (orgIsRemote(mOrg)) {
+            await amrMeetingPatch(mOrg, meetingId, { intelligence: intel, intelligence_status: intel.status }).catch(() => {});
+          } else {
+            await prisma.$executeRawUnsafe(
+              `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
+              JSON.stringify(intel), intel.status, meetingId,
+            );
+          }
         } catch (e) {
           console.warn('[meeting-intel] generate failed:', e.message);
-          try { await prisma.$executeRawUnsafe(`UPDATE meetings SET intelligence_status='error' WHERE id=$1::uuid`, meetingId); } catch { /* ignore */ }
+          try {
+            if (orgIsRemote(mOrg)) {
+              await amrMeetingPatch(mOrg, meetingId, { intelligence_status: 'error' }).catch(() => {});
+            } else {
+              await prisma.$executeRawUnsafe(`UPDATE meetings SET intelligence_status='error' WHERE id=$1::uuid`, meetingId);
+            }
+          } catch { /* ignore */ }
         }
       }
 
@@ -6183,22 +6287,27 @@ exit \$RC
       {
         const mIngest = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/ingest$/);
         if (mIngest && req.method === 'POST') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
           const id = mIngest[1];
           try {
-            const rows = await prisma.$queryRawUnsafe(
-              `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
-                      action_items, decisions, key_points, questions, topics, insights,
-                      participants, scope, project_id,
-                      source_memory_id, created_at
-               FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
-              id, mOrg,
-            );
-            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
-            const m = rows[0];
+            let m;
+            if (orgIsRemote(mOrg)) {
+              m = await amrMeetingGet(mOrg, id);
+            } else {
+              if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+              const rows = await prisma.$queryRawUnsafe(
+                `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
+                        action_items, decisions, key_points, questions, topics, insights,
+                        participants, scope, project_id,
+                        source_memory_id, created_at
+                 FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+                id, mOrg,
+              );
+              m = rows?.[0] || null;
+            }
+            if (!m) return jsonResponse(res, { error: 'not_found' }, 404);
 
             // Idempotent — already ingested unless caller forces a re-ingest.
             if (m.source_memory_id && !body?.force) {
@@ -6392,10 +6501,14 @@ exit \$RC
             }
             // Link the meeting row back to the parent memory (idempotent).
             if (parentId) {
-              await prisma.$queryRawUnsafe(
-                `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
-                parentId, id, mOrg,
-              ).catch(() => { /* link best-effort */ });
+              if (orgIsRemote(mOrg)) {
+                amrMeetingPatch(mOrg, id, { source_memory_id: parentId }).catch(() => { /* link best-effort */ });
+              } else {
+                await prisma.$queryRawUnsafe(
+                  `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
+                  parentId, id, mOrg,
+                ).catch(() => { /* link best-effort */ });
+              }
             }
             // Sectioned cluster: 1 parent (Overview) + ≤4 section memories +
             // optional transcript-evidence. Report the section labels emitted.
@@ -6525,6 +6638,13 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          // Remote (self-host) orgs: ledger on agent.
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'upsert', session_id: String(body.session_id), user_id: tUser, status: 'active', metadata: { mode: body.mode || 'external', voice_id: body.voice_id || null, language: body.language || 'en' } });
+              return jsonResponse(res, { call_id: r?.id || null });
+            } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
+          }
           try {
             const call = await prisma.taraCall.upsert({
               where: { sessionId: String(body.session_id) },
@@ -6537,6 +6657,15 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          // Remote (self-host) orgs: increment counters on agent (turns not stored — rate-limiting only).
+          if (orgIsRemote(tOrg)) {
+            try {
+              const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+              try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
+              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), turn_count_inc: 1, prompt_tokens_inc: pt, completion_tokens_inc: ct });
+              return jsonResponse(res, { ok: true });
+            } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
+          }
           try {
             const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
@@ -6556,6 +6685,13 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          // Remote (self-host) orgs: mark call completed on agent. Summary memory still fires (memories route to agent).
+          if (orgIsRemote(tOrg)) {
+            try {
+              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), status: 'completed' });
+              return jsonResponse(res, { ok: true, duration_ms: 0, turns: 0 });
+            } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
+          }
           try {
             const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
@@ -6612,6 +6748,8 @@ exit \$RC
         }
 
         if (pathname === '/api/tara/calls' && req.method === 'GET') {
+          // Remote (self-host) orgs: no call list available from agent (not needed for runtime).
+          if (orgIsRemote(tOrg)) return jsonResponse(res, { calls: [] });
           const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
           const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
           return jsonResponse(res, { calls });
@@ -6619,6 +6757,8 @@ exit \$RC
 
         const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);
         if (cm && req.method === 'GET') {
+          // Remote (self-host) orgs: call detail not available from agent.
+          if (orgIsRemote(tOrg)) return jsonResponse(res, { error: 'not_found' }, 404);
           const call = await prisma.taraCall.findUnique({ where: { id: cm[1] } });
           if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'not_found' }, 404);
           const [turns, insight] = await Promise.all([

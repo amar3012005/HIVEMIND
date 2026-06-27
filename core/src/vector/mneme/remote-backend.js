@@ -194,3 +194,41 @@ export async function remotePurge(orgId) {
   try { const out = await _call(orgId, '/v1/purge', {}); return out || { ok: true }; }
   catch (e) { console.warn(`[mneme/remote] purge failed org=${orgId}: ${e.message}`); return null; }
 }
+
+// ── Meetings layer (self-host) ───────────────────────────────────────────────
+// Upsert a full meeting row on the agent. Returns { ok, id, created_at } or null on failure.
+export async function remoteMeetingWrite(orgId, meeting) {
+  try { return await _call(orgId, '/v1/meeting-write', { meeting }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-write failed org=${orgId}: ${e.message}`); return null; }
+}
+
+// List meetings for the org (simplified scope: org + deleted_at + limit).
+export async function remoteMeetingList(orgId, filter = {}) {
+  try { const out = await _call(orgId, '/v1/meeting-list', { filter }); return out?.meetings || []; }
+  catch (e) { console.warn(`[mneme/remote] meeting-list failed org=${orgId}: ${e.message}`); return []; }
+}
+
+// Fetch one meeting by id. Returns the meeting object or null.
+export async function remoteMeetingGet(orgId, id) {
+  try { const out = await _call(orgId, '/v1/meeting-get', { id }); return out?.meeting || null; }
+  catch (e) { console.warn(`[mneme/remote] meeting-get failed org=${orgId} id=${id}: ${e.message}`); return null; }
+}
+
+// Soft or hard delete a meeting row.
+export async function remoteMeetingDelete(orgId, id, hard = false) {
+  try { const out = await _call(orgId, '/v1/meeting-delete', { id, hard }); return out || { ok: true }; }
+  catch (e) { console.warn(`[mneme/remote] meeting-delete failed org=${orgId} id=${id}: ${e.message}`); return null; }
+}
+
+// Patch selected fields (source_memory_id, title, summary, intelligence, intelligence_status).
+export async function remoteMeetingPatch(orgId, id, fields) {
+  try { return await _call(orgId, '/v1/meeting-patch', { id, fields }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-patch failed org=${orgId} id=${id}: ${e.message}`); return null; }
+}
+
+// ── TARA call ledger (self-host) ─────────────────────────────────────────────
+// Unified TARA call operation: op = 'upsert' | 'get' | 'update'.
+export async function remoteTaraCall(orgId, params) {
+  try { return await _call(orgId, '/v1/tara-call', params); }
+  catch (e) { console.warn(`[mneme/remote] tara-call failed org=${orgId} op=${params?.op}: ${e.message}`); return null; }
+}

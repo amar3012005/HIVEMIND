@@ -24,3 +24,10 @@ ROLLBACK: unset registry file → all orgs managed (inert).
 - rejected: per-org pgUrl direct connection (dead Model A). New tables (none).
 - rollback: revert the 3 gates + remoteList.
 - kill-condition: a managed org's recall/list/ingest changes at all.
+
+## 2026-06-27 — Unify the routing seam (memoryBackend)
+- problem: write gate used orgIsRemote, read gate used isMnemeOrg → drift → recall-empty. 3 overlapping mechanisms (isMnemeOrg/mnemeMode, mnemeOn, orgIsRemote).
+- decision: ONE predicate memoryBackend(org)→'central'|'agent'|'amr-local' in driver.js; every read+write chokepoint routes through it. Resolve org from currentOrg() (globalThis bridge) when not in the filter — fixes fragile filterMatchValue null.
+- recall gate: `memoryBackend(_mnemeOrg)!=='central'` → amrRecall (handles agent vs local internally). org = filterMatchValue||currentOrg.
+- legacy isMnemeOrg/mnemeOn branches stay dormant (MNEME_ORGS empty in prod) — fold under memoryBackend, don't delete (risk).
+- managed: memoryBackend='central' → existing path verbatim.

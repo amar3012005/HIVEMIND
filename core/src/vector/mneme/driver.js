@@ -23,6 +23,17 @@ export function orgIsRemote(orgId) {
   return !!orgId && hasRemoteAgent(orgId); // hasRemoteAgent is cheap (throttled file check) when inert
 }
 
+// THE single routing seam. Every write + read chokepoint routes through this one predicate so the
+// store is the only variable — swap PG+Qdrant↔.amr inside the agent with zero engine changes.
+//   'agent'     → per-org data plane reached over HTTP (remote-backend): PG+Qdrant now, .amr later.
+//   'amr-local' → legacy .amr-on-core (MNEME_ORGS); dormant in prod. amrRecall/amrWrite handle it.
+//   'central'   → central Qdrant + Postgres (managed / personal / free). Unchanged.
+export function memoryBackend(orgId) {
+  if (orgIsRemote(orgId)) return 'agent';
+  if (isMnemeOrg(orgId)) return 'amr-local';
+  return 'central';
+}
+
 const SIDECAR_MODELS = [
   'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
   'derivationJob', 'memoryDerivation', 'memoryEvidenceLink', 'vectorEmbedding',

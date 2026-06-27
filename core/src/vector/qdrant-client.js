@@ -12,7 +12,7 @@ import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
 // mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
 import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
-import { amrRecall, amrWrite, isMnemeOrg, orgIsRemote } from './mneme/driver.js';
+import { amrRecall, amrWrite, isMnemeOrg, orgIsRemote, memoryBackend } from './mneme/driver.js';
 import { qdrantUrlFor } from './mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
@@ -411,10 +411,11 @@ export class QdrantClient {
     // mneme read path: for enabled orgs, serve recall from the org's .amr shard with the SAME
     // score threshold + is_latest filter Qdrant would apply. Returns null on empty/error -> we
     // transparently fall through to Qdrant below.
-    const _mnemeOrg = filterMatchValue(filter, 'org_id');
-    // Path B: sole-store org -> serve recall from the adapter's ALREADY-OPEN .amr shard (shared
-    // handle, no second flock). Returns memory-layer hits mapped to Qdrant shape.
-    if (isMnemeOrg(_mnemeOrg)) {
+    // Resolve the org from the filter OR the request's org context (the filter shape is unreliable —
+    // hybridSearch passes org_id as an option and may not surface it in filter.must). The ONE seam,
+    // memoryBackend(org), then decides: non-'central' → serve from the agent/.amr via amrRecall.
+    const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
+    if (_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central') {
       try {
         const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
         if (_out) {

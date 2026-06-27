@@ -2666,7 +2666,10 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // (candidate may have been deleted / superseded between recall and
     // edge create). One FK violation poisons the outer Postgres txn so
     // verify existence BEFORE any createRelationship attempt.
-    if (sorted.length > 0) {
+    // Remote (self-host) orgs: candidates came from the agent's /v1/list, which already filters
+    // deleted_at IS NULL — they're known-live. A central existence check would query empty central
+    // Postgres and drop EVERY edge. Skip it; the agent enforces FK/existence on its own insert.
+    if (sorted.length > 0 && !orgIsRemote(baseMemory.org_id)) {
       try {
         const targetIds = Array.from(new Set(sorted.map((l) => candidates[l.index]?.id).filter(Boolean)));
         const prismaClient = (writeStore && writeStore.client) || this.store.client;

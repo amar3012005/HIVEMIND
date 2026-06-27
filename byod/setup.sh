@@ -58,9 +58,11 @@ else
 
   # ── 3. EXPOSURE ────────────────────────────────────────────────────────────────────────────────
   # How will the central engine reach this agent? Direct HTTPS (a domain) or Tailscale (private).
+  # Blank → auto-detect in step 7 (Tailscale IP, else public IP). Only ask interactively, and only
+  # if a terminal is attached — piped/non-interactive installs proceed fully unattended.
   PUBURL="${AGENT_PUBLIC_URL:-}"
-  if [ -z "$PUBURL" ]; then
-    printf 'Public URL the engine will reach this agent at (e.g. https://agent.yourdomain.com), or blank for Tailscale: '
+  if [ -z "$PUBURL" ] && [ -t 0 ]; then
+    printf 'Public URL the engine reaches this agent at (e.g. https://agent.yourdomain.com), or blank to auto-detect: '
     read -r PUBURL </dev/tty || true
   fi
 
@@ -99,14 +101,30 @@ else
 fi
 
 # ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
+# Zero-config: if no explicit AGENT_PUBLIC_URL, AUTO-DETECT a reachable address so the box connects
+# with no input. Priority: (1) host Tailscale IP (private mesh — best), (2) Tailscale tunnel container
+# if TS_AUTHKEY set, (3) the box's public IP. The agent binds 0.0.0.0:${AGENT_PORT} and is bearer-token
+# authed, so plain HTTP over a private tailnet (or a firewalled public IP) is the default link.
+AGENT_PORT="${AGENT_PORT:-8787}"
 AGENT_URL="${AGENT_PUBLIC_URL:-}"
+# (1) Host already on Tailscale? Use its mesh IP — no authkey, no tunnel container needed.
+if [ -z "$AGENT_URL" ] && command -v tailscale >/dev/null 2>&1; then
+  TSIP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  [ -n "${TSIP:-}" ] && { AGENT_URL="http://${TSIP}:${AGENT_PORT}"; log "auto-detected Tailscale IP → $AGENT_URL"; }
+fi
+# (2) Tailscale tunnel container (TS_AUTHKEY path) — legacy/explicit.
 if [ -z "$AGENT_URL" ] && [ -n "${TS_AUTHKEY:-}" ]; then
   log "waiting for tailscale hostname…"; for i in $(seq 1 20); do
     TSHOST="$($COMPOSE exec -T tunnel tailscale status --json 2>/dev/null | grep -oE '"DNSName":"[^"]+"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')" || true
     [ -n "${TSHOST:-}" ] && break; sleep 3; done
-  [ -n "${TSHOST:-}" ] && AGENT_URL="http://${TSHOST}:${AGENT_PORT:-8787}"
+  [ -n "${TSHOST:-}" ] && AGENT_URL="http://${TSHOST}:${AGENT_PORT}"
 fi
-[ -n "$AGENT_URL" ] || die "no agent URL — set AGENT_PUBLIC_URL in .env (https://… with TLS) or use Tailscale"
+# (3) Public IP fallback — works when the box has a routable IP + ${AGENT_PORT} reachable.
+if [ -z "$AGENT_URL" ]; then
+  PUBIP="$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null || curl -fsS -m 5 https://ifconfig.me 2>/dev/null || true)"
+  [ -n "${PUBIP:-}" ] && { AGENT_URL="http://${PUBIP}:${AGENT_PORT}"; log "auto-detected public IP → $AGENT_URL (ensure port ${AGENT_PORT} is reachable)"; }
+fi
+[ -n "$AGENT_URL" ] || die "could not auto-detect a URL — set AGENT_PUBLIC_URL in .env (https://… with TLS) or join Tailscale"
 
 # ── 8. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
 log "waiting for the agent to be ready…"

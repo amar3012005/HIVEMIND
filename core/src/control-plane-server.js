@@ -1029,6 +1029,18 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         let reg = {};
         try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { reg = null; }
         if (reg && typeof reg === 'object') {
+          // GDPR erasure (Phase 7): purge the agent's data BEFORE severing its registry route (the
+          // route is needed to reach the agent). Best-effort + recorded; self-host physical destruction
+          // is the customer's per the DPA. Do it before deleting the reg entry.
+          const { remotePurge } = await import('./vector/mneme/remote-backend.js');
+          for (const oid of orgIdsToDelete) {
+            if (reg[oid]?.url) {
+              try {
+                const r = await remotePurge(oid);
+                emit(96, r ? `Purged self-host agent for org ${oid} (deleted=${r.deleted ?? '?'})` : `Agent purge unreachable for org ${oid} — erasure acknowledged, customer-controlled`);
+              } catch (e) { console.warn(`[account-delete] agent purge failed org=${oid}: ${e.message}`); }
+            }
+          }
           let changed = false;
           for (const oid of orgIdsToDelete) { if (oid in reg) { delete reg[oid]; changed = true; } }
           if (changed) fs.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
@@ -1377,6 +1389,26 @@ const server = http.createServer(async (req, res) => {
     // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
     const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl && !body.agentUrl) return jsonResponse(res, { error: 'agentUrl (Model B) or pgUrl/qdrantUrl required' }, 400);
+    // Phase 9 — transport security: an agent URL must be HTTPS, OR plain http only over a PRIVATE/
+    // encrypted path (loopback, Tailscale CGNAT 100.64/10 or *.ts.net, RFC1918 LAN). Cleartext http to
+    // a PUBLIC host would expose memory content + the bearer token on the wire → reject.
+    const _agentUrl = (body.agentUrl || body.instanceUrl || '').trim();
+    if (_agentUrl) {
+      let secure = false;
+      try {
+        const u = new URL(_agentUrl);
+        if (u.protocol === 'https:') secure = true;
+        else if (u.protocol === 'http:') {
+          const h = u.hostname;
+          const oct = h.split('.').map(Number);
+          const isLoopback = h === 'localhost' || h === '::1' || oct[0] === 127;
+          const isTailscale = h.endsWith('.ts.net') || (oct[0] === 100 && oct[1] >= 64 && oct[1] <= 127); // CGNAT 100.64.0.0/10
+          const isRfc1918 = oct[0] === 10 || (oct[0] === 192 && oct[1] === 168) || (oct[0] === 172 && oct[1] >= 16 && oct[1] <= 31);
+          secure = isLoopback || isTailscale || isRfc1918;
+        }
+      } catch { secure = false; }
+      if (!secure) return jsonResponse(res, { error: 'agentUrl must be https:// (or http only over a private/Tailscale/LAN address). Cleartext http to a public host is rejected — it would expose memory content and the agent token.', code: 'INSECURE_AGENT_URL' }, 400);
+    }
     try {
       const fs = await import('node:fs');
       let reg = {};

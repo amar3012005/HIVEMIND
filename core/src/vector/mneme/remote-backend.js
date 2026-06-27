@@ -149,3 +149,12 @@ export async function remoteDelete(orgId, id, hard = false) {
   try { await _call(orgId, '/v1/delete', { id, hard }); return true; }
   catch (e) { console.warn(`[mneme/remote] delete failed org=${orgId} id=${id}: ${e.message}`); return null; }
 }
+
+// GDPR erasure: purge the ENTIRE org's data on the agent (all rows + vectors + edges). Returns
+// { ok, deleted } from the agent, or null on failure (account-delete records the failure but proceeds
+// to sever the central link; the saga can be retried). Self-host: physical destruction of the box is
+// the customer's responsibility per the DPA — this erases what the agent controls.
+export async function remotePurge(orgId) {
+  try { const out = await _call(orgId, '/v1/purge', {}); return out || { ok: true }; }
+  catch (e) { console.warn(`[mneme/remote] purge failed org=${orgId}: ${e.message}`); return null; }
+}

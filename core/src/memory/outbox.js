@@ -319,6 +319,23 @@ async function processJob(job) {
  * Covers the case where Redis was unavailable at original enqueue time,
  * or where the worker crashed before completing a job.
  */
+// Phase 10 (observability): per-org outbox health — pending depth, oldest-unacked age (lag), DLQ
+// (dead) count, last successful push. Cheap aggregate query; surfaced via /v1/selfhost/status so the
+// onboarding/ops view shows lag + errors, not just green/red. Returns null on any failure (non-fatal).
+export async function getOutboxStats(orgId) {
+  try {
+    const prisma = getCentralPrismaClient();
+    const [pending, dead, oldest, lastAck] = await Promise.all([
+      prisma.memoryOutbox.count({ where: { orgId, status: 'pending' } }),
+      prisma.memoryOutbox.count({ where: { orgId, status: 'dead' } }),
+      prisma.memoryOutbox.findFirst({ where: { orgId, status: 'pending' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
+      prisma.memoryOutbox.findFirst({ where: { orgId, status: 'acked' }, orderBy: { ackedAt: 'desc' }, select: { ackedAt: true } }),
+    ]);
+    const oldestUnackedAgeMs = oldest ? (Date.now() - new Date(oldest.createdAt).getTime()) : 0;
+    return { pending, dead, oldestUnackedAgeMs, lastAckedAt: lastAck?.ackedAt || null };
+  } catch { return null; }
+}
+
 export async function sweepStuckOutbox() {
   if (!PUSH_OUTBOX_ENABLED) return;
   if (!_queue) return; // BullMQ not initialised — nothing to re-enqueue into

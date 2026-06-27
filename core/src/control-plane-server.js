@@ -1498,11 +1498,15 @@ const server = http.createServer(async (req, res) => {
         reachable = !!(r && r.ok);
       } catch { /* unreachable */ }
     }
+    // Phase 10: surface outbox health (push lag + DLQ) so the view shows degradation, not just green/red.
+    let outbox = null;
+    try { const { getOutboxStats } = await import('./memory/outbox.js'); outbox = await getOutboxStats(statusOrgId); } catch { /* non-fatal */ }
     return jsonResponse(res, {
       registered: true,
       reachable,
       kind: entry.kind || 'selfhost',
       transport: entry.url ? 'agent' : (entry.pgUrl ? 'postgres' : 'qdrant'),
+      outbox, // { pending, dead, oldestUnackedAgeMs, lastAckedAt } | null
     });
   }
 

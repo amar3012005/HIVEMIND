@@ -25,6 +25,7 @@ import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
+import { groqFetch } from './llm/groq-fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -5176,16 +5177,36 @@ const server = http.createServer(async (req, res) => {
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) return jsonResponse(res, { error: 'GROQ_API_KEY not configured' }, 503);
 
-    const sys = `You write concise, human-sounding system prompts for AI digital employees. Output ONLY the persona system-prompt as plain text — no preamble, no markdown, no headers. 3-6 sentences. Address the employee in second person ("You are ..."). Include: role, communication style, what they prioritise, and one tasteful quirk. Reflect the requested age/gender/experience subtly through voice, not biography.`;
+    // Org-ground the persona (best-effort): pull the company's own business context from HIVEMIND so a
+    // marketplace profession is tuned to THIS org (not a generic role) — the "closest profession" edge.
+    // Triggered by ground_org (the marketplace hire flow sets it). Never blocks persona generation.
+    let orgContext = '';
+    if (body.ground_org) {
+      try {
+        const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+          body: JSON.stringify({ query_context: 'company business, industry, products, market, brand, strategy', org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
+        });
+        if (rr.ok) {
+          const rd = await rr.json().catch(() => ({}));
+          const mems = rd.memories || rd.results || rd.context || [];
+          const facts = (Array.isArray(mems) ? mems : []).map((m) => (m.content || m.summary || m.text || '')).filter(Boolean).slice(0, 6);
+          if (facts.length) orgContext = facts.join(' | ').slice(0, 1200);
+        }
+      } catch { /* best-effort — fall back to a non-org-grounded persona */ }
+    }
+
+    const sys = `You write concise, human-sounding system prompts for AI digital employees. Output ONLY the persona system-prompt as plain text — no preamble, no markdown, no headers. 3-6 sentences. Address the employee in second person ("You are ..."). Include: role, communication style, what they prioritise, and one tasteful quirk. Reflect the requested age/gender/experience subtly through voice, not biography.${orgContext ? ' If COMPANY CONTEXT is provided, GROUND the persona in that company\'s real domain, market, and products — make this a specialist for THIS company, not a generic role (do not invent facts beyond the context).' : ''}`;
     const user = `Brief: ${brief}
 Name: ${name}
 Role: ${role}${team ? `\nTeam: ${team}` : ''}${age ? `\nAge: ${age}` : ''}${gender ? `\nGender: ${gender}` : ''}
-Experience years: ${exp}
+Experience years: ${exp}${orgContext ? `\n\nCOMPANY CONTEXT (tune the persona to this company):\n${orgContext}` : ''}
 
 Write the persona now.`;
 
     try {
-      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -5206,6 +5227,58 @@ Write the persona now.`;
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }
+  }
+
+  // POST /v1/marketplace/rank-professions — rank a field's professions by relevance to THIS org.
+  // Recalls the company's business → LLM ranks + gives a short why-fits each. Best-effort: on any
+  // failure (no key, no org context, bad JSON) it returns the input order with no why_fits. Powers
+  // the marketplace "closest professions" view. Validates titles (never invents a profession).
+  if (pathname === '/v1/marketplace/rank-professions' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const body = await parseBody(req);
+    const field = (body.field || '').trim();
+    const profs = Array.isArray(body.professions) ? body.professions.filter((p) => p && p.title).slice(0, 12) : [];
+    const passthrough = () => jsonResponse(res, { ranked: profs.map((p) => ({ title: p.title })), org_grounded: false });
+    if (!field || !profs.length) return passthrough();
+    const apiKey = process.env.GROQ_API_KEY;
+    let orgContext = '';
+    try {
+      const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+        body: JSON.stringify({ query_context: `company business, industry, ${field} needs, products, market`, org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
+      });
+      if (rr.ok) {
+        const rd = await rr.json().catch(() => ({}));
+        const mems = rd.memories || rd.results || rd.context || [];
+        orgContext = (Array.isArray(mems) ? mems : []).map((m) => (m.content || m.summary || m.text || '')).filter(Boolean).slice(0, 6).join(' | ').slice(0, 1200);
+      }
+    } catch { /* best-effort */ }
+    if (!orgContext || !apiKey) return passthrough();
+    const sys = `You rank professions by relevance to a SPECIFIC company. Output ONLY JSON: {"ranked":[{"title":"<exact input title>","why_fits":"<=8 words tying it to THIS company>"}]}. Include EVERY input title exactly once, ordered most→least relevant to the company. why_fits must reference the company's real domain — no generic filler.`;
+    const user = `COMPANY CONTEXT:\n${orgContext}\n\nFIELD: ${field}\nPROFESSIONS:\n${profs.map((p) => `- ${p.title}: ${p.blurb || ''}`).join('\n')}\n\nRank now.`;
+    try {
+      const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.3, max_tokens: 600, response_format: { type: 'json_object' } }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const parsed = JSON.parse(d.choices?.[0]?.message?.content || '{}');
+        const ranked = Array.isArray(parsed.ranked) ? parsed.ranked : [];
+        const known = new Set(profs.map((p) => p.title));
+        const seen = new Set();
+        const out = [];
+        for (const x of ranked) {
+          if (x && known.has(x.title) && !seen.has(x.title)) { out.push({ title: x.title, why_fits: String(x.why_fits || '').slice(0, 90) }); seen.add(x.title); }
+        }
+        for (const p of profs) if (!seen.has(p.title)) out.push({ title: p.title });  // append any the LLM dropped
+        return jsonResponse(res, { ranked: out, org_grounded: true });
+      }
+    } catch { /* fall through to passthrough */ }
+    return passthrough();
   }
 
   // POST /v1/employees — create (org_admin only)
@@ -6977,6 +7050,8 @@ Write the persona now.`;
             if (_ct > 0) {
               const _t = await prisma.hyperTurn.findUnique({ where: { id: body.turn_id }, select: { roomId: true } });
               const _r = _t && await prisma.hyperRoom.findUnique({ where: { id: _t.roomId }, select: { orgId: true } });
+              // TODO: per-key metering needs its own principal plumbing — the agent bearer that reaches this
+              // endpoint does not carry an apiKeyId in scope here; wire when control-plane auth thread exposes it.
               if (_r?.orgId) { const { UsageTracker } = await import('./billing/usage-tracker.js'); await new UsageTracker(prisma).recordTokens(_r.orgId, _ct); }
             }
           } catch { /* never break the seal on a metering error */ }

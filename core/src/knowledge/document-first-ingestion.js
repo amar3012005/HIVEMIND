@@ -12,6 +12,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { memoryChatFetch } from '../llm/groq-fallback.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
@@ -297,7 +298,7 @@ Output the JSON object and nothing else.`;
         },
       },
     };
-    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({

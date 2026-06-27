@@ -9,6 +9,8 @@
  * Replaces separate ConflictResolver + Observer calls.
  */
 
+import { memoryChatFetch } from '../llm/groq-fallback.js';
+
 export class MemoryProcessor {
   constructor(options = {}) {
     this.groqApiKey = options.groqApiKey || process.env.GROQ_API_KEY;
@@ -38,7 +40,7 @@ export class MemoryProcessor {
     const maxTokens = Math.max(300, Math.min(inputTokens + 500, 4000));
 
     try {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.groqApiKey}`,

@@ -36,12 +36,138 @@ from ..hivemind_client import (
     google_exec_emulated,
     org_members_emulated,
     recall_emulated,
+    web_search_emulated,
 )
 
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+
+# Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
+# "no OpenRouter text equivalent" → no fallback, the Groq failure is surfaced.
+_OR_MODEL_MAP: Dict[str, str] = {
+    "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile": "meta-llama/llama-3.3-70b-instruct",
+    "llama-3.1-8b-instant": "meta-llama/llama-3.1-8b-instruct",
+    "llama-3.1-70b-versatile": "meta-llama/llama-3.1-70b-instruct",
+}
+# Agentic web-search / audio / vision / safety — never fall back to OpenRouter.
+_OR_NO_FALLBACK = re.compile(r"compound|whisper|playai|tts|guard|vision|parakeet|moderation", re.I)
+
+
+def _or_model(model: str) -> Optional[str]:
+    """Map a Groq model id to its OpenRouter slug, or None when there is no safe
+    text equivalent (→ caller keeps the Groq failure)."""
+    if not model:
+        return None
+    if _OR_NO_FALLBACK.search(model):
+        return None
+    if model in _OR_MODEL_MAP:
+        return _OR_MODEL_MAP[model]
+    if "/" in model:  # already-namespaced slug (anthropic/*, google/*, …) is a valid OpenRouter id
+        return model
+    return None
+
+
+# Groq-native models (Groq direct, or gpt-oss via OpenRouter→Cerebras failover).
+# A vendor-namespaced, non-native model (google/, anthropic/, deepseek/, …) routes
+# DIRECT to OpenRouter — no wasted Groq round-trip. Driven by HYPER_DIRECTOR_MODEL.
+_GROQ_NATIVE_RE = re.compile(r"^(openai/gpt-oss|gpt-oss|llama-|llama3|mixtral|gemma|groq/|whisper)", re.I)
+# Pin the OpenRouter provider per vendor → consistent low latency (avoids
+# require_parameters routing to a slow-but-capable provider, e.g. WandB/StreamLake).
+_OR_PROVIDER_PIN = {
+    "google/": ["Google", "Google AI Studio"],
+    "anthropic/": ["Anthropic"],
+    "deepseek/": ["DeepSeek", "Fireworks"],
+    "openai/gpt-oss": ["Cerebras"],
+    "qwen/": ["Alibaba"],
+    "moonshotai/": ["Moonshot AI", "Novita"],
+}
+
+
+# Set True the first time Groq returns a billing-block error → gpt-oss/llama then
+# route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
+# on process restart (re-probes Groq once), so funding Groq self-heals.
+_GROQ_DEAD = False
+_BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
+
+
+def _route_direct_openrouter(model: str) -> bool:
+    """A vendor-namespaced, non-Groq-native model → route DIRECT to OpenRouter.
+    Once Groq is observed dead (_GROQ_DEAD), gpt-oss/llama also route direct (skip the
+    wasted Groq 400s). compound has no OpenRouter equivalent → never direct-routed."""
+    m = str(model or "")
+    if not m or not os.environ.get("OPENROUTER_API_KEY"):
+        return False
+    if "compound" in m.lower():
+        return False
+    if _GROQ_NATIVE_RE.search(m):
+        return _GROQ_DEAD
+    return "/" in m
+
+
+def _or_provider_pin(model: str) -> Optional[List[str]]:
+    """OpenRouter provider order to pin for a model vendor (consistent latency)."""
+    m = str(model or "")
+    for pfx, order in _OR_PROVIDER_PIN.items():
+        if m.startswith(pfx):
+            return order
+    return None
+
+
+async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
+    """Replay a Groq chat body against OpenRouter when Groq is unavailable.
+
+    Groq stays PRIMARY: this is invoked ONLY after Groq's own retries are spent
+    (zero added latency on the healthy path). Returns the parsed response JSON
+    (Groq/OpenAI shape, `reasoning` coalesced into `content`/`reasoning_content`)
+    or None when no fallback is possible.
+    """
+    or_key = os.environ.get("OPENROUTER_API_KEY", "")
+    or_model = _or_model(str(body.get("model") or ""))
+    if not or_key or not or_model:
+        return None
+    or_body = dict(body)
+    or_body["model"] = or_model
+    # Fastest provider that supports the request's params (tools / response_format),
+    # with OpenRouter's own cross-provider fallback enabled.
+    _pin = _or_provider_pin(or_model)
+    or_body["provider"] = {**({"order": _pin} if _pin else {}),
+                           "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
+    or_body.pop("stream", None)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(
+                _OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {or_key}",
+                    "HTTP-Referer": "https://hivemind.davinciai.eu",
+                    "X-Title": "HIVEMIND",
+                },
+                json=or_body,
+            )
+        if r.status_code != 200:
+            log.warning("[hyper-engine] OpenRouter fallback %s: %s", r.status_code, r.text[:200])
+            return None
+        j = r.json()
+        msg = (j.get("choices") or [{}])[0].get("message") or {}
+        if msg.get("reasoning") and not msg.get("reasoning_content"):
+            msg["reasoning_content"] = msg["reasoning"]
+        if not msg.get("content") and (msg.get("reasoning_content") or msg.get("reasoning")):
+            msg["content"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        log.warning("[hyper-engine] Groq unavailable → OpenRouter served model=%s", or_model)
+        return j
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        log.warning("[hyper-engine] OpenRouter fallback transport error: %s", exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] OpenRouter fallback failed: %s", exc)
+        return None
 
 # Quality skills loaded WITHIN the call (model-driven, not pre-inserted) — the
 # functional equivalent of a Claude skill for the gpt-oss director. Each is a
@@ -163,6 +289,367 @@ _SIM_PERSONAS = max(4, min(150, int(os.environ.get("HYPER_SIM_PERSONAS", "24") o
 _SIM_TYPES = max(3, min(20, int(os.environ.get("HYPER_SIM_TYPES", "8") or "8")))
 _SIM_CONCURRENCY = max(2, int(os.environ.get("HYPER_SIM_CONCURRENCY", "10") or "10"))
 _SIM_ON = {"on", "simulation", "additional", "true", "1", "yes"}
+
+# ── Self-evolving employees (Loop 1: episodic playbook memory) ──────────────
+# Proven before wiring (scripts/swarm_spike/self_evolve_spike.py): a weak 8B employee
+# that reflects each turn's outcome into a playbook and recalls it next turn lifted
+# UNSEEN held-out decisions from 0.354 → 0.669 (+0.315), closing 81% of the gap to being
+# told the rules outright. Fully ADDITIVE + flag-gated + wrapped: a failure is a no-op.
+_EVO_ON = {"on", "evolve", "true", "1", "yes"}
+_EVO_ENABLED = (os.environ.get("HYPER_EVOLVE_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+_EVO_REFLECT_MODEL = os.environ.get("HYPER_EVOLVE_REFLECT_MODEL", "openai/gpt-oss-20b")  # cheap coach call
+_EVO_RECALL_K = max(2, min(8, int(os.environ.get("HYPER_EVOLVE_RECALL_K", "5") or "5")))  # lessons injected
+_EVO_CAP = max(4, min(30, int(os.environ.get("HYPER_EVOLVE_CAP", "12") or "12")))          # max lessons/employee
+_EVO_WORD = re.compile(r"[a-z0-9]{4,}")
+
+# ── Board digest (debate-context compression) ──────────────────────────────
+# The debate fan-out re-pays the gathered blackboard N×2 times. Compress it ONCE into a
+# goal-scoped, fact-preserving digest fed to the DEBATE only; synth keeps the raw board.
+# Proven (scripts/swarm_spike/digest_board_spike.py): ~47% less debate input on a fat board
+# with NO quality loss (digest strips noise → debaters ground cleaner). Compressing the synth
+# too (the deliverable's source) craters grounding — so synth ALWAYS keeps raw.
+_DIGEST_ENABLED = (os.environ.get("HYPER_DIGEST_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+# gpt-oss models can route plain-text output to an analysis channel → empty content; a llama
+# instruct model returns content reliably + is just as cheap for extractive compression.
+_DIGEST_MODEL = os.environ.get("HYPER_DIGEST_MODEL", "llama-3.1-8b-instant")
+_DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "2500") or "2500"))  # gate: engage on a moderately-full board (spike: +21% even at ~2k chars)
+_DIGEST_MAX_CHARS = max(800, int(os.environ.get("HYPER_DIGEST_MAX_CHARS", "2400") or "2400"))   # bound the digest
+_DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000") or "12000"))  # cap the digester's own input
+
+# ── Swarm journal (episodic continuity) ────────────────────────────────────
+# A compact, ordered, per-turn log injected at the START of plan + synth so a turn RECALLS prior
+# turns ("as we decided…"). Proven (scripts/swarm_spike/journal_spike.py): journal arm recalls a
+# prior-turn figure 0.45 vs blank arm 0.00 (blank FABRICATES). Bounded (last N entries) → no token
+# regression. Distinct from evo_playbooks (skills) — this is episodic memory of WHAT HAPPENED.
+_JOURNAL_ENABLED = (os.environ.get("HYPER_JOURNAL_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
+_JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "llama-3.1-8b-instant")  # cheap, content-returning summariser
+_JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
+
+# ── Self-revision (reflexion on the final deliverable) ─────────────────────
+# ONE bounded critique→revise pass after synth: the synth model re-reads its OWN draft against the
+# GATHERED BOARD (the only ground-truth — works for ANY room/tenant, zero hardcoded rules) and
+# corrects three GENERAL failure classes before the turn seals:
+#   (1) FABRICATION — any concrete specific (date/number/%/metric/price/person/contact/product-capability)
+#       not traceable to the board → omit or [placeholder] + surface under Gaps; never assert as fact.
+#   (2) INTERNAL-PROCESS LEAK — when the ask is an external artifact (email/copy/post/talking-points),
+#       strip facilitator/agent names, "the debate", "who argued what", inline (UNVERIFIED); no invented signatory.
+#   (3) FORMAT MISFIT — a diagram (mermaid/ascii) only where the medium renders it; never in an email/spoken script.
+# Catches synth-level defects BEFORE the (expensive) goalkeeper re-runs the whole turn → higher quality
+# AND cheaper. Bounded to 1 pass, skipped on the direct fast-path + tiny drafts (nothing to revise),
+# flag-gated (reversible). Composes with — does NOT replace — the P6 goalkeeper outer net.
+_SELF_REVISE = (os.environ.get("HYPER_SELF_REVISE", "true").strip().lower() not in ("0", "false", "no", "off"))
+_SELF_REVISE_MIN_CHARS = max(200, int(os.environ.get("HYPER_SELF_REVISE_MIN_CHARS", "400") or "400"))
+_SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MAX_CYCLES", "2") or "2")))
+
+# ── Gather deepening (recall-sufficiency recursion) ─────────────────────────
+# After the first gather, a cheap judge asks: is there enough GROUNDED company-specific material
+# to answer the task SPECIFICALLY, or is the board too thin (→ the synth would pad with generic
+# scaffolding)? If thin, it proposes new-angle recall queries (decompose the task, name each
+# entity, try synonyms) and re-gathers ONCE. No magic thresholds — an LLM judges sufficiency, same
+# shape as the synth self-revise. General for any room/agent; skipped on the direct fast-path;
+# bounded to one extra round; flag-gated. Fixes "thin recall → generic answer" at the SOURCE.
+_GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
+_GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
+
+# Web PROSPECTING: a query needing real-world contacts/businesses/people gets the strict
+# verbatim-or-NOT-VERIFIED extraction contract on the deep compound crawl (web_search + visit_website).
+# The regex picks prospecting intent — prompt selection only, never an output gate → general for any room.
+_PROSPECT_RE = re.compile(
+    r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
+    r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
+
+# Run-wide output language (FE navbar toggle). locale code → language NAME; "" / English → no directive.
+_LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish", "it": "Italian",
+               "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "ru": "Russian",
+               "ja": "Japanese", "zh": "Chinese", "ar": "Arabic", "hi": "Hindi", "ko": "Korean",
+               "sv": "Swedish", "da": "Danish", "no": "Norwegian", "fi": "Finnish", "cs": "Czech"}
+
+
+def _resolve_language(lang: str) -> str:
+    """Map a locale code or name ('fr' / 'French' / 'fr-FR') to a language NAME. '' or English → ''
+    (no directive → default English behavior, zero overhead)."""
+    s = (lang or "").strip().lower()
+    if not s or s.split("-")[0] in ("en", "english"):
+        return ""
+    name = _LANG_NAMES.get(s.split("-")[0]) or (lang.strip().title() if lang.strip().isalpha() else "")
+    return "" if name.lower() == "english" else name
+
+
+def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
+    Returns the parsed dict, or None when nothing valid parses (caller treats None as fail-safe)."""
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001
+        pass
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _journal_positions(transcript: Optional[List[Dict[str, Any]]]) -> str:
+    """Compact 'what each agent argued this turn' from the debate transcript — the per-agent slice.
+    Latest contribution per agent, trimmed. Empty when there was no debate (direct/fast-path turn)."""
+    if not transcript:
+        return ""
+    latest: Dict[str, str] = {}
+    for x in transcript:
+        if isinstance(x, dict) and x.get("agent") and x.get("text"):
+            latest[str(x["agent"])] = str(x["text"])  # later rounds overwrite → keep the agent's final stance
+    if not latest:
+        return ""
+    rows = "\n".join(f"- {name}: {text[:240]}" for name, text in list(latest.items())[:5])
+    return f"\n\nWHAT EACH AGENT ARGUED:\n{rows}"
+
+
+async def make_journal_entry(user_message: str, final_text: str, *,
+                             transcript: Optional[List[Dict[str, Any]]] = None,
+                             model: Optional[str] = None) -> Optional[str]:
+    """Compact this turn into ONE figure-preserving journal line for future turns (the Claude-Code
+    compaction model). Keeps the decision + key numbers verbatim (the spike showed dropping figures
+    halves recall) AND a per-agent positions slice when a debate happened (so agents stay consistent
+    with their own prior stance). Returns the line or None on failure. Called by the api AFTER seal."""
+    if not _JOURNAL_ENABLED:
+        return None
+    try:
+        pos = _journal_positions(transcript)
+        fmt = ("\"asked: <≤10 words> | decided: <decision + EVERY key figure/amount/%/date verbatim, ≤28 words>"
+               + (" | positions: <≤6 words per agent, 'Name: stance; …', ONLY agents who took a clear stance>\""
+                  if pos else "\""))
+        sysp = ("Summarize this room turn into ONE compact journal line for future turns. Format EXACTLY: "
+                + fmt + " Preserve numbers exactly; never round or drop them. No preamble, one line.")
+        usr = f"USER ASKED: {user_message[:400]}\n\nTEAM DELIVERABLE:\n{final_text[:1500]}{pos}"
+        out = await _evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+                              model=(model or _JOURNAL_MODEL), schema=None)
+        line = (out or "").strip().split("\n")[0].strip()
+        return line[:420] or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
+        return None
+
+
+def _evo_keywords(s: str) -> set:
+    return set(_EVO_WORD.findall((s or "").lower()))
+
+
+def _evo_recall(playbook: List[str], topic: str, k: int = _EVO_RECALL_K) -> List[str]:
+    """Lexical top-k playbook lessons for this topic + a recency floor (newest 2 always).
+    Mirror of the proven spike recall_playbook. Pure + safe — returns [] on empty."""
+    if not playbook:
+        return []
+    tk = _evo_keywords(topic)
+    scored = sorted(((len(tk & _evo_keywords(les)), -i, les) for i, les in enumerate(playbook)), reverse=True)
+    picked = [les for _, _, les in scored[:k]]
+    for les in playbook[-2:]:
+        if les not in picked:
+            picked.append(les)
+    return picked[:k + 2]
+
+
+def _evo_merge(playbook: List[str], new_lessons: List[str], cap: int = _EVO_CAP) -> List[str]:
+    """Append only non-duplicate lessons (Jaccard > 0.6 on keywords = dup → skip), bounded
+    by cap (drop oldest). Mirror of the proven spike dedupe_into. Returns the new list."""
+    out = list(playbook)
+    for les in new_lessons:
+        les = (les or "").strip()
+        if not les:
+            continue
+        lk = _evo_keywords(les)
+        if any(len(lk & _evo_keywords(ex)) / max(1, len(lk | _evo_keywords(ex))) > 0.6 for ex in out):
+            continue
+        out.append(les)
+    return out[-cap:]
+
+
+async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optional[Dict[str, Any]],
+                    temp: float = 0.3) -> Optional[str]:
+    """Minimal standalone Groq call for api-layer helpers (post-verify reflection + journal entry),
+    decoupled from the Director instance. With a schema → strict json_schema output; schema=None →
+    plain text. Short backoff on 429/5xx. Returns content or None."""
+    key = _groq_key()
+    if not key:
+        return None
+    body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temp}
+    if schema is not None:
+        body["response_format"] = {"type": "json_schema",
+                                   "json_schema": {"name": "evo_out", "schema": schema, "strict": True}}
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+            if r.status_code == 200:
+                return (r.json()["choices"][0]["message"].get("content") or "").strip()
+            if r.status_code in (429, 500, 502, 503) and attempt < 2:
+                await asyncio.sleep(min(2 ** attempt, 6))
+                continue
+            break  # non-retryable Groq status → fall through to OpenRouter
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(min(2 ** attempt, 6))
+    # Groq exhausted/unavailable → OpenRouter failover (Groq stays primary above).
+    j = await _openrouter_chat(body, timeout=httpx.Timeout(30.0, connect=5.0))
+    if j is not None:
+        return (j["choices"][0]["message"].get("content") or "").strip()
+    return None
+
+
+def _evo_outcome_brief(outcome: Optional[Dict[str, Any]]) -> str:
+    """Render the turn's REAL outcome (verifier verdict + status + whether a write was held for
+    approval) into a short prompt block — the richer signal the coach scores against. Empty when
+    no outcome is available (falls back to deliverable-only scoring)."""
+    if not isinstance(outcome, dict) or not outcome:
+        return ""
+    v = outcome.get("verdict") if isinstance(outcome.get("verdict"), dict) else {}
+    parts = []
+    if v:
+        flags = ", ".join(f"{k}={v.get(k)}" for k in ("met", "grounded_ok", "artifact_ok") if k in v)
+        if flags:
+            parts.append(flags)
+        gaps = v.get("gaps") or []
+        if isinstance(gaps, list) and gaps:
+            parts.append("open gaps: " + "; ".join(str(g)[:120] for g in gaps[:3]))
+    if outcome.get("status"):
+        parts.append(f"turn status: {outcome.get('status')}")
+    if outcome.get("pending_writes"):
+        parts.append("a side-effectful action was proposed and HELD for human approval")
+    if outcome.get("user_signal"):
+        parts.append(f"user signal on a recent turn: {outcome.get('user_signal')}")
+    if not parts:
+        return ""
+    return ("\n\nHOW THE TEAM'S DELIVERABLE ACTUALLY SCORED (the real outcome — weight your "
+            "critique by this, reward what led to a met+grounded result, correct what led to gaps/"
+            "escalation):\n- " + "\n- ".join(parts))
+
+
+# Batched reflection output: lessons per employee from ONE coach call (not N). Cuts the per-turn
+# evo cost ~Nx. Strict-schema friendly (array of flat objects).
+_EVO_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "employees": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string"},
+                    "lessons": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["slug", "lessons"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["employees"],
+    "additionalProperties": False,
+}
+
+# Skip reflection entirely on a STRONG turn (verdict met + grounded, completed, no rerun/HITL
+# signal) — there's nothing to learn, so spend 0 tokens. Env-tunable: set HYPER_EVOLVE_REFLECT_ALWAYS
+# to reflect on every turn regardless (costs more). Default: skip strong turns.
+_EVO_REFLECT_ALWAYS = (os.environ.get("HYPER_EVOLVE_REFLECT_ALWAYS", "").strip().lower() in ("1", "true", "yes", "on"))
+
+
+def _evo_skip_strong(outcome: Optional[Dict[str, Any]]) -> bool:
+    """True when the turn clearly succeeded → no lesson to learn → skip the coach call(s)."""
+    if _EVO_REFLECT_ALWAYS or not isinstance(outcome, dict):
+        return False
+    if outcome.get("user_signal"):
+        return False  # an explicit user/HITL signal always warrants reflection
+    if str(outcome.get("status") or "").lower() not in ("", "complete"):
+        return False  # escalated/blocked → learn from it
+    v = outcome.get("verdict") if isinstance(outcome.get("verdict"), dict) else {}
+    gaps = v.get("gaps") or []
+    return bool(v.get("met")) and bool(v.get("grounded_ok")) and not gaps
+
+
+async def evo_reflect_and_merge(
+    *, evo_playbooks: Dict[str, List[str]], transcript: List[Dict[str, Any]],
+    participants: List[Dict[str, Any]], final_text: str,
+    outcome: Optional[Dict[str, Any]] = None, reflect_model: Optional[str] = None,
+) -> Optional[Dict[str, List[str]]]:
+    """Loop 1 reflection, run by the api layer AFTER verification so it sees the real outcome.
+    Reflects each debating employee's contribution (conditioned on the verifier verdict) into its
+    slug-scoped playbook; returns the FULL merged map to persist (only when something changed),
+    else None. ONE batched coach call (not N) + skips strong turns → bounded token cost. Fully
+    wrapped — any failure returns None (turn already sealed, never affected)."""
+    if not transcript or not participants:
+        return None
+    # COST GUARD: a clearly-good turn has nothing to teach → spend nothing.
+    if _evo_skip_strong(outcome):
+        log.info("[hyper-engine] evo: strong turn (met+grounded) — reflection skipped (0 tokens)")
+        return None
+    try:
+        model = reflect_model or _EVO_REFLECT_MODEL
+        playbooks = {str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)}
+
+        def _contrib(nm: str) -> str:
+            return "\n".join(str(x.get("text") or "") for x in transcript
+                             if isinstance(x, dict) and x.get("agent") == nm).strip()
+
+        targets = []  # (slug, name, lane, contribution)
+        for emp in participants[:5]:
+            name, lane, _ = _persona_fields(emp)
+            slug = str(emp.get("slug") or emp.get("id"))
+            c = _contrib(name)
+            if c:
+                targets.append((slug, name, lane, c))
+        if not targets:
+            return None
+
+        # ONE batched coach call scores+coaches ALL contributing employees at once.
+        roster = "\n\n".join(
+            f"[{i+1}] slug={slug} ({name}, {lane})\nCONTRIBUTION:\n{c[:1100]}"
+            for i, (slug, name, lane, c) in enumerate(targets))
+        sysp = (
+            "You are a performance coach for a team of employees. For EACH employee below, judge their "
+            "contribution this turn against the team's final deliverable and how it actually scored, on these "
+            "dims: grounded (only given context, flagged unverifiable), specific (concrete + named next step), "
+            "risk_aware (surfaced the key risk), on_goal (addressed the question), concise (no filler). For each "
+            "employee return 0-2 SHORT, GENERAL, reusable operating rules (imperative, <=18 words) that would "
+            "make THEM better on FUTURE, DIFFERENT questions — transferable principles, never specific to this "
+            "turn's facts. Return an EMPTY lessons list for any employee already strong on every dim. Echo each "
+            "employee's exact slug. Output ONLY the schema.")
+        usr = (f"TEAM EMPLOYEES + CONTRIBUTIONS:\n{roster}\n\nTHE TEAM'S FINAL DELIVERABLE:\n"
+               f"{final_text[:1500]}" + _evo_outcome_brief(outcome))
+        content = await _evo_groq(
+            [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
+            model=model, schema=_EVO_BATCH_SCHEMA)
+        data = json.loads(content or "{}")
+        valid_slugs = {t[0] for t in targets}
+        by_slug: Dict[str, List[str]] = {}
+        for row in (data.get("employees") or []):
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "")
+            if slug not in valid_slugs:
+                continue
+            lessons = [str(x).strip() for x in (row.get("lessons") or []) if str(x).strip()][:2]
+            if lessons:
+                by_slug[slug] = lessons
+
+        updates: Dict[str, List[str]] = {}
+        learned = 0
+        for slug, lessons in by_slug.items():
+            merged = _evo_merge(playbooks.get(slug, []), lessons)
+            if merged != playbooks.get(slug, []):
+                updates[slug] = merged
+                learned += len(lessons)
+        if not updates:
+            return None
+        full = dict(playbooks)
+        full.update(updates)
+        log.info("[hyper-engine] evo: %d employees updated, %d lessons learned", len(updates), learned)
+        return full
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)
+        return None
 
 
 def _norm_connector(cid: str) -> str:
@@ -377,12 +864,36 @@ class Director:
             # tool-calling — sidesteps the gpt-oss harmony tool-call glitch entirely.
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "gather_plan", "schema": schema, "strict": True}}
+        # Provider-aware routing: a non-Groq-native model (gemini/claude/deepseek…)
+        # goes DIRECT to OpenRouter (provider-pinned) — skip the Groq round-trip.
+        # gpt-oss/llama stay Groq-primary below + the OpenRouter failover. Non-
+        # regressing: the default gpt-oss director path is unchanged.
+        if _route_direct_openrouter(body.get("model")):
+            j = await _openrouter_chat(body, timeout=httpx.Timeout(60.0, connect=5.0))
+            if j is not None:
+                u = j.get("usage") or {}
+                t = int(u.get("total_tokens", 0) or 0)
+                self.tokens += t
+                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+                self._last_tok = t
+                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+                return j["choices"][0]["message"]
+            return None
         max_attempts = 3
         _nudged = False
         for attempt in range(max_attempts):
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
                     r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                if r.status_code == 400 and _BILLING_RE.search(r.text or ""):
+                    # Groq billing block: mark dead (gpt-oss routes direct to OpenRouter
+                    # from now) and break straight to the OpenRouter failover below — no
+                    # point burning the 400-retries on a delinquent account.
+                    global _GROQ_DEAD
+                    _GROQ_DEAD = True
+                    log.warning("[hyper-engine] Groq billing block → gpt-oss now routes direct to OpenRouter/Cerebras")
+                    break
                 if r.status_code == 400 and attempt < max_attempts - 1:
                     body["temperature"] = max(0.1, float(body.get("temperature", temp)) - 0.2)
                     # gpt-oss harmony glitch: on a force_text (no-tools) call the decoder
@@ -413,7 +924,7 @@ class Director:
                     continue
                 if r.status_code != 200:
                     log.warning("[hyper-engine] groq %s: %s", r.status_code, r.text[:200])
-                    return None
+                    break  # non-retryable Groq status → fall through to OpenRouter
                 j = r.json()
                 u = j.get("usage") or {}
                 t = int(u.get("total_tokens", 0) or 0)
@@ -429,10 +940,23 @@ class Director:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(float(min(2 ** attempt, 8)))
                     continue
-                return None
+                break  # Groq unreachable → fall through to OpenRouter
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] groq call failed (attempt %d): %s", attempt, exc)
-                return None
+                break  # fall through to OpenRouter
+        # Groq exhausted/unavailable → OpenRouter failover. Groq stays primary;
+        # this runs only after Groq's own 400/429/5xx retries above are spent, so
+        # the healthy path is unchanged. `body` carries the same tools/schema.
+        j = await _openrouter_chat(body, timeout=httpx.Timeout(45.0, connect=5.0))
+        if j is not None:
+            u = j.get("usage") or {}
+            t = int(u.get("total_tokens", 0) or 0)
+            self.tokens += t
+            self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+            self._last_tok = t
+            self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+            self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+            return j["choices"][0]["message"]
         return None
 
     async def _init_connector_tools(self) -> None:
@@ -606,59 +1130,79 @@ class Director:
             log.warning("[hyper-engine] tool %s failed: %s", name, exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
 
-    # ── live web search (Groq built-in, via a compound sub-call) ───────
+    async def _browser_search_fallback(self, content: str, key: str) -> str:
+        """gpt-oss browser_search retry — used when the deep compound web call returns empty content.
+        Exa-powered interactive browse, reliably returns its result inline. '' on failure; never raises."""
+        try:
+            body = {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": content}],
+                    "tools": [{"type": "browser_search"}], "tool_choice": "required",
+                    "temperature": 1, "top_p": 1, "max_completion_tokens": 4096, "reasoning_effort": "low"}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
+                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+            if r.status_code != 200:
+                return ""
+            j = r.json()
+            wt = int((j.get("usage") or {}).get("total_tokens", 0) or 0)
+            self.tokens += wt
+            self.tok_by["web"] = self.tok_by.get("web", 0) + wt
+            return str(j["choices"][0]["message"].get("content") or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] browser_search fallback failed: %s", exc)
+            return ""
+
+    # ── live web search (HIVEMIND core Tavily-backed) ────────────────────────
     async def _web_search(self, query: str) -> str:
-        """Search the live public web using Groq's BUILT-IN web search. The built-in
-        runs only on the `groq/compound*` systems (not gpt-oss), so we make a separate
-        sub-call (same pattern as the debate persona calls) and fold the result back
-        onto the shared board — keeping the director's local tool-loop clean and
-        avoiding the undocumented built-in×custom-tool mixing. Bounded per turn."""
+        """Search the live public web using HIVEMIND core's Tavily-backed web-intel — the
+        SAME engine behind the hivemind_web_search MCP tool. Provider-independent, survives
+        a Groq outage, and inherits core's dedup / rate-limit / quota. Bounded per turn."""
         query = (query or "").strip()
         if not query:
             return json.dumps({"error": "empty query"})
         if self._web_calls >= self._web_budget:
             return json.dumps({"error": "web-search budget for this turn is used — rely on what you already gathered."})
-        key = _groq_key()
-        if not key:
-            return json.dumps({"error": "web search unavailable (no key)"})
         self._web_calls += 1
+        prospect = bool(_PROSPECT_RE.search(query))
+        keep = 3000 if prospect else 1500
+        # Reuse HIVEMIND core's Tavily-backed web-intel (the SAME engine behind the
+        # hivemind_web_search MCP tool) — provider-independent, survives a Groq outage,
+        # and inherits core's dedup / rate-limit / quota. No bespoke Tavily client here.
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
-                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"},
-                                 json={"model": self.web_model,
-                                       "messages": [{"role": "user", "content": query}]})
-            if r.status_code != 200:
-                log.warning("[hyper-engine] web_search %s: %s", r.status_code, r.text[:200])
-                return json.dumps({"error": f"web search failed ({r.status_code})", "is_error": True})
-            j = r.json()
-            uw = j.get("usage") or {}
-            wt = int(uw.get("total_tokens", 0) or 0)
-            self.tokens += wt
-            self.tok_by["web"] = self.tok_by.get("web", 0) + wt
-            self.io["input"] += int(uw.get("prompt_tokens", 0) or 0)
-            self.io["output"] += int(uw.get("completion_tokens", 0) or 0)
-            self.io["cached"] += int(((uw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
-            msg = j["choices"][0]["message"]
-            answer = str(msg.get("content") or "")[:1500]
-            sources: List[Dict[str, str]] = []
-            for et in (msg.get("executed_tools") or []):
-                sr = et.get("search_results")
-                # compound returns either a list, or a dict like {"results": [...]}.
-                if isinstance(sr, dict):
-                    sr = sr.get("results") or sr.get("search_results") or []
-                if not isinstance(sr, list):
-                    sr = []
-                for s in sr[:5]:
-                    if isinstance(s, dict) and s.get("url"):
-                        sources.append({"title": str(s.get("title") or "")[:120], "url": str(s.get("url"))})
-            self.blackboard.append(f"- WEB[{query[:60]}]: {answer[:300]}")
-            self.gather_count += 1
-            await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
-                             "sources": sources[:5], "summary": answer[:400]})
-            return json.dumps({"answer": answer, "sources": sources[:5]})
+            res = await web_search_emulated(query, user_id=self.user_id, org_id=self.org_id,
+                                            limit=8 if prospect else 5,
+                                            timeout_s=120.0 if prospect else 45.0)
         except Exception as exc:  # noqa: BLE001
             log.warning("[hyper-engine] web_search failed: %s", exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
+        if res.get("error"):
+            log.warning("[hyper-engine] web_search: %s", res.get("error"))
+            return json.dumps({"error": str(res.get("error"))[:200], "is_error": True})
+        results = res.get("results") or []
+        sources: List[Dict[str, str]] = [
+            {"title": str(x.get("title") or "")[:120], "url": str(x.get("url") or "")}
+            for x in results[:5] if x.get("url")
+        ]
+        parts: List[str] = []
+        for x in results[:(8 if prospect else 5)]:
+            snip = str(x.get("snippet") or x.get("content") or x.get("raw_content") or "")[:500]
+            parts.append(f"- {str(x.get('title') or '')[:120]} | {x.get('url') or ''}\n  {snip}")
+        answer = "\n".join(parts)[:keep]
+        if prospect and answer:
+            # Strict verbatim-or-NOT-VERIFIED contract for prospecting (no invented info@domain).
+            answer = ("CONTACTS — quote an email/phone ONLY if it literally appears in a result snippet "
+                      "below; cite the source URL; else write NOT VERIFIED. Never invent an address.\n") + answer
+        if len(answer.strip()) < 20:
+            await self.emit({"t": "web_intel", "query": query[:200], "count": 0, "sources": [], "summary": "no results"})
+            return json.dumps({"answer": "No web results found.", "sources": []})
+        # Tag web facts EXTERNAL + entity-unverified (a public search can return a DIFFERENT
+        # same-named entity) — the synth critic reconciles this against the internal board.
+        self.blackboard.append(
+            f"- WEB[{query[:60]}] (EXTERNAL/public, entity UNVERIFIED — may describe a different "
+            f"same-named entity; do NOT treat as a fact about THIS company unless it matches the "
+            f"internal facts): {answer[:keep]}")
+        self.gather_count += 1
+        await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
+                         "sources": sources[:5], "summary": answer[:400]})
+        return json.dumps({"answer": answer, "sources": sources[:5]})
 
     # ── debate (the room) ─────────────────────────────────────────────
     async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int) -> Dict[str, Any]:

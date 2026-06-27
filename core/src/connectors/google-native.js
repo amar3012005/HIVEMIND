@@ -52,12 +52,21 @@ function extractBody(payload) {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// RFC-2047 encode a header value when it contains non-ASCII, so email Subjects with umlauts/accents
+// (German/French/etc.) render correctly instead of mojibake. Pure-ASCII passes through unchanged.
+function _encodeHeader(s) {
+  const v = String(s || '');
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7F]*$/.test(v)) return v;
+  return `=?UTF-8?B?${Buffer.from(v, 'utf8').toString('base64')}?=`;
+}
+
 // RFC-2822 MIME → base64url for Gmail send/draft. threadId/inReplyTo optional.
 function _gmailRaw({ to, subject, body, cc, inReplyTo, references }) {
   const headers = [
     to ? `To: ${to}` : null,
     cc ? `Cc: ${cc}` : null,
-    `Subject: ${subject || ''}`,
+    `Subject: ${_encodeHeader(subject)}`,
     inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
     references ? `References: ${references}` : null,
     'MIME-Version: 1.0',

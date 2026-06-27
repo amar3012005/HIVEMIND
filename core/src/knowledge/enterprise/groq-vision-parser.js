@@ -161,5 +161,33 @@ async function visionOcrPage(imagePath, pageNum) {
     const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * Math.pow(2, attempt));
     await new Promise(r => setTimeout(r, backoffMs));
   }
-  throw lastErr || new Error('Groq vision exhausted retries');
+  // Groq exhausted / blocked (incl billing-block 400) → OpenRouter llama-4-scout
+  // (same OpenAI-vision body, image_url passes through). Provider-independent so
+  // vision OCR survives a Groq outage/delinquency.
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    const orModel = process.env.GROQ_VISION_OR_MODEL || 'meta-llama/llama-4-scout';
+    try {
+      const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${orKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://hivemind.davinciai.eu',
+          'X-Title': 'HIVEMIND',
+        },
+        body: JSON.stringify({ ...body, model: orModel }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (orRes.ok) {
+        const json = await orRes.json();
+        const msg = json.choices?.[0]?.message || {};
+        return msg.content || msg.reasoning || '';
+      }
+      lastErr = new Error(`OpenRouter vision ${orRes.status}: ${(await orRes.text().catch(() => '')).slice(0, 200)}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('vision OCR exhausted (Groq + OpenRouter)');
 }

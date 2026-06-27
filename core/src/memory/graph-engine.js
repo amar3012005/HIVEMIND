@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { isMnemeOrg, mnemeMode, amrUpdateTags, orgIsRemote, amrListRecent } from '../vector/mneme/driver.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { memoryChatFetch } from '../llm/groq-fallback.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -1873,7 +1874,7 @@ OUTPUT JSON only.`;
       const useStrict = supportsStrictJson(modelName);
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2437,7 +2438,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
-        const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,

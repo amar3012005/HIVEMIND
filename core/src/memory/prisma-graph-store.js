@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -757,24 +757,31 @@ export class PrismaGraphStore {
         if (!vec) return [];
         const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
         if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
-        const hits = (await amrRecall(org_id, vec, filter, n_results * 3, 0)) || [];
-        return hits.map((h) => {
+        // HYBRID: vector (semantic) + lexical (exact-term FTS over the agent's Postgres). The lexical
+        // leg surfaces buried exact terms that cosine rank misses — without it self-host recall was
+        // vector-only. Union by id; keep the higher score (lexical hits ride at their ts_rank).
+        const lexFilter = { is_latest: is_latest !== undefined ? is_latest : true };
+        const [hits, lex] = await Promise.all([
+          amrRecall(org_id, vec, filter, n_results * 3, 0).then((r) => r || []),
+          (amrLexicalRemote(org_id, query, lexFilter, n_results * 3) || Promise.resolve([])).then((r) => r || []),
+        ]);
+        const byId = new Map();
+        for (const h of [...hits, ...lex]) {
           const p = h.payload || {};
-          return {
-            id: p.memory_id || h.id,
-            content: p.content || '',
-            title: p.title || null,
-            tags: p.tags || [],
-            memory_type: p.memory_type || 'fact',
-            project: null,
-            importance_score: typeof h.score === 'number' ? h.score : 0.5,
-            is_latest: p.is_latest ?? true,
-            created_at: p.created_at || null,
-            updated_at: p.created_at || null,
-            score: h.score,
-            cognitive_layer_role: p.cognitive_layer_role || null,
-          };
-        });
+          const id = p.memory_id || h.id;
+          if (!id) continue;
+          const score = typeof h.score === 'number' ? h.score : 0.5;
+          const existing = byId.get(id);
+          if (existing && existing.score >= score) continue;
+          byId.set(id, {
+            id, content: p.content || '', title: p.title || null, tags: p.tags || [],
+            memory_type: p.memory_type || 'fact', project: null,
+            importance_score: score, is_latest: p.is_latest ?? true,
+            created_at: p.created_at || null, updated_at: p.created_at || null,
+            score, cognitive_layer_role: p.cognitive_layer_role || null,
+          });
+        }
+        return Array.from(byId.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
       } catch (e) {
         console.warn('[recall] remote agent search failed:', e.message);
         return [];

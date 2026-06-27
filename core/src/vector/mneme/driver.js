@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -217,6 +217,12 @@ export function amrStats(orgId, filter) {
 export function amrGraph(orgId, opts) {
   if (!orgIsRemote(orgId)) return null;
   return remoteGraph(orgId, opts);
+}
+
+// Lexical (FTS) leg of hybrid recall for a REMOTE org — routes to the agent's /v1/lexical. Returns
+// Qdrant-shaped hits [{id, score, payload}] (async). Null for non-remote (caller uses the local path).
+export function amrLexicalRemote(orgId, text, filter, limit) {
+  return orgIsRemote(orgId) ? remoteLexical(orgId, text, filter, limit) : null;
 }
 
 // KB layer (self-host): route document + evidence-segment writes/reads to the agent for remote orgs.

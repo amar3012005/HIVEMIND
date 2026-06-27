@@ -162,6 +162,12 @@ export async function remoteGraph(orgId, opts = {}) {
   catch (e) { console.warn(`[mneme/remote] graph failed org=${orgId}: ${e.message}`); return { nodes: [], edges: [] }; }
 }
 
+// Lexical (keyword/FTS) leg of hybrid recall over the agent's Postgres. Returns Qdrant-shaped hits.
+export async function remoteLexical(orgId, text, filter, limit) {
+  try { const out = await _call(orgId, '/v1/lexical', { text, filter, limit }); return Array.isArray(out?.results) ? out.results : []; }
+  catch (e) { console.warn(`[mneme/remote] lexical failed org=${orgId}: ${e.message}`); return []; }
+}
+
 // ── KB layer (self-host): documents + evidence segments live on the agent ──
 export async function remoteKbDoc(orgId, doc) {
   try { await _call(orgId, '/v1/kb-doc', { doc }); return true; }

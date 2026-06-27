@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph } from './vector/mneme/driver.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
@@ -2334,7 +2334,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     };
     if (project) where.project = project;
 
-    const [memoryCount, recentMemories] = await Promise.all([
+    let [memoryCount, recentMemories] = await Promise.all([
       prisma.memory.count({ where }).catch(() => 0),
       prisma.memory.findMany({
         where,
@@ -2359,6 +2359,15 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
       );
       relationships = relRows?.[0]?.c || 0;
     } catch { relationships = 0; }
+
+    // Remote (self-host) org: memories + relationships live on the agent, not central — the counts
+    // above are 0. Pull the real counts from the agent so Profile/Overview show the truth.
+    if (orgIsRemote(orgId)) {
+      try {
+        const rs = await amrStats(orgId, { user_id: userId });
+        if (rs) { memoryCount = rs.memories ?? memoryCount; relationships = rs.relationships ?? relationships; }
+      } catch { /* keep central fallback */ }
+    }
 
     // Count observations from recent memories tags
     const observationCount = recentMemories.filter(m => (m.tags || []).includes('observation')).length;
@@ -18675,6 +18684,26 @@ exit \$RC
               return;
             }
             try { planEnforcer?.recordUsage(orgId, 'graphQueries', 1); } catch { /* meter */ }
+            // Remote (self-host) org: the graph (memories + relationships) lives on the agent; central
+            // holds 0 rows so the normal build returns an empty graph. Pull nodes+edges from the agent
+            // and map to the FE payload shape (edges: from_id→source, to_id→target).
+            if (orgIsRemote(orgId)) {
+              try {
+                const limit = Number(url.searchParams.get('limit')) || 1000;
+                const g = await amrGraph(orgId, { limit, filter: { user_id: userId } });
+                if (g) {
+                  const nodes = (g.nodes || []).map((n) => ({
+                    id: n.id, label: n.title || (n.content || '').slice(0, 60), title: n.title,
+                    content: n.content, tags: n.tags || [], kind: 'memory',
+                    group: n.memory_type || 'memory', memory_type: n.memory_type, createdAt: n.created_at,
+                  }));
+                  const edges = (g.edges || []).map((e) => ({
+                    source: e.from_id, target: e.to_id, type: e.type || 'Mentions', confidence: e.confidence || 1,
+                  }));
+                  return jsonResponse(res, { nodes, edges, meta: { source: 'agent', node_count: nodes.length, edge_count: edges.length } });
+                }
+              } catch { /* fall through to central (empty) on agent failure */ }
+            }
             let releaseSlot = null;
             try {
               const graphProject = url.searchParams.get('project') || null;

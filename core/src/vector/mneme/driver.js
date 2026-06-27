@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, hasRemoteAgent } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -205,6 +205,18 @@ export function amrUpdateTags(orgId, id, tags) {
   for (const a of allActiveAdapters()) {
     try { if (a?.memory?.byId?.has(id)) a.memory.update?.({ where: { id }, data: { tags } }); } catch { /* best-effort */ }
   }
+}
+
+// Profile/Overview counts ({memories, relationships}) for a remote org — null for non-remote (caller
+// uses its central count). Async.
+export function amrStats(orgId, filter) {
+  if (!orgIsRemote(orgId)) return null;
+  return remoteStats(orgId, filter);
+}
+// Graph {nodes, edges} for a remote org — null for non-remote. Async.
+export function amrGraph(orgId, opts) {
+  if (!orgIsRemote(orgId)) return null;
+  return remoteGraph(orgId, opts);
 }
 
 // Generic partial update (tags / is_latest / memory_type) routed to the agent for remote orgs.

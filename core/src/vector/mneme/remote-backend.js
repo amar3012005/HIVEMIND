@@ -150,6 +150,18 @@ export async function remoteDelete(orgId, id, hard = false) {
   catch (e) { console.warn(`[mneme/remote] delete failed org=${orgId} id=${id}: ${e.message}`); return null; }
 }
 
+// Profile/Overview counts for a remote org (memory_count + relationship_count) — central holds 0.
+export async function remoteStats(orgId, filter = {}) {
+  try { return await _call(orgId, '/v1/stats', { filter }); }
+  catch (e) { console.warn(`[mneme/remote] stats failed org=${orgId}: ${e.message}`); return null; }
+}
+
+// Graph nodes+edges for a remote org's Memory Graph view.
+export async function remoteGraph(orgId, opts = {}) {
+  try { const out = await _call(orgId, '/v1/graph', { limit: opts.limit, filter: opts.filter || {} }); return { nodes: out?.nodes || [], edges: out?.edges || [] }; }
+  catch (e) { console.warn(`[mneme/remote] graph failed org=${orgId}: ${e.message}`); return { nodes: [], edges: [] }; }
+}
+
 // GDPR erasure: purge the ENTIRE org's data on the agent (all rows + vectors + edges). Returns
 // { ok, deleted } from the agent, or null on failure (account-delete records the failure but proceeds
 // to sever the central link; the saga can be retried). Self-host: physical destruction of the box is

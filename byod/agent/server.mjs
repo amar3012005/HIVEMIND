@@ -232,6 +232,37 @@ const routes = {
     return { memories: rows, cursor };
   },
 
+  // Counts for the Profile/Overview stats cards (memory_count + relationship_count). The engine reads
+  // these from here for remote orgs — central holds 0 rows for a self-host org.
+  '/v1/stats': async (b) => {
+    const f = b.filter || {};
+    const conds = ['org_id=$1', 'deleted_at IS NULL', 'is_latest=true'];
+    const args = [ORG];
+    if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
+    const mem = await pg.query(`SELECT count(*)::int AS c FROM memories WHERE ${conds.join(' AND ')}`, args);
+    const rel = await pg.query('SELECT count(*)::int AS c FROM relationships WHERE org_id=$1', [ORG]);
+    return { memories: mem.rows[0]?.c || 0, relationships: rel.rows[0]?.c || 0 };
+  },
+
+  // Graph nodes (memories) + edges (relationships) for the Memory Graph view. Remote orgs' graph lives
+  // here, not central.
+  '/v1/graph': async (b) => {
+    const limit = Math.min(b.limit || 500, 2000);
+    const args = [ORG];
+    let cond = 'org_id=$1 AND deleted_at IS NULL AND is_latest=true';
+    if (b.filter?.user_id) { args.push(b.filter.user_id); cond += ` AND user_id=$${args.length}`; }
+    args.push(limit);
+    const { rows: nodes } = await pg.query(
+      `SELECT id, title, content, tags, memory_type, created_at FROM memories WHERE ${cond} ORDER BY created_at DESC LIMIT $${args.length}`, args);
+    let edges = [];
+    if (nodes.length) {
+      const ids = nodes.map((n) => n.id);
+      const r = await pg.query('SELECT id, from_id, to_id, type, confidence FROM relationships WHERE org_id=$1 AND from_id = ANY($2)', [ORG, ids]);
+      edges = r.rows;
+    }
+    return { nodes, edges };
+  },
+
   // Typed relationship edge (deferred relationship extraction).
   '/v1/edge': async (b) => {
     const rel = b.rel;

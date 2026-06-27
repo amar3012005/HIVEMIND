@@ -2322,3 +2322,48 @@ model Meeting {
   @@index([userId], map: "meetings_user_idx")
   @@map("meetings")
 }
+
+/// Durable outbox for engine→agent pushes (Phase 4 — remote/self-host orgs only).
+/// Every write/edge/update/updateTags/delete op destined for a remote agent is
+/// recorded here BEFORE the BullMQ job is enqueued. If Redis is unavailable at
+/// enqueue time the row persists; the reconciler sweep re-enqueues on the next
+/// worker boot / interval so no push is lost even across process restarts or
+/// Redis blips. Central / personal / managed (non-remote) orgs are never written
+/// here — the outbox engages ONLY when orgIsRemote(orgId) is true.
+///
+/// FIFO ordering is enforced per (recordId, seq): the worker will not dispatch
+/// op N+1 for a given recordId until op N is acked, so write→edge→updateTags
+/// for the same memory always land in the correct order on the agent.
+model MemoryOutbox {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  orgId         String    @map("org_id") @db.Uuid
+  /// The memory/edge id this op is scoped to — used for FIFO ordering (all ops
+  /// for the same recordId must process in seq order) and job dedup.
+  recordId      String    @map("record_id") @db.Uuid
+  /// Op type: 'write' | 'edge' | 'update' | 'updateTags' | 'delete'
+  op            String    @map("op") @db.VarChar(20)
+  /// Full replay envelope. Shape per op:
+  ///   write      → { record, vector, rels }
+  ///   edge       → { rel }
+  ///   update     → { id, patch }
+  ///   updateTags → { id, tags }
+  ///   delete     → { id, hard }
+  payload       Json      @map("payload") @db.JsonB
+  /// Monotonic counter per recordId — SELECT max(seq)+1 at insert time ensures
+  /// ordering is preserved across concurrent callers without a sequence object.
+  seq           BigInt    @map("seq")
+  /// 'pending' → BullMQ job dispatching; 'acked' → agent confirmed ok;
+  /// 'dead' → exhausted retries or poison (4xx non-429).
+  status        String    @default("pending") @map("status") @db.VarChar(10)
+  attempts      Int       @default(0) @map("attempts")
+  lastError     String?   @map("last_error") @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  ackedAt       DateTime? @map("acked_at") @db.Timestamptz(6)
+
+  /// Primary sweep index: find pending rows whose retry window has passed.
+  @@index([orgId, status, nextAttemptAt], map: "memory_outbox_org_status_next_idx")
+  /// FIFO gate: find any earlier-seq pending rows for the same recordId.
+  @@index([recordId, seq], map: "memory_outbox_record_seq_idx")
+  @@map("memory_outbox")
+}

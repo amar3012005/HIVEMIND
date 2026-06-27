@@ -15,6 +15,22 @@ import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
 import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, hasRemoteAgent } from './remote-backend.js';
 
+// Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
+// loads cleanly even when the outbox has not been initialised yet (e.g. in tests
+// or in central-only deployments). Central/personal/managed paths never call it.
+let _enqueuePush = null;
+async function _getEnqueuePush() {
+  if (_enqueuePush) return _enqueuePush;
+  try {
+    const mod = await import('../memory/outbox.js');
+    _enqueuePush = mod.enqueuePush;
+  } catch {
+    // outbox module unavailable (e.g. test environment without Redis)
+    _enqueuePush = null;
+  }
+  return _enqueuePush;
+}
+
 // A REMOTE (.amr-on-customer-box) org has an hm-agent HTTP endpoint that serves recall — decided PER
 // ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
 // agent) are NOT remote — core connects to their stores directly (per-org DATABASE_URL/QDRANT_URL).
@@ -165,25 +181,58 @@ export function wrapPrisma(realPrisma) {
 // Mirror a typed relationship edge into the .amr shard that holds its fromId memory (dual mode — PG
 // already has the row; this keeps the .amr graph in sync for graph-recall). No-op if no .amr org.
 // Resync entity:* tags into the .amr after deferred entity-linking attaches them (remote orgs).
+//
+// REMOTE ORGS: routes through the durable outbox instead of fire-and-forget.
+// The caller does NOT need to await — the push is best-effort on the happy path
+// and durably retried via BullMQ + the MemoryOutbox row if the agent is down.
 export function amrUpdateTags(orgId, id, tags) {
   if (!orgId || !id || !Array.isArray(tags)) return;
-  if (orgIsRemote(orgId)) { remoteUpdateTags(orgId, id, tags); return; }
+  if (orgIsRemote(orgId)) {
+    // Durable outbox: seq ensures updateTags lands after the corresponding write.
+    _getEnqueuePush().then((enqueue) => {
+      if (enqueue) return enqueue(orgId, 'updateTags', id, { id, tags });
+      // Fallback to direct call if outbox unavailable (test / degraded mode).
+      return remoteUpdateTags(orgId, id, tags);
+    }).catch(() => {
+      // Outbox INSERT failed — last-resort direct attempt.
+      remoteUpdateTags(orgId, id, tags);
+    });
+    return;
+  }
   if (!anyMnemeOrg()) return;
   for (const a of allActiveAdapters()) {
     try { if (a?.memory?.byId?.has(id)) a.memory.update?.({ where: { id }, data: { tags } }); } catch { /* best-effort */ }
   }
 }
+
 // Generic partial update (tags / is_latest / memory_type) routed to the agent for remote orgs.
-// Returns a promise when remote (caller may await), undefined otherwise.
+// REMOTE ORGS: durable outbox (was a direct call, now ordered + retried).
 export function amrUpdate(orgId, id, patch) {
   if (!orgId || !id || !patch) return undefined;
-  if (orgIsRemote(orgId)) return remoteUpdate(orgId, id, patch);
+  if (orgIsRemote(orgId)) {
+    return _getEnqueuePush().then((enqueue) => {
+      if (enqueue) return enqueue(orgId, 'update', id, { id, patch });
+      return remoteUpdate(orgId, id, patch);
+    }).catch(() => remoteUpdate(orgId, id, patch));
+  }
   return undefined;
 }
+
+// REMOTE ORGS: was fire-and-forget (lost on agent-down). Now durable via outbox.
+// Ordering: seq guarantees this edge op lands AFTER the write op for the same memory.
 export function amrAddEdge(rel) {
   if (process.env.MNEME_DEBUG_ROUTING) console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');
   if (!rel?.fromId || !rel?.toId) return;
-  if (rel.orgId && orgIsRemote(rel.orgId)) { remoteAddEdge(rel.orgId, rel); return; }
+  if (rel.orgId && orgIsRemote(rel.orgId)) {
+    // Use fromId as the partition key so edge ops for a given memory are ordered
+    // after its write op (which was enqueued with recordId=record.id=fromId).
+    const recordId = rel.fromId;
+    _getEnqueuePush().then((enqueue) => {
+      if (enqueue) return enqueue(rel.orgId, 'edge', recordId, { rel });
+      return remoteAddEdge(rel.orgId, rel);
+    }).catch(() => remoteAddEdge(rel.orgId, rel));
+    return;
+  }
   if (!anyMnemeOrg()) return;
   for (const a of allActiveAdapters()) {
     if (a?.memory?.byId?.has(rel.fromId)) {
@@ -223,8 +272,36 @@ export async function amrListRecent(orgId, userId, limit = 15) {
 }
 
 // unified write (record + vector) for an .amr org (or null → caller uses Qdrant/PG path only).
+//
+// REMOTE ORGS — CRITICAL CONSTRAINT:
+//   The ingest pipeline calls `await amrWrite(...)` and then immediately reads
+//   the row back from the agent (getMemory → remoteHydrate) mid-ingest, so the
+//   INITIAL write MUST remain a synchronous attempt (not fire-and-forget).
+//
+//   Strategy on success: the row landed — no outbox row needed (audit lives on agent).
+//   Strategy on failure: the agent was down / timed-out.  We enqueue a durable
+//     outbox row so the write is retried once the agent is back.  This converts
+//     a silent data-loss into a retried push.
+//
+// Central / .amr-local orgs: unchanged.
 export async function amrWrite(orgId, record, vector, rels = []) {
-  if (orgIsRemote(orgId)) return remoteWrite(orgId, record, vector, rels);
+  if (orgIsRemote(orgId)) {
+    // Synchronous attempt — required for the ingest read-back to succeed.
+    const ok = await remoteWrite(orgId, record, vector, rels);
+    if (ok) return ok; // happy path: landed, no outbox row needed
+    // Write failed (agent down / timeout). Enqueue for durable retry.
+    try {
+      const enqueue = await _getEnqueuePush();
+      if (enqueue) {
+        await enqueue(orgId, 'write', record.id, { record, vector: Array.from(vector || []), rels });
+      }
+    } catch (enqErr) {
+      // If outbox INSERT itself fails (e.g. central PG down) we cannot do much.
+      // Log and return null — the caller will surface an error to the user.
+      console.error(`[amrWrite][outbox] enqueue failed org=${orgId} record=${record?.id}: ${enqErr.message}`);
+    }
+    return null; // signal to caller that the synchronous write did not land
+  }
   const h = orgStore(orgId);
   if (!h) return null;
   return h.storeMemoryUnified(record, vector, rels);

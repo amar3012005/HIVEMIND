@@ -1659,6 +1659,17 @@ if (process.env.ENABLE_EVIDENCE_RECALL === 'true' && prisma && qdrantClient) {
   }
 }
 
+// Durable outbox push worker (Phase 4 — remote/self-host orgs).
+// Safe no-op for central-only deployments: the worker only fires for orgIsRemote
+// orgs.  Wired here so it shares the same Redis probe pattern as KbIngestQueue.
+try {
+  const { startPushWorker } = await import('./memory/outbox.js');
+  await startPushWorker();
+  console.log('[boot] Memory outbox push worker started');
+} catch (err) {
+  console.warn('[boot] Memory outbox push worker failed to start (non-fatal):', err.message);
+}
+
 // Initialize Three-Tier Retrieval
 const threeTierRetrieval = new ThreeTierRetrieval({
   vectorStore: qdrantClient,

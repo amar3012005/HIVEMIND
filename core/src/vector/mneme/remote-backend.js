@@ -142,3 +142,10 @@ export async function remoteList(orgId, filter, cursor, limit) {
   try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit }); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
   catch (e) { console.warn(`[mneme/remote] list failed org=${orgId}: ${e.message}`); return { memories: [], cursor: null }; }
 }
+
+// Hard or soft delete of a memory row + vector + edges + versions + tombstone on the agent.
+// hard=true → permanent erasure (GDPR). hard=false → soft-delete (deletedAt set).
+export async function remoteDelete(orgId, id, hard = false) {
+  try { await _call(orgId, '/v1/delete', { id, hard }); return true; }
+  catch (e) { console.warn(`[mneme/remote] delete failed org=${orgId} id=${id}: ${e.message}`); return null; }
+}

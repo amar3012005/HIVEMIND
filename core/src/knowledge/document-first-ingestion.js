@@ -12,6 +12,22 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
+
+// RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
+// row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
+// the customer's document text would sit on our box. The KB-on-agent layer (agent-side knowledge
+// tables + segment vectors + read/write/recall routing) is a dedicated build; until it ships we
+// REFUSE self-host KB ingestion rather than leak. Chat + connector memories already route to the
+// agent correctly. Throw a clear, surfaced message.
+function assertKbAllowedForOrg(orgId) {
+  if (orgIsRemote(orgId)) {
+    const e = new Error('Knowledge Base document ingestion is not yet available for self-hosted orgs — coming soon. Memories (chat, API, connectors) work normally and stay on your server.');
+    e.code = 'KB_SELFHOST_UNSUPPORTED';
+    e.statusCode = 501;
+    throw e;
+  }
+}
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 
@@ -621,6 +637,7 @@ Output the JSON object and nothing else.`;
    */
   async ingestKnowledgeDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
+    assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
@@ -782,6 +799,7 @@ Output the JSON object and nothing else.`;
    */
   async ingestEnterpriseDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestEnterpriseDocument(opts)); // residency
+    assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} } = opts;
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 

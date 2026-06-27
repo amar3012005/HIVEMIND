@@ -74,3 +74,27 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   the edit (image older than disk) → ALWAYS fetch before checkout + verify `docker exec hm-core grep <marker>`.
 - topology reaffirmed: ENGINE=singulance hm-core (all builds/deploys); /infra CLIENT AGENT=myserver
   hm-byod-agent+postgres (push target, read-only verification). No myserver engine touched.
+
+## 2026-06-27 — Self-host security + residency hardening (audit → fix once-and-for-all)
+- type: security   verdict: GREEN   commit: a47dee3e, 8b78f367 (core) · byod re-split
+- recon: 3 parallel adversarial audits (residency-leak / authz / managed-topology).
+- CRITICAL authz: /api/meetings|tara|autofill sat above the global auth gate, did optional auth →
+  spoofable x-hm-org-id||DEFAULT_ORG → unauthenticated cross-tenant writes + usage-meter poisoning.
+  Fixed: scoped mandatory auth gate, tenant derived strictly from authenticated principal (master key
+  still folds x-hm-* → principal so control-plane proxy works). Verified: unauth→401, valid→201.
+- CRITICAL residency: ingestConnectorRecord missing assertKbAllowedForOrg (connector records leaked
+  segments/source_artifacts central for self-host). Guarded. + meetings/tara content writes blocked
+  for self-host (central-table leak, 501 FEATURE_SELFHOST_UNSUPPORTED). + assistant-identity sentinel
+  + cognition-loop now skip remote orgs (both wrote central directly). All content-ingest entry points
+  now guarded → entity-resolver/synthesis leaks transitively unreachable for remote.
+- agent hardening (byod/agent/server.mjs): timing-safe bearer compare (was plain ===) + Origin/Referer
+  lock (engine is server-to-server; any browser Origin→403; optional ALLOWED_ENGINE_ORIGIN). Verified:
+  browser Origin→403, bad token→401, engine server-to-server→passes.
+- managed/personal: audit confirmed central path byte-unchanged — every remote branch gated by
+  orgIsRemote (false for managed/personal); topology hm-core/hm-control/hm-postgres/hm-qdrant @1024-dim.
+  One noted risk: orgIsRemote keys purely off registry URL presence (ignores plan/hostingMode) — a
+  stray registry row could misclassify; registry only written by /v1/selfhost/register today.
+- verified e2e: self-host save→agent+1/central-0, recall green; all 5 security probes pass.
+- residual (tracked, NOT leaks): KB-on-agent + meetings-on-agent + connector-on-agent layers (agent
+  KB tables + segment vectors + read/write/recall routing) = next dedicated build; until then those
+  features are refused for self-host rather than leaking.

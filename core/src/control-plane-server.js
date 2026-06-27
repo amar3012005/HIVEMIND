@@ -1359,13 +1359,13 @@ const server = http.createServer(async (req, res) => {
     // register: record the customer's tunnel endpoints into the shared registry file (defaults to the
     // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
     const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
-    if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl) return jsonResponse(res, { error: 'pgUrl/qdrantUrl/instanceUrl required' }, 400);
+    if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl && !body.agentUrl) return jsonResponse(res, { error: 'agentUrl (Model B) or pgUrl/qdrantUrl required' }, 400);
     try {
       const fs = await import('node:fs');
       let reg = {};
       try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
       reg[orgId] = {
-        url: (body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host); empty for hybrid
+        url: (body.agentUrl || body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host, Model B); empty for hybrid
         token: body.agentToken || '',
         pgUrl: body.pgUrl || '',                          // customer Postgres (via tunnel)
         qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)

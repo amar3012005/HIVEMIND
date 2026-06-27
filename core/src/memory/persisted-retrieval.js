@@ -1,7 +1,7 @@
 import { computeTokenSimilarity, tokenCountMap, cosineFromCounts } from './conflict-detector.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
-import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { runWithOrg, currentOrg, currentApiKey } from '../db/prisma.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
@@ -556,7 +556,7 @@ async function _groqQueryLLM(systemPrompt, userText, orgId, timeoutMs = 2500) {
     clearTimeout(timer);
     if (!r.ok) return {};
     const j = await r.json();
-    if (orgId && j.usage?.total_tokens) meterTokens(orgId, j.usage.total_tokens); // same usage-tracker pipeline
+    if (orgId && j.usage?.total_tokens) meterTokens(orgId, j.usage.total_tokens, currentApiKey(), j.model, 'recall-expansion'); // same usage-tracker pipeline, now per-key attributed
     return JSON.parse(j.choices?.[0]?.message?.content || '{}');
   } catch (e) { return {}; }
 }

@@ -23,6 +23,34 @@
  */
 import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { readFileSync } from 'fs';
+import { currentOrg, currentApiKey } from '../db/prisma.js';
+import { meterTokens } from '../billing/usage-tracker.js';
+
+// Meter an LLM completion against the org's HIVEMIND API key. These helpers turn the already-routed
+// Groq/OpenRouter funnel (groqFetch / memoryChatFetch — used by the memory pipeline + the server's
+// global Groq monkeypatch) into a metering chokepoint, so background spend that never touches
+// litellm-client's chatCompletion still records. Fire-and-forget: a metering failure never affects
+// the completion. No-op when there's no org context (system/boot calls).
+function _meterUsage(usage, model, feature) {
+  try {
+    const org = currentOrg();
+    const total = Number(usage?.total_tokens || 0);
+    if (!org || !(total > 0)) return;
+    meterTokens(org, total, currentApiKey(), model, feature, {
+      promptTokens: Number(usage?.prompt_tokens || 0),
+      completionTokens: Number(usage?.completion_tokens || 0),
+    });
+  } catch { /* metering never breaks the call */ }
+}
+// Meter from a Response without disturbing the caller: clone() so the original body stays unread.
+function _meterResponse(res, model, feature) {
+  try {
+    if (res && res.ok && typeof res.clone === 'function' && currentOrg()) {
+      res.clone().json().then((j) => _meterUsage(j?.usage, model || j?.model, feature)).catch(() => {});
+    }
+  } catch { /* never throw into the caller path */ }
+  return res;
+}
 
 // Prefer the runtime's global fetch/Response (undici on Node 20) so the healthy
 // path returns the exact Response type a caller using global fetch expects;
@@ -202,7 +230,7 @@ export async function groqFetch(url, options = {}, cfg = {}) {
 
   try {
     const res = await _fetch(url, options);
-    if (res.ok) return res; // healthy path — untouched
+    if (res.ok) return res; // healthy path — untouched (metering lives in memoryChatFetch / litellm / planEnforcer to avoid double-counting the monkeypatched TARA/chat sites)
     if (!isStreaming && reqBody) {
       if (RETRYABLE_STATUS.has(res.status)) {
         const fb = await openrouterReplay(reqBody, timeoutMs).catch(() => null);
@@ -303,7 +331,11 @@ export function memoryLLMRoute() {
 export async function memoryChatFetch(url, options = {}, cfg = {}) {
   const route = memoryLLMRoute();
   if (!route || !isGroqChatUrl(url)) {
-    return groqFetch(url, options, cfg);
+    // Route inactive → Groq (+ OpenRouter failover) via groqFetch. Meter here so the memory-creation
+    // pipeline — the sole caller of memoryChatFetch — records per-key spend that was previously invisible.
+    const r = await groqFetch(url, options, cfg);
+    let mdl = null; try { mdl = options?.body ? JSON.parse(options.body).model : null; } catch { /* ignore */ }
+    return _meterResponse(r, mdl, 'memory-llm');
   }
   const timeoutMs = cfg.timeoutMs || FALLBACK_TIMEOUT_MS;
   let body = {};
@@ -351,6 +383,7 @@ export async function memoryChatFetch(url, options = {}, cfg = {}) {
       msg.content = msg.reasoning_content || msg.reasoning || '';
     }
   }
+  _meterUsage(json?.usage, body.model, 'memory-llm');
   return new _Response(JSON.stringify(json), {
     status: 200,
     headers: { 'content-type': 'application/json' },

@@ -7232,7 +7232,11 @@ exit \$RC
       // awaited authenticateApiKey would not propagate back here). Every downstream handler + synchronous
       // write in this request now resolves getPrismaClient() to the org's store — self-host → customer PG,
       // managed → central (unchanged). Async ingest jobs are covered by the worker's runWithOrg wrap.
-      enterOrgContext(principal.orgId);
+      // Thread the resolved API key id alongside the org so the LLM chokepoint attributes every
+      // completion in this request to the org's HIVEMIND API key. principal.keyId is set by
+      // resolveKeyAccess (persisted keys) + the file-store path; master/test/consumer principals
+      // have no keyId → null → org-level (system) attribution, which is correct for those.
+      enterOrgContext(principal.orgId, principal.keyId || null);
       const orgId = principal.orgId || DEFAULT_ORG;
 
       // ── Container Tag (multi-tenant namespace) resolution ──

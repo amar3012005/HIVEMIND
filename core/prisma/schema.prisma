@@ -1337,6 +1337,37 @@ model OrgUsageDaily {
   @@index([orgId, day], map: "idx_org_usage_daily_org_day")
 }
 
+/// Per-API-key LLM usage rollup. Records EVERY LLM call against the org's HIVEMIND
+/// API key — org_id + api_key_id + model + feature — so spend is attributable per key,
+/// not just per org. OrgUsage stays the org-wide monthly total (unchanged); this is the
+/// per-key / per-model / per-feature breakdown. For system / background / master-key calls that
+/// run inside an org context but carry no request API key (cognition, dreaming, boot, worker jobs)
+/// the writer stores the all-zero SENTINEL uuid so they fold into a single per-(org,month,model)
+/// "system" row under the plain unique index (no NULLs → no expression-index fragility, and ON
+/// CONFLICT inference stays on plain columns). NO FK by design: a usage/billing ledger must keep
+/// spend history after a key is revoked, and the sentinel value has no api_keys row. Written
+/// fire-and-forget at the LLM chokepoint (litellm-client + groq-fallback); a metering failure
+/// never breaks a completion.
+model ApiKeyUsage {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  apiKeyId         String    @default("00000000-0000-0000-0000-000000000000") @map("api_key_id") @db.Uuid
+  month            String    @db.VarChar(7)
+  model            String    @default("") @db.VarChar(128)
+  feature          String    @default("") @db.VarChar(64)
+  tokensProcessed  BigInt    @default(0) @map("tokens_processed")
+  promptTokens     BigInt    @default(0) @map("prompt_tokens")
+  completionTokens BigInt    @default(0) @map("completion_tokens")
+  requests         BigInt    @default(0)
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, apiKeyId, month, model], map: "uq_api_key_usage_org_key_month_model")
+  @@index([orgId, month], map: "idx_api_key_usage_org_month")
+  @@index([apiKeyId, month], map: "idx_api_key_usage_key_month")
+  @@map("api_key_usage")
+}
+
 /// Per-org SSO configuration: Zitadel project mapping, SAML IdP metadata, SCIM token.
 /// Supports subdomain-based org routing for enterprise IdP-initiated login.
 model OrgSsoConfig {

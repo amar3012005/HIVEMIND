@@ -14,16 +14,23 @@ let prisma; // the real Postgres client (singleton)
 // AsyncLocalStorage means the 35 getPrismaClient() call sites stay as-is.
 const _orgCtx = new AsyncLocalStorage();
 const _orgClients = new Map(); // orgId -> split client (memory→customer PG, rest→central)
-export function runWithOrg(orgId, fn) { return _orgCtx.run({ orgId }, fn); }
+// apiKeyId (optional) rides in the SAME store so the LLM chokepoint can attribute every completion to
+// the org's HIVEMIND API key, not just the org. Defaulted null → existing runWithOrg(orgId, fn) callers
+// (background jobs, workers, re-scoped remote-org ingest) are unchanged and record org-level (null-key)
+// spend; the request path threads the real key via enterOrgContext below.
+export function runWithOrg(orgId, fn, apiKeyId = null) { return _orgCtx.run({ orgId, apiKeyId }, fn); }
 export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
+// The org's API key id for the current async context (null for system/background/master-key calls).
+export function currentApiKey() { return _orgCtx.getStore()?.apiKeyId || null; }
 // Set the org context for the REST of the current request (no callback to wrap). Used at the auth
 // seam so every downstream handler + synchronous write in this request routes to the org's store.
 // enterWith persists through the awaiting continuation; each HTTP request is its own async context,
 // so there is no cross-request leak. A null/empty orgId is ignored (resolution falls back to central).
-export function enterOrgContext(orgId) { if (orgId) _orgCtx.enterWith({ orgId }); }
+// apiKeyId is threaded from the resolved request principal so the LLM meter can attribute per key.
+export function enterOrgContext(orgId, apiKeyId = null) { if (orgId) _orgCtx.enterWith({ orgId, apiKeyId }); }
 // Bridge for CommonJS modules (ingestion pipeline) that can't statically import this ESM module.
 // Set synchronously at load so CJS code reads the SAME AsyncLocalStorage instance with no import race.
-globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, enterOrgContext };
+globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, currentApiKey, enterOrgContext };
 
 // Proxy for a self-host org's split client:
 //   • memory-subgraph models (ROUTED_MODELS)            → customer PG (the data plane)

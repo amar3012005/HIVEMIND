@@ -11,6 +11,8 @@
  *   maxUsers, knowledgeBaseUploadsPerMonth
  */
 
+import { currentApiKey } from '../db/prisma.js';
+
 export class PlanEnforcer {
   /**
    * @param {object} prisma       Prisma client
@@ -288,7 +290,7 @@ export class PlanEnforcer {
    * Updates in-memory counters immediately and delegates durable
    * recording to UsageTracker (fire-and-forget).
    */
-  recordUsage(orgId, type, amount = 1) {
+  recordUsage(orgId, type, amount = 1, opts = {}) {
     if (!orgId || amount <= 0) return;
 
     // Update in-memory counters (sync — fast path)
@@ -308,7 +310,14 @@ export class PlanEnforcer {
 
     // Durable recording via UsageTracker (async — fire-and-forget)
     if (this.usageTracker) {
-      if (type === 'tokens') this.usageTracker.recordTokens(orgId, amount).catch(() => {});
+      if (type === 'tokens') {
+        this.usageTracker.recordTokens(orgId, amount).catch(() => {});
+        // Per-API-key attribution for direct-provider token spend (TARA, /chat) that bypasses the
+        // litellm-client gateway. apiKeyId is read from opts or the current request's ALS context, so
+        // existing recordUsage(orgId,'tokens',n) call sites attribute to the request key with no change.
+        const _key = opts.apiKeyId ?? (() => { try { return currentApiKey(); } catch { return null; } })();
+        this.usageTracker.recordKeyUsage?.(orgId, amount, _key, opts.model || null, opts.feature || null).catch(() => {});
+      }
       if (type === 'searches') this.usageTracker.recordQuery(orgId).catch(() => {});
       if (type === 'uploads') this.usageTracker.recordUpload(orgId).catch(() => {});
       if (type === 'memories') this.usageTracker.recordMemory(orgId).catch(() => {});

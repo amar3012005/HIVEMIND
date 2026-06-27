@@ -9,7 +9,7 @@
 
 import fetch from 'node-fetch';
 import { meterTokens } from '../../billing/usage-tracker.js';
-import { currentOrg } from '../../db/prisma.js';
+import { currentOrg, currentApiKey } from '../../db/prisma.js';
 
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
@@ -69,8 +69,20 @@ const TIMEOUT_MS = 60_000;
  * @param {boolean} [opts.json_mode=false] - Request JSON output
  * @returns {Promise<string|Object>} Parsed JSON object if json_mode, otherwise raw content string
  */
-export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false }) {
+export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, feature = 'enterprise-extract' }) {
   model = model || DEFAULT_MODEL;
+
+  // Org-context gate: every LLM call should be attributable to an org (and, on the request path, its
+  // HIVEMIND API key). Legitimate system/boot calls run with NO org context, so the default is to LOG,
+  // not reject — a hard reject would break cognition/dreaming/boot. Set STRICT_ORG_METERING=true to
+  // reject org-less calls (use only on request-scoped deployments where every call must carry an org).
+  const _gateOrg = currentOrg();
+  if (!_gateOrg) {
+    if (String(process.env.STRICT_ORG_METERING || '').toLowerCase() === 'true') {
+      throw new Error(`[enterprise-extract] LLM call rejected: no org context (STRICT_ORG_METERING, model=${model}, feature=${feature})`);
+    }
+    console.warn(`[enterprise-extract] LLM call with no org context — unattributed (model=${model} feature=${feature})`);
+  }
 
   const body = {
     model,
@@ -129,7 +141,12 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   // recall expansion, …) routes through here, so this single meter captures the platform's background
   // token spend that per-endpoint metering misses. orgId from AsyncLocalStorage (callers run inside
   // runWithOrg); no-op when there's no org context (system/boot calls). meterTokens is best-effort.
-  try { meterTokens(currentOrg(), Number(usage?.total_tokens || 0)); } catch { /* never let metering break a completion */ }
+  try {
+    meterTokens(currentOrg(), Number(usage?.total_tokens || 0), currentApiKey(), model, feature, {
+      promptTokens: Number(usage?.prompt_tokens || 0),
+      completionTokens: Number(usage?.completion_tokens || 0),
+    });
+  } catch { /* never let metering break a completion */ }
 
   if (json_mode) {
     // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]

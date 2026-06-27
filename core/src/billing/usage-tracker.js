@@ -22,7 +22,16 @@ export function setUsageTracker(t) { _tracker = t; }
 export function getUsageTrackerInstance() { return _tracker; }
 
 const _safe = (p) => { try { p?.catch?.(() => {}); } catch { /* ignore */ } };
-export function meterTokens(orgId, n) { if (_tracker && orgId && n > 0) _safe(_tracker.recordTokens(orgId, n)); }
+// meterTokens now records BOTH the org-wide monthly total (recordTokens — unchanged, keeps existing
+// dashboards byte-stable) AND, when apiKeyId/model/feature are supplied, a per-API-key/per-model
+// rollup (recordKeyUsage). apiKeyId may be null for system/background/master-key calls — those fold
+// into a single per-(org,month,model) system row via the COALESCE unique index. Fully backward
+// compatible: existing meterTokens(orgId, n) callers still work and just skip the per-key write.
+export function meterTokens(orgId, n, apiKeyId = null, model = null, feature = null, parts = null) {
+  if (!_tracker || !orgId || !(n > 0)) return;
+  _safe(_tracker.recordTokens(orgId, n));
+  _safe(_tracker.recordKeyUsage(orgId, n, apiKeyId, model, feature, parts));
+}
 export function meterQuery(orgId)      { if (_tracker && orgId) _safe(_tracker.recordQuery(orgId)); }
 export function meterUpload(orgId)     { if (_tracker && orgId) _safe(_tracker.recordUpload(orgId)); }
 export function meterMemory(orgId)     { if (_tracker && orgId) _safe(_tracker.recordMemory(orgId)); }
@@ -56,6 +65,41 @@ export class UsageTracker {
       this._invalidateCache(orgId);
     } catch (err) {
       console.warn('[usage-tracker] Record tokens failed:', err.message);
+    }
+  }
+
+  /**
+   * Record one LLM call against the org's HIVEMIND API key — the per-key / per-model / per-feature
+   * monthly rollup that powers per-key spend attribution. orgId is required; apiKeyId is NULL for
+   * system / background / master-key calls (they fold into one sentinel row per org/month/model via
+   * the COALESCE unique index uq_api_key_usage_org_key_month_model). Best-effort: a failure here must
+   * never affect the completion (called fire-and-forget through meterTokens).
+   */
+  async recordKeyUsage(orgId, tokenCount, apiKeyId = null, model = null, feature = null, parts = null) {
+    if (!this.prisma || !orgId || !(tokenCount > 0)) return;
+    const month = this._currentMonth();
+    // System / background / master-key calls have no request key → fold into the all-zero sentinel so
+    // the plain unique index dedupes them per (org, month, model) instead of inserting unbounded rows.
+    const key = apiKeyId || '00000000-0000-0000-0000-000000000000';
+    const m = String(model || '').slice(0, 128);
+    const f = String(feature || '').slice(0, 64);
+    const pt = Number(parts?.promptTokens || 0);
+    const ct = Number(parts?.completionTokens || 0);
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "api_key_usage" ("org_id", "api_key_id", "month", "model", "feature", "tokens_processed", "prompt_tokens", "completion_tokens", "requests", "last_used_at", "updated_at")
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 1, NOW(), NOW())
+         ON CONFLICT ("org_id", "api_key_id", "month", "model")
+         DO UPDATE SET "tokens_processed" = "api_key_usage"."tokens_processed" + $6,
+                       "prompt_tokens" = "api_key_usage"."prompt_tokens" + $7,
+                       "completion_tokens" = "api_key_usage"."completion_tokens" + $8,
+                       "requests" = "api_key_usage"."requests" + 1,
+                       "feature" = CASE WHEN "api_key_usage"."feature" = '' THEN EXCLUDED."feature" ELSE "api_key_usage"."feature" END,
+                       "last_used_at" = NOW(), "updated_at" = NOW()`,
+        orgId, key, month, m, f, tokenCount, pt, ct
+      );
+    } catch (err) {
+      console.warn('[usage-tracker] Record key usage failed:', err.message);
     }
   }
 

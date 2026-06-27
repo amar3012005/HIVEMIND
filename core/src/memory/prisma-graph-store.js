@@ -609,7 +609,10 @@ export class PrismaGraphStore {
       const filter = {};
       if (memory_type) filter.memory_type = Array.isArray(memory_type) ? memory_type : [memory_type];
       if (is_latest !== undefined) filter.is_latest = is_latest;
-      const { memories } = await remoteList(_org, filter, null, limit);
+      if (user_id) filter.user_id = user_id;
+      // Pass offset so the FE's offset-based "load more" actually pages through the agent (was stuck on
+      // page 1 — agent ignored offset and the FE doesn't use cursors).
+      const { memories } = await remoteList(_org, filter, null, limit, offset);
       const mapped = memories.map(mapAgentRow);
       return { memories: mapped, total: mapped.length };
     }

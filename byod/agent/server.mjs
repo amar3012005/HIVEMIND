@@ -226,8 +226,11 @@ const routes = {
     if (f.created_after) { args.push(f.created_after); conds.push(`created_at >= $${args.length}::timestamptz`); }
     if (b.cursor) { args.push(b.cursor); conds.push(`created_at < $${args.length}::timestamptz`); }
     args.push(Math.min(b.limit || 100, 500));
+    const limitPos = args.length;
+    let offsetClause = '';
+    if (b.offset && Number(b.offset) > 0) { args.push(Number(b.offset)); offsetClause = ` OFFSET $${args.length}`; }
     const { rows } = await pg.query(
-      `SELECT * FROM memories WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT $${args.length}`, args);
+      `SELECT * FROM memories WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT $${limitPos}${offsetClause}`, args);
     const cursor = rows.length ? rows[rows.length - 1].created_at : null;
     return { memories: rows, cursor };
   },

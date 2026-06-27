@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { orgIsRemote, amrStats, amrGraph } from './vector/mneme/driver.js';
+import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
@@ -2334,8 +2335,11 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     };
     if (project) where.project = project;
 
-    let [memoryCount, recentMemories] = await Promise.all([
-      prisma.memory.count({ where }).catch(() => 0),
+    // Counts via the ONE uniform seam (getOrgCounts routes central-vs-agent internally) — no per-type
+    // branch here. recentMemories (for tags/titles) stays a central sample; it's empty for remote orgs
+    // (a cosmetic follow-up), but the headline counts are now correct for every org type.
+    const [{ memories: memoryCount, relationships }, recentMemories] = await Promise.all([
+      getOrgCounts(prisma, orgId, userId),
       prisma.memory.findMany({
         where,
         orderBy: { createdAt: 'desc' },
@@ -2343,31 +2347,6 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
         select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
       }).catch(() => []),
     ]);
-    // Relationship count — use raw query against mapped table name, scoped to user.
-    // Also excludes edges originating from extracted-fact children so the count
-    // reconciles with the graph view.
-    let relationships = 0;
-    try {
-      const relRows = await prisma.$queryRawUnsafe(
-        `SELECT COUNT(*)::int as c FROM "relationships" r
-         JOIN "memories" m ON r."from_id" = m."id"
-         WHERE m."user_id" = $1::uuid
-           AND m."deleted_at" IS NULL
-           AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
-        userId
-      );
-      relationships = relRows?.[0]?.c || 0;
-    } catch { relationships = 0; }
-
-    // Remote (self-host) org: memories + relationships live on the agent, not central — the counts
-    // above are 0. Pull the real counts from the agent so Profile/Overview show the truth.
-    if (orgIsRemote(orgId)) {
-      try {
-        const rs = await amrStats(orgId, { user_id: userId });
-        if (rs) { memoryCount = rs.memories ?? memoryCount; relationships = rs.relationships ?? relationships; }
-      } catch { /* keep central fallback */ }
-    }
 
     // Count observations from recent memories tags
     const observationCount = recentMemories.filter(m => (m.tags || []).includes('observation')).length;

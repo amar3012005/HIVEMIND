@@ -127,6 +127,12 @@ services:
     restart: unless-stopped
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    # Per-tenant collections each open many RocksDB segment files; default nofile=1024 → "Too many open
+    # files" → new org_<id> collections fail to create (managed tenants then fall back to shared/in-mem).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - qdrant-data:/qdrant/storage
 

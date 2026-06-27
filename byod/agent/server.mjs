@@ -48,6 +48,15 @@ const routes = {
   '/v1/write': async (b) => { await storeMemoryUnified(b.record, b.vector, b.rels || []); return { ok: true }; },
   // typed edge into the local graph
   '/v1/edge': async (b) => { if (b.rel?.fromId && b.rel?.toId) await adapter.relationship.create({ data: { id: b.rel.id, fromId: b.rel.fromId, toId: b.rel.toId, type: b.rel.type, confidence: b.rel.confidence ?? 1 } }); return { ok: true }; },
+  // tag resync: entity:* tags attach AFTER the initial write (deferred entity-linking). Update the
+  // .amr record so recalled candidates carry their entity tags → the co-mention overlap gate works.
+  '/v1/update-tags': async (b) => {
+    if (b.id && Array.isArray(b.tags)) {
+      try { await adapter.memory.update({ where: { id: b.id }, data: { tags: b.tags } }); }
+      catch (e) { return { ok: false, error: e.message }; }
+    }
+    return { ok: true };
+  },
   // hydrate full memory rows from the LOCAL Postgres by id (content never leaves the box uninvited)
   '/v1/hydrate': async (b) => {
     if (!pg || !Array.isArray(b.ids) || !b.ids.length) return { memories: [] };

@@ -118,6 +118,13 @@ export async function remoteAddEdge(orgId, rel) {
   catch (e) { console.warn(`[mneme/remote] edge failed org=${orgId}: ${e.message}`); return null; }
 }
 
+// Resync entity:* tags to the agent .amr after deferred entity-linking attaches them, so recalled
+// candidates carry their tags and the co-mention overlap gate can find shared entities.
+export async function remoteUpdateTags(orgId, id, tags) {
+  try { await _call(orgId, '/v1/update-tags', { id, tags }); return true; }
+  catch (e) { console.warn(`[mneme/remote] update-tags failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // Hydrate full memory rows from the customer's Postgres (so recall content stays on their box).
 export async function remoteHydrate(orgId, ids) {
   try { const out = await _call(orgId, '/v1/hydrate', { ids }); return out?.memories || []; }

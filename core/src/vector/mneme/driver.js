@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, hasRemoteAgent } from './remote-backend.js';
 
 // A REMOTE (.amr-on-customer-box) org has an hm-agent HTTP endpoint that serves recall — decided PER
 // ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
@@ -153,6 +153,15 @@ export function wrapPrisma(realPrisma) {
 
 // Mirror a typed relationship edge into the .amr shard that holds its fromId memory (dual mode — PG
 // already has the row; this keeps the .amr graph in sync for graph-recall). No-op if no .amr org.
+// Resync entity:* tags into the .amr after deferred entity-linking attaches them (remote orgs).
+export function amrUpdateTags(orgId, id, tags) {
+  if (!orgId || !id || !Array.isArray(tags)) return;
+  if (orgIsRemote(orgId)) { remoteUpdateTags(orgId, id, tags); return; }
+  if (!anyMnemeOrg()) return;
+  for (const a of allActiveAdapters()) {
+    try { if (a?.memory?.byId?.has(id)) a.memory.update?.({ where: { id }, data: { tags } }); } catch { /* best-effort */ }
+  }
+}
 export function amrAddEdge(rel) {
   if (!rel?.fromId || !rel?.toId) return;
   if (rel.orgId && orgIsRemote(rel.orgId)) { remoteAddEdge(rel.orgId, rel); return; }

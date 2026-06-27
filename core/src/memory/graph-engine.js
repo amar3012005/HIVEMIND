@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
-import { isMnemeOrg, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, mnemeMode, amrUpdateTags } from '../vector/mneme/driver.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
@@ -2515,6 +2515,9 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           ...temporalTags,
         ]);
         await store.updateMemory(baseMemory.id, { tags: newTags });
+        // Resync the entity:* tags into the .amr (remote/self-host) so recalled candidates carry their
+        // tags and the co-mention overlap gate finds shared entities on the NEXT ingest.
+        try { amrUpdateTags(baseMemory.org_id, baseMemory.id, newTags); } catch { /* best-effort */ }
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);
         // Postgres 25P02 = transaction aborted by earlier failure.

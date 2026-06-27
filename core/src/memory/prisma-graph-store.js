@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, withAmrLock, amrAddEdge, amrWrite, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrRecall, withAmrLock, amrAddEdge, amrWrite, mnemeMode } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -730,6 +730,38 @@ export class PrismaGraphStore {
     // silently return nothing, leaving recall vector-only.
     if (query && isMnemeOrg(org_id) && mnemeMode() === 'sole') {
       return amrLexical(org_id, query, { org_id, user_id, scope, is_latest, project, created_after, created_before }, n_results * 3) || [];
+    }
+    // REMOTE agent org (push model): recall lives on the org's agent, not central. Embed the query here
+    // and vector-search the agent (amrRecall → POST /v1/recall); content rides in the hit payload.
+    if (query && orgIsRemote(org_id)) {
+      try {
+        const { getEmbedService } = await import('../embeddings/factory.js');
+        const vec = await getEmbedService().embedOne(query).catch(() => null);
+        if (!vec) return [];
+        const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
+        if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
+        const hits = (await amrRecall(org_id, vec, filter, n_results * 3, 0)) || [];
+        return hits.map((h) => {
+          const p = h.payload || {};
+          return {
+            id: p.memory_id || h.id,
+            content: p.content || '',
+            title: p.title || null,
+            tags: p.tags || [],
+            memory_type: p.memory_type || 'fact',
+            project: null,
+            importance_score: typeof h.score === 'number' ? h.score : 0.5,
+            is_latest: p.is_latest ?? true,
+            created_at: p.created_at || null,
+            updated_at: p.created_at || null,
+            score: h.score,
+            cognitive_layer_role: p.cognitive_layer_role || null,
+          };
+        });
+      } catch (e) {
+        console.warn('[recall] remote agent search failed:', e.message);
+        return [];
+      }
     }
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions

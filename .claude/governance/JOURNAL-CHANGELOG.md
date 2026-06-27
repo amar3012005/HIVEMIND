@@ -98,3 +98,19 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - residual (tracked, NOT leaks): KB-on-agent + meetings-on-agent + connector-on-agent layers (agent
   KB tables + segment vectors + read/write/recall routing) = next dedicated build; until then those
   features are refused for self-host rather than leaking.
+
+## 2026-06-27 — Compass Phase 4: durable outbox (THE SPINE) — built + gate PASSED
+- type: feature   verdict: GREEN   commits: b43dd146, d153c5b4, 64fadb02
+- memory_outbox table (central) + BullMQ memory-push worker: FIFO-per-recordId ordering, per-org
+  circuit breaker, exp-backoff+jitter, poison(4xx)/exhausted→DLQ+alarm, sweepStuckOutbox reconciler,
+  runWithOrg(orgId) from job payload. Seam (remote-only): amrWrite keeps SYNC attempt (ingest read-back)
+  + enqueues on failure; amrAddEdge/amrUpdate/amrUpdateTags (were fire-and-forget) → durable.
+- 3 bugs found+fixed during the gate: (1) enqueue ran inside remote-org runWithOrg → getPrismaClient
+  returned mneme proxy → dropped the central memory_outbox write; added getCentralPrismaClient (raw
+  central). (2) lazy-import path wrong: driver at vector/mneme/ used '../memory/outbox.js' → nonexistent
+  vector/memory/ → _getEnqueuePush silently null → enqueue skipped; fixed to '../../memory/outbox.js' +
+  log the load failure. (3) silent catch masked both — now logs.
+- GATE PASSED: agent down → 5 writes → 5 outbox pending → restart agent → worker drained → 5 acked,
+  all 5 landed on agent, central=0. Durable replay proven.
+- deploy: memory_outbox created via raw SQL on central (box uses prisma db push; client regenerated in
+  the image build — verified prisma.memoryOutbox present).

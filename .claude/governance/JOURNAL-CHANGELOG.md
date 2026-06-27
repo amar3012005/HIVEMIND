@@ -130,3 +130,21 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
   P6 migration saga (only when moving a REAL central org → agent; none exist, test org born remote),
   P8 backups+restore drill (ops/cron, before any PG=0), P11 managed density (capacity/pricing DECISION),
   P12 .amr swap (intentionally LATE — transparent swap behind the frozen §4 contract).
+
+## 2026-06-27 — Production billing: metering + per-plan enforcement (every action via API key)
+- commit: 502e0684 (core) + Da-vinci d8c1919   verdict: GREEN
+- LLM token CHOKEPOINT: litellm-client.chatCompletion → meterTokens(currentOrg(), total_tokens). One
+  gateway meter captures background spend (cognition/dreamer/synthesizer/KB-distill/recall-expansion)
+  that per-endpoint metering missed. Verified live: tokens.used grew via the chokepoint.
+- HyperAgents (was 100% free/uncapped): room-create enforces maxHyperRooms (free1/pro5/scale25/ent∞,
+  402 on cap); turn-seal callback meters cost_tokens → OrgUsage (was a dead-end column).
+- Enforcement callsite fixes: KB upload checkLimit('uploads') before accept (cap was a no-op); deep
+  research checks 'deepResearch' not 'webIntel'. New plan-enforcer branches: hyperRooms + users(seats).
+- getUsageSummary returns LIVE connectors.used + hyperRooms{used,limit} + users.used. Usage.jsx: 3 new
+  cards (Connectors / HyperAgents rooms / Seats) on the existing MetricCard (used vs plan limit + bar).
+- VERIFIED: usage summary returns all counters w/ live counts; enforcement branches block over-cap
+  (free hyperRooms 3≥1 → denied, connectors 5≥3 → denied). Self-host test org is enterprise (unlimited)
+  so caps don't fire for it — correct; free/pro orgs are capped.
+- Known residual (honest): some background callsites use a raw Groq fetch (KB distill) or are outside
+  org context → not chokepoint-metered; embeddings/vision tokens still uncounted (tokensScope label
+  notes this). graphQueries + seats are recorded/surfaced but not yet blocked at all callsites.

@@ -43,3 +43,14 @@ How a task moves through the crew. One pass = one accountable unit of work.
 - Capturing `getPrismaClient()` at construction. → BUILDER uses the context proxy.
 - Green unit tests masking a wrong-store bug. → VERIFIER's managed gate catches it.
 - Hand-writing what `pg_dump`/an existing migration gives. → ARCHITECT's reuse rule.
+
+## Anti-patterns the loop killed (2026-06-27, Phase 2b)
+- Skipping the central `createMemory` for a residency org WITHOUT pushing the row somewhere readable
+  first. → mid-ingest reads (applyExtends/versions → getMemory) find the row NOWHERE → ingest throws.
+  FIX/RULE: for an agent-org, `createMemory` must PUSH the row to the agent immediately (vector added
+  later by the storeMemory same-id upsert) so mid-ingest reads resolve on the agent. Never leave a
+  freshly-created memory unreadable between create and the vector-store step.
+- A residency write-skip that forgets the FK CHILDREN (sourceMetadata/version/relationship) → P2003
+  against the absent central parent. RULE: gate the whole subgraph together (A2), not just `memory`.
+- Registry left with a stale `pgUrl` → engine silently revives the dead direct-PG path. RULE: push
+  model = `{url, token}` only; assert pgUrl empty.

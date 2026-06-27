@@ -28,6 +28,14 @@ changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
   relationships, profile counts, KB upload, connectors, meeting notes, HyperAgents room+turn, Web Intel,
   TARA, MCP, cognition. Commit the matrix. GATE: matrix file committed; gaps feed Phases 2-5.
 
+## Phase 1.5 — FIX GAP-1 (managed per-tenant vector isolation) — URGENT
+- [ ] Managed-enterprise vectors write to shared HIVEMIND_PERSONAL, not their org_<id> collection
+  (resolveCollectionForOrg returns the right name but plan-lookup/cache returns personal at write time).
+  Enterprise tenants' vectors are co-mingled = isolation bug. Fix the plan-resolution/cache so the WRITE
+  routes to org_<id>; backfill/migrate any mis-placed vectors. Also clean GAP-2 (21 stale central vectors
+  in org_b30ead1b for the self-host org). GATE: managed save → vector in org_<id>, NOT HIVEMIND_PERSONAL;
+  org_<id> point count grows; HIVEMIND_PERSONAL only holds free-tier vectors.
+
 ## Phase 2 — KB-on-agent (unblock KB for self-host)
 - [ ] Agent knowledge_documents + knowledge_segments tables + segment vectors; route doc+segment
   write/read/recall to the agent via outbox; lift the KB-upload assertKbAllowedForOrg block.

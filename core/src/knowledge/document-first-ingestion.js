@@ -965,7 +965,8 @@ Output the JSON object and nothing else.`;
    */
   async ingestConnectorRecord(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestConnectorRecord(opts)); // residency
-    assertKbAllowedForOrg(opts?.orgId); // connector records persist knowledge_segments/source_artifacts centrally — block for self-host until KB-on-agent ships
+    // Remote (self-host) orgs: KB writes route to the agent — guard lifted for connector path.
+    if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, providerKey, sourceId, title, content, sourceUrl = null, documentDate = null, metadata = {} } = opts;
     if (!content || typeof content !== 'string' || content.trim() === '') {
       return { skipped: true, reason: 'empty_content' };
@@ -973,64 +974,107 @@ Output the JSON object and nothing else.`;
     const checksum = crypto.createHash('sha256').update(`${providerKey}:${sourceId}:${content}`).digest('hex');
 
     // Step 1: source artifact (immutable evidence)
-    const sourceArtifact = await this.db.sourceArtifact.upsert({
-      where: {
-        userId_orgId_checksum_sourcePlatform: {
-          userId, orgId, checksum, sourcePlatform: providerKey,
-        },
-      },
-      create: {
-        userId, orgId,
-        artifactType: 'connector_record',
-        sourcePlatform: providerKey,
-        sourceId,
-        contentType: 'text/plain',
-        sizeBytes: BigInt(Buffer.byteLength(content, 'utf8')),
-        checksum,
-        storageLocation: `connector/${providerKey}/${userId}/${sourceId}`,
-        payload: { title, content, sourceUrl, ...metadata },
-        metadata,
-      },
-      update: {},
-    });
+    // Remote orgs: raw content must not persist on central store (residency). Use stub id.
+    const sourceArtifact = orgIsRemote(orgId)
+      ? { id: crypto.randomUUID() }
+      : await this.db.sourceArtifact.upsert({
+          where: {
+            userId_orgId_checksum_sourcePlatform: {
+              userId, orgId, checksum, sourcePlatform: providerKey,
+            },
+          },
+          create: {
+            userId, orgId,
+            artifactType: 'connector_record',
+            sourcePlatform: providerKey,
+            sourceId,
+            contentType: 'text/plain',
+            sizeBytes: BigInt(Buffer.byteLength(content, 'utf8')),
+            checksum,
+            storageLocation: `connector/${providerKey}/${userId}/${sourceId}`,
+            payload: { title, content, sourceUrl, ...metadata },
+            metadata,
+          },
+          update: {},
+        });
 
     // Step 2: knowledge_document
-    const knowledgeDoc = await this.db.knowledgeDocument.create({
-      data: {
-        userId, orgId,
+    // Remote orgs: push via amrKbDoc to the agent (residency). Central path unchanged.
+    let knowledgeDoc;
+    if (orgIsRemote(orgId)) {
+      const docId = crypto.randomUUID();
+      await amrKbDoc(orgId, {
+        id: docId,
+        userId,
+        orgId,
         sourceArtifactId: sourceArtifact.id,
         documentType: 'connector_record',
-        title: title || `${providerKey}:${sourceId}`,
-        sourcePlatform: providerKey,
-        sourceId,
-        sourceUrl,
-        documentDate: documentDate || new Date(),
-        wordCount: content.split(/\s+/).filter(Boolean).length,
-        parseStatus: 'parsed',
-        parseEngine: 'connector-native',
-        parseMetadata: {},
-        structureExtracted: true,
-        tags: metadata.tags || [],
-      },
-    });
+        filename: title || `${providerKey}:${sourceId}`,
+        contentType: 'text/plain',
+        status: 'ready',
+        checksum,
+        metadata: { sourcePlatform: providerKey, sourceId, sourceUrl },
+        createdAt: new Date().toISOString(),
+      });
+      knowledgeDoc = { id: docId };
+    } else {
+      knowledgeDoc = await this.db.knowledgeDocument.create({
+        data: {
+          userId, orgId,
+          sourceArtifactId: sourceArtifact.id,
+          documentType: 'connector_record',
+          title: title || `${providerKey}:${sourceId}`,
+          sourcePlatform: providerKey,
+          sourceId,
+          sourceUrl,
+          documentDate: documentDate || new Date(),
+          wordCount: content.split(/\s+/).filter(Boolean).length,
+          parseStatus: 'parsed',
+          parseEngine: 'connector-native',
+          parseMetadata: {},
+          structureExtracted: true,
+          tags: metadata.tags || [],
+        },
+      });
+    }
 
-    // Step 3: single segment (whole record body) — adapter could split later
-    const segment = await this.db.knowledgeSegment.create({
-      data: {
+    // Step 3: single segment (whole record body) — adapter could split later.
+    // Remote orgs: build in-memory segment object (no central DB write); _embedSegments
+    // will push it to the agent via amrKbSegment when callerOrgId is remote.
+    let segments;
+    if (orgIsRemote(orgId)) {
+      const segment = {
+        id: crypto.randomUUID(),
         userId, orgId,
         documentId: knowledgeDoc.id,
         segmentType: 'chunk',
         segmentIndex: 0,
         content,
+        contentHash: crypto.createHash('sha256').update(content).digest('hex'),
         wordCount: content.split(/\s+/).filter(Boolean).length,
-        startPage: null, endPage: null,
+        previousSegmentId: null,
         metadata: { providerKey, sourceId },
-      },
-    });
-    const segments = [segment];
+        createdAt: new Date().toISOString(),
+      };
+      segments = [segment];
+    } else {
+      const segment = await this.db.knowledgeSegment.create({
+        data: {
+          userId, orgId,
+          documentId: knowledgeDoc.id,
+          segmentType: 'chunk',
+          segmentIndex: 0,
+          content,
+          wordCount: content.split(/\s+/).filter(Boolean).length,
+          startPage: null, endPage: null,
+          metadata: { providerKey, sourceId },
+        },
+      });
+      segments = [segment];
+    }
 
-    // Step 4: embed segment
-    await this._embedSegments(segments);
+    // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
+    await this._embedSegments(segments, orgId);
 
     this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 5: promote memories

@@ -148,3 +148,17 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - Known residual (honest): some background callsites use a raw Groq fetch (KB distill) or are outside
   org context → not chokepoint-metered; embeddings/vision tokens still uncounted (tokensScope label
   notes this). graphQueries + seats are recorded/surfaced but not yet blocked at all callsites.
+
+## 2026-06-27 — Uniform org-type model: counts via one seam + collection routing confirmed
+- commits: bffb5897, c6c54f0d   verdict: GREEN
+- PRINCIPLE: engine treats all org types identically; type matters ONLY at the storage seam.
+- Confirmed LIVE on singulance (PER_TENANT=true): PERSONAL→shared HIVEMIND_PERSONAL (1024) ·
+  ENTERPRISE-MANAGED→per-tenant org_<id> (1024, provisionForPlan at create) · SELF-HOST→agent.
+  (myserver/davinciai prod by contrast: PER_TENANT off, single shared "BUNDB AGENT" cloud collection
+  @384, no per-tenant, no agents — the simpler older model.)
+- Unified counts: new getOrgCounts(prisma,org,user) — THE one seam that routes central-vs-agent
+  internally. buildProfileSummary calls it uniformly (removed the inline orgIsRemote branch). Profile
+  now shows mem/rel for every org type with zero per-type endpoint branching. Verified self-host 29/7.
+- Fixed self-host Memories 'stuck at 20': FE pages by offset, agent /v1/list only honored cursor →
+  threaded offset through listMemories→remoteList→agent (LIMIT/OFFSET). Verified page1=20, page2=9 (=29).
+- Skip central Qdrant collection provisioning for self_host orgs (data lives on agent).

@@ -2644,6 +2644,35 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         .filter((e) => e && !OWNER_COMMON.has(e)),
     );
 
+    // Candidate content, normalized once for the tag-lag fallback below.
+    const candContentNorm = (cand) => normEntity(`${cand?.title || ''} ${cand?.content || ''}`);
+
+    // Count shared non-owner entities between the new memory and a candidate.
+    // PRIMARY signal = candidate entity:* tags. But entity tags are extracted
+    // ASYNCHRONOUSLY (deferred entity-linking — server.js sets defer_entity_linking
+    // on every /api/memories save), so a peer created seconds earlier in the same
+    // session often has NO tags yet at link-time. Without a fallback the overlap
+    // gate drops every edge to a fresh peer (observed: "N links proposed, 0 survived").
+    // Fallback when the candidate has no entity tags: scan its raw content for the
+    // new memory's LLM-extracted entities. The LLM already read both texts and cited
+    // the shared entity, so a content hit is a sound same-topic signal. Applies to
+    // ALL org types (central is usually masked by the vector-recall smart-ingest path;
+    // self-host relies entirely on this co-mention path).
+    const sharedEntityCount = (cand) => {
+      const cset = candEntsNorm(cand);
+      if (cset.size > 0) {
+        let n = 0;
+        for (const e of cset) if (newEntitiesLower.has(e)) n += 1;
+        return n;
+      }
+      const hay = candContentNorm(cand);
+      let n = 0;
+      for (const e of newEntitiesLower) {
+        if (e.length >= 3 && (hay === e || hay.includes(` ${e} `) || hay.startsWith(`${e} `) || hay.endsWith(` ${e}`))) n += 1;
+      }
+      return n;
+    };
+
     // New memory's entity set (LLM-extracted + own entity tags), normalized,
     // owner stripped. Union both so a tag the LLM didn't re-emit still counts.
     const baseTagEnts = (baseMemory.tags || [])
@@ -2661,26 +2690,33 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         const floor = MIN_CONFIDENCE_BY_TYPE[type] ?? 0.55;
         return typeof l.confidence === 'number' && l.confidence >= floor;
       })
-      // For Updates (destructive — flips target is_latest=false): demand
-      // ≥2 shared non-owner entities. Strong evidence required.
+      // For Updates (destructive — flips target is_latest=false): demand ≥1 shared
+      // non-owner entity. This MATCHES the smart-ingest supersede policy (graph-engine
+      // line ~1320: sharedNonCommon.length >= 1 + conf≥0.85, the floor already enforced
+      // above). Person-centric supersessions ("Greta moved to Netflix" vs "Greta works
+      // at Amazon") share exactly ONE non-owner entity — the person — so the old ≥2
+      // requirement made co-mention NEVER supersede a job/role change; central got the
+      // flip from the vector-recall classifier instead, which self-host can't rely on.
+      // sharedEntityCount falls back to candidate-content scan when tags lag (async).
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type !== 'Updates') return true;
-        const cset = candEntsNorm(candidates[l.index]);
-        let shared = 0;
-        for (const e of cset) if (newEntitiesLower.has(e)) shared += 1;
-        return shared >= 2;
+        return sharedEntityCount(candidates[l.index]) >= 1;
       })
-      // For Mentions/Extends/Contradicts: ≥1 shared non-owner entity, OR the
-      // LLM-cited entity itself is present on both sides (trust the model).
+      // For Mentions/Extends/Contradicts: ≥1 shared non-owner entity (tag or
+      // content fallback), OR the LLM-cited entity present on both sides.
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type === 'Updates') return true; // handled above
-        const cset = candEntsNorm(candidates[l.index]);
-        for (const e of cset) if (newEntitiesLower.has(e)) return true;
-        // LLM-cited entity bridge: cited entity present on both sides.
+        if (sharedEntityCount(candidates[l.index]) >= 1) return true;
+        // LLM-cited entity bridge: cited entity present on both sides (tags OR content).
         const cited = normEntity(l.entity);
-        if (cited && !OWNER_COMMON.has(cited) && newEntitiesLower.has(cited) && cset.has(cited)) return true;
+        if (cited && !OWNER_COMMON.has(cited) && newEntitiesLower.has(cited)) {
+          const cset = candEntsNorm(candidates[l.index]);
+          if (cset.has(cited)) return true;
+          const hay = candContentNorm(candidates[l.index]);
+          if (cited.length >= 3 && (hay === cited || hay.includes(` ${cited} `) || hay.startsWith(`${cited} `) || hay.endsWith(` ${cited}`))) return true;
+        }
         return false;
       })
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))

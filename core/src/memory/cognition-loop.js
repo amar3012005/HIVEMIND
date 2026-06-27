@@ -26,7 +26,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { orgIsRemote } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrWrite, amrAddEdge, amrListRecent } from '../vector/mneme/driver.js';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
@@ -515,10 +515,10 @@ export class CognitionLoop {
 
   async runOnce(orgId, opts = {}) {
     if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.runOnce(orgId, opts)); // residency
-    // Self-host orgs: synthesis writes (syntheses, drift-compaction, Derives edges) go through direct
-    // prisma.* writes, not the agent-routed store — running this for a remote org would persist
-    // derived content centrally. Skip entirely; their data + cognition belong on their box.
-    if (orgIsRemote(orgId)) return { skipped: true, reason: 'remote_org_cognition_runs_on_agent' };
+    // Self-host orgs: synthesis is allowed but MUST use the agent-routed store (amrWrite/amrAddEdge).
+    // Destructive passes (drift-compaction, principle-distill, reweight) are central-coupled
+    // and MUST NOT run for remote orgs — compaction in particular can hard-purge KB data.
+    const _remote = orgIsRemote(orgId);
     const { skipCompaction = false, lookbackHours, trigger = 'manual', triggeredBy = null } = opts;
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
@@ -546,14 +546,19 @@ export class CognitionLoop {
       // (the §10 hazard that over-compacted a real org's KB). Skip it on manual
       // runs; gentle compaction still happens on the scheduled every-12-tick
       // cadence via the governance 'compression' tool.
-      const compact = skipCompaction ? 0 : await this.compactDriftForOrg(orgId);
-      // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
-      const principles = await this.distillPrinciplesForOrg(orgId);
+      // Remote orgs: compaction is destructive (hard-purges central KB) — never run it.
+      // Central-only passes (principle-distill + reweight) are also skipped for remote
+      // because they read+write central prisma tables that hold 0 rows for remote orgs.
+      const compact = (_remote || skipCompaction) ? 0 : await this.compactDriftForOrg(orgId);
+      // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED; skip remote)
+      const principles = _remote ? 0 : await this.distillPrinciplesForOrg(orgId);
       // Pass 4 — WS3 retroactive re-sweep: temper stale syntheses on late
-      // contradictions (cheap, capped, no LLM). Non-fatal.
+      // contradictions (cheap, capped, no LLM). Non-fatal. Skip remote (central-only).
       let reweighted = 0;
-      try { reweighted = await this.reweightStaleForOrg(orgId); }
-      catch (rwErr) { this.logger.warn(`[cognition][reweight] org=${orgId} failed: ${rwErr.message}`); }
+      if (!_remote) {
+        try { reweighted = await this.reweightStaleForOrg(orgId); }
+        catch (rwErr) { this.logger.warn(`[cognition][reweight] org=${orgId} failed: ${rwErr.message}`); }
+      }
       if (reweighted) this.logger.log(`[cognition] reweight org=${orgId} tempered=${reweighted}`);
       _status.last_run_at           = new Date().toISOString();
       _status.last_run_ms           = Date.now() - tStart;
@@ -819,30 +824,57 @@ export class CognitionLoop {
       'salesforce', 'salesforce-sandbox', 'hubspot', 'pipedrive',
       'github', 'linear', 'jira', 'confluence',
     ];
-    const recentRaw = await this.prisma.memory.findMany({
-      where: {
-        orgId,
-        createdAt:  { gte: since },
-        deletedAt:  null,
-        memoryType: { in: ['fact', 'decision'] },
-        // Exclude the governance swarm's OWN output. Reflections + every synthesis
-        // tier carry a non-null cognitive_layer_role; without this filter the
-        // agents' internal-audit/reflection memories dominate clustering and the
-        // only canonical that ever reaches the floor is a tautological
-        // "governance (N sources)". This is the cognition layer eating its own
-        // exhaust — the single biggest reason synthesis produced no real knowledge.
-        cognitiveLayerRole: null,
-        // Exclude existing synthesis outputs + governance audit tags from the source pool
-        NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
-      },
-      take: 400,
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true, title: true, content: true, tags: true,
-        memoryType: true, userId: true, project: true, createdAt: true,
-        sourceMetadata: { select: { sourcePlatform: true } },
-      },
-    });
+    let recentRaw;
+    if (orgIsRemote(orgId)) {
+      // Remote orgs: central has 0 rows — pull the working set from the agent.
+      // Exclude existing synthesis outputs (tags carry synthesis:*) and keep only
+      // fact/decision; the agent list is the sole source of truth for this org.
+      const agentRows = await amrListRecent(orgId, null, 400);
+      recentRaw = agentRows
+        .filter(r => {
+          const mt = r.memory_type || r.memoryType;
+          if (!['fact', 'decision'].includes(mt)) return false;
+          const tags = r.tags || [];
+          if (tags.some(t => ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'].includes(t))) return false;
+          return true;
+        })
+        .map(r => ({
+          id:          r.id,
+          title:       r.title,
+          content:     r.content,
+          tags:        r.tags || [],
+          memoryType:  r.memory_type || r.memoryType || 'fact',
+          userId:      null,
+          project:     null,
+          createdAt:   r.created_at || r.createdAt,
+          sourceMetadata: null,
+        }));
+    } else {
+      recentRaw = await this.prisma.memory.findMany({
+        where: {
+          orgId,
+          createdAt:  { gte: since },
+          deletedAt:  null,
+          memoryType: { in: ['fact', 'decision'] },
+          // Exclude the governance swarm's OWN output. Reflections + every synthesis
+          // tier carry a non-null cognitive_layer_role; without this filter the
+          // agents' internal-audit/reflection memories dominate clustering and the
+          // only canonical that ever reaches the floor is a tautological
+          // "governance (N sources)". This is the cognition layer eating its own
+          // exhaust — the single biggest reason synthesis produced no real knowledge.
+          cognitiveLayerRole: null,
+          // Exclude existing synthesis outputs + governance audit tags from the source pool
+          NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
+        },
+        take: 400,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true, title: true, content: true, tags: true,
+          memoryType: true, userId: true, project: true, createdAt: true,
+          sourceMetadata: { select: { sourcePlatform: true } },
+        },
+      });
+    }
     // Drop memories sourced from structured connectors. They get recalled
     // directly by source_id / entity-tag without synthesis layer.
     const recent = recentRaw.filter((m) => {
@@ -924,25 +956,31 @@ export class CognitionLoop {
         if (tag === 'untagged') continue;        // project-fallback, not a real tag
         const have = new Set(members.map((m) => m.id));
         let older = [];
-        try {
-          older = await this.prisma.memory.findMany({
-            where: {
-              orgId, deletedAt: null,
-              createdAt: { lt: since },               // the back-catalog, any age
-              tags: { has: tag },                     // the shared entity = grounding
-              memoryType: { in: ['fact', 'decision'] },
-              cognitiveLayerRole: null,
-              NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
-            },
-            orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
-            take: NEIGHBOR_REACH_MAX,
-            select: {
-              id: true, title: true, content: true, tags: true,
-              memoryType: true, userId: true, project: true, createdAt: true,
-              sourceMetadata: { select: { sourcePlatform: true } },
-            },
-          });
-        } catch { older = []; }
+        if (orgIsRemote(orgId)) {
+          // Remote: no central back-catalog. The agent recent list (already loaded
+          // as recentRaw) is the working set; skip the separate back-catalog query.
+          older = [];
+        } else {
+          try {
+            older = await this.prisma.memory.findMany({
+              where: {
+                orgId, deletedAt: null,
+                createdAt: { lt: since },               // the back-catalog, any age
+                tags: { has: tag },                     // the shared entity = grounding
+                memoryType: { in: ['fact', 'decision'] },
+                cognitiveLayerRole: null,
+                NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
+              },
+              orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
+              take: NEIGHBOR_REACH_MAX,
+              select: {
+                id: true, title: true, content: true, tags: true,
+                memoryType: true, userId: true, project: true, createdAt: true,
+                sourceMetadata: { select: { sourcePlatform: true } },
+              },
+            });
+          } catch { older = []; }
+        }
         for (const m of older) {
           if (have.has(m.id)) continue;
           const sp = m.sourceMetadata?.sourcePlatform;
@@ -2356,6 +2394,13 @@ Output JSON only:
         ? `Canonical fact: ${tag.slice(0, 60)} (${members.length} sources)`
         : `Bridge: ${tag.slice(0, 80)} [conf=${confidence?.toFixed(2)}]`;
 
+    // Remote orgs: engine.ingestMemory + prisma.memory.count both write/read central tables
+    // that hold 0 rows for self-host orgs. Force _directInsert (now agent-routed) and skip
+    // the central visibility probe (default 'private' is the safe fallback for remote).
+    if (orgIsRemote(orgId)) {
+      return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta, visibility: 'private' });
+    }
+
     // Inherit visibility conservatively: an org-wide canonical ONLY when EVERY
     // source is org-visible — never fold a user's private memory into a memory
     // the whole org can recall. Default private. Without this, all synthesis was
@@ -2494,8 +2539,42 @@ Output JSON only:
     }
   }
 
-  // Direct Prisma insert fallback (used when engine not available or throws)
+  // Direct Prisma insert fallback (used when engine not available or throws).
+  // For remote orgs, routes through amrWrite (agent outbox) instead of central Prisma.
   async _directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta, visibility = 'private' }) {
+    if (orgIsRemote(orgId)) {
+      // Embed centrally (bge-m3 via factory), then push to agent — no central Prisma row.
+      let vec = null;
+      try {
+        const { getEmbedService } = await import('../embeddings/factory.js');
+        vec = await getEmbedService().embedOne(`${title}\n${content}`).catch(() => null);
+      } catch { /* embedding failure is non-fatal — agent stores without vector */ }
+      const id = crypto.randomUUID();
+      const cognitiveLayerRole = sourceType === 'principle'
+        ? 'principle'
+        : sourceType === 'canonical-fact'
+          ? 'canonical'
+          : 'bridge';
+      await amrWrite(orgId, {
+        id,
+        orgId,
+        userId,
+        content,
+        title,
+        tags:              Array.from(unionedTags),
+        memoryType:        'synthesis',
+        isLatest:          true,
+        layer:             'cognitive',
+        cognitiveLayerRole,
+        confidence,
+        createdAt:         new Date().toISOString(),
+        project:           project || null,
+        projectIds:        [],
+      }, vec, []);
+      await this._linkDerivesEdges(id, members, sourceType, tag);
+      return { id };
+    }
+
     const created = await this.prisma.memory.create({
       data: {
         id:                  crypto.randomUUID(),
@@ -2609,6 +2688,24 @@ Output JSON only:
         metadata:   { reason: sourceType, topic: tag, source_count: members.length },
       }));
     if (rows.length) {
+      // Remote orgs: central relationship table holds 0 rows for this org.
+      // _linkDerivesEdges runs inside a runWithOrg(orgId) scope so currentOrg()
+      // is always the correct tenant — use it to detect remote without adding orgId param.
+      const edgeOrgId = currentOrg();
+      if (edgeOrgId && orgIsRemote(edgeOrgId)) {
+        for (const row of rows) {
+          await amrAddEdge({
+            id:         row.id,
+            fromId:     row.fromId,
+            toId:       row.toId,
+            type:       'Derives',
+            confidence: row.confidence,
+            orgId:      edgeOrgId,
+          }).catch(() => {});
+        }
+        // Central prisma path skipped for remote — return after agent outbox flush.
+        return;
+      }
       try {
         await this.prisma.relationship.createMany({ data: rows, skipDuplicates: true });
       } catch (batchErr) {

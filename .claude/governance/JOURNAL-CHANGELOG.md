@@ -53,3 +53,24 @@ One dated entry per turn. Quotes commits + the verifier's verdict. Records RED t
 - 3 types resolved: Personal→central pool; Enterprise-managed→central + per-org Qdrant collection (provisionForPlan); Enterprise-self-host→agent (PG+Qdrant). One seam: memoryBackend(org).
 - residuals: phantom-org in logs = RECALL_WARMUP_ORG hardcoded default (harmless warmup, set RECALL_WARMUP_ORG or ignore); FE deploy to singulance is docker-cp (box submodule inaccessible → image can't rebuild) — live but not durable; agent-side enrichment for remote deferred.
 - next: production compass phases (outbox spine, etc.).
+
+## 2026-06-27 — Self-host graph layer fixed (entity tags + co-mention edges on agent)
+- type: fix   verdict: GREEN   commits: cf26d739, 41c3f9e1, e6285f21 (core) · byod c19dcdd5
+- symptom: relationships/entity-graph dead for remote (self-host) orgs — 0 entity tags, 0 edges on agent.
+- 4 chained root causes, each fixed:
+  1. _attachEntityCoMentionEdges hard-returned on 0 co-mention candidates BEFORE extracting the
+     memory's own entity:*/temporal tags → now continues to self-tag extraction (helps central first-memory too).
+  2. candidate pool queried central Postgres (empty for remote) → added amrListRecent → agent /v1/list
+     (flat filter + new user_id scoping).
+  3. store.updateMemory threw 'record not found' for remote (tag persist + type upgrade) → remote branch
+     routes tags/is_latest/memory_type to agent via amrUpdate → new agent /v1/update (PG+Qdrant).
+  4. central edge-existence pre-flight dropped every edge (candidates absent from central) → skipped for
+     remote (agent /v1/list already deleted_at-filtered; agent enforces existence on insert).
+- verified e2e (singulance engine save → myserver agent PG read): entity:* tags land on agent; Δ3 edges
+  (Updates + 2×Mentions) on hm.relationships; recall green; central=0 (residency held).
+- deploy gotchas hit + logged: (a) `docker compose up` WITHOUT `--env-file ../.env` boots core with blank
+  HIVEMIND_ADMIN_SECRET (environment: <<:*common-env interpolates ${VAR} from shell, overriding env_file)
+  → FATAL; always pass --env-file. (b) git checkout from stale origin (forgot fetch) + a build that missed
+  the edit (image older than disk) → ALWAYS fetch before checkout + verify `docker exec hm-core grep <marker>`.
+- topology reaffirmed: ENGINE=singulance hm-core (all builds/deploys); /infra CLIENT AGENT=myserver
+  hm-byod-agent+postgres (push target, read-only verification). No myserver engine touched.

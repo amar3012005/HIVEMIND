@@ -4,6 +4,10 @@
 # The engine + dashboard stay central; your memory data (content + vectors + graph) lives in the .amr on
 # THIS box. Only query results traverse the link.
 #   git clone --branch byod --single-branch <repo> hivemind-byod && cd hivemind-byod && ./setup.sh
+#
+# Single smooth flow: the heavy work (building the .amr agent image + pulling Postgres + starting it)
+# runs in the BACKGROUND while you paste your key — so by the time the key is validated, the box is
+# already warmed and the agent comes up instantly. No second run needed.
 set -euo pipefail
 cd "$(dirname "$0")"
 COMPOSE="docker compose -f docker-compose.byod.yml"
@@ -13,10 +17,22 @@ die(){ printf '\033[1;31m[byod] %s\033[0m\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die "install Docker first (curl -fsSL https://get.docker.com | sh)"
 gen(){ openssl rand -hex "${1:-24}"; }
 
-if [ ! -f .env ]; then
+# Idempotent re-run: .env already exists → just bring everything up and re-register.
+if [ -f .env ]; then
+  log "existing .env found — bringing up + re-registering…"
+else
+  # ── 1. WARM IN BACKGROUND ──────────────────────────────────────────────────────────────────────
+  # Build the agent image + pull Postgres while you fetch/paste your key. This is the slow part; doing
+  # it now means the agent starts instantly once the key is in.
+  log "warming up (building the .amr agent + pulling Postgres in the background while you grab your key)…"
+  : > .byod-warm.log
+  ( $COMPOSE build agent >>.byod-warm.log 2>&1 && docker pull postgres:16-alpine >>.byod-warm.log 2>&1 ) &
+  WARM_PID=$!
+
+  # ── 2. KEY ─────────────────────────────────────────────────────────────────────────────────────
   API_KEY="${HIVEMIND_API_KEY:-}"
   if [ -z "$API_KEY" ]; then
-    printf 'Paste your HIVEMIND API key (dashboard → Settings → Self-host): '
+    printf 'Paste your HIVEMIND API key (dashboard → Self-host): '
     read -r API_KEY </dev/tty || true   # /dev/tty so this works under `curl … | bash`
   fi
   [ -n "$API_KEY" ] || die "no key entered (or pass HIVEMIND_API_KEY=… for non-interactive)"
@@ -25,12 +41,21 @@ if [ ! -f .env ]; then
     || die "key validation failed — check the key + that $CENTRAL is reachable"
   ORG="$(printf '%s' "$RESP" | grep -oE '"orgId":"[^"]+"' | cut -d'"' -f4)"; [ -n "$ORG" ] || die "no org for key: $RESP"
   log "key OK → org $ORG"
+
+  # ── 3. EXPOSURE ────────────────────────────────────────────────────────────────────────────────
   # How will the central engine reach this agent? Direct HTTPS (a domain) or Tailscale (private).
   PUBURL="${AGENT_PUBLIC_URL:-}"
   if [ -z "$PUBURL" ]; then
     printf 'Public URL the engine will reach this agent at (e.g. https://agent.yourdomain.com), or blank for Tailscale: '
     read -r PUBURL </dev/tty || true
   fi
+
+  # ── 4. WAIT FOR WARM ───────────────────────────────────────────────────────────────────────────
+  log "finishing warm-up (image build + Postgres pull)…"
+  if ! wait "$WARM_PID"; then die "warm-up failed — see $(pwd)/.byod-warm.log"; fi
+  log "warm-up done — box is primed."
+
+  # ── 5. WRITE .env ──────────────────────────────────────────────────────────────────────────────
   cat > .env <<EOF
 HIVEMIND_API_KEY=$API_KEY
 HIVEMIND_ORG_ID=$ORG
@@ -47,19 +72,19 @@ AGENT_PUBLIC_URL=$PUBURL
 TS_AUTHKEY=
 TS_HOSTNAME=hivemind-byod
 EOF
-  log ".env written. If using Tailscale, add TS_AUTHKEY then re-run. Otherwise re-run to bring it up."
-  exit 0
+  log ".env written."
 fi
+
 set -a; . ./.env; set +a
 
-# 1. bring up Postgres + the .amr agent (+ tunnel if Tailscale)
+# ── 6. BRING UP (fast — image already built + Postgres pulled during warm) ──────────────────────────
 if [ -n "${TS_AUTHKEY:-}" ]; then
-  log "starting Postgres + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d --build
+  log "starting Postgres + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
 else
-  log "starting Postgres + .amr agent…"; $COMPOSE up -d --build
+  log "starting Postgres + .amr agent…"; $COMPOSE up -d
 fi
 
-# 2. resolve the agent URL the engine will use
+# ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
 AGENT_URL="${AGENT_PUBLIC_URL:-}"
 if [ -z "$AGENT_URL" ] && [ -n "${TS_AUTHKEY:-}" ]; then
   log "waiting for tailscale hostname…"; for i in $(seq 1 20); do
@@ -69,11 +94,16 @@ if [ -z "$AGENT_URL" ] && [ -n "${TS_AUTHKEY:-}" ]; then
 fi
 [ -n "$AGENT_URL" ] || die "no agent URL — set AGENT_PUBLIC_URL in .env (https://… with TLS) or use Tailscale"
 
-# 3. register the agent with the central engine (engine ships finished memories here via /v1/write)
+# ── 8. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
+log "waiting for the agent to be ready…"
+for i in $(seq 1 30); do
+  if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT:-8787}/health" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
 log "registering the .amr agent with HIVEMIND ($AGENT_URL)…"
 curl -fsS -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' \
   -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"agentUrl\":\"$AGENT_URL\",\"agentToken\":\"$AGENT_TOKEN\"}" >/dev/null \
   || die "registration failed"
 
 log "✅ connected. org $HIVEMIND_ORG_ID — your memory data lives in the .amr on THIS box ($PWD/data)."
-log "Use the HIVEMIND dashboard as normal. Stop: $COMPOSE down  |  BACK UP ./data."
+log "Start using the HIVEMIND dashboard now. The Self-host page will flip to 'Agent connected'. BACK UP ./data."

@@ -295,6 +295,9 @@ export async function amrListRecent(orgId, userId, limit = 15) {
     title: m.title || null,
     content: m.content || '',
     tags: Array.isArray(m.tags) ? m.tags : [],
+    memory_type: m.memory_type || null,
+    created_at: m.created_at || null,
+    user_id: m.user_id || null,
   }));
 }
 

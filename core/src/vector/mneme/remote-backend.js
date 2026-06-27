@@ -162,6 +162,24 @@ export async function remoteGraph(orgId, opts = {}) {
   catch (e) { console.warn(`[mneme/remote] graph failed org=${orgId}: ${e.message}`); return { nodes: [], edges: [] }; }
 }
 
+// ── KB layer (self-host): documents + evidence segments live on the agent ──
+export async function remoteKbDoc(orgId, doc) {
+  try { await _call(orgId, '/v1/kb-doc', { doc }); return true; }
+  catch (e) { console.warn(`[mneme/remote] kb-doc failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteKbSegment(orgId, segment, vector) {
+  try { const out = await _call(orgId, '/v1/kb-segment', { segment, vector }); return out?.ok ? true : null; }
+  catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteKbRecall(orgId, vector, opts = {}) {
+  try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, scoreThreshold: opts.scoreThreshold }); return out?.results || []; }
+  catch (e) { console.warn(`[mneme/remote] kb-recall failed org=${orgId}: ${e.message}`); return []; }
+}
+export async function remoteKbHydrate(orgId, ids) {
+  try { const out = await _call(orgId, '/v1/kb-hydrate', { ids }); return out?.segments || []; }
+  catch (e) { console.warn(`[mneme/remote] kb-hydrate failed org=${orgId}: ${e.message}`); return []; }
+}
+
 // GDPR erasure: purge the ENTIRE org's data on the agent (all rows + vectors + edges). Returns
 // { ok, deleted } from the agent, or null on failure (account-delete records the failure but proceeds
 // to sever the central link; the saga can be retried). Self-host: physical destruction of the box is

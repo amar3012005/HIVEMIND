@@ -12,7 +12,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { orgIsRemote } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -637,36 +637,41 @@ Output the JSON object and nothing else.`;
    */
   async ingestKnowledgeDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
-    assertKbAllowedForOrg(opts?.orgId);
+    // Remote (self-host) orgs: KB writes route to the agent — assertKbAllowedForOrg is lifted.
+    // All other paths (enterprise, connector) still block via their own assertKbAllowedForOrg calls.
+    if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-    // Step 1: Store raw source artifact
-    const sourceArtifact = await this.db.sourceArtifact.upsert({
-      where: {
-        userId_orgId_checksum_sourcePlatform: {
+    // Step 1: Store raw source artifact — skipped for remote orgs (residency: raw bytes stay on agent).
+    let sourceArtifact = { id: crypto.randomUUID() };
+    if (!orgIsRemote(orgId)) {
+      sourceArtifact = await this.db.sourceArtifact.upsert({
+        where: {
+          userId_orgId_checksum_sourcePlatform: {
+            userId,
+            orgId,
+            checksum,
+            sourcePlatform: 'knowledge_upload'
+          }
+        },
+        create: {
           userId,
           orgId,
+          artifactType: 'upload',
+          sourcePlatform: 'knowledge_upload',
+          sourceId: filename,
+          contentType,
+          sizeBytes: BigInt(fileBuffer.length),
           checksum,
-          sourcePlatform: 'knowledge_upload'
-        }
-      },
-      create: {
-        userId,
-        orgId,
-        artifactType: 'upload',
-        sourcePlatform: 'knowledge_upload',
-        sourceId: filename,
-        contentType,
-        sizeBytes: BigInt(fileBuffer.length),
-        checksum,
-        storageLocation: `kb/${userId}/${checksum}/${filename}`,
-        payload: { filename, uploadedAt: new Date().toISOString() },
-        metadata
-      },
-      update: {}
-    });
+          storageLocation: `kb/${userId}/${checksum}/${filename}`,
+          payload: { filename, uploadedAt: new Date().toISOString() },
+          metadata
+        },
+        update: {}
+      });
+    }
 
     // Step 2: Parse document with Docling
     const _tParse = Date.now();
@@ -702,16 +707,14 @@ Output the JSON object and nothing else.`;
     // any schema change — gin-indexed tags[] is already there.
     const _scopeTag = `scope-key:${_scopeKey}`;
     const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag]));
-    const knowledgeDoc = await this.db.knowledgeDocument.upsert({
-      where: {
-        userId_orgId_sourcePlatform_sourceId: {
-          userId,
-          orgId,
-          sourcePlatform: 'knowledge_upload',
-          sourceId: _scopedSourceId,
-        }
-      },
-      create: {
+
+    // Step 3: Create knowledge document — route to agent for remote orgs.
+    let knowledgeDoc;
+    if (orgIsRemote(orgId)) {
+      // Pre-generate a stable doc id so segments can reference it on both sides.
+      const docId = crypto.randomUUID();
+      const docPayload = {
+        id: docId,
         userId,
         orgId,
         sourceArtifactId: sourceArtifact.id,
@@ -719,39 +722,92 @@ Output the JSON object and nothing else.`;
         title: filename,
         sourcePlatform: 'knowledge_upload',
         sourceId: _scopedSourceId,
-        documentDate: new Date(),
+        documentDate: new Date().toISOString(),
         wordCount: parseResult.wordCount,
         parseStatus: parseResult.success ? 'parsed' : 'failed',
         parseEngine: parseResult.engine,
         parseMetadata: parseResult.metadata || {},
         structureExtracted: parseResult.success,
         tags: _docTags,
-      },
-      update: {
-        // Backfill scope-key tag on pre-existing rows so the dedup gate sees
-        // them in subsequent uploads. parseMetadata stays untouched.
-        tags: _docTags,
-      }
-    });
+        checksum,
+        contentType,
+        filename,
+        createdAt: new Date().toISOString(),
+        metadata,
+      };
+      await amrKbDoc(orgId, docPayload);
+      knowledgeDoc = { id: docId };
+    } else {
+      knowledgeDoc = await this.db.knowledgeDocument.upsert({
+        where: {
+          userId_orgId_sourcePlatform_sourceId: {
+            userId,
+            orgId,
+            sourcePlatform: 'knowledge_upload',
+            sourceId: _scopedSourceId,
+          }
+        },
+        create: {
+          userId,
+          orgId,
+          sourceArtifactId: sourceArtifact.id,
+          documentType: 'file',
+          title: filename,
+          sourcePlatform: 'knowledge_upload',
+          sourceId: _scopedSourceId,
+          documentDate: new Date(),
+          wordCount: parseResult.wordCount,
+          parseStatus: parseResult.success ? 'parsed' : 'failed',
+          parseEngine: parseResult.engine,
+          parseMetadata: parseResult.metadata || {},
+          structureExtracted: parseResult.success,
+          tags: _docTags,
+        },
+        update: {
+          // Backfill scope-key tag on pre-existing rows so the dedup gate sees
+          // them in subsequent uploads. parseMetadata stays untouched.
+          tags: _docTags,
+        }
+      });
+    }
 
     // Step 4: Create segments from parsed structure (idempotent — re-uploads
-    // of identical content reuse existing segments)
+    // of identical content reuse existing segments).
+    // Remote orgs: _createSegments returns in-memory objects (no DB); no re-query needed.
     const _tSeg = Date.now();
-    let segments = await this.db.knowledgeSegment.findMany({
-      where: { documentId: knowledgeDoc.id },
-      orderBy: { segmentIndex: 'asc' },
-    });
-    let _msEmbed = 0;
-    if (!segments.length) {
+    let segments;
+    let _segmentsNeedEmbed = false; // true only when segments were freshly created this request
+    if (orgIsRemote(orgId)) {
+      // Always rebuild in-memory for remote — there are no central DB rows to dedup against.
       segments = await this._createSegments({
         documentId: knowledgeDoc.id,
         userId,
         orgId,
         parseResult
       });
-      // Step 5: Embed segments (only on first-time creation)
+      _segmentsNeedEmbed = segments.length > 0;
+    } else {
+      segments = await this.db.knowledgeSegment.findMany({
+        where: { documentId: knowledgeDoc.id },
+        orderBy: { segmentIndex: 'asc' },
+      });
+      if (!segments.length) {
+        segments = await this._createSegments({
+          documentId: knowledgeDoc.id,
+          userId,
+          orgId,
+          parseResult
+        });
+        _segmentsNeedEmbed = segments.length > 0;
+      }
+    }
+    let _msEmbed = 0;
+    if (_segmentsNeedEmbed) {
+      // Step 5: Embed segments.
+      // Central path: store vector in Qdrant + update DB row (vectorStored=true).
+      // Remote path: embed and push segment + vector to the agent via amrKbSegment.
       const _tEmbed = Date.now();
-      await this._embedSegments(segments);
+      await this._embedSegments(segments, orgId);
       _msEmbed = Date.now() - _tEmbed;
     }
     const _msSeg = Date.now() - _tSeg;
@@ -1071,6 +1127,7 @@ Output the JSON object and nothing else.`;
    * @private
    */
   async _createSegments({ documentId, userId, orgId, parseResult }) {
+    const remote = orgIsRemote(orgId);
     const hybridChunks = parseResult?.metadata?.hybridChunks;
     const hasChunks = Array.isArray(hybridChunks) && hybridChunks.length > 0;
     // If parse failed AND no chunks, nothing to segment.
@@ -1088,26 +1145,47 @@ Output the JSON object and nothing else.`;
         const contentHash = crypto.createHash('sha256').update(text).digest('hex');
         const heading = Array.isArray(hc.headings) && hc.headings.length
           ? hc.headings.join(' › ').slice(0, 500) : null;
-        try {
-          const segment = await this.db.knowledgeSegment.create({
-            data: {
-              documentId, userId, orgId,
-              segmentType: 'structured',
-              content: text,
-              contentHash,
-              segmentIndex,
-              previousSegmentId,
-              depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
-              startOffset: null, endOffset: null,
-              wordCount: text.split(/\s+/).length,
-              metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
-            },
-          });
+        if (remote) {
+          // Remote: build in-memory segment object — no central DB write.
+          const segment = {
+            id: crypto.randomUUID(),
+            documentId, userId, orgId,
+            segmentType: 'structured',
+            content: text,
+            contentHash,
+            segmentIndex,
+            previousSegmentId,
+            depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
+            startOffset: null, endOffset: null,
+            wordCount: text.split(/\s+/).length,
+            metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+            createdAt: new Date().toISOString(),
+          };
           segments.push(segment);
           previousSegmentId = segment.id;
           segmentIndex++;
-        } catch (err) {
-          console.warn(`[segments] hybrid chunk insert failed: ${err.message}`);
+        } else {
+          try {
+            const segment = await this.db.knowledgeSegment.create({
+              data: {
+                documentId, userId, orgId,
+                segmentType: 'structured',
+                content: text,
+                contentHash,
+                segmentIndex,
+                previousSegmentId,
+                depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
+                startOffset: null, endOffset: null,
+                wordCount: text.split(/\s+/).length,
+                metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+              },
+            });
+            segments.push(segment);
+            previousSegmentId = segment.id;
+            segmentIndex++;
+          } catch (err) {
+            console.warn(`[segments] hybrid chunk insert failed: ${err.message}`);
+          }
         }
       }
       if (segments.length) return segments;
@@ -1155,8 +1233,10 @@ Output the JSON object and nothing else.`;
 
       const contentHash = crypto.createHash('sha256').update(chunk).digest('hex');
 
-      const segment = await this.db.knowledgeSegment.create({
-        data: {
+      if (remote) {
+        // Remote: build in-memory segment object — no central DB write.
+        const segment = {
+          id: crypto.randomUUID(),
           documentId,
           userId,
           orgId,
@@ -1169,13 +1249,34 @@ Output the JSON object and nothing else.`;
           startOffset: null,
           endOffset: null,
           wordCount: chunk.split(/\s+/).length,
-          metadata: { source: 'paragraph_fallback' }
-        }
-      });
-
-      segments.push(segment);
-      previousSegmentId = segment.id;
-      segmentIndex++;
+          metadata: { source: 'paragraph_fallback' },
+          createdAt: new Date().toISOString(),
+        };
+        segments.push(segment);
+        previousSegmentId = segment.id;
+        segmentIndex++;
+      } else {
+        const segment = await this.db.knowledgeSegment.create({
+          data: {
+            documentId,
+            userId,
+            orgId,
+            segmentType: 'chunk',
+            content: chunk,
+            contentHash,
+            segmentIndex,
+            previousSegmentId,
+            depth: 0,
+            startOffset: null,
+            endOffset: null,
+            wordCount: chunk.split(/\s+/).length,
+            metadata: { source: 'paragraph_fallback' }
+          }
+        });
+        segments.push(segment);
+        previousSegmentId = segment.id;
+        segmentIndex++;
+      }
     }
 
     return segments;
@@ -1192,10 +1293,15 @@ Output the JSON object and nothing else.`;
   }
 
   /**
-   * Embed segments into evidence vector collection
+   * Embed segments into evidence vector collection.
+   * For remote (self-host) orgs: embeds each segment and pushes the row + vector
+   * to the agent via amrKbSegment — no central Qdrant write, no central DB update.
+   * For central orgs: unchanged behaviour (Qdrant upsert + DB vectorStored=true).
    * @private
+   * @param {Array} segments - segment objects (DB rows for central, in-memory for remote)
+   * @param {string} [callerOrgId] - orgId hint; falls back to segment.orgId
    */
-  async _embedSegments(segments) {
+  async _embedSegments(segments, callerOrgId) {
     if (!this.embeddingService) return;
 
     // Legacy: a dedicated hivemind_evidence collection. Per-tenant: evidence
@@ -1203,34 +1309,51 @@ Output the JSON object and nothing else.`;
     const legacyEvidence = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
 
     for (const segment of segments) {
+      const segOrgId = callerOrgId || segment.orgId;
       try {
         const embedding = await this.embeddingService.embed(segment.content);
 
-        const collectionName = PER_TENANT
-          ? await resolveCollectionForOrg(segment.orgId)
-          : legacyEvidence;
+        if (orgIsRemote(segOrgId)) {
+          // Remote path: push segment row + vector to the agent. No central DB or Qdrant write.
+          await amrKbSegment(segOrgId, {
+            id: segment.id,
+            userId: segment.userId,
+            documentId: segment.documentId,
+            content: segment.content,
+            contentHash: segment.contentHash,
+            segmentType: segment.segmentType,
+            segmentIndex: segment.segmentIndex,
+            previousSegmentId: segment.previousSegmentId || null,
+            metadata: segment.metadata || {},
+            createdAt: segment.createdAt || new Date().toISOString(),
+          }, Array.isArray(embedding) ? embedding : []);
+        } else {
+          const collectionName = PER_TENANT
+            ? await resolveCollectionForOrg(segment.orgId)
+            : legacyEvidence;
 
-        // Store evidence vector. In per-tenant mode the org container holds both
-        // memory + evidence — layer=evidence keeps it out of memory recall.
-        await this.embeddingService.storeVector({
-          collectionName,
-          id: segment.id,
-          vector: embedding,
-          payload: {
-            segment_id: segment.id,
-            document_id: segment.documentId,
-            user_id: segment.userId,
-            org_id: segment.orgId,
-            segment_type: segment.segmentType,
-            layer: 'evidence',
-            content_preview: segment.content.slice(0, 200)
-          }
-        });
+          // Store evidence vector. In per-tenant mode the org container holds both
+          // memory + evidence — layer=evidence keeps it out of memory recall.
+          await this.embeddingService.storeVector({
+            collectionName,
+            id: segment.id,
+            vector: embedding,
+            payload: {
+              segment_id: segment.id,
+              document_id: segment.documentId,
+              user_id: segment.userId,
+              org_id: segment.orgId,
+              segment_type: segment.segmentType,
+              layer: 'evidence',
+              content_preview: segment.content.slice(0, 200)
+            }
+          });
 
-        await this.db.knowledgeSegment.update({
-          where: { id: segment.id },
-          data: { vectorStored: true }
-        });
+          await this.db.knowledgeSegment.update({
+            where: { id: segment.id },
+            data: { vectorStored: true }
+          });
+        }
       } catch (error) {
         console.error(`[DocumentFirstIngestion] Failed to embed segment ${segment.id}:`, error);
       }

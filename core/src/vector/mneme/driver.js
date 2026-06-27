@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, hasRemoteAgent } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -218,6 +218,13 @@ export function amrGraph(orgId, opts) {
   if (!orgIsRemote(orgId)) return null;
   return remoteGraph(orgId, opts);
 }
+
+// KB layer (self-host): route document + evidence-segment writes/reads to the agent for remote orgs.
+// All return null/[] for non-remote (caller uses the central path). Async.
+export function amrKbDoc(orgId, doc) { return orgIsRemote(orgId) ? remoteKbDoc(orgId, doc) : null; }
+export function amrKbSegment(orgId, segment, vector) { return orgIsRemote(orgId) ? remoteKbSegment(orgId, segment, vector) : null; }
+export function amrKbRecall(orgId, vector, opts) { return orgIsRemote(orgId) ? remoteKbRecall(orgId, vector, opts) : null; }
+export function amrKbHydrate(orgId, ids) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids) : null; }
 
 // Generic partial update (tags / is_latest / memory_type) routed to the agent for remote orgs.
 // REMOTE ORGS: durable outbox (was a direct call, now ordered + retried).

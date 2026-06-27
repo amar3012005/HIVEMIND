@@ -84,6 +84,39 @@ async function ensureSchema() {
     );
     CREATE INDEX IF NOT EXISTS rel_from_idx ON relationships(from_id);
     CREATE INDEX IF NOT EXISTS rel_to_idx   ON relationships(to_id);
+    -- KB layer (self-host): documents + evidence segments live here, never central. Segment vectors
+    -- go in the same Qdrant collection tagged layer='segment' (recall filters on it).
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      user_id uuid,
+      filename text,
+      content_type text,
+      status text DEFAULT 'ready',
+      checksum text,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      deleted_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS kbdoc_org_idx ON knowledge_documents(org_id) WHERE deleted_at IS NULL;
+    CREATE TABLE IF NOT EXISTS knowledge_segments (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      user_id uuid,
+      document_id uuid NOT NULL,
+      content text,
+      content_hash text,
+      segment_type text,
+      segment_index int NOT NULL DEFAULT 0,
+      previous_segment_id uuid,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      vector_synced boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content,''))) STORED
+    );
+    CREATE INDEX IF NOT EXISTS kbseg_org_idx  ON knowledge_segments(org_id);
+    CREATE INDEX IF NOT EXISTS kbseg_doc_idx  ON knowledge_segments(document_id);
+    CREATE INDEX IF NOT EXISTS kbseg_tsv_idx  ON knowledge_segments USING gin(content_tsv);
   `);
   console.log('[hm-agent] postgres schema ready');
 }
@@ -305,6 +338,63 @@ const routes = {
     return { ok: true };
   },
 
+  // ── KB layer (self-host) — documents + evidence segments live on the agent, never central ──
+  // Upsert a knowledge document row.
+  '/v1/kb-doc': async (b) => {
+    const d = b.doc || {};
+    if (!d.id) return { ok: false, error: 'doc.id required' };
+    await pg.query(
+      `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,coalesce($9::timestamptz,now()))
+       ON CONFLICT (id) DO UPDATE SET filename=EXCLUDED.filename, content_type=EXCLUDED.content_type,
+         status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata, deleted_at=NULL`,
+      [d.id, ORG, d.userId || null, d.filename || null, d.contentType || null, d.status || 'ready',
+       d.checksum || null, JSON.stringify(d.metadata || {}), d.createdAt || null]);
+    return { ok: true };
+  },
+
+  // Upsert one evidence segment: row + vector (layer='segment' in the shared Qdrant collection).
+  '/v1/kb-segment': async (b) => {
+    const s = b.segment || {};
+    if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
+    await pg.query(
+      `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,
+         segment_index, previous_segment_id, metadata, vector_synced, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,false,coalesce($11::timestamptz,now()))
+       ON CONFLICT (id) DO UPDATE SET content=EXCLUDED.content, content_hash=EXCLUDED.content_hash,
+         segment_type=EXCLUDED.segment_type, segment_index=EXCLUDED.segment_index, metadata=EXCLUDED.metadata,
+         vector_synced=false`,
+      [s.id, ORG, s.userId || null, s.documentId, s.content || null, s.contentHash || null, s.segmentType || 'chunk',
+       s.segmentIndex ?? 0, s.previousSegmentId || null, JSON.stringify(s.metadata || {}), s.createdAt || null]);
+    if (Array.isArray(b.vector)) {
+      const qr = await qFetch(`/collections/${QCOLL}/points`, { method: 'PUT', body: JSON.stringify({
+        points: [{ id: s.id, vector: b.vector, payload: { segment_id: s.id, document_id: s.documentId, org_id: ORG, user_id: s.userId || null, layer: 'segment', content: s.content || '' } }], wait: true }) });
+      if (!qr.ok) return { ok: false, error: `qdrant seg upsert ${qr.status}` };
+      await pg.query('UPDATE knowledge_segments SET vector_synced=true WHERE id=$1', [s.id]);
+    }
+    return { ok: true };
+  },
+
+  // Vector search over evidence segments (layer='segment'). Returns [{segment_id, document_id, content, score}].
+  '/v1/kb-recall': async (b) => {
+    if (!Array.isArray(b.vector)) return { results: [] };
+    const filter = { must: [{ key: 'org_id', match: { value: ORG } }, { key: 'layer', match: { value: 'segment' } }] };
+    if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
+    const qr = await qFetch(`/collections/${QCOLL}/points/search`, { method: 'POST', body: JSON.stringify({
+      vector: b.vector, limit: Math.min(b.limit || 20, 100), with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
+    if (!qr.ok) return { results: [] };
+    const j = await qr.json();
+    return { results: (j.result || []).map((h) => ({ segment_id: h.payload?.segment_id || h.id, document_id: h.payload?.document_id, content: h.payload?.content || '', score: h.score })) };
+  },
+
+  // Hydrate segment rows by id (full content + metadata for evidence display).
+  '/v1/kb-hydrate': async (b) => {
+    const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+    if (!ids.length) return { segments: [] };
+    const { rows } = await pg.query('SELECT id, document_id, content, content_hash, segment_type, segment_index, metadata, created_at FROM knowledge_segments WHERE org_id=$1 AND id = ANY($2)', [ORG, ids]);
+    return { segments: rows };
+  },
+
   // Delete one memory: row + vector + edges (+ tombstone if soft).
   '/v1/delete': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
@@ -323,6 +413,8 @@ const routes = {
   '/v1/purge': async () => {
     const m = await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]);
     await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM knowledge_documents WHERE org_id=$1', [ORG]);
     await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
     await ensureQdrant();
     return { ok: true, deleted: m.rowCount };

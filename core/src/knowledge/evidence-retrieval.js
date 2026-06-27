@@ -9,6 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+import { orgIsRemote, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -48,6 +49,49 @@ export class EvidenceRetrievalService {
       : (docIdSet ? 0.2 : 0.5);
 
     try {
+      // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
+      if (orgIsRemote(orgId)) {
+        const queryVector = await this.qdrantClient.generateEmbedding(query);
+        if (!queryVector) return [];
+        // amrKbRecall returns [{segment_id, document_id, content, score}]
+        const hits = await amrKbRecall(orgId, queryVector, {
+          limit: limit * 2,
+          documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
+          scoreThreshold: effectiveThreshold,
+        });
+        if (!hits || !hits.length) return [];
+        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id));
+        // Build a score lookup from the recall hits.
+        const scoreMap = new Map(hits.map((h) => [h.segment_id, h.score]));
+        const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
+        const remoteResults = hits
+          .map((h) => {
+            const s = hydrateMap.get(h.segment_id);
+            if (!s) return null;
+            // Filter by docIdSet when multiple docs requested (agent-side only filtered single-doc).
+            if (docIdSet && docIdSet.length > 1 && !docIdSet.includes(s.document_id)) return null;
+            const score = scoreMap.get(h.segment_id) ?? h.score;
+            return {
+              type: 'evidence_segment',
+              segmentId: s.id,
+              documentId: s.document_id,
+              content: s.content,
+              snippet: this._extractSnippet(s.content, query),
+              score,
+              document: { id: s.document_id },
+              metadata: {
+                segmentType: s.segment_type,
+                segmentIndex: s.segment_index,
+                wordCount: null,
+                startPage: null,
+                endPage: null,
+              },
+            };
+          })
+          .filter(Boolean);
+        return remoteResults.sort((a, b) => b.score - a.score).slice(0, limit);
+      }
+
       // Step 1: Vector search in evidence collection.
       // Multi-doc filter uses Qdrant's `match.any` array, single uses
       // `match.value`. Falls back to no doc filter when docIdSet null.

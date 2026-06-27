@@ -243,6 +243,23 @@ const routes = {
     return { ok: true };
   },
 
+  // Generic partial update: tags / is_latest / memory_type. Used by the central engine's
+  // updateMemory seam for remote orgs (entity-link type upgrades, supersession is_latest flips).
+  '/v1/update': async (b) => {
+    if (!b.id) return { ok: false, error: 'id required' };
+    const sets = []; const args = [b.id, ORG];
+    if (Array.isArray(b.tags)) { args.push(b.tags); sets.push(`tags=$${args.length}`); }
+    if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
+    if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
+    if (!sets.length) return { ok: true };
+    await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
+    if (Array.isArray(b.tags)) {
+      qFetch(`/collections/${QCOLL}/points/payload`, { method: 'POST',
+        body: JSON.stringify({ payload: { tags: b.tags }, points: [b.id] }) }).catch(() => {});
+    }
+    return { ok: true };
+  },
+
   // Delete one memory: row + vector + edges (+ tombstone if soft).
   '/v1/delete': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };

@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrRecall, withAmrLock, amrAddEdge, amrWrite, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -445,6 +445,20 @@ export class PrismaGraphStore {
   async updateMemory(id, rawPatch) {
     // Strip null bytes from all string fields — web-scraped content contains \u0000
     const patch = stripNullBytes(rawPatch);
+    // Remote (self-host) orgs have NO central row — the memory lives on the agent. Route the
+    // supported partial-update fields (tags / is_latest / memory_type) over HTTP instead of hitting
+    // central Postgres (which throws "record not found"). This is the seam the entity-link tag/type
+    // upgrades + supersession is_latest flips go through for remote orgs.
+    const _remoteUpdOrg = currentOrg();
+    if (_remoteUpdOrg && orgIsRemote(_remoteUpdOrg)) {
+      const remotePatch = {};
+      if (patch.tags !== undefined) remotePatch.tags = normalizeTagsArray(patch.tags);
+      const rIsLatest = patch.isLatest ?? patch.is_latest;
+      if (rIsLatest !== undefined) remotePatch.is_latest = rIsLatest;
+      if (patch.memoryType !== undefined) remotePatch.memory_type = patch.memoryType;
+      if (Object.keys(remotePatch).length) await amrUpdate(_remoteUpdOrg, id, remotePatch);
+      return this.getMemory(id);
+    }
     const data = {};
     const isLatestVal = patch.isLatest ?? patch.is_latest;
     if (isLatestVal !== undefined) data.isLatest = isLatestVal;

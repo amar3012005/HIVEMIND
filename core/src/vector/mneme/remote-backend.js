@@ -125,6 +125,12 @@ export async function remoteUpdateTags(orgId, id, tags) {
   catch (e) { console.warn(`[mneme/remote] update-tags failed org=${orgId}: ${e.message}`); return null; }
 }
 
+// Generic partial update (tags / is_latest / memory_type) on the agent row.
+export async function remoteUpdate(orgId, id, patch) {
+  try { await _call(orgId, '/v1/update', { id, ...patch }); return true; }
+  catch (e) { console.warn(`[mneme/remote] update failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // Hydrate full memory rows from the customer's Postgres (so recall content stays on their box).
 export async function remoteHydrate(orgId, ids) {
   try { const out = await _call(orgId, '/v1/hydrate', { ids }); return out?.memories || []; }

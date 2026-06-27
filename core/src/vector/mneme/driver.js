@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteList, hasRemoteAgent } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, hasRemoteAgent } from './remote-backend.js';
 
 // A REMOTE (.amr-on-customer-box) org has an hm-agent HTTP endpoint that serves recall — decided PER
 // ORG, so it coexists with central dual/sole orgs. Self-host-HYBRID orgs (customer PG+Qdrant, no
@@ -172,6 +172,13 @@ export function amrUpdateTags(orgId, id, tags) {
   for (const a of allActiveAdapters()) {
     try { if (a?.memory?.byId?.has(id)) a.memory.update?.({ where: { id }, data: { tags } }); } catch { /* best-effort */ }
   }
+}
+// Generic partial update (tags / is_latest / memory_type) routed to the agent for remote orgs.
+// Returns a promise when remote (caller may await), undefined otherwise.
+export function amrUpdate(orgId, id, patch) {
+  if (!orgId || !id || !patch) return undefined;
+  if (orgIsRemote(orgId)) return remoteUpdate(orgId, id, patch);
+  return undefined;
 }
 export function amrAddEdge(rel) {
   if (process.env.MNEME_DEBUG_ROUTING) console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');

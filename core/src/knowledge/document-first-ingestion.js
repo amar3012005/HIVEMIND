@@ -1264,6 +1264,11 @@ Output the JSON object and nothing else.`;
           segmentType: 'chunk',
           segmentIndex: 0,
           content,
+          // contentHash is required (NOT NULL) — the remote branch above sets it
+          // but the central insert omitted it, so connector ingestion on
+          // central (managed/personal) orgs threw "Argument contentHash is
+          // missing". Same sha256(content) the remote/KB paths use (dedup key).
+          contentHash: crypto.createHash('sha256').update(content).digest('hex'),
           wordCount: content.split(/\s+/).filter(Boolean).length,
           startPage: null, endPage: null,
           metadata: { providerKey, sourceId },

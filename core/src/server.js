@@ -5716,6 +5716,27 @@ exit \$RC
             Number.isFinite(body.start_ms) ? body.start_ms : null,
             Number.isFinite(body.end_ms) ? body.end_ms : null,
           );
+          // P2: fire-and-forget Stage-1 extraction — runs DURING the meeting so
+          // Stop only reduces, never extracts. fetch→groqFetch openrouter failover.
+          (async () => {
+            try {
+              const sys = 'Extract from this meeting transcript SEGMENT. STRICT JSON {"entities":{"people":string[],"organizations":string[]},"decisions":string[],"actions":[{"task":string,"owner":string|null}],"topics":string[]}. Faithful — never invent. Empty arrays when none.';
+              const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: process.env.MEETING_EXTRACT_MODEL || process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: text.slice(0, 20000) }] }),
+                signal: AbortSignal.timeout(60_000),
+              });
+              if (!r.ok) throw new Error(`llm ${r.status}`);
+              const ex = JSON.parse((await r.json()).choices[0].message.content);
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.meeting_segments SET extraction=$1::jsonb, extraction_status='done' WHERE session_id=$2::uuid AND idx=$3`,
+                JSON.stringify(ex), sid, idx,
+              );
+            } catch (_e) {
+              await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_segments SET extraction_status='error' WHERE session_id=$1::uuid AND idx=$2`, sid, idx).catch(() => {});
+            }
+          })();
           return jsonResponse(res, { ok: true });
         } catch (e) {
           return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
@@ -5732,7 +5753,7 @@ exit \$RC
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
-              `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id
+              `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id, extraction, extraction_status
                  FROM hivemind.meeting_segments
                 WHERE session_id=$1::uuid AND org_id=$2::uuid
                 ORDER BY idx ASC`,

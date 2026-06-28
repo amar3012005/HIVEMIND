@@ -5475,6 +5475,40 @@ exit \$RC
           ? `PARTICIPANTS (real names of attendees — use these to map SPEAKER_xx diarization labels to real people in speaker_names):\n${participantNames.join(', ')}\n\n`
           : '';
         const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
+        // P3 — entity canonicalization. Feed the org's existing global entities so
+        // the model maps STT variants/misspellings ("Amar"/"Amer" → "Amar Sai Gadde")
+        // to the canonical name in entities/owners/speakers. Central only (remote
+        // org entities live on the agent; skip rather than transit central).
+        const mOrg = _mOrgId;
+        let _canonEnts = [];
+        try {
+          if (!orgIsRemote(mOrg) && prisma) {
+            const erows = await prisma.$queryRawUnsafe(
+              `SELECT tag, count(*) c FROM (
+                 SELECT unnest(tags) tag FROM hivemind.memories
+                  WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+               ) t WHERE tag LIKE 'entity:%' OR tag LIKE 'person:%'
+               GROUP BY tag ORDER BY c DESC LIMIT 80`,
+              mOrg,
+            );
+            const seen = new Set();
+            for (const r of (erows || [])) {
+              // Humanize the slug tag → proper canonical: "borealis-freight" →
+              // "Borealis Freight", "nadia_khan" → "Nadia Khan". Hyphens AND
+              // underscores → spaces, then Title Case (was only stripping _ →
+              // the LLM echoed the ugly hyphenated slug + didn't map first-names).
+              const name = String(r.tag).replace(/^(entity|person):/, '').replace(/[-_]+/g, ' ').trim()
+                .replace(/\b\w/g, (c) => c.toUpperCase());
+              const k = name.toLowerCase();
+              if (name.length > 1 && !seen.has(k)) { seen.add(k); _canonEnts.push(name); }
+              if (_canonEnts.length >= 50) break;
+            }
+          }
+        } catch (ee) { console.warn('[meeting-insights] canon-entities fetch failed:', ee.message); }
+        const entHint = _canonEnts.length
+          ? `\n\nKNOWN ORGANIZATION ENTITIES (canonical): ${_canonEnts.join('; ')}.\nWhen the transcript clearly refers to a variant, abbreviation, first-name-only, or transcription-misspelling of one of these, NORMALIZE it to the canonical name in entities, action_items.owner, quotes.speaker and speaker_names. Only normalize a confident match — do NOT force unrelated names onto this list.`
+          : '';
+        const sysEnt = sys + entHint;
         const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
         const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
         const callLLM = async (messages, ms = 120_000) => {
@@ -5497,7 +5531,7 @@ exit \$RC
         try {
           if (transcript.length <= WINDOW) {
             const usr = participantsBlock + (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
-            const insights = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }]);
+            const insights = await callLLM([{ role: 'system', content: sysEnt }, { role: 'user', content: usr }]);
             return jsonResponse(res, { insights });
           }
           // Split on paragraph/sentence boundaries near each window edge.
@@ -5512,7 +5546,7 @@ exit \$RC
             i = end - WINDOW; // align next start to the (possibly shifted) boundary
           }
           const parts = await Promise.all(windows.map((w, idx) => callLLM([
-            { role: 'system', content: sys },
+            { role: 'system', content: sysEnt },
             { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
           ]).catch(() => null)));
           const ok = parts.filter(Boolean);

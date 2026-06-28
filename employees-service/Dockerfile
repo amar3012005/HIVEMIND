@@ -35,11 +35,14 @@ COPY README.md ./
 COPY NOTICE ./
 RUN pip install --no-cache-dir -e .
 
-# Default port for FastAPI service
-EXPOSE 8060
+# Default port for FastAPI service. The runtime PORT env (compose sets PORT=3000)
+# is what uvicorn actually binds to; EXPOSE + HEALTHCHECK follow it (was a stale 8060
+# that never matched the bind → container flagged unhealthy while serving fine on 3000).
+EXPOSE 3000
 
-# Health check — Coolify + scripts/deploy.sh employees probe this
+# Health check — Coolify + scripts/deploy.sh employees probe this. Shell form so ${PORT}
+# expands from the container env at runtime (falls back to 3000 if unset).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://localhost:8060/health || exit 1
+  CMD curl -fsS http://localhost:${PORT:-3000}/health || exit 1
 
 CMD ["python", "-m", "hivemind_employees.main"]

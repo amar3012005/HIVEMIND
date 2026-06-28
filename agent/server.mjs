@@ -63,12 +63,19 @@ async function ensureSchema() {
       document_date timestamptz,
       project text,
       project_ids text[] NOT NULL DEFAULT '{}',
+      scope text,
+      primary_team_id uuid,
       metadata jsonb NOT NULL DEFAULT '{}',
       deleted_at timestamptz,
       vector_synced boolean NOT NULL DEFAULT false,
       content_tsv tsvector GENERATED ALWAYS AS
         (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))) STORED
     );
+    -- Self-host scope/team parity (added after the table shipped): idempotent
+    -- backfill for existing boxes so scope + primary_team_id round-trip like
+    -- central. project/project_ids already existed; these complete the set.
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope text;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS primary_team_id uuid;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
@@ -228,12 +235,14 @@ const routes = {
     await pg.query(
       `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
          cognitive_layer_role, confidence, created_at, valid_from, document_date, project, project_ids,
-         metadata, vector_synced)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,false)
+         metadata, scope, primary_team_id, vector_synced)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,false)
        ON CONFLICT (id) DO UPDATE SET
          content=EXCLUDED.content, title=EXCLUDED.title, tags=EXCLUDED.tags, memory_type=EXCLUDED.memory_type,
          is_latest=EXCLUDED.is_latest, layer=EXCLUDED.layer, cognitive_layer_role=EXCLUDED.cognitive_layer_role,
          confidence=EXCLUDED.confidence,
+         scope=COALESCE(EXCLUDED.scope, memories.scope),
+         primary_team_id=COALESCE(EXCLUDED.primary_team_id, memories.primary_team_id),
          -- Provenance preservation: memory rows are written in two phases — the
          -- engine creates the row (with valid_from / document_date / metadata),
          -- then the vector store re-upserts the SAME id to attach the embedding
@@ -249,7 +258,7 @@ const routes = {
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
        r.createdAt || null, r.validFrom || null, r.documentDate || null, r.project || null,
-       r.projectIds || [], JSON.stringify(r.metadata || {})]
+       r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null]
     );
     if (Array.isArray(b.vector)) {
       const qr = await qFetch(`/collections/${QCOLL}/points`, {

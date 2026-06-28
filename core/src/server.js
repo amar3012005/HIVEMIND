@@ -5800,6 +5800,39 @@ exit \$RC
         }
       }
 
+      // GET /api/meetings/entities — the org's global entities (humanized from
+      // entity:/person: tags) for WIDE highlighting in meeting text. Highlight-only
+      // (no recall yet). Central only (remote entities live on the agent).
+      if (pathname === '/api/meetings/entities' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { entities: [] });
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT tag, count(*) c FROM (
+               SELECT unnest(tags) tag FROM hivemind.memories
+                WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+             ) t WHERE tag LIKE 'entity:%' OR tag LIKE 'person:%'
+             GROUP BY tag ORDER BY c DESC LIMIT 400`,
+            mOrg,
+          );
+          const seen = new Set();
+          const entities = [];
+          for (const r of (rows || [])) {
+            const name = String(r.tag).replace(/^(entity|person):/, '').replace(/[-_]+/g, ' ').trim()
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+            const k = name.toLowerCase();
+            if (name.length > 1 && !seen.has(k)) {
+              seen.add(k);
+              entities.push({ name, kind: String(r.tag).startsWith('person:') ? 'person' : 'entity', count: Number(r.c) });
+            }
+            if (entities.length >= 200) break;
+          }
+          return jsonResponse(res, { entities });
+        } catch (e) {
+          return jsonResponse(res, { entities: [] });
+        }
+      }
+
       // POST /api/meetings/invite — email external participants that an org
       // member added at meeting start. Best-effort, capped, user-initiated
       // (fires when the organizer clicks Start with externals entered). Org
@@ -16867,7 +16900,7 @@ exit \$RC
             // owner_only: restrict to the caller's OWN memories (KB "past docs"
             // must show only what THIS user uploaded, not every member's shared docs).
             const ownerOnlyQ = url.searchParams.get('owner_only') === 'true';
-            const { memories, total } = await persistentMemoryStore.listMemories({
+            const { memories, total: listTotal } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
               project,
@@ -16883,6 +16916,22 @@ exit \$RC
               ...(ownerOnlyQ ? { owner_only: true } : {}),
               access_context: listAccessCtx,
             });
+
+            // UNIFORM total: the headline "N memories" must be the org-wide count regardless of backend.
+            // listMemories' own total is only the returned PAGE size for the agent (BYOD) backend — which
+            // showed "20" instead of the real org total. For the default (unfiltered) view, source the
+            // total from getOrgCounts — THE single seam that routes central-count vs agent-/v1/stats by org
+            // type (same source /api/profile uses). Filtered/narrowed views keep the list's own total so
+            // the count still reflects the active filter.
+            const _narrowed = (Array.isArray(parsedTags) && parsedTags.length > 0)
+              || filters.memory_type || project || project_id || ownerOnlyQ;
+            let total = (typeof listTotal === 'number') ? listTotal : memories.length;
+            if (!_narrowed) {
+              try {
+                const c = await getOrgCounts(prisma, orgId, userId);
+                if (c && typeof c.memories === 'number') total = c.memories;
+              } catch { /* keep page-based fallback */ }
+            }
 
             return jsonResponse(res, {
               memories,

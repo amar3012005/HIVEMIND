@@ -1522,23 +1522,29 @@ Output the JSON object and nothing else.`;
       // variable) evidence-chunk size — a doc that the chunker split into one giant segment OR many tiny
       // fragments both produce a sensible fact set. Merge adjacent segments up to ~WIN chars; set the
       // per-window fact cap proportional to length (clamped) so dense windows yield more, thin ones fewer.
-      const WIN = Number(process.env.KB_DISTILL_WINDOW_CHARS || 1500);
-      const FACTS_PER_K = Number(process.env.KB_FACTS_PER_1K_CHARS || 7); // ~7 salient facts / 1000 chars
-      const windows = [];
-      let cur = null;
-      for (const s of promotableSegments) {
-        const seg = { segmentId: s.id, content: s.content || '', heading: s.metadata?.heading || null, page: s.metadata?.page || null };
-        if (!cur) { cur = seg; continue; }
-        if ((cur.content.length + seg.content.length + 2) <= WIN) { cur.content += '\n\n' + seg.content; }
-        else { windows.push(cur); cur = seg; }
+      const WIN = Number(process.env.KB_DISTILL_WINDOW_CHARS || 800);
+      const FACTS_PER_K = Number(process.env.KB_FACTS_PER_1K_CHARS || 7); // ~salient facts / 1000 chars
+      // Re-window the WHOLE doc semantically (boundary-aware chunkText splits big segments AND merges
+      // small ones at heading/paragraph/sentence boundaries — never mid-word). This decouples fact
+      // COVERAGE from the evidence chunker: a doc that arrived as one giant segment or many tiny
+      // fragments both get ~WIN-sized windows spanning the whole doc, so the tail (metrics/timeline)
+      // isn't starved by a single front-loaded window.
+      const fullText = promotableSegments.map((s) => (s.content || '').trim()).filter(Boolean).join('\n\n');
+      let winChunks = [];
+      try {
+        const { chunkText } = await import('./document-chunker.js');
+        winChunks = (chunkText(fullText, { targetSize: WIN, maxSize: Math.round(WIN * 1.6), minSize: 200, overlapSize: 0 }) || [])
+          .map((c) => (c && c.text ? c.text : '')).filter((t) => t && t.trim().length >= 40);
+      } catch (e) {
+        this.logger.warn?.(`[kb-facts-only] re-window failed, using segments: ${e.message}`);
       }
-      if (cur) windows.push(cur);
-      const targets = windows.map((w) => ({
-        segmentId: w.segmentId,
-        content: w.content,
-        heading: w.heading,
-        page: w.page,
-        maxFacts: Math.max(3, Math.min(12, Math.round((w.content.length / 1000) * FACTS_PER_K))),
+      if (!winChunks.length) winChunks = promotableSegments.map((s) => s.content).filter(Boolean);
+      const targets = winChunks.map((content, i) => ({
+        segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
+        content,
+        heading: null,
+        page: null,
+        maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * FACTS_PER_K))),
         scope: metadata.scope,
         visibility: metadata.visibility,
         primary_team_id: metadata.primary_team_id || null,

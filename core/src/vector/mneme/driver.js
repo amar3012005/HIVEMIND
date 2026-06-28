@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -231,6 +231,22 @@ export function amrKbDoc(orgId, doc) { return orgIsRemote(orgId) ? remoteKbDoc(o
 export function amrKbSegment(orgId, segment, vector) { return orgIsRemote(orgId) ? remoteKbSegment(orgId, segment, vector) : null; }
 export function amrKbRecall(orgId, vector, opts) { return orgIsRemote(orgId) ? remoteKbRecall(orgId, vector, opts) : null; }
 export function amrKbHydrate(orgId, ids) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids) : null; }
+
+// KB doc LIST for remote org — returns the central-shaped { documents, pagination } response from the
+// agent's /v1/kb-docs route. null for non-remote (caller uses central Prisma). Async.
+export function amrKbDocs(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDocs(orgId, opts) : null; }
+
+// KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount }
+// from the agent. null for non-remote (caller uses central Prisma). Async.
+export function amrKbDocDetail(orgId, documentId) { return orgIsRemote(orgId) ? remoteKbDocDetail(orgId, documentId) : null; }
+
+// Per-memory edge counts for remote org — returns { <id>: { in, out } } for a batch of memory ids.
+// {} / null for non-remote (caller uses central Prisma). Async.
+export function amrMemEdgeCounts(orgId, ids) { return orgIsRemote(orgId) ? remoteMemEdges(orgId, ids) : null; }
+
+// Per-memory relationships for remote org — returns the central-shaped relationship object from the
+// agent. null for non-remote (caller uses central Prisma). Async.
+export function amrMemRelationships(orgId, memoryId) { return orgIsRemote(orgId) ? remoteMemRelationships(orgId, memoryId) : null; }
 
 // Meetings layer (self-host): route meeting row writes/reads to the agent for remote orgs.
 // All return null/[] for non-remote (caller uses the central path). Async.

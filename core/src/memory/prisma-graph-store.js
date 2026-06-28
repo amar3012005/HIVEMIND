@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode, amrMemEdgeCounts } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -628,6 +628,20 @@ export class PrismaGraphStore {
       // page 1 — agent ignored offset and the FE doesn't use cursors).
       const { memories } = await remoteList(_org, filter, null, limit, offset);
       const mapped = memories.map(mapAgentRow);
+      // Enrich with edge counts (in/out) in a single batched call so the FE "linked N" chip is correct.
+      // Central orgs compute edges_in_count / edges_out_count via Prisma _count; remote orgs query the
+      // agent's relationships table. On failure we degrade gracefully (counts stay 0).
+      if (mapped.length) {
+        try {
+          const edgeMap = await amrMemEdgeCounts(_org, mapped.map((m) => m.id));
+          if (edgeMap && typeof edgeMap === 'object') {
+            for (const m of mapped) {
+              const e = edgeMap[m.id];
+              if (e) { m.edges_in_count = e.in || 0; m.edges_out_count = e.out || 0; }
+            }
+          }
+        } catch { /* degrade gracefully — FE uses || 0 fallback */ }
+      }
       return { memories: mapped, total: mapped.length };
     }
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back

@@ -186,6 +186,30 @@ export async function remoteKbHydrate(orgId, ids) {
   catch (e) { console.warn(`[mneme/remote] kb-hydrate failed org=${orgId}: ${e.message}`); return []; }
 }
 
+// KB doc LIST for remote org — returns central-shaped { documents, pagination } or null on failure.
+export async function remoteKbDocs(orgId, opts = {}) {
+  try { return await _call(orgId, '/v1/kb-docs', { limit: opts.limit, offset: opts.offset }); }
+  catch (e) { console.warn(`[mneme/remote] kb-docs failed org=${orgId}: ${e.message}`); return null; }
+}
+
+// KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount } or null.
+export async function remoteKbDocDetail(orgId, documentId) {
+  try { const out = await _call(orgId, '/v1/kb-doc-detail', { documentId }); return out?.error ? null : out; }
+  catch (e) { console.warn(`[mneme/remote] kb-doc-detail failed org=${orgId} id=${documentId}: ${e.message}`); return null; }
+}
+
+// Per-memory edge counts for remote org — returns { <id>: {in, out} } or {} on failure.
+export async function remoteMemEdges(orgId, ids) {
+  try { return await _call(orgId, '/v1/mem-edges', { ids }); }
+  catch (e) { console.warn(`[mneme/remote] mem-edges failed org=${orgId}: ${e.message}`); return {}; }
+}
+
+// Per-memory relationships for remote org — returns central-shaped relationship object or null.
+export async function remoteMemRelationships(orgId, memoryId) {
+  try { const out = await _call(orgId, '/v1/mem-relationships', { memoryId }); return out?.error ? null : out; }
+  catch (e) { console.warn(`[mneme/remote] mem-relationships failed org=${orgId} id=${memoryId}: ${e.message}`); return null; }
+}
+
 // GDPR erasure: purge the ENTIRE org's data on the agent (all rows + vectors + edges). Returns
 // { ok, deleted } from the agent, or null on failure (account-delete records the failure but proceeds
 // to sever the central link; the saga can be retried). Self-host: physical destruction of the box is

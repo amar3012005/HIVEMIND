@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships } from './vector/mneme/driver.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -7828,6 +7828,18 @@ exit \$RC
       if (relsMatch && req.method === 'GET') {
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/relationships')) return;
         const memoryId = relsMatch[1];
+
+        // RESIDENCY: remote org — relationships live on the agent, not central.
+        if (orgIsRemote(orgId)) {
+          try {
+            const remRels = await amrMemRelationships(orgId, memoryId);
+            if (!remRels) return jsonResponse(res, { error: 'Not found' }, 404);
+            return jsonResponse(res, remRels);
+          } catch (remRelsErr) {
+            return jsonResponse(res, { error: remRelsErr.message }, 500);
+          }
+        }
+
         try {
           // Tenant + ownership check via the canonical store
           const mem = await persistentMemoryStore.getMemory(memoryId);
@@ -9708,7 +9720,18 @@ exit \$RC
         }
 
         const documentId = pathname.split('/')[3];
-        
+
+        // RESIDENCY: remote org — KB doc + segments + promoted memories live on the agent.
+        if (orgIsRemote(orgId)) {
+          try {
+            const remDetail = await amrKbDocDetail(orgId, documentId);
+            if (!remDetail) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
+            return jsonResponse(res, remDetail);
+          } catch (remErr) {
+            return jsonResponse(res, { error: remErr.message }, 500);
+          }
+        }
+
         try {
           const document = await prisma.knowledgeDocument.findFirst({
             where: {
@@ -22094,6 +22117,20 @@ ${injectionText}`;
         case '/api/documents':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/documents')) return;
+
+            // RESIDENCY: remote org — KB docs live on the agent, not central.
+            if (orgIsRemote(orgId)) {
+              const remLimit = parseInt(url.searchParams.get('limit') || '20');
+              const remOffset = parseInt(url.searchParams.get('offset') || '0');
+              try {
+                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset });
+                if (remResult) return jsonResponse(res, remResult);
+                return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
+              } catch (remErr) {
+                return jsonResponse(res, { error: remErr.message }, 500);
+              }
+            }
+
             if (!documentFirstIngestion) {
               return jsonResponse(res, { error: 'Document-first ingestion not enabled. Set ENABLE_DOCUMENT_FIRST_INGEST=true' }, 501);
             }

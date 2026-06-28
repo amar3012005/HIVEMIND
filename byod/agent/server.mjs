@@ -592,6 +592,247 @@ const routes = {
     return { ok: true, updated: r.rowCount };
   },
 
+  // ── KB doc LIST (self-host READ) ─────────────────────────────────────────
+  // Returns the org's knowledge_documents with per-doc segment_count and promoted_count.
+  // promoted_count = memories whose tags array contains 'filename:<filename>'.
+  // Response: { documents: [...], pagination: { total, limit, offset, hasMore } }
+  '/v1/kb-docs': async (b) => {
+    const limit = Math.min(Number(b.limit) || 20, 200);
+    const offset = Math.max(Number(b.offset) || 0, 0);
+    const { rows: docs } = await pg.query(
+      `SELECT id, filename, content_type, status, metadata, created_at
+       FROM knowledge_documents
+       WHERE org_id=$1 AND deleted_at IS NULL
+       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [ORG, limit, offset]
+    );
+    const { rows: totRow } = await pg.query(
+      'SELECT count(*)::int AS c FROM knowledge_documents WHERE org_id=$1 AND deleted_at IS NULL',
+      [ORG]
+    );
+    const total = totRow[0]?.c || 0;
+    // Batch segment counts and promoted counts in two queries rather than N+1.
+    const ids = docs.map((d) => d.id);
+    const filenames = docs.map((d) => d.filename).filter(Boolean);
+    let segMap = {};
+    let proMap = {};
+    if (ids.length) {
+      const { rows: segs } = await pg.query(
+        'SELECT document_id, count(*)::int AS c FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
+        [ORG, ids]
+      );
+      for (const r of segs) segMap[r.document_id] = r.c;
+    }
+    if (filenames.length) {
+      // promoted = memories tagged 'filename:<filename>'
+      const tagPatterns = filenames.map((f) => `filename:${f}`);
+      const { rows: prows } = await pg.query(
+        `SELECT unnest(tags) AS tag, count(*)::int AS c
+         FROM memories
+         WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
+         GROUP BY tag`,
+        [ORG, tagPatterns]
+      );
+      for (const r of prows) {
+        if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
+          const fn = r.tag.slice('filename:'.length);
+          proMap[fn] = (proMap[fn] || 0) + r.c;
+        }
+      }
+    }
+    const documents = docs.map((d) => ({
+      id: d.id,
+      // Map agent columns to the central shape the FE expects:
+      title: (d.metadata?.title) || d.filename || d.id,
+      documentType: d.content_type || (d.metadata?.document_type) || null,
+      sourcePlatform: d.metadata?.source_platform || null,
+      sourceUrl: d.metadata?.source_url || null,
+      documentDate: d.metadata?.document_date || null,
+      wordCount: d.metadata?.word_count || null,
+      parseStatus: d.status || 'ready',
+      parseEngine: d.metadata?.parse_engine || null,
+      structureExtracted: d.metadata?.structure_extracted ?? false,
+      tags: d.metadata?.tags || [],
+      createdAt: d.created_at,
+      updatedAt: d.created_at,
+      // Extra fields used by agent schema (not in central — ignored by FE gracefully):
+      filename: d.filename,
+      content_type: d.content_type,
+      status: d.status,
+      metadata: d.metadata || {},
+      // Counts:
+      segmentCount: segMap[d.id] || 0,
+      promotedCount: d.filename ? (proMap[d.filename] || 0) : 0,
+    }));
+    return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };
+  },
+
+  // ── KB doc DETAIL (self-host READ) ───────────────────────────────────────
+  // Returns one doc + its segments + promoted memories (memories tagged filename:<filename>).
+  // Response: { document, segments, promotedMemories, segmentCount, promotedCount }
+  '/v1/kb-doc-detail': async (b) => {
+    if (!b.documentId) return { error: 'documentId required' };
+    const { rows: docRows } = await pg.query(
+      'SELECT id, filename, content_type, status, metadata, created_at FROM knowledge_documents WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL',
+      [b.documentId, ORG]
+    );
+    if (!docRows.length) return { error: 'not found' };
+    const d = docRows[0];
+    const { rows: segs } = await pg.query(
+      'SELECT id, document_id, content, content_hash, segment_type, segment_index, metadata, created_at FROM knowledge_segments WHERE document_id=$1 AND org_id=$2 ORDER BY segment_index ASC',
+      [d.id, ORG]
+    );
+    // Map segments to central camelCase shape (FE reads segmentIndex, segmentType).
+    const segments = segs.map((s) => ({
+      id: s.id,
+      documentId: s.document_id,
+      content: s.content,
+      contentHash: s.content_hash,
+      segmentType: s.segment_type,
+      segmentIndex: s.segment_index,
+      metadata: s.metadata || {},
+      createdAt: s.created_at,
+    }));
+    // Promoted memories: tagged filename:<filename>.
+    let promotedMemories = [];
+    if (d.filename) {
+      const tag = `filename:${d.filename}`;
+      const { rows: mems } = await pg.query(
+        `SELECT id, title, content, memory_type, confidence, tags, created_at
+         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
+         ORDER BY created_at DESC LIMIT 100`,
+        [ORG, tag]
+      );
+      promotedMemories = mems.map((m) => ({
+        id: m.id,
+        title: m.title,
+        content: m.content,
+        memoryType: m.memory_type,
+        importanceScore: m.confidence,
+        tags: m.tags,
+        createdAt: m.created_at,
+        // evidence link fields (central shape includes these from evidenceLink join):
+        linkType: 'extracted-fact',
+        confidence: m.confidence,
+        excerpt: null,
+      }));
+    }
+    const document = {
+      id: d.id,
+      title: d.metadata?.title || d.filename || d.id,
+      documentType: d.content_type || d.metadata?.document_type || null,
+      sourcePlatform: d.metadata?.source_platform || null,
+      sourceUrl: d.metadata?.source_url || null,
+      documentDate: d.metadata?.document_date || null,
+      wordCount: d.metadata?.word_count || null,
+      parseStatus: d.status || 'ready',
+      parseEngine: d.metadata?.parse_engine || null,
+      structureExtracted: d.metadata?.structure_extracted ?? false,
+      tags: d.metadata?.tags || [],
+      createdAt: d.created_at,
+      filename: d.filename,
+      content_type: d.content_type,
+      status: d.status,
+      metadata: d.metadata || {},
+    };
+    return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
+  },
+
+  // ── Per-memory edge counts (self-host READ) ───────────────────────────────
+  // Returns { <id>: { in: N, out: N } } for each requested memory id.
+  // "in"  = relationships where to_id = this memory
+  // "out" = relationships where from_id = this memory
+  '/v1/mem-edges': async (b) => {
+    const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+    if (!ids.length) return {};
+    const { rows: outRows } = await pg.query(
+      'SELECT from_id AS id, count(*)::int AS c FROM relationships WHERE org_id=$1 AND from_id = ANY($2::uuid[]) GROUP BY from_id',
+      [ORG, ids]
+    );
+    const { rows: inRows } = await pg.query(
+      'SELECT to_id AS id, count(*)::int AS c FROM relationships WHERE org_id=$1 AND to_id = ANY($2::uuid[]) GROUP BY to_id',
+      [ORG, ids]
+    );
+    const result = {};
+    for (const id of ids) result[id] = { in: 0, out: 0 };
+    for (const r of outRows) if (result[r.id]) result[r.id].out = r.c;
+    for (const r of inRows) if (result[r.id]) result[r.id].in = r.c;
+    return result;
+  },
+
+  // ── Per-memory relationships (self-host READ) ─────────────────────────────
+  // Returns the same shape as /api/memories/:id/relationships (central handler).
+  // { memory_id, out: [...], in: [...], by_type: {...}, counts: { out, in, total } }
+  '/v1/mem-relationships': async (b) => {
+    if (!b.memoryId) return { error: 'memoryId required' };
+    const memId = b.memoryId;
+    const { rows: outRels } = await pg.query(
+      'SELECT id, from_id, to_id, type, confidence, created_at FROM relationships WHERE org_id=$1 AND from_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
+      [ORG, memId]
+    );
+    const { rows: inRels } = await pg.query(
+      'SELECT id, from_id, to_id, type, confidence, created_at FROM relationships WHERE org_id=$1 AND to_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
+      [ORG, memId]
+    );
+    // Batch-fetch peer memory titles.
+    const peerIds = [...new Set([...outRels.map((r) => r.to_id), ...inRels.map((r) => r.from_id)])];
+    let peerById = {};
+    if (peerIds.length) {
+      const { rows: peers } = await pg.query(
+        'SELECT id, title, content, memory_type, is_latest, deleted_at, created_at FROM memories WHERE org_id=$1 AND id = ANY($2::uuid[])',
+        [ORG, peerIds]
+      );
+      for (const p of peers) peerById[p.id] = p;
+    }
+    const peerTitle = (p) => p?.title || (p?.content || '').slice(0, 60) || '(untitled)';
+    const enrichOut = outRels.map((r) => {
+      const p = peerById[r.to_id];
+      return {
+        id: r.id,
+        type: r.type || 'Mentions',
+        confidence: r.confidence,
+        created_by: null,
+        created_at: r.created_at,
+        metadata: {},
+        direction: 'out',
+        target_id: r.to_id,
+        target_title: peerTitle(p),
+        target_memory_type: p?.memory_type || null,
+        target_is_latest: p?.is_latest ?? null,
+        target_deleted: !!(p?.deleted_at),
+      };
+    });
+    const enrichIn = inRels.map((r) => {
+      const p = peerById[r.from_id];
+      return {
+        id: r.id,
+        type: r.type || 'Mentions',
+        confidence: r.confidence,
+        created_by: null,
+        created_at: r.created_at,
+        metadata: {},
+        direction: 'in',
+        source_id: r.from_id,
+        source_title: peerTitle(p),
+        source_memory_type: p?.memory_type || null,
+        source_is_latest: p?.is_latest ?? null,
+        source_deleted: !!(p?.deleted_at),
+      };
+    });
+    const by_type = {};
+    for (const e of [...enrichOut, ...enrichIn]) {
+      const t = e.type || 'Other';
+      (by_type[t] = by_type[t] || []).push(e);
+    }
+    return {
+      memory_id: memId,
+      out: enrichOut,
+      in: enrichIn,
+      by_type,
+      counts: { out: enrichOut.length, in: enrichIn.length, total: enrichOut.length + enrichIn.length },
+    };
+  },
+
   // ── TARA call ledger (self-host) ──────────────────────────────────────────
   // op: 'upsert'  → create-or-update a call row (session start / reconnect).
   // op: 'get'     → fetch by session_id.

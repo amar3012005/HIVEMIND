@@ -709,7 +709,7 @@ Output the JSON object and nothing else.`;
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
         factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: 'fact', tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null });
-        embedPending.push({ id, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        embedPending.push({ id, fact: fact.f, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
@@ -719,7 +719,10 @@ Output the JSON object and nothing else.`;
         await Promise.all(embedPending.map(async (p, idx) => {
           try {
             const vec = vecs[idx];
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: embedPending[idx].ctxInput, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+            // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
+            // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
+            // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }

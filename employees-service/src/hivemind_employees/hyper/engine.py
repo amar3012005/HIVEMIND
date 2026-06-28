@@ -108,6 +108,11 @@ def _route_direct_openrouter(model: str) -> bool:
     if "compound" in m.lower():
         return False
     if _GROQ_NATIVE_RE.search(m):
+        # OpenRouter-PRIMARY for the director: native gpt-oss/llama route DIRECT to OpenRouter from
+        # call 1 (skip the wasted Groq probe) by default. Reversible per-process via
+        # HYPER_OPENROUTER_PRIMARY=0 → revert to Groq-primary-with-failover (direct only once Groq dead).
+        if os.environ.get("HYPER_OPENROUTER_PRIMARY", "1").lower() not in ("0", "false", "no", "off"):
+            return True
         return _GROQ_DEAD
     return "/" in m
 

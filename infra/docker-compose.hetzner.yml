@@ -100,6 +100,11 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
       GROQ_API_KEY: ${GROQ_API_KEY}
+      # Employees sidecar MUST listen on 8060 — control-plane calls http://hm-employees:8060
+      # (control-plane-server.js _hyperSidecar default). The global .env sets PORT=3000 (for core), so
+      # override it here or the sidecar binds 3000 and every room turn "no responses". config.py
+      # already defaults port=8060; this just neutralizes the inherited global PORT=3000.
+      PORT: "8060"
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }

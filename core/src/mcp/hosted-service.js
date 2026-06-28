@@ -2490,30 +2490,42 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         // smart-ingest + entity_co_mention + relationship edges fire
         // before we return. Wall time ~3-8s on the canonical pipeline,
         // acceptable for an interactive save.
-        const saveResp = await apiClient.post('/api/memories?sync=true', {
+        // Canonical front door: MCP save_memory (and chat autosave, which calls
+        // this same tool) routes through POST /api/ingest/source as an ATOMIC
+        // ingest. Provenance is normalized to source:mcp; the engine still owns
+        // supersession (relationship carries {type,target_id}) + entity/edge
+        // creation via the smart router — ingestSource atomic does NOT skip it,
+        // so behaviour matches the old sync /api/memories path. Identity flows
+        // through the X-HM-User-Id/Org-Id headers apiClient already sets, so the
+        // endpoint resolves the correct principal (no body user_id/org_id).
+        const _proj = SCOPE_FIELDS.project_id
+          || (autoAttachedProjectId && !resolvedProjectId ? autoAttachedProjectId : null);
+        const _projIds = SCOPE_FIELDS.project_ids
+          || (autoAttachedProjectId && !resolvedProjectId ? [autoAttachedProjectId] : undefined);
+        const ingestResp = await apiClient.post('/api/ingest/source', {
+          mode: 'atomic',
           title,
           content,
-          memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
-          source_platform: 'mcp',
+          source: { type: 'mcp', source_id: 'mcp' },
           tags: normalizeTags(args.tags),
-          project: normalizeMemoryText(args.project, null) || null,
+          ...(_proj ? { scope: 'project', project_id: _proj } : {}),
+          ...(SCOPE_FIELDS.primary_team_id ? { primary_team_id: SCOPE_FIELDS.primary_team_id } : {}),
           relationship,
           metadata: {
-            source_type: args.source_type || 'text'
+            memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
+            source_type: args.source_type || 'text',
+            project: normalizeMemoryText(args.project, null) || null,
+            ...(_projIds ? { project_ids: _projIds } : {}),
           },
-          user_id: userId,
-          org_id: orgId,
-          smartIngest: true,
-          sync: true,
-          ...SCOPE_FIELDS,
-          // Auto-attach needs the same shape as explicit scoping: project_ids[]
-          // drives resolveScopedIngestPayload; bare project_id alone is ignored
-          // by the scope resolver and the save lands org-wide/personal.
-          ...(autoAttachedProjectId && !resolvedProjectId
-            ? { project_id: autoAttachedProjectId, project_ids: [autoAttachedProjectId], scope: 'project' }
-            : {}),
-          __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
+        const newId = ingestResp.memoryId || (Array.isArray(ingestResp.memoryIds) ? ingestResp.memoryIds[0] : null);
+        const saveResp = {
+          saved: ingestResp.ok === true && !!newId,
+          id: newId,
+          memory_id: newId,
+          operation: ingestResp.operation || 'created',
+          skipped: ingestResp.skipped || false,
+        };
         return formatToolContent({
           ...saveResp,
           scope: resolvedProjectId ? { project_id: resolvedProjectId } : { scope: 'org-wide' },

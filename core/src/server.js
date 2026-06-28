@@ -10127,6 +10127,9 @@ exit \$RC
               scope: body.scope,
               projectId: body.project_id || body.projectId,
               primaryTeamId: body.primary_team_id || body.primaryTeamId,
+              // Atomic-save supersession (MCP save_memory / chat autosave).
+              relationship: body.relationship,
+              relatedTo: body.related_to || body.relatedTo,
               tags: body.tags,
               metadata: body.metadata,
             };
@@ -11563,15 +11566,20 @@ exit \$RC
                 const content = rec.content || rec.body || rec.text || null;
                 if (!content) continue;
                 try {
-                  const result = await documentFirstIngestion.ingestConnectorRecord({
+                  // Canonical front door — bulk backfill normalizes each record
+                  // into the same IngestEnvelope as webhook + KB + MCP.
+                  const result = await documentFirstIngestion.ingestSource({
                     userId: targetUserId,
                     orgId: targetOrgId,
-                    providerKey,
-                    sourceId: String(rec.resource_id || rec.id || `${providerKey}-${Date.now()}-${Math.random()}`),
-                    title: rec.title || null,
                     content,
-                    sourceUrl: rec.refs?.url || null,
-                    documentDate: rec.ts ? new Date(rec.ts) : null,
+                    source: {
+                      type: 'connector',
+                      provider: providerKey,
+                      sourceId: String(rec.resource_id || rec.id || `${providerKey}-${Date.now()}-${Math.random()}`),
+                      url: rec.refs?.url || null,
+                      title: rec.title || null,
+                    },
+                    occurredAt: rec.ts ? new Date(rec.ts) : null,
                     metadata: { resource_type: rec.resource_type, refs: rec.refs || null },
                   });
                   ingested.push({ resource_id: rec.resource_id, ...result });
@@ -14662,11 +14670,10 @@ exit \$RC
                       continue;
                     }
                   }
-                  const r = await documentFirstIngestion.ingestKnowledgeDocument({
+                  const r = await documentFirstIngestion.ingestSource({
                     userId, orgId,
-                    filename: fp.filename,
-                    fileBuffer: fp.data,
-                    contentType: fp.contentType || 'application/octet-stream',
+                    source: { type: 'kb', filename: fp.filename },
+                    file: { buffer: fp.data, contentType: fp.contentType || 'application/octet-stream', filename: fp.filename },
                     metadata: {
                       tags: userTags,
                       project: containerTag,
@@ -14979,11 +14986,10 @@ exit \$RC
                   (async () => {
                     const tBg = Date.now();
                     try {
-                      const result = await documentFirstIngestion.ingestKnowledgeDocument({
+                      const result = await documentFirstIngestion.ingestSource({
                         userId, orgId,
-                        filename: filePart.filename,
-                        fileBuffer: filePart.data,
-                        contentType: filePart.contentType || `text/${ext}`,
+                        source: { type: 'kb', filename: filePart.filename },
+                        file: { buffer: filePart.data, contentType: filePart.contentType || `text/${ext}`, filename: filePart.filename },
                         metadata: phase1Metadata,
                         onProgress: (p) => {
                           const prev = ingestTracker.getJob(jobId)?.metadata || {};
@@ -15010,11 +15016,10 @@ exit \$RC
 
                 const tPhase1 = Date.now();
                 try {
-                  const result = await documentFirstIngestion.ingestKnowledgeDocument({
+                  const result = await documentFirstIngestion.ingestSource({
                     userId, orgId,
-                    filename: filePart.filename,
-                    fileBuffer: filePart.data,
-                    contentType: filePart.contentType || `text/${ext}`,
+                    source: { type: 'kb', filename: filePart.filename },
+                    file: { buffer: filePart.data, contentType: filePart.contentType || `text/${ext}`, filename: filePart.filename },
                     metadata: {
                       tags: userTags,
                       project: containerTag,

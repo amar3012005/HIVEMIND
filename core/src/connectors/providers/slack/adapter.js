@@ -483,12 +483,21 @@ export class SlackAdapter extends BaseProviderAdapter {
         const buf = Buffer.from(arrayBuf);
         if (buf.length === 0 || buf.length > 50 * 1024 * 1024) continue; // 50 MB cap
 
-        await docService.ingestKnowledgeDocument({
+        // Canonical front door — a Slack-shared file is a connector-sourced
+        // document. source.provider='slack' so provenance highlights the
+        // connector (platform → connector:slack), routed through the same
+        // ingestKnowledgeDocument file pipeline.
+        await docService.ingestSource({
           userId: ctx.user_id,
           orgId: ctx.org_id,
-          filename: f.name,
-          fileBuffer: buf,
-          contentType: f.mimetype || 'application/octet-stream',
+          source: {
+            type: 'connector',
+            provider: 'slack',
+            filename: f.name,
+            sourceId: f.id,
+            title: f.name,
+          },
+          file: { buffer: buf, contentType: f.mimetype || 'application/octet-stream', filename: f.name },
           metadata: {
             source: 'slack',
             slack_file_id: f.id,

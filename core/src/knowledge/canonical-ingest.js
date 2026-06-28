@@ -79,6 +79,9 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {string[]} [tags]
  * @property {Object} [metadata]
  * @property {number} [documentThreshold]   override DEFAULT_DOCUMENT_THRESHOLD
+ * @property {Object} [relationship]         atomic-save supersession descriptor (engine-owned)
+ * @property {string} [relatedTo]            id this atomic memory supersedes/extends
+ * @property {Function} [onProgress]         internal-only per-stage progress callback (document+file)
  */
 
 /**

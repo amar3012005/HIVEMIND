@@ -1361,12 +1361,14 @@ Output the JSON object and nothing else.`;
         const r = await this.ingestKnowledgeDocument({
           userId, orgId, filename, fileBuffer: buffer, contentType,
           metadata: { ...docMeta, filename },
+          // Internal callers (KB upload queue/routes) stream per-stage progress
+          // into the job tracker. Not an HTTP-envelope field — undefined for
+          // remote callers, which is harmless.
+          onProgress: envelope.onProgress || null,
         });
-        return {
-          ok: true, mode, source: sourceType,
-          documentId: r.documentId, segmentCount: r.segmentCount,
-          promotedCount: r.promotedCount, memoryIds: r.promotedMemoryIds || [],
-        };
+        // Spread the underlying result so existing callers keep reading pages /
+        // candidateCount / segmentCount / documentId; add the canonical fields.
+        return { ...r, ok: true, mode, source: sourceType, memoryIds: r.promotedMemoryIds || [] };
       }
 
       // Text document (connector record / long note / meeting transcript):
@@ -1382,11 +1384,7 @@ Output the JSON object and nothing else.`;
         metadata: { ...docMeta, filename: prov.title || undefined },
       });
       if (r.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: r.reason };
-      return {
-        ok: true, mode, source: sourceType,
-        documentId: r.documentId, segmentCount: r.segmentCount,
-        promotedCount: r.promotedCount, memoryIds: r.promotedMemoryIds || [],
-      };
+      return { ...r, ok: true, mode, source: sourceType, memoryIds: r.promotedMemoryIds || [] };
     }
 
     // ── atomic mode ── one memory through the canonical engine gateway.
@@ -1401,16 +1399,23 @@ Output the JSON object and nothing else.`;
       source_metadata: prov.sourceMetadata,
       document_date: prov.documentDate || undefined,
       scope: scope || undefined,
-      project_ids: projectId ? [projectId] : [],
       primary_team_id: primaryTeamId || undefined,
       visibility: envelope.metadata?.visibility || undefined,
+      // Atomic-save semantics (MCP save_memory / chat autosave): supersession
+      // relationship + project_ids[] flow straight to the engine. The engine
+      // (smart-router) owns the actual update/extend/contradict logic — we only
+      // forward, never reimplement it here ("memory engine left untouched").
+      relationship: envelope.relationship || undefined,
+      related_to: envelope.relatedTo || undefined,
+      project_ids: projectId ? [projectId] : (Array.isArray(envelope.metadata?.project_ids) ? envelope.metadata.project_ids : []),
+      project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)
       ? res.results.map(x => x?.memoryId || x?.id).filter(Boolean)
       : [res?.memoryId || res?.id].filter(Boolean);
-    return { ok: true, mode, source: sourceType, memoryIds, promotedCount: memoryIds.length };
+    return { ok: true, mode, source: sourceType, memoryIds, promotedCount: memoryIds.length, memoryId: memoryIds[0] || null, operation: res?.operation || null };
   }
 
   /**

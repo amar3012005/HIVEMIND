@@ -6124,7 +6124,7 @@ exit \$RC
             meeting = await amrMeetingGet(mOrg, meetingId);
           } else {
             const rows = await prisma.$queryRawUnsafe(
-              `SELECT id, title, insights, summary, topics, decisions, action_items, key_points
+              `SELECT id, title, insights, summary, topics, decisions, action_items, key_points, notes
                  FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
               meetingId, mOrg,
             );
@@ -6198,7 +6198,9 @@ exit \$RC
           };
           const judge = async (payload) => {
             let sys;
-            if (payload.task === 'entity_briefs') {
+            if (payload.task === 'synthesis') {
+              sys = 'You are the chief-of-staff intelligence layer for THIS organization. Inputs: the meeting (summary/decisions/actions/risks), the user\'s own NOTES (their intent — HIGHEST priority, reflect their framing), and what HIVEMIND already knows about this org (entity_briefs, continuity = how this meeting\'s decisions relate to PRIOR org decisions, open_loops = still-open items from before, related = related org memories). Produce HIGH-LEVEL, ORG-SPECIFIC strategic intelligence — NOT a generic recap of the meeting. Every point MUST be grounded in the provided meeting/notes/memories and name the connection (e.g. "contradicts the March pricing decision", "advances the open Acme integration loop"). Honor the NOTES as primary intent. If grounding is thin, return FEWER points — never pad with generic advice. STRICT JSON {"synthesis":{"headline": string (one punchy org-specific sentence), "strategic_points": string[] (3-6, each grounded + names its source), "whats_changed": string[] (what this shifts vs prior org memory — cite the prior), "risks_opportunities": [{"type":"risk"|"opportunity","text":string}], "recommended_focus": string[] (1-4 concrete next priorities for THIS org)}}. Empty arrays when nothing is grounded.';
+            } else if (payload.task === 'entity_briefs') {
               sys = 'You write one-line factual briefs about named entities, grounded ONLY in the provided dated snippets. Rules: (1) Use ONLY facts where the named entity is the EXPLICIT subject. (2) If NO snippet is clearly about that entity, output an EMPTY string "" for it — never guess, never infer a relationship that is not stated. (3) When snippets conflict or evolve over time, the MOST RECENT dated fact wins (snippets are prefixed [YYYY-MM-DD]). (4) One sentence, concrete, no fluff. Output STRICT JSON {"briefs":{"<name>":"<brief or empty string>"}}.';
             } else if (payload.task === 'resolve_loops') {
               sys = 'For each {action, evidence[]} item, decide the action\'s current status using ONLY the dated evidence snippets (dated AFTER the action was raised). "done" ONLY if a snippet clearly shows the action was completed. "in_progress" if a snippet shows partial movement toward it. Otherwise "open". NEVER mark done without explicit completion evidence. For in_progress, write a one-line progress note citing the evidence and set evidence_index to the snippet index used (else -1). STRICT JSON {"results":[{"status":"done|in_progress|open","progress":"<one line or empty>","evidence_index":<int>}]} in item order.';

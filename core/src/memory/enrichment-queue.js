@@ -56,7 +56,11 @@ export class EnrichmentQueue {
       return false;
     }
     const orgId = payload?.orgId || payload?.org_id || null;
-    this.pending.push({ memoryId, payload, orgId, enqueuedAt: Date.now() });
+    // Capture the request's API key at enqueue (runs inside the ingest-worker context) so the detached
+    // worker attributes this memory's structured-enrichment LLM spend to the originating org key.
+    const apiKeyId = payload?.apiKeyId
+      || (() => { try { return globalThis.__hivemindOrgCtx?.currentApiKey?.() || null; } catch { return null; } })();
+    this.pending.push({ memoryId, payload, orgId, apiKeyId, enqueuedAt: Date.now() });
     this.counters.enqueued += 1;
     setImmediate(() => this._drain());
     return true;
@@ -107,7 +111,7 @@ export class EnrichmentQueue {
     try {
       const ctx = globalThis.__hivemindOrgCtx;
       const run = job.orgId && ctx?.runWithOrg
-        ? (fn) => ctx.runWithOrg(job.orgId, fn)
+        ? (fn) => ctx.runWithOrg(job.orgId, fn, job.apiKeyId || null)
         : (fn) => fn();
       const result = await run(() => this.engine.enrichMemoryStructured(job.memoryId, job.payload));
       const dur = Date.now() - startedAt;

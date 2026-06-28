@@ -16895,6 +16895,10 @@ exit \$RC
                 // 202), where enterWith from the request scope does not survive — re-establish the org
                 // context explicitly so the background writes route to the org's store (self-host → its PG).
                 runWithOrg(orgId, async () => {
+                  // Re-thread the request's API key into this detached context (the request-scope
+                  // enterWith didn't survive) so the deferred enrichment/entity-link LLM calls enqueued
+                  // below attribute their token spend to the originating org key, not the system sentinel.
+                  try { enterOrgContext(orgId, principal.keyId || null); } catch { /* best-effort */ }
                   await ingestAcquire();
                   // Deadlock-proof: release the slot exactly once, and force it
                   // free after INGEST_JOB_TIMEOUT_MS so a hung job (qdrant/pool/

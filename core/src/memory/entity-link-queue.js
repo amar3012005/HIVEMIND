@@ -48,7 +48,10 @@ export class EntityLinkQueue {
       return false;
     }
     this.queuedKeys.add(memoryId);
-    this.pending.push({ key: memoryId, memory, memoryId, enqueuedAt: Date.now() });
+    // Capture the request's API key NOW (enqueue runs inside the request/ingest-worker context) so the
+    // detached drain can attribute this memory's entity-link LLM spend to the originating org key.
+    const apiKeyId = (() => { try { return globalThis.__hivemindOrgCtx?.currentApiKey?.() || null; } catch { return null; } })();
+    this.pending.push({ key: memoryId, memory, memoryId, apiKeyId, enqueuedAt: Date.now() });
     this.counters.enqueued += 1;
     setImmediate(() => this._drain());
     return true;
@@ -97,7 +100,7 @@ export class EntityLinkQueue {
       const _org = memory.org_id || memory.orgId;
       const _ctx = globalThis.__hivemindOrgCtx;
       const _run = (_org && _ctx && _ctx.runWithOrg)
-        ? (fn) => _ctx.runWithOrg(_org, fn)
+        ? (fn) => _ctx.runWithOrg(_org, fn, job.apiKeyId || null)
         : (fn) => fn();
       await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, []));
       this.counters.completed += 1;

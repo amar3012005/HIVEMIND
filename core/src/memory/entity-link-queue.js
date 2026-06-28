@@ -37,8 +37,9 @@ export class EntityLinkQueue {
     this.logger = logger;
   }
 
-  /** Enqueue a memory (object preferred — avoids a reload) or an id string. */
-  enqueue(memoryOrId) {
+  /** Enqueue a memory (object preferred — avoids a reload) or an id string.
+   *  peers = same-batch sibling memories passed as explicit co-mention candidates. */
+  enqueue(memoryOrId, peers = null) {
     if (!memoryOrId) return false;
     const memory = typeof memoryOrId === 'object' ? memoryOrId : null;
     const memoryId = memory ? memory.id : String(memoryOrId);
@@ -51,7 +52,7 @@ export class EntityLinkQueue {
     // Capture the request's API key NOW (enqueue runs inside the request/ingest-worker context) so the
     // detached drain can attribute this memory's entity-link LLM spend to the originating org key.
     const apiKeyId = (() => { try { return globalThis.__hivemindOrgCtx?.currentApiKey?.() || null; } catch { return null; } })();
-    this.pending.push({ key: memoryId, memory, memoryId, apiKeyId, enqueuedAt: Date.now() });
+    this.pending.push({ key: memoryId, memory, memoryId, apiKeyId, peers, enqueuedAt: Date.now() });
     this.counters.enqueued += 1;
     setImmediate(() => this._drain());
     return true;
@@ -60,8 +61,20 @@ export class EntityLinkQueue {
   /** Enqueue many memory objects/ids. Returns count actually queued. */
   enqueueBatch(items) {
     if (!Array.isArray(items)) return 0;
+    // Same-batch peers (e.g. all memories promoted from ONE KB doc) are passed as explicit co-mention
+    // candidates so siblings sharing entities link to each other in a SINGLE pass — independent of the
+    // async tag/commit timing that otherwise leaves intra-doc memories disconnected (the "0 survived"
+    // gap). Content-bearing so the linker's entity content-fallback matches even before tags attach.
+    const objs = items.filter((it) => it && typeof it === 'object' && it.id);
+    const peerPool = objs.map((o) => ({ id: o.id, content: o.content, title: o.title, tags: o.tags || [] }));
     let added = 0;
-    for (const it of items) { if (this.enqueue(it)) added += 1; }
+    for (const it of items) {
+      const id = typeof it === 'object' ? it?.id : it;
+      const peers = (peerPool.length > 1 && id)
+        ? peerPool.filter((p) => p.id !== id).slice(0, 12)
+        : null;
+      if (this.enqueue(it, peers)) added += 1;
+    }
     return added;
   }
 
@@ -102,7 +115,8 @@ export class EntityLinkQueue {
       const _run = (_org && _ctx && _ctx.runWithOrg)
         ? (fn) => _ctx.runWithOrg(_org, fn, job.apiKeyId || null)
         : (fn) => fn();
-      await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, []));
+      const peers = Array.isArray(job.peers) ? job.peers : [];
+      await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, peers));
       this.counters.completed += 1;
     } catch (err) {
       this.counters.failed += 1;

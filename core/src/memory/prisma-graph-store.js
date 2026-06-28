@@ -1216,6 +1216,12 @@ export class PrismaGraphStore {
   }
 
   async enqueueDerivationJob(job) {
+    // RESIDENCY: derivation jobs are a CENTRAL-only async-derivation feature whose FK points at memory
+    // rows. For a remote (self-host) org the memory lives on the agent, so a central create() throws
+    // (Invalid prisma.derivationJob.create invocation — FK to a row central doesn't have) and aborts KB
+    // promotion. Skip for remote; the agent-side graph (tags + edges via the co-mention linker) is the
+    // self-host equivalent.
+    if (orgIsRemote(currentOrg())) return null;
     return this.client.derivationJob.create({
       data: {
         id: job.id,

@@ -1599,11 +1599,18 @@ Output the JSON object and nothing else.`;
             memories.push(result);
             continue;
           }
-          // Defense-in-depth: verify row actually exists before FK insert
-          const exists = await this.db.memory.findUnique({ where: { id: memoryId }, select: { id: true } });
-          if (!exists) {
-            memories.push(result);
-            continue;
+          // Defense-in-depth: verify row actually exists before FK insert.
+          // RESIDENCY: a remote (self-host) org's memory lives on the AGENT, not central — a central
+          // findUnique returns null and would wrongly skip promotion, dropping entity-linking +
+          // provenance + relations (the bug that left a self-host PDF's 21 segments → 0 useful memories).
+          // Trust the agent write: ingestMemory→amrWrite already landed it and the agent enforces its own
+          // existence; the deferred co-mention linker self-fetches candidates.
+          if (!orgIsRemote(orgId)) {
+            const exists = await this.db.memory.findUnique({ where: { id: memoryId }, select: { id: true } });
+            if (!exists) {
+              memories.push(result);
+              continue;
+            }
           }
           memories.push({ ...result, id: memoryId });
           entityLinkTargets.push({
@@ -1666,11 +1673,14 @@ Output the JSON object and nothing else.`;
 
     // #6 — batched provenance inserts (2 round-trips total vs 2×N). Append-only
     // link rows, no advisory-lock semantics — safe + contained to the KB path.
-    if (evidenceLinkRows.length) {
+    // RESIDENCY: memoryEvidenceLink + memoryDerivation are CENTRAL-only provenance tables FK'd to the
+    // memory. For a remote (self-host) org the memory is on the agent, so these createMany throw + are
+    // pointless. Skip for remote — segment↔memory traceability for self-host is the agent's concern.
+    if (evidenceLinkRows.length && !orgIsRemote(orgId)) {
       await this.db.memoryEvidenceLink.createMany({ data: evidenceLinkRows, skipDuplicates: true })
         .catch((e) => this.logger.warn?.(`[kb] evidence-link batch failed: ${e.message}`));
     }
-    if (derivationRows.length) {
+    if (derivationRows.length && !orgIsRemote(orgId)) {
       await this.db.memoryDerivation.createMany({ data: derivationRows, skipDuplicates: true })
         .catch((e) => this.logger.warn?.(`[kb] derivation batch failed: ${e.message}`));
     }
@@ -1824,6 +1834,11 @@ Output the JSON object and nothing else.`;
   /** Fire-and-forget: copy segment's entity mentions onto memory + update topic state. */
   _linkEntitiesToMemoryAsync({ memoryId, segmentId, orgId, documentId, memoryContent }) {
     if (process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
+    // RESIDENCY: this mirrors central segment entity_mentions onto the memory via central entityMention
+    // + memory.update — all FK'd to central rows the agent doesn't have. For a remote (self-host) org the
+    // memory's entity tags + edges are built on the AGENT by the deferred co-mention linker
+    // (_attachEntityCoMentionEdges → amrUpdateTags + amrAddEdge). Skip the central mirror for remote.
+    if (orgIsRemote(orgId)) return;
     (async () => {
       try {
         await new Promise(r => setTimeout(r, 500));

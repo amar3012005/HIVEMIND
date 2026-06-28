@@ -1357,7 +1357,12 @@ Output the JSON object and nothing else.`;
         document_date: prov.documentDate ? prov.documentDate.toISOString() : null,
         tags: [...callerTags, ...prov.provenanceTags],
         ...(scope ? { scope } : {}),
-        ...(projectId ? { project_id: projectId } : {}),
+        // Thread BOTH project_id (legacy) and project_ids[] — the distill path
+        // (_ingestUnifiedWindow / ingestFact) reads metadata.project_ids, and the
+        // engine THROWS on scope:'project' with an empty project_ids[]. When the
+        // caller passed project_ids in metadata (KB upload routes) it is already
+        // spread above; envelope.projectId (meeting/MCP) is normalized to [id].
+        ...(projectId ? { project_id: projectId, project_ids: [projectId] } : {}),
         ...(primaryTeamId ? { primary_team_id: primaryTeamId } : {}),
       };
 

@@ -1768,11 +1768,33 @@ Output the JSON object and nothing else.`;
       if (String(process.env.KB_UNIFIED_EXTRACT ?? 'false').toLowerCase() === 'true' || String(process.env.KB_UNIFIED_EXTRACT ?? '') === '1') {
         const docTitle = metadata.documentTitle || metadata.filename || '';
         const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
+        const DOC_CAP = Number(process.env.KB_UNIFIED_DOC_CAP || 30); // rich-but-bounded total facts/doc
+        // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
+        // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
+        const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
+        const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 11);
+        let uWindows = targets;
+        try {
+          const { chunkText } = await import('./document-chunker.js');
+          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 0 }) || [])
+            .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
+          if (uc.length) uWindows = uc.map((content, i) => ({
+            segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
+            content, heading: null, page: null,
+            maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * UFPK))),
+            scope: metadata.scope, visibility: metadata.visibility,
+            primary_team_id: metadata.primary_team_id || null,
+            project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+          }));
+        } catch { /* keep targets */ }
         const uFacts = [];
         let wi = 0;
-        const uWorkers = Array.from({ length: Math.min(uConc, targets.length) }, async () => {
-          while (wi < targets.length) {
-            const w = targets[wi++];
+        const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
+          while (wi < uWindows.length && uFacts.length < DOC_CAP) {
+            const w = { ...uWindows[wi++] };
+            // Clamp this window's budget to the remaining doc cap so the total stays bounded + coverage
+            // doesn't get front-loaded out by early dense windows.
+            w.maxFacts = Math.max(1, Math.min(w.maxFacts || 8, DOC_CAP - uFacts.length));
             const fo = await this._ingestUnifiedWindow(w, { userId, orgId, documentId, metadata, docTitle, entityContext: '' });
             if (Array.isArray(fo) && fo.length) uFacts.push(...fo);
           }

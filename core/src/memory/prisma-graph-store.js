@@ -93,7 +93,11 @@ function mapAgentRow(r) {
     valid_from: r.valid_from || null,
     document_date: r.document_date || null,
     metadata: r.metadata || {},
-    source_metadata: {},
+    // Provenance is folded into the agent's `metadata` jsonb on write (createMemory
+    // remote branch). Surface it as the canonical source_metadata shape so remote
+    // reads match central reads. Falls back to a top-level field if the agent ever
+    // gains a dedicated column.
+    source_metadata: r.source_metadata || (r.metadata && r.metadata.source_metadata) || {},
   };
 }
 
@@ -340,6 +344,14 @@ export class PrismaGraphStore {
         createdAt: memory.created_at || new Date().toISOString(),
         project: memory.project || null, projectIds: memory.project_ids || [],
         validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
+        // Provenance round-trip: the agent persists a `metadata` jsonb (no
+        // dedicated source columns), so fold source_metadata into it. Without
+        // this, remote-org reads return source_metadata:{} (the structured
+        // provenance was captured only in tags). mapAgentRow reads it back.
+        metadata: {
+          ...(memory.metadata && typeof memory.metadata === 'object' ? memory.metadata : {}),
+          ...(memory.source_metadata ? { source_metadata: memory.source_metadata } : {}),
+        },
       }, null, []);
       return;
     }

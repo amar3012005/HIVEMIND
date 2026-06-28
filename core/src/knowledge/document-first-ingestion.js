@@ -414,6 +414,11 @@ Output the JSON object and nothing else.`;
           title: (factTitle && factTitle.trim() && !isGarbageTitle(factTitle)) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
           memory_type: 'fact',
           source_type: 'knowledge_fact',
+          // Event date of the source document (connector occurredAt / meeting
+          // date / KB document_date) → every distilled fact carries it, so
+          // time-travel + recency ranking work on the real-world date, not the
+          // ingest time. Null for plain uploads with no date (unchanged).
+          document_date: metadata.document_date || null,
           tags: [
             ...(metadata.tags || []),
             'extracted-fact',
@@ -1343,6 +1348,7 @@ Output the JSON object and nothing else.`;
         source_id: prov.sourceMetadata.source_id,
         source_url: prov.sourceMetadata.source_url,
         ingest_source: sourceType,
+        document_date: prov.documentDate ? prov.documentDate.toISOString() : null,
         tags: [...callerTags, ...prov.provenanceTags],
         ...(scope ? { scope } : {}),
         ...(projectId ? { project_id: projectId } : {}),

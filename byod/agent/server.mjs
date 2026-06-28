@@ -238,9 +238,18 @@ const routes = {
          metadata, scope, primary_team_id, vector_synced)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,false)
        ON CONFLICT (id) DO UPDATE SET
-         content=EXCLUDED.content, title=EXCLUDED.title, tags=EXCLUDED.tags, memory_type=EXCLUDED.memory_type,
+         content=EXCLUDED.content,
+         -- title/tags/confidence: the 2-phase write (engine row, THEN vector
+         -- re-upsert) carries null title / bare tags / null confidence on the
+         -- 2nd write. Plain EXCLUDED CLOBBERED the title, the ts: date tag, and
+         -- the importance score. COALESCE title+confidence (keep the scored
+         -- value) and UNION tags (so ts:/entity:/filename: from BOTH writes
+         -- survive) instead of overwriting.
+         title=COALESCE(NULLIF(EXCLUDED.title,''), memories.title),
+         tags=(SELECT ARRAY(SELECT DISTINCT x FROM unnest(memories.tags || EXCLUDED.tags) AS x)),
+         confidence=COALESCE(EXCLUDED.confidence, memories.confidence),
+         memory_type=COALESCE(EXCLUDED.memory_type, memories.memory_type),
          is_latest=EXCLUDED.is_latest, layer=EXCLUDED.layer, cognitive_layer_role=EXCLUDED.cognitive_layer_role,
-         confidence=EXCLUDED.confidence,
          scope=COALESCE(EXCLUDED.scope, memories.scope),
          primary_team_id=COALESCE(EXCLUDED.primary_team_id, memories.primary_team_id),
          -- Provenance preservation: memory rows are written in two phases — the

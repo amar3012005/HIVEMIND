@@ -607,13 +607,19 @@ Output the JSON object and nothing else.`;
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
     }
     const REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates'];
-    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, and the RELATIONSHIPS between facts. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
+    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, the RELATIONSHIPS between facts, and each fact's IMPORTANCE. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","importance":<0.0-1.0>,"entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
 
 FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
-- "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize.
+- "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize. Keep it SPECIFIC to THIS document — concrete subjects, real figures, named parties — not a generic restatement.
 - Extract only decision-relevant stated information (names, roles, products, specs, numbers, dates, decisions, events, causal claims). NON-REDUNDANT — never restate the same point; keep the single most specific.
 - SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
 - At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
+
+IMPORTANCE rules — rate each fact 0.0-1.0 by how decision-critical + specific it is:
+- 0.85-1.0: a decision, commitment, deadline, price/budget figure, contract term, or a named strategic fact unique to this org/project.
+- 0.6-0.8: a concrete spec/metric/role/event with named parties or numbers.
+- 0.3-0.5: supporting context, general description, or background.
+- < 0.3: near-boilerplate (you should usually SKIP these instead).
 
 ENTITY rules — ONE canonical name per real-world thing (so it never forks):
 - A SHORT noun (1-3 words): a specific person, organization, product/model, place, technology, or standard. NEVER a phrase, clause, description, or generic concept.
@@ -629,9 +635,10 @@ Output the JSON object and nothing else.`;
     const SCHEMA = {
       type: 'object', additionalProperties: false, required: ['facts'],
       properties: { facts: { type: 'array', items: {
-        type: 'object', additionalProperties: false, required: ['t', 'f', 'entities', 'rels'],
+        type: 'object', additionalProperties: false, required: ['t', 'f', 'importance', 'entities', 'rels'],
         properties: {
           t: { type: 'string' }, f: { type: 'string' },
+          importance: { type: 'number' },
           entities: { type: 'array', items: { type: 'string' } },
           rels: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['to', 'type'],
             properties: { to: { type: 'integer' }, type: { type: 'string', enum: REL_TYPES } } } },
@@ -666,6 +673,18 @@ Output the JSON object and nothing else.`;
       .map((x) => ({
         t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim().slice(0, 80) : cleanTitleFrom(x.f, 48),
         f: x.f.trim(),
+        // LLM-rated salience in the SAME pass (no extra call). Clamp 0.1-1.0;
+        // fall back to a content-signal heuristic if the model omitted/garbled it.
+        importance: (() => {
+          const n = Number(x.importance);
+          if (Number.isFinite(n) && n > 0) return Math.max(0.1, Math.min(1.0, Number(n.toFixed(3))));
+          const f = x.f || '';
+          let s = 0.55;
+          if (/\d/.test(f)) s += 0.1;                                  // has a number/date/figure
+          if (/(decision|deadline|budget|price|contract|agreed|will |must |launch|signed|€|\$|%)/i.test(f)) s += 0.12;
+          if ((Array.isArray(x.entities) ? x.entities.length : 0) >= 3) s += 0.08;
+          return Math.max(0.1, Math.min(0.95, Number(s.toFixed(3))));
+        })(),
         entities: (Array.isArray(x.entities) ? x.entities : []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8),
         rels: (Array.isArray(x.rels) ? x.rels : []).filter((r) => r && Number.isInteger(r.to) && REL_TYPES.includes(r.type)).slice(0, 5),
       }));
@@ -705,6 +724,7 @@ Output the JSON object and nothing else.`;
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           document_date: metadata.document_date || null,
           source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
           metadata: { document_id: documentId, segment_id: window.segmentId || null, distill_agent: 'kb_unified_v1' },

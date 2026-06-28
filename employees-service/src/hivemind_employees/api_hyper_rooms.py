@@ -64,6 +64,9 @@ from .db import (
     get_room_quality_mode,
     get_room_sim_mode,
     get_room_sim_agents,
+    get_room_evo_mode,
+    get_employee_playbooks_map,
+    update_employee_playbook,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -75,7 +78,7 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director
+from .hyper.engine import run_director, evo_reflect_and_merge
 
 log = logging.getLogger(__name__)
 
@@ -1635,6 +1638,9 @@ class RoomTurnRequest(BaseModel):
     # stored sim_mode is read. Optional so existing callers are unaffected (additive).
     sim_mode: Optional[str] = None
     sim_agents: Optional[int] = None  # population-sim cast size (10-100); per-turn override
+    # Self-evolving employees toggle ("on" reflects+injects per-agent playbooks). Per-turn override;
+    # else the room's stored evo_mode is read. Optional (existing callers unaffected, additive).
+    evo_mode: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -2635,8 +2641,25 @@ async def _orchestrate_single_agent(
             _sim_agents = await get_room_sim_agents(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _sim_agents = 24
-    log.info("[single] room=%s quality=%s sim=%s/%d models=(%s, %s, %s)",
-             req.room_id, _qmode, _sim_mode, _sim_agents, _dir_m, _per_m, _syn_m)
+    # Self-evolving employees (ADDITIONAL, opt-in) — req.evo_mode (eval override) wins, else the
+    # room's stored toggle. When on, load each participant's GLOBAL playbook (lessons across ALL
+    # rooms, on digital_employees) for this turn. Never raises (additive, dormant).
+    _evo_mode = str(getattr(req, "evo_mode", "") or "").strip().lower()
+    if not _evo_mode:
+        try:
+            _evo_mode = await get_room_evo_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _evo_mode = "off"
+    _evo_playbooks: Dict[str, list] = {}
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
+        try:
+            _p_slugs = [str(p.get("slug")) for p in (participants or []) if p.get("slug")]
+            _evo_playbooks = await get_employee_playbooks_map(req.org_id, _p_slugs)
+        except Exception:  # noqa: BLE001
+            _evo_playbooks = {}
+    log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks),
+             _dir_m, _per_m, _syn_m)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2648,6 +2671,7 @@ async def _orchestrate_single_agent(
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
+            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2747,6 +2771,41 @@ async def _orchestrate_single_agent(
         status = "blocked"
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
+
+    # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal so the FE (SSE closes on
+    # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL
+    # outcome, then persists to the GLOBAL playbook (digital_employees) — learning compounds across
+    # ALL rooms. Best-effort + org-scoped; any failure never blocks the seal.
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
+        try:
+            _outcome = {
+                "verdict": _gv if isinstance(_gv, dict) else {},
+                "status": status,
+                "pending_writes": bool(pending),
+                "user_signal": (str(getattr(req, "user_signal", "") or "").strip() or None),
+            }
+            _merged = await evo_reflect_and_merge(
+                evo_playbooks=_evo_playbooks, transcript=transcript, participants=participants,
+                final_text=final_text, outcome=_outcome, reflect_model=None,
+            )
+            if isinstance(_merged, dict) and _merged:
+                _oks = [await update_employee_playbook(req.org_id, str(_slug), _lessons)
+                        for _slug, _lessons in _merged.items()]
+                ok = any(_oks)
+                _names = {str(p.get("slug")): (p.get("name") or p.get("slug")) for p in (participants or [])}
+                _evo_emp = []
+                for _slug, _lessons in _merged.items():
+                    _added = max(0, len(_lessons) - len(_evo_playbooks.get(_slug, [])))
+                    _evo_emp.append({"slug": _slug, "name": _names.get(str(_slug), _slug),
+                                     "added": _added, "total": len(_lessons)})
+                _evo_added_total = sum(e["added"] for e in _evo_emp)
+                if ok and _evo_added_total > 0:
+                    await _emit({"t": "self_evolve", "employees": _evo_emp,
+                                 "added": _evo_added_total, "playbooks": _merged})
+                log.info("[single] room=%s evo reflected+persisted=%s employees=%d added=%d status=%s",
+                         req.room_id, ok, len(_merged), _evo_added_total, status)
+        except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
+            log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
 
     await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
                  "duration_ms": int((time.time() - started) * 1000), "engine": "single",

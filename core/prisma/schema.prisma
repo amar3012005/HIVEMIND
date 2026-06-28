@@ -1462,6 +1462,14 @@ model DigitalEmployee {
   peerReviewTargets     String[]       @default([]) @map("peer_review_targets")
   tools                 String[]       @default([])
   policyRules           Json           @default("{}") @map("policy_rules")
+  // GLOBAL per-agent learned playbook (self-evolving Loop 1) — ordered operating
+  // lessons distilled across ALL rooms. One row per org+slug. Surfaced lazily via the
+  // recall_experience tool in rooms AND 1-on-1 chat. Stored here (NOT the vector KB) so
+  // lessons never pollute recall. Distinct from hyper_rooms.evo_playbooks (per-room).
+  evoPlaybook           Json           @default("[]") @map("evo_playbook")
+  // Per-agent connector grants → 1-on-1 chat registers the same toolkits the agent uses
+  // in rooms. Distinct from hyper_rooms.enabledConnectors (per-room). Empty = none.
+  enabledConnectors     String[]       @default([]) @map("enabled_connectors")
   status                String         @default("draft") @db.VarChar(20)
   // draft | deploying | running | paused | error
   replicas              Int            @default(1)

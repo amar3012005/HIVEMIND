@@ -97,7 +97,11 @@ async def _get_or_build_agent(emp: Dict, conv_key: str) -> ReActAgent:
         }
     if not api_key:
         raise HTTPException(412, "employee has no bootstrap api_key")
-    agent = build_react_agent(merged_emp, api_key)
+    # Pass org_id so recall + connector toolkits are tenant-scoped. merged_emp carries the agent's
+    # own connector grants (→ Gmail/Docs/Sheets/MCP tools) and its GLOBAL learned playbook (→ injected
+    # into the persona) from the chat-profile, so private chat knows the org + what it learned and can
+    # call toolkits — the same reach it has inside a room.
+    agent = build_react_agent(merged_emp, api_key, org_id=merged_emp.get("org_id"))
     _CHAT_AGENTS[conv_key] = agent
     return agent
 

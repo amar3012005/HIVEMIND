@@ -361,6 +361,107 @@ async def get_room_sim_agents(room_id: str, org_id: Optional[str] = None) -> int
     return 24
 
 
+async def get_room_evo_mode(room_id: str, org_id: Optional[str] = None) -> str:
+    """Self-evolving employees toggle ('on' = reflect+inject per-employee playbooks,
+    else 'off'). Defaults to 'off' (graceful pre-migration: a missing column means the
+    additional feature is dormant and the turn runs untouched). org_id scopes the read."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT evo_mode FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT evo_mode FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["evo_mode"]:
+                return str(row["evo_mode"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_evo_mode fallback: %s", exc)
+    return "off"
+
+
+async def get_employee_playbook(org_id: str, slug: str) -> list:
+    """GLOBAL per-agent learned playbook — ordered list of operating lessons this
+    employee distilled across ALL rooms. Lives on digital_employees (one row per
+    org+slug) so it follows the agent into every room AND 1-on-1 private chat.
+    Empty list if missing/pre-migration. org_id+slug scope the read (tenant-safe)."""
+    import json as _json
+    if not org_id or not slug:
+        return []
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT evo_playbook FROM hivemind.digital_employees WHERE org_id = $1::uuid AND slug = $2",
+                org_id, slug,
+            )
+            if row and row["evo_playbook"]:
+                raw = row["evo_playbook"]
+                pb = _json.loads(raw) if isinstance(raw, str) else list(raw)
+                if isinstance(pb, list):
+                    return [str(x) for x in pb if str(x).strip()]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_employee_playbook fallback: %s", exc)
+    return []
+
+
+async def get_employee_playbooks_map(org_id: str, slugs: list) -> Dict[str, list]:
+    """Batch form of get_employee_playbook for a room's participants: returns
+    { "<slug>": ["lesson", ...] } for the given slugs. One query, tenant-scoped.
+    Slugs with no lessons (or no row) are omitted. Empty dict on any failure."""
+    import json as _json
+    out: Dict[str, list] = {}
+    clean = [str(s) for s in (slugs or []) if str(s).strip()]
+    if not org_id or not clean:
+        return out
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                "SELECT slug, evo_playbook FROM hivemind.digital_employees "
+                "WHERE org_id = $1::uuid AND slug = ANY($2::text[])",
+                org_id, clean,
+            )
+            for row in rows:
+                raw = row["evo_playbook"]
+                if not raw:
+                    continue
+                pb = _json.loads(raw) if isinstance(raw, str) else list(raw)
+                if isinstance(pb, list):
+                    lessons = [str(x) for x in pb if str(x).strip()]
+                    if lessons:
+                        out[str(row["slug"])] = lessons
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_employee_playbooks_map fallback: %s", exc)
+    return out
+
+
+async def update_employee_playbook(org_id: str, slug: str, lessons: list) -> bool:
+    """Persist one employee's GLOBAL learned playbook (Loop 1 cross-room write-back).
+    Best-effort: returns False (never raises) on failure so a reflection write can
+    never break the sealed turn. org_id+slug scope the write (tenant-safe)."""
+    import json as _json
+    if not org_id or not slug or not isinstance(lessons, list):
+        return False
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            payload = _json.dumps([str(x) for x in lessons if str(x).strip()])
+            await conn.execute(
+                "UPDATE hivemind.digital_employees SET evo_playbook = $1::jsonb, updated_at = now() "
+                "WHERE org_id = $2::uuid AND slug = $3",
+                payload, org_id, slug,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update_employee_playbook failed (non-fatal): %s", exc)
+    return False
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

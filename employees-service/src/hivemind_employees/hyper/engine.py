@@ -784,6 +784,8 @@ class Director:
         synth_model: Optional[str] = None,
         sim_mode: str = "off",
         sim_agents: int = 0,
+        evo_mode: str = "off",
+        evo_playbooks: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -834,6 +836,15 @@ class Director:
         self.sim_agents = max(10, min(100, int(sim_agents or _SIM_PERSONAS)))
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
+        # Self-evolving employees (Loop 1, additional + opt-in). evo_playbooks = each participant's
+        # GLOBAL learned playbook (lessons across ALL rooms, keyed by slug) injected before it speaks.
+        # The WRITE (reflection) happens in the api layer post-verification. Dormant unless the
+        # global env flag AND the room toggle are both on. Default off → turn untouched.
+        self.evo_mode = str(evo_mode or "off").strip().lower()
+        self.evo_active = _EVO_ENABLED and self.evo_mode in _EVO_ON
+        self.evo_playbooks: Dict[str, List[str]] = {
+            str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)
+        }
         # Input/output split + Groq prompt-cache hits. cached = the slice of input
         # billed at 50% (auto on gpt-oss; the re-sent director-loop prefix caches).
         self.io: Dict[str, int] = {"input": 0, "output": 0, "cached": 0}
@@ -1217,9 +1228,21 @@ class Director:
         bias = (" You are the SKEPTIC of this room — find the single weakest claim and challenge it hard "
                 "with specifics." if is_skeptic else "")
         ctx = "\n".join(self.blackboard)[:4000]
+        # Self-evolving (Loop 1): inject THIS employee's GLOBAL learned playbook (lessons across ALL
+        # rooms) so it applies them in this decision. Lexical recall, slug-scoped, bounded. Dormant +
+        # empty unless evo is active.
+        evo_block = ""
+        if self.evo_active:
+            slug = emp.get("slug") or emp.get("id")
+            topic = f"{self.room_goal} {self.user_message} {prompt}"
+            lessons = _evo_recall(self.evo_playbooks.get(str(slug), []), topic)
+            if lessons:
+                evo_block = ("\nYOUR PLAYBOOK — operating lessons you have learned across ALL your past "
+                             "work (every room, every task). Apply every one:\n"
+                             + "\n".join(f"- {l}" for l in lessons))
         msg = await self._groq([
             {"role": "system", "content": (
-                f"You are {name}, a {lane} on this team.{bias} {sysp}\nRespond IN CHARACTER, CONCISELY "
+                f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
@@ -1625,6 +1648,7 @@ class Director:
             "gathered_emails": sorted(self.gathered_emails),
             "gather_facts": list(self.blackboard),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
+            "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
         }
 
 
@@ -1645,6 +1669,8 @@ async def run_director(
     max_iters: int = 16,
     sim_mode: str = "off",
     sim_agents: int = 0,
+    evo_mode: str = "off",
+    evo_playbooks: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -1654,5 +1680,6 @@ async def run_director(
         enabled_connectors=enabled_connectors, emit=emit,
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
+        evo_mode=evo_mode, evo_playbooks=evo_playbooks,
     )
     return await director.run()

@@ -31,7 +31,7 @@ from agentscope.formatter import (
 from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
-from .agentscope_tools import build_hivemind_toolkit
+from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
 
 log = logging.getLogger(__name__)
 
@@ -444,6 +444,20 @@ def build_react_agent(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("connector group activation failed: %s", exc)
+
+        # GLOBAL learned playbook → lazy `recall_experience` tool + a one-line pointer
+        # (not a wholesale inject). The agent loads the relevant lessons on demand, the
+        # same way it reaches for recall/web. Read-only: private chat never journalises.
+        register_experience_tool(toolkit, org_id, name)
+        _pb = employee_row.get("evo_playbook") or []
+        _pb_n = len([x for x in _pb if str(x).strip()]) if isinstance(_pb, list) else 0
+        if _pb_n:
+            persona = (
+                persona
+                + f"\n\nYou have {_pb_n} learned lesson(s) from your past work across all rooms. "
+                  "When a task resembles something you have handled before, call "
+                  "recall_experience(topic) to load the relevant lessons and apply them."
+            )
 
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)

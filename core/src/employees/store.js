@@ -276,6 +276,10 @@ export class EmployeeStore {
       select: {
         ...PUBLIC_FIELDS,
         scopedApiKeyEncrypted: true,
+        // 1-on-1 private chat needs the agent's connector grants + GLOBAL learned playbook.
+        // Both omitted from PUBLIC_FIELDS to keep list payloads lean.
+        enabledConnectors: true,
+        evoPlaybook: true,
       },
       orderBy: { updatedAt: 'desc' },
     });

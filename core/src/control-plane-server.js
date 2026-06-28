@@ -5497,6 +5497,11 @@ Write the persona now.`;
         status: r.status,
         api_key: apiKey,
         created_by: r.createdBy,
+        // Per-agent connector grants → 1-on-1 chat registers the same toolkits (Gmail/
+        // Docs/Sheets/MCP) it uses in rooms. Global learned playbook → injected into the
+        // private-chat persona so the agent applies what it learned everywhere (read-only).
+        connectors: r.enabledConnectors || [],
+        evo_playbook: Array.isArray(r.evoPlaybook) ? r.evoPlaybook : [],
       };
       return jsonResponse(res, await enrichEmployeeWithHyperState(baseEmployee));
     } catch (err) {

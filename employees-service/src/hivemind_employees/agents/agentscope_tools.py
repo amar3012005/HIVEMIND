@@ -968,6 +968,52 @@ def _register_connector_tools(
         tk.register_tool_function(cll, group_name=safe)
 
 
+def register_experience_tool(tk: Toolkit, org_id: Optional[str], slug: Optional[str]) -> None:
+    """Register `recall_experience` — the LAZY, read-only accessor for an agent's
+    GLOBAL learned playbook (operating lessons distilled across ALL rooms, stored on
+    digital_employees.evo_playbook). Surfaced as a TOOL — not injected wholesale every
+    turn — so it stays token-lean and scales as the playbook grows, loaded only when
+    the agent decides it's relevant. The agent reads its OWN lessons on demand; this
+    path NEVER writes (a private chat is not journalised — only a sealed room turn's
+    post-verify reflection appends). Org-scoped by (org_id, slug); no-op if either is
+    missing. Uniform across personal/managed/self-host: reads the deployment-local
+    digital_employees row, the same relational anchor every org type uses."""
+    if not org_id or not slug:
+        return
+
+    async def recall_experience(topic: str = "") -> ToolResponse:
+        """Recall YOUR own learned operating lessons from past work across every room
+        (your global playbook). Call this when a task resembles one you have handled
+        before and you want to apply what you learned. `topic` narrows to the most
+        relevant lessons by keyword; empty returns your most recent. These are lessons
+        to APPLY, not facts to cite to the user."""
+        try:
+            from ..db import get_employee_playbook
+            lessons = await get_employee_playbook(str(org_id), str(slug))
+        except Exception as exc:  # noqa: BLE001 — experience is optional, never fatal
+            return _tool_response_text(f"(could not load your experience: {str(exc)[:120]})")
+        lessons = [str(l).strip() for l in (lessons or []) if str(l).strip()]
+        if not lessons:
+            return _tool_response_text("You have no learned lessons yet.")
+        t = (topic or "").lower().strip()
+        if t:
+            toks = [w for w in re.split(r"\W+", t) if len(w) > 2]
+            hits = [l for l in lessons if any(w in l.lower() for w in toks)]
+            chosen = (hits or lessons[-8:])[:8]
+        else:
+            chosen = lessons[-8:]
+        body = "\n".join(f"- {l}" for l in chosen)
+        return _tool_response_text(
+            "YOUR LEARNED LESSONS (apply these, do not cite as facts):\n" + body,
+            metadata={"count": len(lessons), "returned": len(chosen)},
+        )
+
+    try:
+        tk.register_tool_function(recall_experience)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_experience_tool failed: %s", exc)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],

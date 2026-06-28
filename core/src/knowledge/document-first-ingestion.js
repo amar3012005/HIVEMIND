@@ -779,6 +779,63 @@ Output the JSON object and nothing else.`;
   }
 
   /**
+   * Canonical Document parent + PartOf edges for the facts-only / unified paths.
+   * Per-doc: create ONE document-anchor memory (title=filename, summary, high
+   * importance, ts tag) and wire every distilled fact to it via a PartOf edge.
+   * This is the doc→fact hierarchy the FE graph + "show source" rely on; the
+   * facts-only/unified paths previously returned documentParentId:null (no
+   * structure). Best-effort + residency-safe (ingestMemory→agent, edges→amrAddEdge).
+   * @returns {Promise<string|null>} the document-parent memory id
+   */
+  async _attachDocumentParent({ memories, userId, orgId, documentId, metadata = {}, totalFacts = 0, firstContent = '' }) {
+    const childIds = (memories || [])
+      .filter((m) => m?.id && !(m?.operation || '').startsWith('skipped') && !m?.isParent)
+      .map((m) => m.id);
+    if (!childIds.length) return null;
+    let docParentId = null;
+    try {
+      const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
+      const docSummary = [`Document: ${docTitle}`, `Facts extracted: ${childIds.length}`, '', String(firstContent || '').slice(0, 280)].join('\n');
+      const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
+      const parentRes = await this.memoryGraphEngine.ingestMemory({
+        user_id: userId, org_id: orgId,
+        scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0 ? 'project' : metadata.primary_team_id ? 'team' : undefined),
+        visibility: metadata.visibility || 'private',
+        primary_team_id: metadata.primary_team_id || null,
+        project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+        content: docSummary, title: docTitle, memory_type: 'fact',
+        importance_score: 0.9,                                    // the doc anchor — high salience
+        document_date: metadata.document_date || null,
+        tags: normalizeTagsArray([
+          ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',
+          `ts:${_tsd.toISOString().slice(0, 10)}`,
+          ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+          ...(documentId ? [`doc-id:${documentId}`] : []),
+        ]),
+        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null },
+        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, child_count: childIds.length, total_facts: totalFacts },
+        skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
+        skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
+      });
+      docParentId = parentRes?.memoryId || parentRes?.id || null;
+      if (docParentId) {
+        const createPartOf = async (childId) => {
+          const base = { id: crypto.randomUUID(), from_id: childId, to_id: docParentId, confidence: 1.0, created_by: 'document_first_ingestion', created_at: new Date().toISOString() };
+          try {
+            await this.memoryGraphEngine.store.createRelationship({ ...base, type: 'PartOf', metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' } });
+          } catch (err) {
+            try { await this.memoryGraphEngine.store.createRelationship({ ...base, type: 'Extends', metadata: { ingest_tree: true, subtype: 'PartOf', document_id: documentId, parent_role: 'document', fallback_reason: err.message } }); }
+            catch (err2) { this.logger.warn?.(`[doc-first] PartOf ${String(childId).slice(0, 8)}→${String(docParentId).slice(0, 8)} failed: ${err2.message}`); }
+          }
+        };
+        await Promise.all(childIds.map(createPartOf));
+        memories.push({ id: docParentId, operation: 'document_parent', isParent: true });
+      }
+    } catch (e) { this.logger.warn?.(`[doc-first] document parent attach failed: ${e.message}`); }
+    return docParentId;
+  }
+
+  /**
    * Phase 2 — async enrichment pass (OFF the ingest hot path, flag-gated).
    * For each just-created fact, find its nearest existing same-org memory:
    *   • sim >= SUPPRESS  → the fact is a near-duplicate of an ALREADY-stored
@@ -2003,8 +2060,10 @@ Output the JSON object and nothing else.`;
             .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))
             .catch((e) => this.logger.warn?.(`[kb-unified] cross-doc link failed: ${e.message}`));
         }
-        this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${uFacts.length} facts from ${targets.length} windows (single-call extract+entities+rels)`);
-        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: null };
+        // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
+        const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
+        this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${uFacts.length} facts from ${targets.length} windows + parent=${uDocParent ? 'y' : 'n'} (single-call extract+entities+rels)`);
+        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent };
       }
 
       let factObjs = [];
@@ -2021,8 +2080,9 @@ Output the JSON object and nothing else.`;
           .then(() => this.logger.info?.(`[kb-facts-only] linked ${factObjs.length} fact memories`))
           .catch((e) => this.logger.warn?.(`[kb-facts-only] entity-link failed: ${e.message}`));
       }
-      this.logger.info?.(`[kb-facts-only] doc ${String(documentId).slice(0, 8)}: ${factObjs.length} fact memories from ${promotableSegments.length} segments (no raw-segment promotion)`);
-      return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'distill_source' })), memories: factObjs, documentParentId: null };
+      const dDocParent = await this._attachDocumentParent({ memories: factObjs, userId, orgId, documentId, metadata, totalFacts: factObjs.length, firstContent: fullText });
+      this.logger.info?.(`[kb-facts-only] doc ${String(documentId).slice(0, 8)}: ${factObjs.length} fact memories from ${promotableSegments.length} segments + parent=${dDocParent ? 'y' : 'n'} (no raw-segment promotion)`);
+      return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'distill_source' })), memories: factObjs, documentParentId: dDocParent };
     }
 
     const promoteOne = async (segment) => {

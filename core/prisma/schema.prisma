@@ -2354,6 +2354,32 @@ model Meeting {
   @@map("meetings")
 }
 
+/// P1 — progressive durable transcript. Each 10-min recording segment is persisted
+/// here AS IT TRANSCRIBES (keyed by a client-generated session_id), so a long
+/// meeting survives a tab crash and the transcript is recoverable. At save the
+/// session's segments are linked to the new meeting row. Central durability for
+/// managed/personal orgs only — self-host (remote) orgs keep segments in-browser
+/// (transcript text must not transit central). meeting_id nullable until save.
+model MeetingSegment {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId  String   @map("session_id") @db.Uuid
+  meetingId  String?  @map("meeting_id") @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  idx        Int      @map("idx")
+  text       String   @map("text")
+  speakers   Json?    @map("speakers")
+  startMs    Int?     @map("start_ms")
+  endMs      Int?     @map("end_ms")
+  status     String   @default("transcribed") @map("status") @db.VarChar(16)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([sessionId, idx], map: "meeting_segments_session_idx_key")
+  @@index([meetingId], map: "meeting_segments_meeting_idx")
+  @@index([orgId, userId], map: "meeting_segments_org_user_idx")
+  @@map("meeting_segments")
+}
+
 /// Durable outbox for engine→agent pushes (Phase 4 — remote/self-host orgs only).
 /// Every write/edge/update/updateTags/delete op destined for a remote agent is
 /// recorded here BEFORE the BullMQ job is enqueued. If Redis is unavailable at

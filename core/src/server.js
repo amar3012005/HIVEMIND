@@ -5676,10 +5676,72 @@ exit \$RC
             mScope,
           );
           const _newId = rows?.[0]?.id;
+          // P1: link any durably-persisted recording segments (by client session_id)
+          // to this finalized meeting row, so the crash-recovery cache is tied to it.
+          if (_newId && body.session_id && /^[0-9a-fA-F-]{36}$/.test(String(body.session_id))) {
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid WHERE session_id=$2::uuid AND meeting_id IS NULL`,
+              _newId, body.session_id,
+            ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
+          }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
           return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // POST /api/meetings/segments — P1 durable transcript. Persist ONE recording
+      // segment as it transcribes (keyed by client session_id), so a long meeting
+      // survives a tab crash. Residency: self-host (remote) orgs keep segments
+      // in-browser — never persisted central. Idempotent upsert on (session_id, idx).
+      if (pathname === '/api/meetings/segments' && req.method === 'POST') {
+        const mUser = _mUserId, mOrg = _mOrgId;
+        if (orgIsRemote(mOrg)) return jsonResponse(res, { ok: true, skipped: 'remote' });
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        const sid = (body.session_id || '').toString();
+        const idx = Number(body.idx);
+        const text = (body.text || '').toString();
+        if (!/^[0-9a-fA-F-]{36}$/.test(sid) || !Number.isInteger(idx) || idx < 0 || !text.trim()) {
+          return jsonResponse(res, { error: 'bad_segment' }, 400);
+        }
+        try {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
+               VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7,$8)
+             ON CONFLICT (session_id, idx) DO UPDATE
+               SET text=EXCLUDED.text, speakers=EXCLUDED.speakers, start_ms=EXCLUDED.start_ms, end_ms=EXCLUDED.end_ms`,
+            sid, mOrg, mUser, idx, text.slice(0, 200000),
+            body.speakers ? JSON.stringify(body.speakers) : null,
+            Number.isFinite(body.start_ms) ? body.start_ms : null,
+            Number.isFinite(body.end_ms) ? body.end_ms : null,
+          );
+          return jsonResponse(res, { ok: true });
+        } catch (e) {
+          return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // GET /api/meetings/session/:sid/segments — recover an in-progress session's
+      // persisted segments (e.g. after a tab crash), ordered. Org-scoped.
+      {
+        const mSeg = pathname.match(/^\/api\/meetings\/session\/([0-9a-fA-F-]{36})\/segments$/);
+        if (mSeg && req.method === 'GET') {
+          const mOrg = _mOrgId;
+          if (orgIsRemote(mOrg)) return jsonResponse(res, { segments: [], skipped: 'remote' });
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id
+                 FROM hivemind.meeting_segments
+                WHERE session_id=$1::uuid AND org_id=$2::uuid
+                ORDER BY idx ASC`,
+              mSeg[1], mOrg,
+            );
+            return jsonResponse(res, { segments: rows || [], stitched: (rows || []).map((r) => r.text).join('\n').trim() });
+          } catch (e) {
+            return jsonResponse(res, { error: 'segments_read_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
         }
       }
 

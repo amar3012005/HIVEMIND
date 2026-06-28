@@ -10089,6 +10089,68 @@ exit \$RC
           }
           break;
 
+        // Canonical ingest front door — the SINGLE entry where memory creation
+        // starts. KB / connector / MCP / meeting / chat / raw-API all normalize
+        // into ONE envelope (see canonical-ingest.js) and dispatch identically.
+        // Provenance (source, source_id, url, event date, scope) is required in
+        // a fixed schema, so every memory carries uniform provenance regardless
+        // of source. Org context is already established for this handler; the
+        // dispatcher also re-enters runWithOrg(orgId) for residency.
+        case '/api/ingest/source':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/ingest/source')) {
+              return;
+            }
+            if (!documentFirstIngestion) {
+              return jsonResponse(res, {
+                ok: false,
+                error: '/api/ingest/source is not available in this runtime.'
+              }, 503);
+            }
+            const src = body.source || {};
+            const envelope = {
+              userId,
+              orgId,
+              content: body.content,
+              title: body.title,
+              mode: body.mode,
+              source: {
+                type: src.type,
+                platform: src.platform,
+                provider: src.provider,
+                sourceId: src.source_id || src.sourceId,
+                url: src.url,
+                title: src.title,
+                filename: src.filename,
+              },
+              occurredAt: body.occurred_at || body.occurredAt,
+              scope: body.scope,
+              projectId: body.project_id || body.projectId,
+              primaryTeamId: body.primary_team_id || body.primaryTeamId,
+              tags: body.tags,
+              metadata: body.metadata,
+            };
+            // Optional inline file (base64) — text payloads use `content`.
+            if (body.file && typeof body.file.data === 'string') {
+              envelope.file = {
+                buffer: Buffer.from(body.file.data, 'base64'),
+                contentType: body.file.content_type || body.file.contentType,
+                filename: body.file.filename,
+              };
+            }
+            try {
+              const result = await documentFirstIngestion.ingestSource(envelope);
+              return jsonResponse(res, result, result.ok ? 200 : 400);
+            } catch (error) {
+              return jsonResponse(res, {
+                ok: false,
+                error: 'Ingestion failed',
+                message: error.message,
+              }, 500);
+            }
+          }
+          break;
+
         case '/api/ingest/status':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/ingest/status')) {

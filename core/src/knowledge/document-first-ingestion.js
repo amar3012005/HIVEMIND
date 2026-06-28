@@ -31,6 +31,7 @@ function assertKbAllowedForOrg(orgId) {
 }
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
+import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
@@ -1290,6 +1291,119 @@ Output the JSON object and nothing else.`;
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id).filter(Boolean),
     };
+  }
+
+  /**
+   * Canonical ingest front door — the SINGLE entry where memory creation starts.
+   *
+   * Every source (KB upload, connector record, MCP save, meeting notes, chat
+   * autosave, raw API) builds a canonical {@link IngestEnvelope} and calls this.
+   * Provenance is normalized ONCE here, then dispatched to the existing proven
+   * pipeline by mode — identical downstream regardless of source:
+   *   - document → file ? ingestKnowledgeDocument : ingestConnectorRecord (text doc)
+   *               → _promoteMemories (chunk → unified extract → fact memories)
+   *   - atomic   → memoryGraphEngine.ingestMemory (one memory, smart-router, edges)
+   *
+   * Residency is preserved automatically: every downstream entry re-enters the
+   * org context (runWithOrg) and routes to the org's store (central / per-tenant
+   * / self-host agent).
+   *
+   * @param {import('./canonical-ingest.js').IngestEnvelope} envelope
+   * @returns {Promise<{ok:boolean, mode?:string, source?:string, documentId?:string,
+   *   memoryIds?:string[], promotedCount?:number, segmentCount?:number,
+   *   skipped?:boolean, reason?:string, error?:string}>}
+   */
+  async ingestSource(envelope) {
+    const v = validateEnvelope(envelope);
+    if (!v.ok) return { ok: false, error: v.error };
+
+    const { userId, orgId } = envelope;
+    // Run the whole ingest inside the org context so every nested store resolves
+    // to this org's backend (central / per-tenant / self-host agent).
+    if (currentOrg() !== orgId) {
+      return runWithOrg(orgId, () => this.ingestSource(envelope));
+    }
+
+    const prov = normalizeProvenance(envelope);
+    const mode = detectMode(envelope);
+    const sourceType = envelope.source.type;
+    const callerTags = Array.isArray(envelope.tags) ? envelope.tags : [];
+
+    // Scope mapping shared by both modes (matches the upload-route / save shape).
+    const scope = envelope.scope || null;
+    const projectId = envelope.projectId || null;
+    const primaryTeamId = envelope.primaryTeamId || null;
+
+    if (mode === 'document') {
+      // Common provenance carried via metadata → _promoteMemories stamps it on
+      // every distilled fact (source_metadata + filename/doc-id tags).
+      const docMeta = {
+        ...(envelope.metadata || {}),
+        source_platform: prov.sourcePlatform,
+        source_id: prov.sourceMetadata.source_id,
+        source_url: prov.sourceMetadata.source_url,
+        ingest_source: sourceType,
+        tags: [...callerTags, ...prov.provenanceTags],
+        ...(scope ? { scope } : {}),
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(primaryTeamId ? { primary_team_id: primaryTeamId } : {}),
+      };
+
+      if (envelope.file) {
+        const { buffer, contentType, filename } = envelope.file;
+        const r = await this.ingestKnowledgeDocument({
+          userId, orgId, filename, fileBuffer: buffer, contentType,
+          metadata: { ...docMeta, filename },
+        });
+        return {
+          ok: true, mode, source: sourceType,
+          documentId: r.documentId, segmentCount: r.segmentCount,
+          promotedCount: r.promotedCount, memoryIds: r.promotedMemoryIds || [],
+        };
+      }
+
+      // Text document (connector record / long note / meeting transcript):
+      // reuse the connector-record pipeline (text → segment → _promoteMemories).
+      const r = await this.ingestConnectorRecord({
+        userId, orgId,
+        providerKey: prov.sourcePlatform,
+        sourceId: prov.sourceMetadata.source_id || crypto.randomUUID(),
+        title: prov.title || `${sourceType}:${prov.sourceMetadata.source_id || 'record'}`,
+        content: envelope.content,
+        sourceUrl: prov.sourceMetadata.source_url,
+        documentDate: prov.documentDate,
+        metadata: { ...docMeta, filename: prov.title || undefined },
+      });
+      if (r.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: r.reason };
+      return {
+        ok: true, mode, source: sourceType,
+        documentId: r.documentId, segmentCount: r.segmentCount,
+        promotedCount: r.promotedCount, memoryIds: r.promotedMemoryIds || [],
+      };
+    }
+
+    // ── atomic mode ── one memory through the canonical engine gateway.
+    const res = await this.memoryGraphEngine.ingestMemory({
+      user_id: userId,
+      org_id: orgId,
+      content: envelope.content,
+      title: prov.title || undefined,
+      memory_type: envelope.metadata?.memory_type || 'fact',
+      source_type: sourceType,
+      source_platform: prov.sourcePlatform,
+      source_metadata: prov.sourceMetadata,
+      document_date: prov.documentDate || undefined,
+      scope: scope || undefined,
+      project_ids: projectId ? [projectId] : [],
+      primary_team_id: primaryTeamId || undefined,
+      visibility: envelope.metadata?.visibility || undefined,
+      tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
+    });
+    if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
+    const memoryIds = Array.isArray(res?.results)
+      ? res.results.map(x => x?.memoryId || x?.id).filter(Boolean)
+      : [res?.memoryId || res?.id].filter(Boolean);
+    return { ok: true, mode, source: sourceType, memoryIds, promotedCount: memoryIds.length };
   }
 
   /**

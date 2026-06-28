@@ -2024,7 +2024,12 @@ OUTPUT JSON only.`;
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
     const q = getEntityLinkQueue(this);
     if (!q) return;
-    q.enqueueBatch(memories.filter((m) => m && m.id));
+    const items = memories.filter((m) => m && m.id);
+    // noPeers: enqueue individually so the co-mention linker does NOT receive same-batch siblings as
+    // candidates — used by the unified KB extractor, which already created intra-doc edges; this pass
+    // only adds CROSS-DOC/TIME edges (candidates come from listLatestMemories = other docs/time).
+    if (_opts.noPeers) { for (const it of items) q.enqueue(it); }
+    else q.enqueueBatch(items);
   }
 
   /**

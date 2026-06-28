@@ -581,6 +581,168 @@ Output the JSON object and nothing else.`;
   }
 
   /**
+   * UNIFIED EXTRACTOR — one structured LLM call per window returns FACTS + canonical
+   * ENTITIES + intra-window RELATIONSHIPS together. Replaces the separate distill +
+   * intra-doc co-mention passes: the model decides facts, their entities, and the
+   * edges BETWEEN them in ONE context → coherent, low-noise, entity-consistent
+   * (aliases collapse inside the call), far fewer LLM calls. Cross-DOC/TIME edges
+   * (Updates/Contradicts against prior org memories) are NOT this call's job — the
+   * recall-based co-mention pass handles those afterward. Enterprise-robust: strict
+   * json_schema on gpt-oss-120b + salvage; per-window bounded; caps on facts/entities/rels.
+   * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
+   */
+  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '' } = {}) {
+    const apiKey = process.env.GROQ_API_KEY;
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const content = (window.content || '').slice(0, 6000);
+    if (!apiKey || content.trim().length < 40) {
+      // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
+      return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
+        .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
+    }
+    const REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates'];
+    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, and the RELATIONSHIPS between facts. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
+
+FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
+- "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize.
+- Extract only decision-relevant stated information (names, roles, products, specs, numbers, dates, decisions, events, causal claims). NON-REDUNDANT — never restate the same point; keep the single most specific.
+- SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
+- At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
+
+ENTITY rules — ONE canonical name per real-world thing (so it never forks):
+- A SHORT noun (1-3 words): a specific person, organization, product/model, place, technology, or standard. NEVER a phrase, clause, description, or generic concept.
+- Use the FULL canonical name, not a partial — "Amar Sai Gadde" not "Amar"; "B&B Sinn für Marken" not "B&B" — and reuse that EXACT form for every mention.
+- Source language as written (do not translate); singular; drop legal suffixes; prefer full term over acronym unless the acronym is the proper name. 3-7 high-signal entities per fact max.
+
+RELATIONSHIP rules — only between facts in THIS list, only when genuinely related:
+- "Extends": one fact adds detail/nuance to another (same subject, complementary). "Mentions": two facts share a key entity but are otherwise distinct. "Contradicts": two facts state conflicting values for the same thing. "Updates": one fact supersedes another (rare within one section).
+- Reference the OTHER fact by its 0-based index in "facts". Omit "rels" or use [] when a fact stands alone. Do NOT invent edges to force connectivity.
+
+Output the JSON object and nothing else.`;
+    const isGptOss = /gpt-oss/i.test(model);
+    const SCHEMA = {
+      type: 'object', additionalProperties: false, required: ['facts'],
+      properties: { facts: { type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['t', 'f', 'entities', 'rels'],
+        properties: {
+          t: { type: 'string' }, f: { type: 'string' },
+          entities: { type: 'array', items: { type: 'string' } },
+          rels: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['to', 'type'],
+            properties: { to: { type: 'integer' }, type: { type: 'string', enum: REL_TYPES } } } },
+        },
+      } } },
+    };
+    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0.2, max_tokens: 6000,
+        messages: [
+          { role: 'system', content: sys },
+          ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
+          { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
+        ],
+        ...(isGptOss ? { reasoning_effort: process.env.KB_DISTILL_REASONING_EFFORT || 'low' } : {}),
+        response_format: isGptOss
+          ? { type: 'json_schema', json_schema: { name: 'unified_extraction', strict: true, schema: SCHEMA } }
+          : { type: 'json_object' },
+      }),
+    });
+    if (!resp.ok) throw new Error(`unified-extract ${resp.status}`);
+    const j = await resp.json();
+    const text = j?.choices?.[0]?.message?.content || '';
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
+    const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
+    return rawFacts
+      .filter((x) => x && typeof x.f === 'string' && x.f.trim().length >= 20)
+      .slice(0, maxFacts)
+      .map((x) => ({
+        t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim().slice(0, 80) : cleanTitleFrom(x.f, 48),
+        f: x.f.trim(),
+        entities: (Array.isArray(x.entities) ? x.entities : []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8),
+        rels: (Array.isArray(x.rels) ? x.rels : []).filter((r) => r && Number.isInteger(r.to) && REL_TYPES.includes(r.type)).slice(0, 5),
+      }));
+  }
+
+  /**
+   * Ingest ONE window via the unified extractor: create the fact memories (provenance +
+   * canonical entity tags), contextual-embed them, and create the intra-window typed edges.
+   * Returns factObjs (for the cross-doc co-mention pass). Self-contained + residency-safe
+   * (ingestMemory → agent, createRelationship → amrAddEdge for remote).
+   */
+  async _ingestUnifiedWindow(window, { userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '' }) {
+    let facts = [];
+    try {
+      facts = await this._extractUnified(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
+    } catch (e) {
+      this.logger.warn?.(`[kb-unified] extract failed: ${e.message}`);
+      return [];
+    }
+    if (!facts.length) return [];
+    const vs = this.memoryGraphEngine.vectorStore;
+    const idByIdx = new Array(facts.length).fill(null);
+    const factObjs = [];
+    const embedPending = [];
+    for (let i = 0; i < facts.length; i++) {
+      const fact = facts[i];
+      const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
+      const tags = normalizeTagsArray([
+        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', ...entityTags,
+        ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+        ...(documentId ? [`doc-id:${documentId}`] : []),
+      ]);
+      try {
+        const res = await this.memoryGraphEngine.ingestMemory({
+          user_id: userId, org_id: orgId,
+          scope: metadata.scope, visibility: metadata.visibility || 'private',
+          primary_team_id: metadata.primary_team_id || null,
+          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+          content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
+          metadata: { document_id: documentId, segment_id: window.segmentId || null, distill_agent: 'kb_unified_v1' },
+          skip_fact_extraction: true, defer_entity_linking: true,
+          skipSmartRouting: true, skipPredictCalibrate: true, skipAdvisoryLock: true,
+          skip_relationship_classification: true, skip_contradiction_detection: true,
+        });
+        const id = res?.memoryId || res?.id || null;
+        if (!id || (res?.operation || '').startsWith('skipped')) continue;
+        idByIdx[i] = id;
+        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: 'fact', tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null });
+        embedPending.push({ id, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+      } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
+    }
+    // Contextual embeds (one batched call) so the facts are vector-recallable.
+    if (embedPending.length && vs) {
+      try {
+        const vecs = (await vs.generateEmbeddings?.(embedPending.map((p) => p.ctxInput))) || [];
+        await Promise.all(embedPending.map(async (p, idx) => {
+          try {
+            const vec = vecs[idx];
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: embedPending[idx].ctxInput, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+          } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
+        }));
+      } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
+    }
+    // Intra-window typed edges (from the SAME structured call — coherent, no recall race).
+    for (let i = 0; i < facts.length; i++) {
+      const fromId = idByIdx[i];
+      if (!fromId) continue;
+      for (const rel of (facts[i].rels || [])) {
+        const toId = idByIdx[rel.to];
+        if (!toId || toId === fromId) continue;
+        try {
+          await this.memoryGraphEngine.store.createRelationship({
+            id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type, confidence: 0.85,
+            metadata: { created_by: 'kb_unified_v1', document_id: documentId, intra_window: true },
+          });
+        } catch { /* best-effort; dup/FK tolerated */ }
+      }
+    }
+    return factObjs;
+  }
+
+  /**
    * Phase 2 — async enrichment pass (OFF the ingest hot path, flag-gated).
    * For each just-created fact, find its nearest existing same-org memory:
    *   • sim >= SUPPRESS  → the fact is a near-duplicate of an ALREADY-stored
@@ -1599,6 +1761,32 @@ Output the JSON object and nothing else.`;
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
       }));
+      // UNIFIED single-call extraction (KB_UNIFIED_EXTRACT=true): one structured LLM call per window
+      // emits facts + canonical entities + intra-window relationships TOGETHER (coherent, low-noise,
+      // alias-collapsed, ~1 call/window). The recall co-mention pass below then adds CROSS-DOC/TIME edges
+      // only (no batch peers → no duplicate intra-doc edges).
+      if (String(process.env.KB_UNIFIED_EXTRACT ?? 'false').toLowerCase() === 'true' || String(process.env.KB_UNIFIED_EXTRACT ?? '') === '1') {
+        const docTitle = metadata.documentTitle || metadata.filename || '';
+        const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
+        const uFacts = [];
+        let wi = 0;
+        const uWorkers = Array.from({ length: Math.min(uConc, targets.length) }, async () => {
+          while (wi < targets.length) {
+            const w = targets[wi++];
+            const fo = await this._ingestUnifiedWindow(w, { userId, orgId, documentId, metadata, docTitle, entityContext: '' });
+            if (Array.isArray(fo) && fo.length) uFacts.push(...fo);
+          }
+        });
+        await Promise.all(uWorkers);
+        if (uFacts.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+          this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
+            .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))
+            .catch((e) => this.logger.warn?.(`[kb-unified] cross-doc link failed: ${e.message}`));
+        }
+        this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${uFacts.length} facts from ${targets.length} windows (single-call extract+entities+rels)`);
+        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: null };
+      }
+
       let factObjs = [];
       try {
         const distill = await this._distillFactsAsync({ targets, userId, orgId, documentId, metadata: { ...metadata, perTargetMaxFacts: true } });

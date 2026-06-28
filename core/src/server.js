@@ -5865,6 +5865,53 @@ exit \$RC
         }
       }
 
+      // GET /api/meetings/obligations — P6.3 obligation register. Flattens every
+      // meeting's action_items into a cross-meeting view of commitments with
+      // owner · due · status (open/overdue/done) · source meeting. The legal-grade
+      // "who owes what, by when" register. Central only (remote = agent follow-up).
+      if (pathname === '/api/meetings/obligations' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { obligations: [], counts: {} });
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id, title, created_at, action_items
+               FROM hivemind.meetings
+              WHERE org_id=$1::uuid AND deleted_at IS NULL
+                AND action_items IS NOT NULL AND jsonb_array_length(action_items) > 0
+              ORDER BY created_at DESC LIMIT 200`,
+            mOrg,
+          );
+          const today = new Date().toISOString().slice(0, 10);
+          const obligations = [];
+          for (const r of (rows || [])) {
+            const items = Array.isArray(r.action_items) ? r.action_items : [];
+            for (const a of items) {
+              const task = (typeof a === 'string' ? a : (a?.task || '')).toString().trim();
+              if (!task) continue;
+              const owner = (typeof a === 'object' && a?.owner) ? String(a.owner) : null;
+              const due = (typeof a === 'object' && a?.due) ? String(a.due) : null;
+              const done = (typeof a === 'object' && (a?.status === 'done' || a?.done === true));
+              const status = done ? 'done' : (due && due.slice(0, 10) < today ? 'overdue' : 'open');
+              obligations.push({
+                task, owner, due, status,
+                source_meeting_id: r.id, source_meeting_title: r.title, meeting_date: r.created_at,
+              });
+            }
+          }
+          const rank = { overdue: 0, open: 1, done: 2 };
+          obligations.sort((x, y) => (rank[x.status] - rank[y.status]) || String(x.due || '9999').localeCompare(String(y.due || '9999')));
+          const counts = {
+            total: obligations.length,
+            open: obligations.filter((o) => o.status === 'open').length,
+            overdue: obligations.filter((o) => o.status === 'overdue').length,
+            done: obligations.filter((o) => o.status === 'done').length,
+          };
+          return jsonResponse(res, { obligations, counts });
+        } catch (e) {
+          return jsonResponse(res, { obligations: [], counts: {} });
+        }
+      }
+
       // POST /api/meetings/invite — email external participants that an org
       // member added at meeting start. Best-effort, capped, user-initiated
       // (fires when the organizer clicks Start with externals entered). Org

@@ -1206,6 +1206,55 @@ Output the JSON object and nothing else.`;
       return [];
     }
     console.log(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
+
+    // SEMANTIC SEGMENTS (default; reversible via KB_SEMANTIC_SEGMENTS=false). Docling's HybridChunker
+    // text can start/end MID-WORD (token-window artifacts: "...doc" | "ents to share…"), poisoning the
+    // evidence layer (recall hop-2) + embeddings. Re-segment the CLEAN docling markdown (or text) with
+    // boundary-aware chunkText — splits only at heading/paragraph/sentence edges (forceSplit is
+    // sentence-safe), never mid-word; heading-aware via markdown ##. Falls through to hybrid/fallback
+    // if it yields nothing. Same clean units the distill re-windows over → uniform, no mid-word anywhere.
+    if (String(process.env.KB_SEMANTIC_SEGMENTS ?? 'true').toLowerCase() !== 'false') {
+      const src = (parseResult.markdown && parseResult.markdown.trim().length > 40)
+        ? parseResult.markdown : (parseResult.text || '');
+      if (src && src.trim().length >= 40) {
+        let chunks = [];
+        try {
+          const { chunkText } = await import('./document-chunker.js');
+          const TARGET = Number(process.env.KB_SEGMENT_CHARS || 1500); // ~512 BGE-M3 tokens
+          chunks = (chunkText(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: 0 }) || [])
+            .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 20);
+        } catch (e) { console.warn(`[segments] semantic chunk failed: ${e.message}`); }
+        if (chunks.length) {
+          const segments = [];
+          let segmentIndex = 0;
+          let previousSegmentId = null;
+          for (const text of chunks) {
+            const contentHash = crypto.createHash('sha256').update(text).digest('hex');
+            const hm = text.match(/^#{1,6}\s+(.+)$/m);
+            const heading = hm ? hm[1].slice(0, 500) : null;
+            const base = {
+              documentId, userId, orgId, segmentType: 'structured', content: text, contentHash,
+              segmentIndex, previousSegmentId, depth: 0, startOffset: null, endOffset: null,
+              wordCount: text.split(/\s+/).length, metadata: { heading, source: 'semantic_chunk' },
+            };
+            if (remote) {
+              const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };
+              segments.push(segment); previousSegmentId = segment.id; segmentIndex++;
+            } else {
+              try {
+                const segment = await this.db.knowledgeSegment.create({ data: base });
+                segments.push(segment); previousSegmentId = segment.id; segmentIndex++;
+              } catch (err) { console.warn(`[segments] semantic insert failed: ${err.message}`); }
+            }
+          }
+          if (segments.length) {
+            console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word)`);
+            return segments;
+          }
+        }
+      }
+    }
+
     if (Array.isArray(hybridChunks) && hybridChunks.length > 0) {
       const segments = [];
       let segmentIndex = 0;

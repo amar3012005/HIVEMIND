@@ -114,5 +114,47 @@ export function normalizeTagsArray(tags) {
     seen.add(nt);
     out.push(nt);
   }
-  return out;
+  return canonicalizeEntityAliases(out);
+}
+
+/**
+ * Within-set alias canonicalization: when a shorter entity's hyphen-words are a
+ * strict LEADING prefix of a longer entity's words, drop the shorter (keep the
+ * more-specific full form). Handles the common intro-sentence case where one
+ * memory names both a partial and a full reference:
+ *   entity:amar + entity:amar-sai-gadde      → entity:amar-sai-gadde
+ *   entity:uwe  + entity:uwe-berger          → entity:uwe-berger
+ *   entity:b-b  + entity:b-b-sinn-für-marken → entity:b-b-sinn-für-marken
+ * Deterministic, conservative (strict word-prefix, ≥1 word shorter), no dict, no
+ * fuzzy merge. Cross-MEMORY alias resolution (where the two forms live on
+ * different rows) is a separate entity-resolution concern, not handled here.
+ * @param {string[]} tagList already-normalized tags
+ * @returns {string[]}
+ */
+export function canonicalizeEntityAliases(tagList) {
+  if (!Array.isArray(tagList) || tagList.length < 2) return tagList;
+  const ents = [];
+  const rest = [];
+  for (const t of tagList) {
+    if (typeof t === 'string' && t.startsWith('entity:')) ents.push(t.slice('entity:'.length));
+    else rest.push(t);
+  }
+  if (ents.length < 2) return tagList;
+  const words = (e) => e.split('-').filter(Boolean);
+  const isLeadingPrefix = (a, b) => {
+    const wa = words(a); const wb = words(b);
+    if (wa.length >= wb.length) return false;            // must be strictly shorter
+    for (let i = 0; i < wa.length; i++) if (wa[i] !== wb[i]) return false;
+    return true;
+  };
+  const dropped = new Set();
+  for (const a of ents) {
+    if (dropped.has(a)) continue;
+    for (const b of ents) {
+      if (a === b || dropped.has(b)) continue;
+      if (isLeadingPrefix(a, b)) { dropped.add(a); break; } // a is a partial of fuller b → drop a
+    }
+  }
+  const merged = ents.filter((e) => !dropped.has(e)).map((e) => `entity:${e}`);
+  return [...rest, ...merged];
 }

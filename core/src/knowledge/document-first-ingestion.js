@@ -1392,6 +1392,39 @@ Output the JSON object and nothing else.`;
       return { ...r, ok: true, mode, source: sourceType, memoryIds: r.promotedMemoryIds || [] };
     }
 
+    // ── evidence mode ── store the raw content as ONE recall-excluded,
+    // non-distilled memory (e.g. a meeting transcript). It grounds facts by
+    // shared tag but never surfaces in recall (persisted-retrieval honours
+    // metadata.recall_exclude). No fact distillation, no smart-router, no edges.
+    if (mode === 'evidence') {
+      const evRes = await this.memoryGraphEngine.ingestMemory({
+        user_id: userId,
+        org_id: orgId,
+        content: envelope.content,
+        title: prov.title || undefined,
+        memory_type: envelope.metadata?.memory_type || 'event',
+        source_type: sourceType,
+        source_platform: prov.sourcePlatform,
+        source_metadata: prov.sourceMetadata,
+        document_date: prov.documentDate || undefined,
+        scope: scope || undefined,
+        project_ids: projectId ? [projectId] : [],
+        primary_team_id: primaryTeamId || undefined,
+        visibility: envelope.metadata?.visibility || undefined,
+        tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags, 'evidence']),
+        metadata: { ...(envelope.metadata || {}), recall_exclude: true, evidence_only: true },
+        skip_fact_extraction: true,
+        defer_entity_linking: true,
+        skipSmartRouting: true,
+        skipPredictCalibrate: true,
+        skipAdvisoryLock: true,
+        skip_relationship_classification: true,
+        skip_contradiction_detection: true,
+      });
+      const evId = evRes?.memoryId || evRes?.id || null;
+      return { ok: true, mode, source: sourceType, memoryIds: evId ? [evId] : [], promotedCount: evId ? 1 : 0, memoryId: evId };
+    }
+
     // ── atomic mode ── one memory through the canonical engine gateway.
     const res = await this.memoryGraphEngine.ingestMemory({
       user_id: userId,

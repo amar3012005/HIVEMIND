@@ -75,7 +75,7 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {('personal'|'organization'|'project'|'team')} [scope]
  * @property {string} [projectId]
  * @property {string} [primaryTeamId]
- * @property {('document'|'atomic')} [mode]  override; auto-detected when omitted
+ * @property {('document'|'atomic'|'evidence')} [mode]  override; auto-detected when omitted. 'evidence' = one recall-excluded, non-distilled memory (transcripts/raw evidence)
  * @property {string[]} [tags]
  * @property {Object} [metadata]
  * @property {number} [documentThreshold]   override DEFAULT_DOCUMENT_THRESHOLD
@@ -109,8 +109,8 @@ export function validateEnvelope(env) {
   if (env.scope && !INGEST_SCOPES.includes(env.scope)) {
     return { ok: false, error: `scope must be one of ${INGEST_SCOPES.join('|')}` };
   }
-  if (env.mode && env.mode !== 'document' && env.mode !== 'atomic') {
-    return { ok: false, error: 'mode must be document|atomic' };
+  if (env.mode && env.mode !== 'document' && env.mode !== 'atomic' && env.mode !== 'evidence') {
+    return { ok: false, error: 'mode must be document|atomic|evidence' };
   }
   return { ok: true };
 }
@@ -183,7 +183,7 @@ export function normalizeProvenance(env) {
  * @returns {'document'|'atomic'}
  */
 export function detectMode(env) {
-  if (env.mode === 'document' || env.mode === 'atomic') return env.mode;
+  if (env.mode === 'document' || env.mode === 'atomic' || env.mode === 'evidence') return env.mode;
   if (env.file) return 'document';
   const type = env.source?.type;
   if (type === 'mcp' || type === 'chat') return 'atomic';

@@ -6017,15 +6017,26 @@ exit \$RC
               try { const u = await prisma.user.findUnique({ where: { id: m.user_id }, select: { displayName: true, email: true } }); if (u) owner = { name: u.displayName || null, email: u.email || null }; } catch { /* best-effort */ }
               return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner', owner }, 403);
             }
-            // Collect the memory cluster (parent + section children).
-            let clusterIds = [];
+            // Collect the meeting's memory set. Canonical ingest tags EVERY
+            // meeting memory (distilled facts + transcript-evidence) with
+            // `meeting:<id>`, so the tag is the authoritative key. Also union the
+            // legacy cluster (source_memory_id parent + PartOf children) for
+            // meetings saved before the canonical-ingest cutover.
+            const meetingTag = `meeting:${id}`;
+            const idSet = new Set();
+            const byTag = await prisma.$queryRawUnsafe(
+              `SELECT id FROM memories WHERE org_id = $1::uuid AND $2 = ANY(tags)`,
+              mOrg, meetingTag,
+            );
+            for (const r of byTag) idSet.add(r.id);
             if (m.source_memory_id) {
               const cl = await prisma.$queryRawUnsafe(
                 `SELECT id FROM memories WHERE id = $1::uuid OR id IN (SELECT from_id FROM relationships WHERE to_id = $1::uuid AND type = 'PartOf')`,
                 m.source_memory_id,
               );
-              clusterIds = cl.map((r) => r.id);
+              for (const r of cl) idSet.add(r.id);
             }
+            const clusterIds = [...idSet];
             let deletedMemories = 0;
             if (clusterIds.length) {
               if (hard && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
@@ -6425,21 +6436,24 @@ exit \$RC
         }
       }
 
-      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" the SMART way.
-      // Instead of one flat markdown blob, build an ingest TREE from the
-      // insights we already extracted: a parent `event` memory (summary +
-      // participant/org entity tags + meeting-date temporal anchor) plus
-      // first-class typed children — each decision → `decision`, each action
-      // item → `goal`, key points / risks → `fact`, next steps → `goal`, and
-      // the transcript as ONE low-priority grounding child. Every node runs
-      // the SAME canonical pipeline (smart-router → embed → Qdrant → relation
-      // classify) so a decision here auto-links (Updates/Contradicts) to prior
-      // decisions on the same topic, and entity tags connect it to existing
-      // people/org clusters. Idempotent via meetings.source_memory_id.
+      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" via the CANONICAL
+      // front door. Build ONE hard-facts markdown of only STATED, attributable
+      // content (decisions, action items, next steps, open questions, notable
+      // quotes + participants/orgs + event date) and hand it to
+      // documentFirstIngestion.ingestSource(mode:'document') — the SAME
+      // _promoteMemories distill + entity-extract + relationship-classify path
+      // as KB/connectors. No bespoke meeting ingest tree. Everything INFERRED
+      // (summary, sentiment, risks, key-points, and the synthesis/entity-brief/
+      // continuity/open-loop ANALYSIS) stays display-only in meetings.intelligence
+      // and is NEVER ingested. The transcript goes as a separate evidence-layer
+      // envelope (mode:'evidence', recall-excluded). authority_level:'claimed' +
+      // the 'unverified' tag rank these below verified facts in recall. The whole
+      // set is addressable by the `meeting:<id>` tag. Idempotent via
+      // meetings.source_memory_id.
       {
         const mIngest = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/ingest$/);
         if (mIngest && req.method === 'POST') {
-          if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
+          if (!documentFirstIngestion) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
           const mOrg = _mOrgId;
           const mUser = _mUserId;
           const id = mIngest[1];
@@ -6521,26 +6535,20 @@ exit \$RC
             const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
             const meetingTag = `meeting:${id}`;
 
-            // ── Meeting context stamp — "<title> @ <YYYY-MM-DD HH:MM> — <topic>"
-            // Prefixed onto EVERY memory title so a recalled meeting memory is
-            // self-identifying (which meeting, when) without a graph walk.
+            // ── Meeting event-date stamp (display + provenance) ──────────────
             const _d = meetingDate ? new Date(meetingDate) : new Date();
             const pad = (n) => String(n).padStart(2, '0');
             const stamp = `${_d.getUTCFullYear()}-${pad(_d.getUTCMonth() + 1)}-${pad(_d.getUTCDate())} ${pad(_d.getUTCHours())}:${pad(_d.getUTCMinutes())}`;
-            const topicName = (topics[0] || title).toString().slice(0, 60);
-            const ctxPrefix = `${title} @ ${stamp} — ${topicName}`;
             // Provenance: these are MEETING INSIGHTS — claims made in a meeting,
-            // NOT verified ground truth. Tagged + metadata-flagged so recall and
-            // conflict-resolution rank them BELOW authoritative facts and surface
-            // them as "stated in meeting X" rather than as truth.
-            const provLine = `From meeting "${title}" on ${stamp}. These are meeting insights (claims stated in the meeting) — not verified facts.`;
+            // NOT verified ground truth. authority_level:'claimed' + the
+            // 'unverified' tag make recall + conflict-resolution rank them BELOW
+            // authoritative facts and surface them as "stated in meeting X".
             const baseMeta = {
               meeting_id: id, source: 'meeting-notes',
               provenance: 'meeting', authority_level: 'claimed', meeting_stamp: stamp,
             };
-            const INSIGHT_TAGS = ['meeting-insight', 'unverified', meetingTag];
 
-            // ── Cross-section dedup (within the cluster) ──────────────────────
+            // ── Cross-section dedup (within the meeting) ──────────────────────
             const seenClaims = new Set();
             const claimKey = (s) => String(s || '')
               .toLowerCase().normalize('NFKD')
@@ -6560,117 +6568,114 @@ exit \$RC
               }
               return out;
             };
-            const bulletBlock = (lines) => lines.map((l) => `• ${l}`).join('\n');
 
-            // ── SECTION CLUSTER: parent + ≤4 section memories ─────────────────
-            // Instead of ~20 atomic children (recall noise + dreaming hairball),
-            // each meeting becomes a SMALL cluster: one parent (overview) plus a
-            // memory per section that holds the WHOLE deduped list. This keeps
-            // recall list-coherent ("what did we decide" → one hit, full list)
-            // and the noise floor low, while the rich parent still anchors
-            // cross-meeting dreaming links. Knowledge that needs claim-grain
-            // belongs in standalone notes, not meeting minutes.
+            // ── Canonical ingest: ONE hard-facts markdown → document mode ─────
+            // Only STATED, attributable content enters memory: decisions, action
+            // items, next steps, open questions, notable quotes + participants/
+            // orgs + the event date. Everything INFERRED — summary, sentiment,
+            // risks, key-points, and the synthesis/entity-brief/continuity/
+            // open-loop ANALYSIS — stays display-only in meetings.intelligence and
+            // is NEVER ingested. The markdown goes through ingestSource(mode:
+            // 'document') → the SAME _promoteMemories distill+entity+relationship
+            // path as KB/connectors, so there is no bespoke meeting ingest tree.
             const openQuestions = arr(m.questions).length ? arr(m.questions) : arr(ins.open_questions || ins.questions);
             const quotes = arr(ins.quotes);
-
-            const mkSection = (label, memory_type, lines, extraTags = []) => ({
-              user_id: mUser,
-              org_id: mOrg,
-              ...scopeFields,
-              title: `${ctxPrefix} — ${label}`.slice(0, 200),
-              content: `${provLine}\n\n${label}:\n${bulletBlock(lines)}`,
-              memory_type,
-              tags: [...INSIGHT_TAGS, ...extraTags].filter(Boolean),
-              ...(meetingDate ? { document_date: meetingDate } : {}),
-              metadata: { ...baseMeta, section: label },
-            });
-
-            // Parent (event) — summary/overview + participants + notable quotes.
-            // Quotes ride along as grounding here (not a separate recall row).
-            const quoteBlock = quotes.length
-              ? `\n\nNotable quotes:\n${quotes.slice(0, 6).map((q) => `“${(typeof q === 'string' ? q : (q?.quote || '')).toString().trim()}”${(q?.speaker ? ` — ${q.speaker}` : '')}`).filter((s) => s.length > 3).join('\n')}`
-              : '';
-            const parent = {
-              user_id: mUser,
-              org_id: mOrg,
-              ...scopeFields,
-              title: `${ctxPrefix} — Overview`.slice(0, 200),
-              content: provLine + '\n\n' + summary
-                + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
-                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : '')
-                + quoteBlock,
-              memory_type: 'event',
-              tags: ['meeting', 'ai-meeting-notes', 'meeting-insight', meetingTag,
-                ...(m.multi_speaker ? ['multi-speaker'] : []),
-                ...topics, ...entityTags].filter(Boolean),
-              ...(meetingDate ? { document_date: meetingDate } : {}),
-              metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length },
-            };
-
-            const children = [];
-            // 1) Decisions
-            const decisionLines = dedupeBullets(decisions.slice(0, 12), (d) => (typeof d === 'string' ? d : (d?.text || '')));
-            if (decisionLines.length) children.push(mkSection('Decisions', 'decision', decisionLines, ['decision', ...topics.slice(0, 2)]));
-            // 2) Action items + Next steps (one actionable list)
-            const actionLines = dedupeBullets(actionItems.slice(0, 12), (a) => {
-              const taskText = typeof a === 'string' ? a : (a?.task || '');
-              if (!taskText) return '';
+            const fmtAction = (a) => {
+              const t = (typeof a === 'string' ? a : (a?.task || '')).toString();
+              if (!t.trim()) return '';
               const owner = (typeof a === 'object' && a?.owner) ? a.owner : null;
               const due = (typeof a === 'object' && a?.due) ? a.due : null;
-              return `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
-            }).concat(dedupeBullets(nextSteps.slice(0, 8), (n) => String(n || '')));
-            if (actionLines.length) children.push(mkSection('Action items & next steps', 'goal', actionLines, ['action-item', 'open-loop']));
-            // 3) Key points + Risks (the substantive discussion)
-            const knowledgeLines = dedupeBullets(keyPoints.slice(0, 10), (k) => String(k || ''))
-              .concat(dedupeBullets(risks.slice(0, 8), (r) => `Risk: ${String(r || '')}`));
-            if (knowledgeLines.length) children.push(mkSection('Key points & risks', 'fact', knowledgeLines, ['key-point', 'risk']));
-            // 4) Open questions → open-loop lane (dreaming + meeting-intel)
+              const meta = [owner ? `owner: ${owner}` : null, due ? `due: ${due}` : null].filter(Boolean).join(', ');
+              return meta ? `${t.trim()} — ${meta}` : t.trim();
+            };
+            const fmtQuote = (q) => {
+              const text = (typeof q === 'string' ? q : (q?.quote || '')).toString().trim();
+              if (text.length < 3) return '';
+              const speaker = (typeof q === 'object' && q?.speaker) ? ` — ${q.speaker}` : '';
+              return `"${text}"${speaker}`;
+            };
+            const decisionLines = dedupeBullets(decisions.slice(0, 12), (d) => (typeof d === 'string' ? d : (d?.text || '')));
+            const actionLines = dedupeBullets(actionItems.slice(0, 12), fmtAction);
+            const nextStepLines = dedupeBullets(nextSteps.slice(0, 8), (n) => String(n || ''));
             const questionLines = dedupeBullets(openQuestions.slice(0, 8), (q) => (typeof q === 'string' ? q : (q?.text || q?.question || '')));
-            if (questionLines.length) children.push(mkSection('Open questions', 'fact', questionLines, ['open-loop', 'question']));
+            const quoteLines = dedupeBullets(quotes.slice(0, 6), fmtQuote);
+            const mdSection = (label, lines) => (lines.length ? `\n## ${label}\n${lines.map((l) => `- ${l}`).join('\n')}\n` : '');
+            const factsMarkdown =
+              `# Meeting: ${title} — ${stamp}\n`
+              + `Participants: ${people.join(', ') || '—'}   Organizations: ${orgs.join(', ') || '—'}\n`
+              + `> Meeting insights — claims stated in the meeting, not verified facts.\n`
+              + mdSection('Decisions', decisionLines)
+              + mdSection('Action items', actionLines)
+              + mdSection('Next steps', nextStepLines)
+              + mdSection('Open questions', questionLines)
+              + mdSection('Notable quotes', quoteLines);
 
-            // Transcript — EVIDENCE only, recall-excluded, grounds by meeting id.
+            const hasFacts = !!(decisionLines.length || actionLines.length || nextStepLines.length || questionLines.length || quoteLines.length);
+            if (!hasFacts && !transcript.trim()) {
+              return jsonResponse(res, { error: 'nothing_to_ingest' }, 400);
+            }
+
+            const scopeEnvelope = {
+              ...(scopeFields.scope ? { scope: scopeFields.scope } : {}),
+              ...(saveProjectIds[0] ? { projectId: saveProjectIds[0] } : {}),
+              ...(savePrimaryTeamId ? { primaryTeamId: savePrimaryTeamId } : {}),
+            };
+
+            // Facts envelope — distilled into fact memories + canonical entities
+            // (participants/orgs carried as entity: tags) + relationships.
+            let factIds = [];
+            if (hasFacts) {
+              const factsResult = await documentFirstIngestion.ingestSource({
+                userId: mUser, orgId: mOrg,
+                content: factsMarkdown,
+                source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title },
+                occurredAt: meetingDate || undefined,
+                mode: 'document',
+                ...scopeEnvelope,
+                tags: ['meeting', 'meeting-insight', 'unverified', meetingTag, ...entityTags, ...topics].filter(Boolean),
+                metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
+              });
+              factIds = factsResult?.memoryIds || [];
+            }
+
+            // Transcript → evidence-layer envelope: recall-excluded, never
+            // distilled. Grounds the facts by the shared meeting:<id> tag.
+            let transcriptResult = null;
             if (transcript.trim()) {
-              children.push({
-                user_id: mUser,
-                org_id: mOrg,
-                ...scopeFields,
-                title: `${ctxPrefix} — Transcript`.slice(0, 200),
+              transcriptResult = await documentFirstIngestion.ingestSource({
+                userId: mUser, orgId: mOrg,
                 content: transcript.slice(0, 16000),
-                memory_type: 'event',
+                source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title: `${title} — transcript` },
+                occurredAt: meetingDate || undefined,
+                mode: 'evidence',
+                ...scopeEnvelope,
                 tags: [meetingTag, 'transcript', 'evidence'],
-                ...(meetingDate ? { document_date: meetingDate } : {}),
                 metadata: { ...baseMeta, recall_exclude: true, evidence_only: true },
-                skip_fact_extraction: true,
               });
             }
 
-            const tree = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
-            const parentId = tree?.parentId || null;
-
-            // Structured enrichment on the parent (fire-and-forget).
-            if (parentId && enrichmentQueue) {
-              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags, orgId: mOrg });
-            }
-            // Link the meeting row back to the parent memory (idempotent).
-            if (parentId) {
+            // Link the meeting to its memory set via the first distilled fact —
+            // the idempotency flag + "already ingested?" check. The FULL set is
+            // addressable by the meeting:<id> tag (delete + recall grounding key).
+            const linkId = factIds[0] || transcriptResult?.memoryIds?.[0] || null;
+            if (linkId) {
               if (orgIsRemote(mOrg)) {
-                amrMeetingPatch(mOrg, id, { source_memory_id: parentId }).catch(() => { /* link best-effort */ });
+                amrMeetingPatch(mOrg, id, { source_memory_id: linkId }).catch(() => { /* link best-effort */ });
               } else {
                 await prisma.$queryRawUnsafe(
                   `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
-                  parentId, id, mOrg,
+                  linkId, id, mOrg,
                 ).catch(() => { /* link best-effort */ });
               }
             }
-            // Sectioned cluster: 1 parent (Overview) + ≤4 section memories +
-            // optional transcript-evidence. Report the section labels emitted.
-            const emitted = children.map((c) => (c.metadata?.section || (c.tags?.includes('transcript') ? 'transcript' : 'other')));
             return jsonResponse(res, {
               ok: true,
-              parent_id: parentId,
-              child_ids: tree?.childIds || [],
-              memory_count: 1 + children.length,
-              sections: emitted,
+              parent_id: linkId,
+              memory_ids: factIds,
+              fact_count: factIds.length,
+              transcript_evidence: !!transcriptResult,
+              source: 'meeting',
+              mode: 'document',
             }, 201);
           } catch (e) {
             console.error('[meeting-ingest] failed:', e && (e.stack || e.message || JSON.stringify(e)));

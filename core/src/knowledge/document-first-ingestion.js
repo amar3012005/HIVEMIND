@@ -712,8 +712,14 @@ Output the JSON object and nothing else.`;
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
+      // ts: date tag (the previous-version rule) — derived from the doc's event
+      // date (document_date) else ingest time. Put it in the fact's OWN tags so
+      // BOTH the engine write AND the vector re-upsert carry it (the ingestMemory
+      // ts-stamp gets clobbered by the 2-phase write; this is the durable source).
+      const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
+      const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
-        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', ...entityTags,
+        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', _tsDay, ...entityTags,
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);

@@ -5833,6 +5833,38 @@ exit \$RC
         }
       }
 
+      // GET /api/meetings/entity-recall?name=<entity> — entity-level recall for
+      // the click-through popover: recent memories where this org entity is
+      // mentioned (tag match on slug OR title/content match), newest-first,
+      // evidence excluded. Central only (remote entities on agent).
+      if (pathname === '/api/meetings/entity-recall' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        const name = (url.searchParams.get('name') || '').toString().trim().slice(0, 80);
+        if (!name || name.length < 2) return jsonResponse(res, { name, mentions: [] });
+        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { name, mentions: [], skipped: 'remote' });
+        try {
+          const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id, title, memory_type, created_at, left(content, 220) AS snippet
+               FROM hivemind.memories
+              WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+                AND NOT (tags && ARRAY['evidence'])
+                AND ( tags && ARRAY[$2,$3] OR title ILIKE $4 OR content ILIKE $4 )
+              ORDER BY created_at DESC LIMIT 8`,
+            mOrg, `entity:${slug}`, `person:${slug}`, `%${name}%`,
+          );
+          return jsonResponse(res, {
+            name,
+            mentions: (rows || []).map((r) => ({
+              id: r.id, title: r.title, memory_type: r.memory_type,
+              date: r.created_at, snippet: r.snippet,
+            })),
+          });
+        } catch (e) {
+          return jsonResponse(res, { name, mentions: [] });
+        }
+      }
+
       // POST /api/meetings/invite — email external participants that an org
       // member added at meeting start. Best-effort, capped, user-initiated
       // (fires when the organizer clicks Start with externals entered). Org

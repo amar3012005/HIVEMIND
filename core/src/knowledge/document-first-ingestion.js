@@ -498,7 +498,12 @@ Output the JSON object and nothing else.`;
         if (created >= MAX_FACTS_PER_DOC) return;
         let perSection;
         try {
-          perSection = await this._batchExtractFacts(batch, { maxFacts: MAX_FACTS_PER_SEGMENT, entityContext });
+          // Allow the LLM up to the batch's largest per-target cap (windowed facts-only passes bigger
+          // caps for bigger windows); the per-section slice above still enforces each target's own cap.
+          const _batchMax = metadata.perTargetMaxFacts
+            ? Math.max(MAX_FACTS_PER_SEGMENT, ...batch.map((t) => Number(t.maxFacts) || 0))
+            : MAX_FACTS_PER_SEGMENT;
+          perSection = await this._batchExtractFacts(batch, { maxFacts: _batchMax, entityContext });
         } catch (err) {
           failed++;
           this.logger.warn?.(`[kb-distill] batch LLM failed: ${err.message}`);
@@ -509,7 +514,10 @@ Output the JSON object and nothing else.`;
           if (created >= MAX_FACTS_PER_DOC) break;
           const t = batch[k];
           const ex = perSection[k] || { facts: [], entities: [] };
-          const facts = (ex.facts || []).filter((f) => f && typeof f.f === 'string' && f.f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
+          // Per-target cap (facts-only windowed distill passes t.maxFacts sized to content length);
+          // falls back to the flat per-segment cap for the legacy path.
+          const _capK = (metadata.perTargetMaxFacts && Number(t.maxFacts) > 0) ? Number(t.maxFacts) : MAX_FACTS_PER_SEGMENT;
+          const facts = (ex.facts || []).filter((f) => f && typeof f.f === 'string' && f.f.trim().length >= 20).slice(0, _capK);
           // Canonicalize at the SOURCE (normalizeEntity), not via a raw
           // underscore-join. KB facts set defer_entity_linking=true so the
           // co-mention linker never re-tags them, and they do NOT reach the
@@ -1510,11 +1518,27 @@ Output the JSON object and nothing else.`;
     // attributable memories — uniform for central/managed/self-host (the distill + linker both route by
     // org type at their own seams).
     if (String(process.env.KB_FACTS_ONLY ?? 'true').toLowerCase() !== 'false') {
-      const targets = promotableSegments.map((s) => ({
-        segmentId: s.id,
-        content: s.content,
-        heading: s.metadata?.heading || null,
-        page: s.metadata?.page || null,
+      // Window the content for distillation so fact yield tracks CONTENT VOLUME, not the (highly
+      // variable) evidence-chunk size — a doc that the chunker split into one giant segment OR many tiny
+      // fragments both produce a sensible fact set. Merge adjacent segments up to ~WIN chars; set the
+      // per-window fact cap proportional to length (clamped) so dense windows yield more, thin ones fewer.
+      const WIN = Number(process.env.KB_DISTILL_WINDOW_CHARS || 1500);
+      const FACTS_PER_K = Number(process.env.KB_FACTS_PER_1K_CHARS || 7); // ~7 salient facts / 1000 chars
+      const windows = [];
+      let cur = null;
+      for (const s of promotableSegments) {
+        const seg = { segmentId: s.id, content: s.content || '', heading: s.metadata?.heading || null, page: s.metadata?.page || null };
+        if (!cur) { cur = seg; continue; }
+        if ((cur.content.length + seg.content.length + 2) <= WIN) { cur.content += '\n\n' + seg.content; }
+        else { windows.push(cur); cur = seg; }
+      }
+      if (cur) windows.push(cur);
+      const targets = windows.map((w) => ({
+        segmentId: w.segmentId,
+        content: w.content,
+        heading: w.heading,
+        page: w.page,
+        maxFacts: Math.max(3, Math.min(12, Math.round((w.content.length / 1000) * FACTS_PER_K))),
         scope: metadata.scope,
         visibility: metadata.visibility,
         primary_team_id: metadata.primary_team_id || null,
@@ -1522,7 +1546,7 @@ Output the JSON object and nothing else.`;
       }));
       let factObjs = [];
       try {
-        const distill = await this._distillFactsAsync({ targets, userId, orgId, documentId, metadata });
+        const distill = await this._distillFactsAsync({ targets, userId, orgId, documentId, metadata: { ...metadata, perTargetMaxFacts: true } });
         factObjs = (distill && Array.isArray(distill.factObjs)) ? distill.factObjs : [];
       } catch (e) {
         this.logger.warn?.(`[kb-facts-only] distill failed: ${e.message}`);

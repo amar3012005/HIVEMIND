@@ -80,6 +80,7 @@ function mapAgentRow(r) {
     project_ids: r.project_ids || [],
     visibility: r.visibility || 'private',
     scope: r.scope || 'personal',
+    primary_team_id: r.primary_team_id || null,
     content: r.content || '',
     title: r.title || null,
     tags: r.tags || [],
@@ -343,6 +344,9 @@ export class PrismaGraphStore {
         cognitiveLayerRole: memory.cognitive_layer_role || null, confidence: memory.importance_score ?? null,
         createdAt: memory.created_at || new Date().toISOString(),
         project: memory.project || null, projectIds: memory.project_ids || [],
+        // Scope + team parity: the agent now has scope / primary_team_id columns,
+        // so a project/team-scoped memory round-trips on self-host like central.
+        scope: memory.scope || null, primaryTeamId: memory.primary_team_id || null,
         validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
         // Provenance round-trip: the agent persists a `metadata` jsonb (no
         // dedicated source columns), so fold source_metadata into it. Without

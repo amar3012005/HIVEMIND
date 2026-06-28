@@ -1,0 +1,38 @@
+name: BYOD setup-branch publish
+
+# Fresh self-host installs clone the `byod` branch and build the agent from it.
+# Its root must mirror byod/. Whenever byod/ changes on a source branch, auto-
+# republish so the setup branch can never drift (the stale 322-line agent that
+# almost shipped is the failure this prevents).
+on:
+  push:
+    branches: [main, master, feat/mneme-foundation]
+    paths: ['byod/**']
+  workflow_dispatch: {}   # allow manual re-publish
+
+permissions:
+  contents: write          # GITHUB_TOKEN needs push access to the byod branch
+
+concurrency:
+  group: byod-publish      # never let two publishes race the branch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Republish byod/ → byod branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + branch refs for the worktree/compare
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Republish (idempotent)
+        run: bash scripts/publish-byod.sh
+
+      - name: Verify byod branch now mirrors byod/
+        run: bash scripts/check-byod-sync.sh

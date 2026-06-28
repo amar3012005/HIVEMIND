@@ -1571,8 +1571,8 @@ Output the JSON object and nothing else.`;
       // variable) evidence-chunk size — a doc that the chunker split into one giant segment OR many tiny
       // fragments both produce a sensible fact set. Merge adjacent segments up to ~WIN chars; set the
       // per-window fact cap proportional to length (clamped) so dense windows yield more, thin ones fewer.
-      const WIN = Number(process.env.KB_DISTILL_WINDOW_CHARS || 800);
-      const FACTS_PER_K = Number(process.env.KB_FACTS_PER_1K_CHARS || 7); // ~salient facts / 1000 chars
+      const WIN = Number(process.env.KB_DISTILL_WINDOW_CHARS || 500);
+      const FACTS_PER_K = Number(process.env.KB_FACTS_PER_1K_CHARS || 11); // ~salient facts / 1000 chars (tuned)
       // Re-window the WHOLE doc semantically (boundary-aware chunkText splits big segments AND merges
       // small ones at heading/paragraph/sentence boundaries — never mid-word). This decouples fact
       // COVERAGE from the evidence chunker: a doc that arrived as one giant segment or many tiny

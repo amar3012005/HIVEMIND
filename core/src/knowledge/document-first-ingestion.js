@@ -391,6 +391,7 @@ Output the JSON object and nothing else.`;
       // Phase 2: collect {factId, vec} for the OFF-HOT-PATH async enrichment pass
       // (cross-doc dedup + relationship edges). Populated in flushEmbeds.
       const enrichRecs = [];
+      const factObjs = []; // created fact memories (id+content+tags) — facts-only mode links them post-distill
 
       // Only sections with enough prose to distill.
       const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
@@ -422,8 +423,8 @@ Output the JSON object and nothing else.`;
             ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
             ...(t.page ? [`page:${t.page}`] : []),
           ],
-          source_metadata: { source_platform: 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId },
-          metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v2' },
+          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
+          metadata: { document_id: documentId, segment_memory_id: t.memoryId || null, segment_id: t.segmentId || null, distill_agent: 'kb_distill_v2' },
           skip_fact_extraction: true,
           defer_entity_linking: true,   // entities already extracted in the batch pass
           // KB distilled facts are append-only with explicit Derives-to-segment
@@ -443,14 +444,19 @@ Output the JSON object and nothing else.`;
         });
         const factId = res?.memoryId || res?.id || null;
         if (!factId || (res?.operation || '').startsWith('skipped')) return null;
-        // Provenance: fact Derives-from its section.
-        try {
-          await this.memoryGraphEngine.store.createRelationship({
-            id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
-            type: 'Derives', confidence: 0.9,
-            metadata: { created_by: 'kb_distill_v2', document_id: documentId },
-          });
-        } catch { /* best-effort */ }
+        // Provenance: fact Derives-from its section — ONLY in legacy mode where a section memory exists.
+        // In facts-only mode (t.memoryId null) the fact's provenance is the SEGMENT (evidence) via
+        // metadata.segment_id + the filename/doc-id tags; no memory↔memory Derives is created (that was
+        // the bulk of the "Derives noise"). Cross-fact relationships come from the co-mention linker.
+        if (t.memoryId) {
+          try {
+            await this.memoryGraphEngine.store.createRelationship({
+              id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
+              type: 'Derives', confidence: 0.9,
+              metadata: { created_by: 'kb_distill_v2', document_id: documentId },
+            });
+          } catch { /* best-effort */ }
+        }
         // Return a pending vector-index job. The CONTEXTUAL embedding (doc title +
         // heading prefix, Anthropic contextual-retrieval) is BATCHED by the caller
         // — one bge-m3 call per ≤20 facts instead of a network round-trip per fact,
@@ -521,7 +527,19 @@ Output the JSON object and nothing else.`;
               // `created` is shared across CONCURRENCY workers and the await above
               // is a yield point, so the outer break alone lets the soft cap
               // overshoot. This keeps MAX_FACTS_PER_DOC effectively binding.
-              if (p && created < MAX_FACTS_PER_DOC) { pending.push(p); created++; }
+              if (p && created < MAX_FACTS_PER_DOC) {
+                pending.push(p); created++;
+                factObjs.push({
+                  id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
+                  title: (p.fact || '').slice(0, 80), memory_type: 'fact',
+                  tags: [
+                    ...p.entityTags,
+                    ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+                    ...(documentId ? [`doc-id:${documentId}`] : []),
+                  ],
+                  project: Array.isArray(p.t.project_ids) ? p.t.project_ids[0] : null,
+                });
+              }
             } catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
           }
         }
@@ -544,7 +562,7 @@ Output the JSON object and nothing else.`;
         this._enrichDocAsync({ enrichRecs, orgId, documentId })
           .catch((e) => this.logger.warn?.(`[kb-enrich] ${e.message}`));
       }
-      return { created, failed };
+      return { created, failed, factObjs };
     })().catch((err) => {
       this.logger.warn?.(`[kb-distill] batch failed: ${err.message}`);
       return null;
@@ -1481,6 +1499,44 @@ Output the JSON object and nothing else.`;
       }
       return Array.from(picked.values());
     })();
+
+    // ── FACTS-ONLY memory creation (default; reversible via KB_FACTS_ONLY=false) ──────────────────────
+    // Segments are EVIDENCE (hop-2). Memories = the LLM-distilled atomic FACTS only. We do NOT promote
+    // raw segments as "section" memories — those duplicated evidence, carried mid-word chunk text, and
+    // spawned a fact→section Derives edge per fact (the bulk of the "Derives noise"). Instead: distill the
+    // segments straight into clean fact memories (with filename/doc-id provenance), then run the
+    // co-mention linker over the FACTS so they gain real cross-fact relationships (Updates/Extends/
+    // Mentions via shared entities) + intra-doc cohesion (batch peers). Result: fewer, richer, fully
+    // attributable memories — uniform for central/managed/self-host (the distill + linker both route by
+    // org type at their own seams).
+    if (String(process.env.KB_FACTS_ONLY ?? 'true').toLowerCase() !== 'false') {
+      const targets = promotableSegments.map((s) => ({
+        segmentId: s.id,
+        content: s.content,
+        heading: s.metadata?.heading || null,
+        page: s.metadata?.page || null,
+        scope: metadata.scope,
+        visibility: metadata.visibility,
+        primary_team_id: metadata.primary_team_id || null,
+        project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+      }));
+      let factObjs = [];
+      try {
+        const distill = await this._distillFactsAsync({ targets, userId, orgId, documentId, metadata });
+        factObjs = (distill && Array.isArray(distill.factObjs)) ? distill.factObjs : [];
+      } catch (e) {
+        this.logger.warn?.(`[kb-facts-only] distill failed: ${e.message}`);
+      }
+      // Cross-fact relationships + intra-doc cohesion (batch peers passed to the co-mention linker).
+      if (factObjs.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+        const linkConcurrency = Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6);
+        this.memoryGraphEngine.linkEntitiesForMemories(factObjs, { concurrency: linkConcurrency })
+          .then(() => this.logger.info?.(`[kb-facts-only] linked ${factObjs.length} fact memories`))
+          .catch((e) => this.logger.warn?.(`[kb-facts-only] entity-link failed: ${e.message}`));
+      }
+      this.logger.info?.(`[kb-facts-only] doc ${String(documentId).slice(0, 8)}: ${factObjs.length} fact memories from ${promotableSegments.length} segments (no raw-segment promotion)`);
+      return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'distill_source' })), memories: factObjs, documentParentId: null };
+    }
 
     const promoteOne = async (segment) => {
       candidates.push({

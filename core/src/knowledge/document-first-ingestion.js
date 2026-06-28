@@ -705,6 +705,7 @@ Output the JSON object and nothing else.`;
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          document_date: metadata.document_date || null,
           source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
           metadata: { document_id: documentId, segment_id: window.segmentId || null, distill_agent: 'kb_unified_v1' },
           skip_fact_extraction: true, defer_entity_linking: true,

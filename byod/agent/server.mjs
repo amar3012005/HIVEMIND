@@ -233,8 +233,18 @@ const routes = {
        ON CONFLICT (id) DO UPDATE SET
          content=EXCLUDED.content, title=EXCLUDED.title, tags=EXCLUDED.tags, memory_type=EXCLUDED.memory_type,
          is_latest=EXCLUDED.is_latest, layer=EXCLUDED.layer, cognitive_layer_role=EXCLUDED.cognitive_layer_role,
-         confidence=EXCLUDED.confidence, valid_from=EXCLUDED.valid_from, document_date=EXCLUDED.document_date,
-         project=EXCLUDED.project, project_ids=EXCLUDED.project_ids, metadata=EXCLUDED.metadata,
+         confidence=EXCLUDED.confidence,
+         -- Provenance preservation: memory rows are written in two phases — the
+         -- engine creates the row (with valid_from / document_date / metadata),
+         -- then the vector store re-upserts the SAME id to attach the embedding
+         -- (carrying null/empty for those fields). Plain EXCLUDED assignment let
+         -- the second write CLOBBER provenance. COALESCE/merge keeps the existing
+         -- value when the incoming one is null/empty, so the date + source
+         -- metadata survive the vector-add upsert (and any later partial write).
+         valid_from=COALESCE(EXCLUDED.valid_from, memories.valid_from),
+         document_date=COALESCE(EXCLUDED.document_date, memories.document_date),
+         project=EXCLUDED.project, project_ids=EXCLUDED.project_ids,
+         metadata=(memories.metadata || EXCLUDED.metadata),
          vector_synced=false, deleted_at=NULL`,
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,

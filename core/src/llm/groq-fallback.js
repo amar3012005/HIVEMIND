@@ -139,6 +139,14 @@ async function openrouterReplay(reqBody, timeoutMs) {
   if (!orModel || !OPENROUTER_KEY) return null;
 
   const body = { ...reqBody, model: orModel };
+  // Strip Groq-/OpenAI-specific params that OpenRouter's `require_parameters`
+  // routing cannot satisfy for the target model — no provider advertises
+  // support for them, so routing returns 404 "No endpoints found that can
+  // handle the requested parameters". `parallel_tool_calls` is the proven
+  // offender for gpt-oss-* + tools; `service_tier` is Groq-only and meaningless
+  // to OpenRouter. Dropping them only relaxes a hint — tool-calling still works.
+  delete body.parallel_tool_calls;
+  delete body.service_tier;
   // Fastest provider that still supports the request's params (tools /
   // response_format), with OpenRouter's own cross-provider fallback enabled.
   body.provider = { sort: 'throughput', allow_fallbacks: true, require_parameters: true };

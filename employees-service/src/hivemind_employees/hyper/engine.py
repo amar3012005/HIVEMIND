@@ -1446,8 +1446,9 @@ class Director:
         # The deliverable FORMAT is driven by the intended output — so an "email" turn writes a
         # ready-to-send email (Subject + body), NOT a generic strategy report the producer can't send.
         _io = self.intended_output
-        _is_prospecting = bool(re.search(r"\b(prospect|lead|potential client|new client|outreach|reach out)\b",
-                                         (self.user_message or "").lower()))
+        _is_prospecting = bool(re.search(
+            r"\b(?:prospects?|leads?|potential clients?|new clients?|outreach|reach out|find clients?)\b",
+            (self.user_message or "").lower()))
         if _io == "email":
             _fmt = ("\n\nThe deliverable is an EMAIL. Write it ready to send: a 'Subject:' line, then the body "
                     "(greeting, 2-4 tight paragraphs, ONE clear ask/CTA, sign-off). NOT a report or doc. "

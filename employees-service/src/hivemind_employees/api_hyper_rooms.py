@@ -2661,6 +2661,21 @@ async def _orchestrate_single_agent(
              req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks),
              _dir_m, _per_m, _syn_m)
 
+    # Org grounding — recall a standing COMPANY CONTEXT (name, products, customers, market) ONCE
+    # before the director plans, so its gather-PLAN (recall_queries + web_query) AND the synthesis
+    # are specific to THIS company, not a generic industry. Master+emulation recall (no minted key
+    # needed — reaches the org brain); bounded + best-effort so it never stalls or sinks the turn.
+    _company_brief = ""
+    try:
+        _company_brief = await asyncio.wait_for(
+            _build_company_brief(req.user_message, req.user_id, req.org_id, "", project_id=req.project_id),
+            timeout=8.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — grounding is best-effort, never fatal
+        log.warning("[single] company brief failed (non-fatal): %s", exc)
+        _company_brief = ""
+    log.info("[single] room=%s company_brief=%d chars", req.room_id, len(_company_brief or ""))
+
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2672,6 +2687,7 @@ async def _orchestrate_single_agent(
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
+            company_brief=_company_brief,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

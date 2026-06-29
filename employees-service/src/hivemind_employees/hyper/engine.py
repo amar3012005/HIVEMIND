@@ -786,6 +786,7 @@ class Director:
         sim_agents: int = 0,
         evo_mode: str = "off",
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
+        company_brief: str = "",
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -795,6 +796,10 @@ class Director:
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
         self.room_goal = room_goal or ""
+        # Standing org identity (name + what the company does/sells + customers/market),
+        # recalled once before the turn. Injected into PLAN + SYNTH so the director grounds
+        # queries + the deliverable in THIS company — not a generic industry. '' = no brief.
+        self.company_brief = str(company_brief or "")
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
@@ -1362,9 +1367,17 @@ class Director:
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true ONLY if the task needs a decision, judgment, trade-off, or genuine discussion; "
-            "false for a pure lookup / factual answer."
+            "false for a pure lookup / factual answer.\n"
+            "GROUND recall_queries AND web_query in the COMPANY CONTEXT when one is given — reference the company's "
+            "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
+            "<product> in <market>'), NEVER a generic industry query."
         )
-        user = f"ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        _org = (self.company_brief or "").strip()
+        _org_block = (
+            "COMPANY CONTEXT — the organisation you are planning for. Ground every query in its identity, "
+            "products, customers, and market; do NOT emit generic industry queries:\n" + _org[:1200] + "\n\n"
+        ) if _org else ""
+        user = f"{_org_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                model=self.director_model, temp=0.3, schema=schema, bucket="director")
         self.director_iters.append(self._last_tok)
@@ -1430,7 +1443,11 @@ class Director:
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED.")
-        user = (f"TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
+        _org = (self.company_brief or "").strip()
+        _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "
+                      f"and market; make every specific concrete to this company, not generic):\n{_org[:1500]}\n\n"
+                      if _org else "")
+        user = (f"{_org_block}TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
                 "Write the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                force_text=True, model=self.synth_model, bucket="synth")
@@ -1671,6 +1688,7 @@ async def run_director(
     sim_agents: int = 0,
     evo_mode: str = "off",
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
+    company_brief: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -1681,5 +1699,6 @@ async def run_director(
         director_model=director_model, persona_model=persona_model, synth_model=synth_model,
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
+        company_brief=company_brief,
     )
     return await director.run()

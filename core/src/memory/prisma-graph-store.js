@@ -89,6 +89,10 @@ function mapAgentRow(r) {
     layer: r.layer || 'memory',
     cognitive_layer_role: r.cognitive_layer_role || null,
     importance_score: r.confidence ?? 0.5,
+    // Recall reinforcement → feeds recall scoring (log-boost + strength multiplier).
+    recall_count: r.recall_count ?? 0,
+    strength: typeof r.strength === 'number' ? r.strength : 1.0,
+    last_accessed_at: r.last_accessed_at || null,
     created_at: r.created_at,
     updated_at: r.created_at,
     valid_from: r.valid_from || null,
@@ -347,6 +351,8 @@ export class PrismaGraphStore {
         // Scope + team parity: the agent now has scope / primary_team_id columns,
         // so a project/team-scoped memory round-trips on self-host like central.
         scope: memory.scope || null, primaryTeamId: memory.primary_team_id || null,
+        // Recall reinforcement seed (agent owns subsequent bumps via /v1/bump-recall).
+        recallCount: memory.recall_count ?? 0, strength: memory.strength ?? 1.0,
         validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
         // Provenance round-trip: the agent persists a `metadata` jsonb (no
         // dedicated source columns), so fold source_metadata into it. Without

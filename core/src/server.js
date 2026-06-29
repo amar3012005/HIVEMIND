@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships } from './vector/mneme/driver.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -18959,6 +18959,10 @@ exit \$RC
                         strength: { increment: 0.05 },
                       },
                     }).catch(() => {});
+                    // Self-host: the central updateMany above no-ops (rows live on
+                    // the agent). Mirror the reinforcement to the agent so recall
+                    // scoring's recall_count/strength boost works on self-host too.
+                    try { amrBumpRecall(orgId, ids); } catch { /* best-effort */ }
                   }
                   const HYDRATE_THRESHOLD = 0.6;
                   const tier1Hits = hits.filter((m) => m.tier === 1 && (m.score || 0) >= HYDRATE_THRESHOLD);

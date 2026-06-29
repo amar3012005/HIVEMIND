@@ -131,6 +131,12 @@ export async function remoteUpdate(orgId, id, patch) {
   catch (e) { console.warn(`[mneme/remote] update failed org=${orgId}: ${e.message}`); return null; }
 }
 
+// Recall reinforcement — bump recall_count/strength/last_accessed for delivered ids.
+export async function remoteBumpRecall(orgId, ids) {
+  try { const out = await _call(orgId, '/v1/bump-recall', { ids }); return out?.bumped ?? 0; }
+  catch (e) { console.warn(`[mneme/remote] bump-recall failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // Hydrate full memory rows from the customer's Postgres (so recall content stays on their box).
 export async function remoteHydrate(orgId, ids) {
   try { const out = await _call(orgId, '/v1/hydrate', { ids }); return out?.memories || []; }

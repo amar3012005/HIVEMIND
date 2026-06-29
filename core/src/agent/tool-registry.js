@@ -12,6 +12,7 @@
 
 import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
+import { amrBumpRecall } from '../vector/mneme/driver.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -380,6 +381,8 @@ const TOOL_HANDLERS = {
             strength: { increment: 0.05 },
           },
         }).catch(() => {});
+        // Self-host: central updateMany no-ops (rows on the agent) — mirror to agent.
+        try { amrBumpRecall(ctx.orgId, recalledIds); } catch { /* best-effort */ }
       }
     }
 

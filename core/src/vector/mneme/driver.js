@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -270,6 +270,15 @@ export function amrUpdate(orgId, id, patch) {
       return remoteUpdate(orgId, id, patch);
     }).catch(() => remoteUpdate(orgId, id, patch));
   }
+  return undefined;
+}
+
+// Recall reinforcement — bump recall_count/strength for delivered ids on the agent.
+// Best-effort + fire-and-forget (matches central's prisma.updateMany().catch(()=>{}));
+// recall feedback is lossy-tolerant, so no outbox (avoids bloat from frequent recalls).
+export function amrBumpRecall(orgId, ids) {
+  if (!orgId || !Array.isArray(ids) || ids.length === 0) return undefined;
+  if (orgIsRemote(orgId)) { Promise.resolve(remoteBumpRecall(orgId, ids)).catch(() => {}); return true; }
   return undefined;
 }
 

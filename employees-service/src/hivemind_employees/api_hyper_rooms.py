@@ -2199,9 +2199,10 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
                 continue
             to = addr
             break
-    if not to:
-        log.info("[produce] email skipped — no recipient")
-        return {"skipped": "no verified recipient (org directory / Gmail / HIVEMIND recall all empty)"}
+    # No verified recipient → DON'T skip to nothing (which degrades to a generic doc). Still DRAFT
+    # the email in the owner's Gmail (empty To) so they review + add recipients + send themselves.
+    # Never auto-sends (no approval queued). Honors intended_output=email instead of a report.
+    _no_recipient = not to
     # Dependency gate: if an EARLIER step was meant to create the artifact this
     # email links but it was NOT produced, do NOT draft an email with a fabricated
     # link — skip honestly so the seal reports the real blocker.
@@ -2231,12 +2232,21 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
     url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
     if draft_id:
+        if _no_recipient:
+            log.info("[produce] email drafted with NO recipient — review + add recipients in Gmail")
+            return {"draft_id": draft_id, "url": url, "to": "", "needs_recipient": True,
+                    "note": "Drafted in Gmail with no recipient — no verified contact was found. "
+                            "Review it, add recipients, and send from Gmail."}
         queue_email_approval(to, subject, draft_id, url)
         log.info("[produce] email draft → %s", to)
         return {"draft_id": draft_id, "url": url, "to": to}
     if isinstance(res, dict) and res.get("error"):
         await _surface_produce_error(req, plan, "Gmail draft", res.get("error"))
-    return {"skipped": "the Gmail draft could not be created"}
+    # Draft couldn't be saved. The email TEXT was still written by synth (intended_output=email),
+    # so say that honestly rather than implying nothing was produced.
+    return {"skipped": ("no verified recipient and the Gmail draft could not be saved — the email text is "
+                        "in the answer above; add recipients to send" if _no_recipient
+                        else "the Gmail draft could not be created")}
 
 
 # "deliver X through/via/in a sheet|doc" → the artifact is a PREREQUISITE the
@@ -2689,6 +2699,15 @@ async def _orchestrate_single_agent(
         _company_brief = ""
     log.info("[single] room=%s company_brief=%d chars", req.room_id, len(_company_brief or ""))
 
+    # Derive the intended deliverable + capability-gate it BEFORE the run, so SYNTH writes the right
+    # FORMAT (a ready-to-send email vs a generic report). If the artifact's connector isn't enabled
+    # for the room, downgrade to a text answer — never write the wrong format or call an absent connector.
+    intended_output = _derive_intended_output(req.user_message)
+    if not _artifact_connector_enabled(intended_output, conns):
+        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
+                 intended_output, req.room_id, conns)
+        intended_output = "answer"
+
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2700,7 +2719,7 @@ async def _orchestrate_single_agent(
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
-            company_brief=_company_brief,
+            company_brief=_company_brief, intended_output=intended_output,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2715,16 +2734,8 @@ async def _orchestrate_single_agent(
     _io = result.get("io") or {}
     _tok_by = result.get("tok_by") or {}
 
-    # 2. PLAN — derive output kind + a plan dict the producer + verifier consume.
-    intended_output = _derive_intended_output(req.user_message)
-    # Capability gate: a connector-backed artifact (doc/sheet→Google, email→Gmail,
-    # notion→Notion) can only be produced if that connector is TOGGLED ON for this room.
-    # If it isn't, downgrade to a TEXT answer — never call a connector the room didn't
-    # enable (it would hang on an absent/dead token and block a complete deliverable).
-    if not _artifact_connector_enabled(intended_output, conns):
-        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
-                 intended_output, req.room_id, conns)
-        intended_output = "answer"
+    # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
+    # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
     done_txt = req.room_goal or req.user_message
     contributions = [
         {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",

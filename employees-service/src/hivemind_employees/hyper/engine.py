@@ -787,6 +787,7 @@ class Director:
         evo_mode: str = "off",
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
         company_brief: str = "",
+        intended_output: str = "answer",
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -800,6 +801,9 @@ class Director:
         # recalled once before the turn. Injected into PLAN + SYNTH so the director grounds
         # queries + the deliverable in THIS company — not a generic industry. '' = no brief.
         self.company_brief = str(company_brief or "")
+        # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
+        # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
+        self.intended_output = str(intended_output or "answer").strip().lower()
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
@@ -1439,10 +1443,28 @@ class Director:
         sim_ctx = (f"\n\nA POPULATION SIMULATION of synthetic stakeholder voices produced this report — "
                    f"incorporate its consensus + fault lines where relevant:\n{self._sim_report[:2500]}"
                    if self._sim_report else "")
+        # The deliverable FORMAT is driven by the intended output — so an "email" turn writes a
+        # ready-to-send email (Subject + body), NOT a generic strategy report the producer can't send.
+        _io = self.intended_output
+        _is_prospecting = bool(re.search(r"\b(prospect|lead|potential client|new client|outreach|reach out)\b",
+                                         (self.user_message or "").lower()))
+        if _io == "email":
+            _fmt = ("\n\nThe deliverable is an EMAIL. Write it ready to send: a 'Subject:' line, then the body "
+                    "(greeting, 2-4 tight paragraphs, ONE clear ask/CTA, sign-off). NOT a report or doc. "
+                    + ("This is OUTREACH to prospects — open by naming the prospect and why they fit; if you "
+                       "identified specific companies, write the email so it can be personalised per prospect, "
+                       "and list the prospects (name + why + how to reach) ABOVE the email so the user can send it. "
+                       if _is_prospecting else ""))
+        elif _io in ("doc", "notion"):
+            _fmt = "\n\nThe deliverable is a DOCUMENT — structured, publish-ready prose with headings + tables."
+        elif _io == "sheet":
+            _fmt = "\n\nThe deliverable is a SPREADSHEET — output the rows/columns the producer will create as a sheet."
+        else:
+            _fmt = ""
         sysp = (self._system_prompt() + "\n\nYou are now WRITING THE FINAL DELIVERABLE from the gathered "
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
-                "flag anything unverifiable as UNVERIFIED.")
+                "flag anything unverifiable as UNVERIFIED." + _fmt)
         _org = (self.company_brief or "").strip()
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "
                       f"and market; make every specific concrete to this company, not generic):\n{_org[:1500]}\n\n"
@@ -1689,6 +1711,7 @@ async def run_director(
     evo_mode: str = "off",
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
     company_brief: str = "",
+    intended_output: str = "answer",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -1700,5 +1723,6 @@ async def run_director(
         max_iters=max_iters, sim_mode=sim_mode, sim_agents=sim_agents,
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
         company_brief=company_brief,
+        intended_output=intended_output,
     )
     return await director.run()

@@ -386,11 +386,14 @@ const routes = {
     if (b.filter?.user_id) { args.push(b.filter.user_id); cond += ` AND user_id=$${args.length}`; }
     args.push(limit);
     const { rows: nodes } = await pg.query(
-      `SELECT id, title, content, tags, memory_type, created_at FROM memories WHERE ${cond} ORDER BY created_at DESC LIMIT $${args.length}`, args);
+      `SELECT id, title, content, tags, memory_type, created_at, document_date,
+              confidence, recall_count, strength, scope
+         FROM memories WHERE ${cond} ORDER BY created_at DESC LIMIT $${args.length}`, args);
     let edges = [];
     if (nodes.length) {
       const ids = nodes.map((n) => n.id);
-      const r = await pg.query('SELECT id, from_id, to_id, type, confidence FROM relationships WHERE org_id=$1 AND from_id = ANY($2)', [ORG, ids]);
+      // Both directions so node-detail inbound+outbound relationships resolve.
+      const r = await pg.query('SELECT id, from_id, to_id, type, confidence FROM relationships WHERE org_id=$1 AND (from_id = ANY($2) OR to_id = ANY($2))', [ORG, ids]);
       edges = r.rows;
     }
     return { nodes, edges };

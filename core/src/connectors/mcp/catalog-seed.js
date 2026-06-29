@@ -8,11 +8,16 @@
  *   - stdio  → an env var the server reads (var/format declared here)
  *   - http   → Authorization header (default) or a custom header
  *
- * Only providers whose Nango credential is a single bearer/PAT token are
- * listed — they work end-to-end with the existing runner the moment the
- * tenant connects them. Google Workspace + Microsoft 365 are intentionally
- * omitted: they need a refresh-token / device-code shim (see openswarm's
- * google_workspace_mcp_shim) which is a separate P0.5 task, not faked here.
+ * Most providers' Nango credential is a single bearer/PAT token and work
+ * end-to-end with the runner the moment the tenant connects them.
+ *
+ * Google Workspace (gmail/drive/calendar/docs/gemini) + Salesforce are also
+ * seeded, but as CONNECT-ONLY mappings: their only job here is to let
+ * /api/connectors/connect-session resolve connector_id → nango_provider and
+ * mint a Nango Connect session against the Nango that holds the OAuth
+ * integrations. Gmail/Docs ingestion is the first-party native connector, and
+ * the MCP runner is on-demand (never auto-invoked for these). Microsoft 365
+ * still needs a device-code shim (P0.5).
  */
 
 export const MCP_CATALOG = [
@@ -77,6 +82,19 @@ export const MCP_CATALOG = [
     nango_provider: 'linear',
     category: 'project',
   },
+  // ── Google Workspace + Salesforce (Nango connect mappings) ───────────────
+  // These exist so /api/connectors/connect-session can map connector_id →
+  // nango_provider and mint a Nango Connect session against the (central)
+  // Nango that holds the OAuth integrations. The Nango unique_key MUST match
+  // nango_provider. Gmail/Docs ingestion runs in the first-party connector;
+  // these entries are connect-only (the MCP runner is on-demand, never
+  // auto-invoked for them). Matches the working reference deployment.
+  { name: 'gmail',           label: 'Gmail',           transport: 'streamable-http', url: 'https://gmail.googleapis.com',            nango_provider: 'gmail',           category: 'google_workspace' },
+  { name: 'google-drive',    label: 'Google Drive',    transport: 'streamable-http', url: 'https://www.googleapis.com/drive',        nango_provider: 'google-drive',    category: 'google_workspace' },
+  { name: 'google-calendar', label: 'Google Calendar', transport: 'streamable-http', url: 'https://www.googleapis.com/calendar',     nango_provider: 'google-calendar', category: 'google_workspace' },
+  { name: 'google-docs',     label: 'Google Docs',     transport: 'streamable-http', url: 'https://docs.googleapis.com',             nango_provider: 'google-docs',     category: 'google_workspace' },
+  { name: 'google-gemini',   label: 'Google Gemini',   transport: 'streamable-http', url: 'https://generativelanguage.googleapis.com', nango_provider: 'google-gemini', category: 'google_workspace' },
+  { name: 'salesforce',      label: 'Salesforce',      transport: 'streamable-http', url: 'https://api.salesforce.com',              nango_provider: 'salesforce',      category: 'crm' },
 ];
 
 /**

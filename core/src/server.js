@@ -19189,6 +19189,11 @@ exit \$RC
                     id: n.id, label: n.title || (n.content || '').slice(0, 60), title: n.title,
                     content: n.content, tags: n.tags || [], kind: 'memory',
                     group: n.memory_type || 'memory', memory_type: n.memory_type, createdAt: n.created_at,
+                    // Scoring fields → FE node detail panel + node size/glow (camelCase).
+                    importanceScore: n.confidence != null ? Number(n.confidence) : null,
+                    recallCount: n.recall_count ?? 0,
+                    strength: typeof n.strength === 'number' ? n.strength : (n.strength != null ? Number(n.strength) : 1.0),
+                    documentDate: n.document_date || null,
                   }));
                   const edges = (g.edges || []).map((e) => ({
                     source: e.from_id, target: e.to_id, type: e.type || 'Mentions', confidence: e.confidence || 1,

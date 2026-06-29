@@ -1723,6 +1723,19 @@ def _is_deep_sim_prompt(user_message: str) -> bool:
     return any(t in msg for t in triggers)
 
 
+# Standing, orthogonal probes for the company brief — recall the org's identity, people,
+# customers, and direction so the brief grounds a turn even when the user's query alone
+# wouldn't surface them. Fanned out concurrently with the query (query-first, so query hits
+# win dedup ties). NOTE: this was previously undefined → _build_company_brief always raised
+# NameError → empty brief everywhere; defining it makes the brief actually load.
+_COMPANY_BRIEF_PROBES = [
+    "company overview — what this organisation does, its products, services, and market",
+    "founders, leadership, key people, and team",
+    "customers, clients, partners, and target market",
+    "goals, strategy, priorities, and current initiatives",
+]
+
+
 async def _build_company_brief(query: str, user_id: str, org_id: str,
                                api_key: str = "", max_memories: int = 25,
                                project_id: Optional[str] = None) -> str:

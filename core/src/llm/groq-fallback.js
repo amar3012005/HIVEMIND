@@ -147,6 +147,13 @@ async function openrouterReplay(reqBody, timeoutMs) {
   // to OpenRouter. Dropping them only relaxes a hint — tool-calling still works.
   delete body.parallel_tool_calls;
   delete body.service_tier;
+  // OpenRouter uses `max_tokens`; `max_completion_tokens` (newer OpenAI/Groq
+  // field) is not advertised by its providers → require_parameters routing
+  // finds zero endpoints (404). Translate it so the cap is still honored.
+  if (body.max_completion_tokens != null) {
+    if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
+    delete body.max_completion_tokens;
+  }
   // Fastest provider that still supports the request's params (tools /
   // response_format), with OpenRouter's own cross-provider fallback enabled.
   body.provider = { sort: 'throughput', allow_fallbacks: true, require_parameters: true };

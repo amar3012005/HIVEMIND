@@ -65,17 +65,26 @@ async function ensureSchema() {
       project_ids text[] NOT NULL DEFAULT '{}',
       scope text,
       primary_team_id uuid,
+      -- Recall reinforcement (feeds recall SCORING: log-boost on recall_count +
+      -- multiplicative strength). Bumped by /v1/bump-recall on every recall hit,
+      -- mirroring central's prisma updateMany. Without these the reinforcement
+      -- boost is permanently neutral on self-host.
+      recall_count int NOT NULL DEFAULT 0,
+      strength real NOT NULL DEFAULT 1.0,
+      last_accessed_at timestamptz,
       metadata jsonb NOT NULL DEFAULT '{}',
       deleted_at timestamptz,
       vector_synced boolean NOT NULL DEFAULT false,
       content_tsv tsvector GENERATED ALWAYS AS
         (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))) STORED
     );
-    -- Self-host scope/team parity (added after the table shipped): idempotent
-    -- backfill for existing boxes so scope + primary_team_id round-trip like
-    -- central. project/project_ids already existed; these complete the set.
+    -- Self-host parity (added after the table shipped): idempotent backfill for
+    -- existing boxes so scope/team + recall-reinforcement round-trip like central.
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope text;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS primary_team_id uuid;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS recall_count int NOT NULL DEFAULT 0;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1.0;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
@@ -235,8 +244,8 @@ const routes = {
     await pg.query(
       `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
          cognitive_layer_role, confidence, created_at, valid_from, document_date, project, project_ids,
-         metadata, scope, primary_team_id, vector_synced)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,false)
+         metadata, scope, primary_team_id, recall_count, strength, vector_synced)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,coalesce($20::int,0),coalesce($21::real,1.0),false)
        ON CONFLICT (id) DO UPDATE SET
          content=EXCLUDED.content,
          -- title/tags/confidence: the 2-phase write (engine row, THEN vector
@@ -263,11 +272,16 @@ const routes = {
          document_date=COALESCE(EXCLUDED.document_date, memories.document_date),
          project=EXCLUDED.project, project_ids=EXCLUDED.project_ids,
          metadata=(memories.metadata || EXCLUDED.metadata),
+         -- recall reinforcement is owned by /v1/bump-recall + decay, NOT the
+         -- ingest upsert — keep the existing values so a re-ingest / 2-phase
+         -- vector write never resets a memory's accumulated recall_count/strength.
+         recall_count=memories.recall_count, strength=memories.strength,
          vector_synced=false, deleted_at=NULL`,
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
        r.createdAt || null, r.validFrom || null, r.documentDate || null, r.project || null,
-       r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null]
+       r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null,
+       r.recallCount ?? 0, r.strength ?? 1.0]
     );
     if (Array.isArray(b.vector)) {
       const qr = await qFetch(`/collections/${QCOLL}/points`, {
@@ -402,6 +416,22 @@ const routes = {
         body: JSON.stringify({ payload: { tags: b.tags }, points: [b.id] }) }).catch(() => {});
     }
     return { ok: true };
+  },
+
+  // Recall reinforcement — bump recall_count + strength + last_accessed_at for the
+  // delivered top-N on every recall hit. Mirrors central's prisma.memory.updateMany
+  // (recallCount:{increment:1}, strength:{increment:0.05}) so the recall SCORING
+  // log-boost (pow(recall_count+1,0.15)) + strength multiplier work on self-host too.
+  '/v1/bump-recall': async (b) => {
+    const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+    if (!ids.length) return { ok: true, bumped: 0 };
+    const r = await pg.query(
+      `UPDATE memories SET recall_count = recall_count + 1,
+         strength = LEAST(1.0, COALESCE(strength, 1.0) + 0.05),
+         last_accessed_at = now()
+       WHERE id = ANY($1::uuid[]) AND org_id = $2::uuid AND deleted_at IS NULL`,
+      [ids, ORG]);
+    return { ok: true, bumped: r.rowCount };
   },
 
   // Generic partial update: tags / is_latest / memory_type. Used by the central engine's

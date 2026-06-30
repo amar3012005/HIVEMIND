@@ -448,6 +448,135 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   return { plan, usage };
 }
 
+// ── STEP 2 (ALT) — Tool-decision router (CHAT_ROUTER=tool) ──────────────
+// Language-agnostic replacement for the regex gate + the big JSON planStep.
+// ONE cheap LLM call with a TINY tool set decides what to do:
+//   • recall(queries, mode) → memory lookup (the common path)
+//   • act(provider)         → connector action (delegated to the existing
+//                             action_intent flow downstream)
+//   • no tool call          → direct answer (greeting / smalltalk / general),
+//                             already produced in the user's language → carried
+//                             on plan._direct_answer so the caller short-circuits.
+// Returns the SAME { plan, usage } contract as planStep so every downstream
+// step (gather/reflect/answer/confidence-retry/save/return) is reused verbatim.
+// Connector tool schemas are NOT loaded here — only when act() is chosen does
+// the downstream action sub-loop load them (lazy, token-cheap).
+const ROUTER_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'recall',
+      description: 'Search the organisation memory. Use for ANY question about specific facts, the org, its people, products, projects, documents, history, numbers, or the world. When in doubt, recall — never answer specific questions from your own knowledge.',
+      parameters: {
+        type: 'object',
+        properties: {
+          queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 search queries, ALWAYS written in ENGLISH — translate the user\'s wording even when they wrote in another language (German "Umsatz"→"revenue", "Gründer"→"founder", "Mitarbeiter"→"employees", "Preis"→"price"). Memory is stored in English and recall ranks far better in English. Each query = the entity name + the specific attribute asked (e.g. "Solvis revenue 2021").' },
+          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], description: 'quick = direct lookup (default); panorama = timeline/history; insight = relationships between things' },
+        },
+        required: ['queries'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'act',
+      description: 'Perform an action through a connector (send / create / schedule / draft a message). Use ONLY when the user explicitly asks to perform such an action.',
+      parameters: {
+        type: 'object',
+        properties: {
+          provider: { type: 'string', enum: ['slack', 'notion', 'gmail', 'github', 'linear'] },
+        },
+        required: ['provider'],
+      },
+    },
+  },
+];
+
+async function routerPlan({ message, history, language, assistantName, orgName, model, apiKey, signal, onEvent }) {
+  const basePlan = {
+    intent_kind: 'lookup', user_message: message, action_intent: null, intents: [],
+    sub_queries: [], named_entities: [], needs_traverse: false, needs_time_travel: false,
+    time_travel: null, needs_web: false, save_intent: null, auto_save_intent: null,
+    ask_for_project: false, update_intent: null, recall_mode: 'quick', expected_evidence_types: [],
+  };
+
+  const name = assistantName || 'HIVE';
+  const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
+  const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
+- Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
+- Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
+- Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
+CRITICAL: recall queries MUST be in ENGLISH — translate the user's terms (German/French/etc. → English) before searching; memory is English and ranks poorly on foreign-language queries.
+Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote in.`;
+
+  const histMsgs = Array.isArray(history)
+    ? history.slice(-4).filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
+        .map(h => ({ role: h.role, content: String(h.content).slice(0, 1500) }))
+    : [];
+
+  const routerModel = process.env.CHAT_ROUTER_MODEL || model || INTERNAL_MODEL;
+  const body = {
+    model: routerModel,
+    messages: [{ role: 'system', content: sys }, ...histMsgs, { role: 'user', content: message }],
+    tools: ROUTER_TOOLS,
+    tool_choice: 'auto',
+    max_tokens: 500,
+    temperature: 0,
+  };
+
+  let data = null;
+  try {
+    const resp = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!resp.ok) {
+      const t = (await resp.text().catch(() => '')).slice(0, 200);
+      throw new Error(`router ${resp.status}: ${t}`);
+    }
+    data = await resp.json();
+  } catch (err) {
+    // Router call failed → safe default: recall the raw message (never strand the user).
+    onEvent?.({ type: 'plan', routed: 'recall_fallback', reason: err.message });
+    return { plan: { ...basePlan, sub_queries: [message] }, usage: null };
+  }
+
+  const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+  const usage = data.usage || null;
+  const tc = Array.isArray(msg.tool_calls) ? msg.tool_calls[0] : null;
+
+  if (!tc) {
+    // No tool → direct answer already written in the user's language.
+    const direct = (msg.content || '').trim();
+    onEvent?.({ type: 'plan', routed: 'direct' });
+    // Empty content (model emitted nothing) → fall back to recall so the user
+    // still gets a grounded answer rather than silence.
+    if (!direct) return { plan: { ...basePlan, sub_queries: [message] }, usage };
+    return { plan: { ...basePlan, sub_queries: [], _direct_answer: direct }, usage };
+  }
+
+  let args = {};
+  try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { args = {}; }
+  const fn = tc.function?.name;
+
+  if (fn === 'act') {
+    const VALID = ['slack', 'notion', 'gmail', 'github', 'linear'];
+    const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
+    onEvent?.({ type: 'plan', routed: 'act', provider });
+    return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
+  }
+
+  // Default: recall (also the safe catch-all for an unknown tool name).
+  const queries = (Array.isArray(args.queries) ? args.queries : [])
+    .filter(q => typeof q === 'string' && q.trim()).slice(0, 3);
+  const mode = ['quick', 'panorama', 'insight'].includes(args.mode) ? args.mode : 'quick';
+  onEvent?.({ type: 'plan', routed: 'recall', queries });
+  return { plan: { ...basePlan, sub_queries: queries.length ? queries : [message], recall_mode: mode }, usage };
+}
+
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
 async function gatherEvidence({ plan, ctx, onEvent }) {
@@ -1783,9 +1912,13 @@ export async function runReactAgentV2({
   language,
   ctx,
   onEvent,
+  router,
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
+  // Tool-decision router (per-request `router:'tool'` OR env CHAT_ROUTER=tool).
+  // Per-request lets us A/B test safely without flipping the deployment default.
+  const useRouter = (router || process.env.CHAT_ROUTER) === 'tool';
 
   const abortCtrl = new AbortController();
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
@@ -1830,7 +1963,9 @@ export async function runReactAgentV2({
     const hasBrowserContext = /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');
 
     // STEP 1 — Quick gate (no LLM). Browser context bypasses the gate.
-    const gateKind = hasBrowserContext ? null : quickGateClassify(message);
+    // CHAT_ROUTER=tool also bypasses it — the LLM router (STEP 2 ALT) decides
+    // greetings/smalltalk in ANY language, so no regex routing is relied upon.
+    const gateKind = (useRouter || hasBrowserContext) ? null : quickGateClassify(message);
     if (gateKind) {
       onEvent?.({ type: 'gate', kind: gateKind });
       // Quick gate (greeting/math/definition) is user-facing → FINAL_MODEL
@@ -1852,13 +1987,34 @@ export async function runReactAgentV2({
       };
     }
 
-    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning)
-    const planResult = await planStep({
-      message, history, language, assistantName, orgName, hasBrowserContext,
-      model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
-    });
+    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning).
+    // CHAT_ROUTER=tool swaps the big JSON planStep for the tiny-tool routerPlan
+    // (language-robust, ~token-cheap). Same { plan, usage } contract → every
+    // downstream step is reused unchanged.
+    const planResult = (useRouter)
+      ? await routerPlan({
+          message, history, language, assistantName, orgName,
+          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
+        })
+      : await planStep({
+          message, history, language, assistantName, orgName, hasBrowserContext,
+          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
+        });
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
+
+    // Router direct-answer short-circuit: the router already wrote a
+    // language-correct reply (no tool needed) → skip the extra answerDirectly
+    // call + save-rescue. 1 LLM call total for greetings/smalltalk.
+    if (useRouter && plan._direct_answer) {
+      onEvent?.({ type: 'finish', text: plan._direct_answer });
+      return {
+        response: plan._direct_answer,
+        sources: [], steps, evidence_used: [], confidence: 0.9, gaps: [],
+        usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
+        assistant_name: assistantName || null,
+      };
+    }
 
     // Save-classifier rescue: catch declarative facts the small planner missed
     // (3rd-person "X is now Y" teachings). Runs on the strong answer model, only

@@ -21446,6 +21446,7 @@ exit \$RC
                       message, history, model, apiKey: groqKey,
                       assistantName: agentAssistantName, orgName: agentOrgName,
                       language,
+                      router: body?.router,
                       ctx: {
                         userId, orgId,
                         projectId: requestProjectId,
@@ -21478,6 +21479,7 @@ exit \$RC
                   message, history, model, apiKey: groqKey,
                   assistantName: agentAssistantName, orgName: agentOrgName,
                   language,
+                  router: body?.router,
                   ctx: {
                     userId, orgId,
                     projectId: requestProjectId,

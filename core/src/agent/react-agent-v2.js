@@ -506,6 +506,22 @@ const ROUTER_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description: 'Save a durable fact to memory. Call this when the user (a) explicitly asks to save/remember/note something, OR (b) STATES a durable fact about their own world — their org, people, products, projects, decisions, plans ("X is now Y", "we decided Z", "the launch is March 2026"). Do NOT call for questions, opinions, or general world knowledge. The fact is also recalled to check for existing/conflicting memory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short title for the fact' },
+          content: { type: 'string', description: 'The fact as a clear, self-contained statement (3rd person, ENGLISH)' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'optional entity:/topic: tags' },
+        },
+        required: ['content'],
+      },
+    },
+  },
 ];
 
 async function routerPlan({ message, history, language, assistantName, orgName, model, apiKey, signal, onEvent }) {
@@ -520,6 +536,7 @@ async function routerPlan({ message, history, language, assistantName, orgName, 
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
   const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
 - Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
+- Call remember(content) when the user asks to save/remember something OR STATES a durable fact about their own world (org/people/products/projects/decisions/plans — "X is now Y", "we decided Z", "launch is March 2026"). NOT for questions, opinions, or general world knowledge.
 - Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
 - Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
 - Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
@@ -583,6 +600,25 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
     const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
     onEvent?.({ type: 'plan', routed: 'act', provider });
     return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
+  }
+
+  if (fn === 'remember') {
+    const content = (typeof args.content === 'string' && args.content.trim()) ? args.content.trim() : message;
+    const title = (typeof args.title === 'string' && args.title.trim()) ? args.title.trim() : content.slice(0, 60);
+    const tags = Array.isArray(args.tags) ? args.tags.filter(t => typeof t === 'string' && t.trim()).slice(0, 8) : [];
+    onEvent?.({ type: 'plan', routed: 'remember' });
+    // Save the fact AND recall to surface existing/conflicting memory (mirrors
+    // v2's save+recall). intent_kind 'save' + save_intent → maybeSaveOrUpdate fires.
+    return {
+      plan: {
+        ...basePlan,
+        intent_kind: 'save',
+        save_intent: { title, content, tags },
+        sub_queries: [content.slice(0, 120)],
+        recall_mode: 'quick',
+      },
+      usage,
+    };
   }
 
   if (fn === 'live_lookup') {

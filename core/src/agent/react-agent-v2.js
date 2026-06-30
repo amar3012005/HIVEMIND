@@ -491,6 +491,21 @@ const ROUTER_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'live_lookup',
+      description: 'Pull FRESH/LIVE data straight from the user\'s connected apps (email, chat, docs, notes) to answer about recent or real-time things — "my latest emails", "what was said in the #channel", "today\'s calendar", "the latest Notion page". Use when the answer needs current connector data rather than (or in addition to) stored memory. Only connected apps are queried; pick the relevant ones. You may ALSO let recall run by including a query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          providers: { type: 'array', items: { type: 'string', enum: ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'] }, description: 'Which connected app(s) to pull live data from' },
+          query: { type: 'string', description: 'ENGLISH search query / what to look for in those apps' },
+        },
+        required: ['providers'],
+      },
+    },
+  },
 ];
 
 async function routerPlan({ message, history, language, assistantName, orgName, model, apiKey, signal, onEvent }) {
@@ -505,6 +520,7 @@ async function routerPlan({ message, history, language, assistantName, orgName, 
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
   const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
 - Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
+- Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
 - Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
 - Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
 CRITICAL: recall queries MUST be in ENGLISH — translate the user's terms (German/French/etc. → English) before searching; memory is English and ranks poorly on foreign-language queries.
@@ -567,6 +583,17 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
     const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
     onEvent?.({ type: 'plan', routed: 'act', provider });
     return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
+  }
+
+  if (fn === 'live_lookup') {
+    const VALID = ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'];
+    const providers = (Array.isArray(args.providers) ? args.providers : [])
+      .map(p => String(p || '').toLowerCase()).filter(p => VALID.includes(p));
+    const q = (typeof args.query === 'string' && args.query.trim()) ? args.query.trim() : message;
+    onEvent?.({ type: 'plan', routed: 'live_lookup', providers });
+    // Run memory recall on the query AND fetch live from the chosen connected
+    // apps (gatherEvidence honours plan.live_providers). Combined evidence.
+    return { plan: { ...basePlan, sub_queries: [q], recall_mode: 'quick', live_providers: providers }, usage };
   }
 
   // Default: recall (also the safe catch-all for an unknown tool name).
@@ -917,38 +944,54 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     },
     gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
   };
-  const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
   const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
   const lowRecall = memoriesById.size < 3;
   // NB: removed !plan.action_intent gate — planner sometimes flags read
   // queries as action_intent. Live-read should always fire when query has
   // explicit read verb + connector keyword + extractable target.
-  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma) {
+  //
+  // Connectors to live-fetch come from TWO sources:
+  //   (1) plan.live_providers — the tool-router's EXPLICIT, language-robust
+  //       choice (CHAT_ROUTER=tool → live_lookup). Always fires (the model
+  //       already judged live data is needed), no lowRecall gate.
+  //   (2) userConnector — the keyword-detected connector (legacy path), which
+  //       fires only on low recall / slack read-verb.
+  // Filtered to providers that have a READ_CONNECTOR_TRIGGER (notion/slack).
+  // gmail live flows via recall's live tier already; drive/calendar/docs have
+  // no read-trigger yet (recall live tier / future read sub-loop).
+  const explicitLive = Array.isArray(plan.live_providers) ? plan.live_providers : [];
+  const keywordLive = (userConnector && READ_CONNECTOR_TRIGGERS[userConnector]
+    && (lowRecall || (liveReadIntent && userConnector === 'slack'))) ? [userConnector] : [];
+  const connectorsToFetch = [...new Set([...explicitLive, ...keywordLive])]
+    .filter(p => READ_CONNECTOR_TRIGGERS[p]);
+  if (connectorsToFetch.length > 0 && ctx.prisma) {
     try {
       const { buildToolkitForUser } = await import('./toolkit-factory.js');
       const tk = await buildToolkitForUser({
         prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId, hivemindTools: [],
       });
-      tk.resetEquippedTools([userConnector]);
-      const cfg = connectorTriggered;
-      const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
-      if (!cfg.requires || cfg.requires(arg)) {
-        const resp = await tk.execute(cfg.tool, arg, {
-          userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
-          persistentMemoryEngine: ctx.persistentMemoryEngine,
-        });
-        const text = resp.content?.[0]?.text || '';
-        recordTool(cfg.tool, arg, `${text.length}b live`, resp);
-        if (text) {
-          liveItems.push({
-            source: userConnector,
-            title: `live ${userConnector} result`,
-            snippet: text.slice(0, 600),
-          });
+      for (const provider of connectorsToFetch) {
+        try {
+          tk.resetEquippedTools([provider]);
+          const cfg = READ_CONNECTOR_TRIGGERS[provider];
+          const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
+          if (!cfg.requires || cfg.requires(arg)) {
+            const resp = await tk.execute(cfg.tool, arg, {
+              userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
+              persistentMemoryEngine: ctx.persistentMemoryEngine,
+            });
+            const text = resp.content?.[0]?.text || '';
+            recordTool(cfg.tool, arg, `${text.length}b live`, resp);
+            if (text) {
+              liveItems.push({ source: provider, title: `live ${provider} result`, snippet: text.slice(0, 600) });
+            }
+          }
+        } catch (e) {
+          recordTool('connector_live_fallback', { provider }, `error: ${e.message}`, null);
         }
       }
     } catch (err) {
-      recordTool('connector_live_fallback', { provider: userConnector }, `error: ${err.message}`, null);
+      recordTool('connector_live_fallback', { providers: connectorsToFetch }, `error: ${err.message}`, null);
     }
   }
 

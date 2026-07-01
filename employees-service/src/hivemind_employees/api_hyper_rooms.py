@@ -166,6 +166,17 @@ _PLAN_BY_TURN: Dict[str, Dict[str, Any]] = {}
 _PENDING_APPROVALS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _PENDING_APPROVALS_CAP = 500
 
+# Phase 6 fix — goalkeeper seal ordering. The FE's SSE closes ON `seal`, and the
+# control-plane marks the turn sealed on the FIRST seal event — so a goalkeeper
+# re-round after a per-round seal streamed into a CLOSED pipe (its artifact only
+# appeared on refresh) and the second seal was dropped. While a turn_id is in
+# _GK_ACTIVE, the single-agent handler STASHES its seal here instead of emitting;
+# the goalkeeper emits ONE final seal (total cost + true duration) after the last
+# round. Same-process safe (the loop awaits the handler). Bounded.
+_GK_ACTIVE: Dict[str, bool] = {}
+_SEAL_BY_TURN: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_SEAL_BY_TURN_CAP = 200
+
 
 async def _register_and_emit_approvals(
     req: "RoomTurnRequest", pending: List[Dict[str, Any]]
@@ -2857,13 +2868,21 @@ async def _orchestrate_single_agent(
         except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
             log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
 
-    await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
-                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",
-                 "tokens_in": int(_io.get("input", 0) or 0),
-                 "tokens_out": int(_io.get("output", 0) or 0),
-                 "tokens_cached": int(_io.get("cached", 0) or 0),
-                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
-                 "quality_mode": _qmode})
+    _seal_ev = {"t": "seal", "cost_tokens": cost_tokens, "status": status,
+                "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+                "tokens_in": int(_io.get("input", 0) or 0),
+                "tokens_out": int(_io.get("output", 0) or 0),
+                "tokens_cached": int(_io.get("cached", 0) or 0),
+                "tok_by": {k: int(v) for k, v in _tok_by.items()},
+                "quality_mode": _qmode}
+    if _GK_ACTIVE.get(req.turn_id):
+        # Goalkeeper owns the seal: stash this round's payload; the loop emits ONE
+        # final seal after the last round so the FE stream stays open across re-rounds.
+        _SEAL_BY_TURN[req.turn_id] = _seal_ev
+        while len(_SEAL_BY_TURN) > _SEAL_BY_TURN_CAP:
+            _SEAL_BY_TURN.popitem(last=False)
+    else:
+        await _emit(_seal_ev)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
@@ -3096,47 +3115,70 @@ async def post_room_turn(
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None
-    for rnd in range(1, max_rounds + 1):
-        resp = await _orchestrate(req)
-        total_cost += int(resp.cost_tokens or 0)
-        plan = _PLAN_BY_TURN.get(req.turn_id)
-        verdict = plan.get("verification") if isinstance(plan, dict) else None
-        # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
-        # the source data genuinely doesn't exist) is NOT re-plannable — re-running
-        # would only re-discover the same wall and burn rounds. Stop and let the
-        # honest dead-end surface, rather than loop to the cap emitting placeholders.
-        if isinstance(plan, dict) and plan.get("dead_end"):
-            log.info("[goalkeeper] room=%s dead-end (un-fixable) → stop honestly", req.room_id)
-            break
-        # Recon-driven rework: a produced deliverable is NOT an automatic stop.
-        # Loop only stops when the verdict is met (or a pending draft is both
-        # produced AND grounded), or the round cap is hit. A recon-rejected
-        # draft (ungrounded / incomplete) gets reworked — we don't surface a
-        # known-bad result. Same shape as Claude `/goal`: keep going to success.
-        if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
-            break
-        # Discard the rejected round's draft/artifacts so the rework round
-        # produces a FRESH deliverable (else `_produce_output`'s idempotency
-        # guard would short-circuit on the stale draft).
-        reset_turn_outputs()
-        gaps = list((verdict or {}).get("gaps") or [])
-        gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "goalkeeper_round",
-            "round": rnd,
-            "next_round": rnd + 1,
-            "met": False,
-            "gaps": gaps,
-        })
-        log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
-                 req.room_id, rnd, gap_str)
-        # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
-        # so preambles don't stack; the planner re-plans against the gaps.
-        req.user_message = (
-            f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
-            f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
-            f"Address these gaps and COMPLETE the task this round: {gap_str}."
-        )
+    # Seal ordering: while the goalkeeper owns this turn, per-round seals are stashed
+    # (not emitted) so the FE stream stays open across re-rounds; ONE final seal — with
+    # the TOTAL cost and TRUE duration — goes out after the last round, in `finally`
+    # so it can never be lost to an exception between rounds.
+    _GK_ACTIVE[req.turn_id] = True
+    _gk_started = time.time()
+    rnd = 0
+    try:
+        for rnd in range(1, max_rounds + 1):
+            resp = await _orchestrate(req)
+            total_cost += int(resp.cost_tokens or 0)
+            plan = _PLAN_BY_TURN.get(req.turn_id)
+            verdict = plan.get("verification") if isinstance(plan, dict) else None
+            # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
+            # the source data genuinely doesn't exist) is NOT re-plannable — re-running
+            # would only re-discover the same wall and burn rounds. Stop and let the
+            # honest dead-end surface, rather than loop to the cap emitting placeholders.
+            if isinstance(plan, dict) and plan.get("dead_end"):
+                log.info("[goalkeeper] room=%s dead-end (un-fixable) → stop honestly", req.room_id)
+                break
+            # Recon-driven rework: a produced deliverable is NOT an automatic stop.
+            # Loop only stops when the verdict is met (or a pending draft is both
+            # produced AND grounded), or the round cap is hit. A recon-rejected
+            # draft (ungrounded / incomplete) gets reworked — we don't surface a
+            # known-bad result. Same shape as Claude `/goal`: keep going to success.
+            if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
+                break
+            # Discard the rejected round's draft/artifacts so the rework round
+            # produces a FRESH deliverable (else `_produce_output`'s idempotency
+            # guard would short-circuit on the stale draft).
+            reset_turn_outputs()
+            gaps = list((verdict or {}).get("gaps") or [])
+            gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "goalkeeper_round",
+                "round": rnd,
+                "next_round": rnd + 1,
+                "met": False,
+                "gaps": gaps,
+            })
+            log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
+                     req.room_id, rnd, gap_str)
+            # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
+            # so preambles don't stack; the planner re-plans against the gaps.
+            req.user_message = (
+                f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
+                f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
+                f"Address these gaps and COMPLETE the task this round: {gap_str}."
+            )
+            # Re-rounds close GAPS — they never re-simulate the stakeholder population
+            # (the sim's report doesn't change; it cost 11-31s per round for nothing).
+            req.sim_mode = "off"
+    finally:
+        _GK_ACTIVE.pop(req.turn_id, None)
+        _final_seal = _SEAL_BY_TURN.pop(req.turn_id, None)
+        if _final_seal:
+            _final_seal["cost_tokens"] = total_cost
+            _final_seal["duration_ms"] = int((time.time() - _gk_started) * 1000)
+            if rnd > 1:
+                _final_seal["gk_rounds"] = rnd
+            try:
+                await _emit_event(req.callback_url, req.turn_id, _final_seal)
+            except Exception as exc:  # noqa: BLE001 — a lost seal wedges the FE; log loudly
+                log.warning("[goalkeeper] final seal emit FAILED turn=%s: %s", req.turn_id, exc)
 
     if resp is None:  # defensive — loop always runs ≥1
         resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")

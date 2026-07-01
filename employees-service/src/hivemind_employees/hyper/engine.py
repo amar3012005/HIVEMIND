@@ -166,7 +166,10 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
             msg["reasoning_content"] = msg["reasoning"]
         if not msg.get("content") and (msg.get("reasoning_content") or msg.get("reasoning")):
             msg["content"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
-        log.warning("[hyper-engine] Groq unavailable → OpenRouter served model=%s", or_model)
+        # NOTE: this fires for the INTENDED OpenRouter-primary direct route too, not just
+        # Groq failover — info-level + neutral wording (the old "Groq unavailable" text
+        # spammed WARNs and misread as an outage on every healthy direct-routed call).
+        log.info("[hyper-engine] OpenRouter served model=%s (direct-route primary or Groq failover)", or_model)
         return j
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         log.warning("[hyper-engine] OpenRouter fallback transport error: %s", exc)

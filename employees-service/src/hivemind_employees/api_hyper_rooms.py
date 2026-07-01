@@ -3169,16 +3169,12 @@ async def post_room_turn(
             req.sim_mode = "off"
     finally:
         _GK_ACTIVE.pop(req.turn_id, None)
-        _final_seal = _SEAL_BY_TURN.pop(req.turn_id, None)
-        if _final_seal:
-            _final_seal["cost_tokens"] = total_cost
-            _final_seal["duration_ms"] = int((time.time() - _gk_started) * 1000)
-            if rnd > 1:
-                _final_seal["gk_rounds"] = rnd
-            try:
-                await _emit_event(req.callback_url, req.turn_id, _final_seal)
-            except Exception as exc:  # noqa: BLE001 — a lost seal wedges the FE; log loudly
-                log.warning("[goalkeeper] final seal emit FAILED turn=%s: %s", req.turn_id, exc)
+    # The turn's ONE seal — held past the approvals/artifacts drain below and emitted
+    # right before return, so the FE stream (which CLOSES on seal) has already received
+    # every approval card + connector_logo button. (First fix emitted it here in the
+    # loop's finally — the artifact drain runs after the loop, so connector_logo still
+    # landed post-seal into a closed pipe. Verified ordering: ... → connector_logo → seal.)
+    _final_seal = _SEAL_BY_TURN.pop(req.turn_id, None)
 
     if resp is None:  # defensive — loop always runs ≥1
         resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
@@ -3236,6 +3232,17 @@ async def post_room_turn(
         resp.status = "blocked"
         log.info("[dead-end] room=%s blocked honestly: %s",
                  req.room_id, (_vplan.get("dead_end") or {}).get("reason"))
+    # LAST event, always: the goalkeeper-held seal (total cost, true duration across
+    # all rounds). Everything the FE must render live — approval cards, artifact
+    # buttons, the dead-end line — has been emitted above. _emit_event is non-fatal.
+    if _final_seal:
+        _final_seal["cost_tokens"] = total_cost
+        _final_seal["duration_ms"] = int((time.time() - _gk_started) * 1000)
+        if rnd > 1:
+            _final_seal["gk_rounds"] = rnd
+        if resp.status and str(resp.status) != str(_final_seal.get("status")):
+            _final_seal["status"] = resp.status  # dead-end downgrade (blocked) wins
+        await _emit_event(req.callback_url, req.turn_id, _final_seal)
     return resp
 
 

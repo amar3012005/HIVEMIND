@@ -61,18 +61,134 @@ function _encodeHeader(s) {
   return `=?UTF-8?B?${Buffer.from(v, 'utf8').toString('base64')}?=`;
 }
 
+// ─── Markdown → email-safe HTML (agents write markdown; Gmail must not show raw ** | ```) ───
+// Inline-styled (email clients strip <style>), bounded subset: headings, bold/italic,
+// links, inline code, bullet/numbered lists, tables, hr, code fences. mermaid fences are
+// STRIPPED (never emailable as text) and replaced with a short note — "(diagram attached)"
+// when the send carries image attachments, else "(diagram available in the room)".
+function _escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function _mdInline(s) {
+  return _escHtml(s)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/`([^`]+)`/g, '<code style="background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:90%">$1</code>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" style="color:#117dff">$1</a>');
+}
+function _mdToHtml(md, { hasAttachments = false } = {}) {
+  const note = hasAttachments ? '(diagram attached)' : '(diagram available in the HIVEMIND room)';
+  // Pull out fenced blocks first (```mermaid → note token; other fences → pre token).
+  const src = String(md || '').replace(/\r/g, '')
+    .replace(/```mermaid[\s\S]*?```/g, '\n@@MERMAIDNOTE@@\n')
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => `\n@@PRE${Buffer.from(code).toString('base64')}@@\n`);
+  const out = [];
+  let list = null; // 'ul' | 'ol'
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(ln)) continue; // |---| separator
+    if (/^\s*\|.*\|\s*$/.test(ln)) {               // table block
+      closeList();
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) {
+          rows.push(lines[i].trim().replace(/^\||\|$/g, '').split('|').map(c => _mdInline(c.trim())));
+        }
+        i++;
+      }
+      i--;
+      const [head, ...tbody] = rows;
+      out.push('<table style="border-collapse:collapse;margin:12px 0;font-size:14px">');
+      if (head) out.push('<tr>' + head.map(c => `<th style="border:1px solid #ddd;padding:6px 10px;background:#f7f7f5;text-align:left">${c}</th>`).join('') + '</tr>');
+      tbody.forEach(r => out.push('<tr>' + r.map(c => `<td style="border:1px solid #ddd;padding:6px 10px">${c}</td>`).join('') + '</tr>'));
+      out.push('</table>');
+      continue;
+    }
+    const h = ln.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { closeList(); const lv = h[1].length; out.push(`<h${lv + 1} style="margin:16px 0 6px;font-size:${20 - lv * 2}px">${_mdInline(h[2])}</h${lv + 1}>`); continue; }
+    if (/^\s*(?:-{3,}|\*{3,})\s*$/.test(ln)) { closeList(); out.push('<hr style="border:none;border-top:1px solid #e3e0db;margin:14px 0">'); continue; }
+    const bullet = ln.match(/^\s*[-*•]\s+(.*)$/);
+    const num = ln.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || num) {
+      const want = bullet ? 'ul' : 'ol';
+      if (list !== want) { closeList(); out.push(`<${want} style="margin:6px 0 6px 22px;padding:0">`); list = want; }
+      out.push(`<li style="margin:3px 0">${_mdInline((bullet || num)[1])}</li>`);
+      continue;
+    }
+    closeList();
+    if (!ln.trim()) continue;
+    if (/^@@MERMAIDNOTE@@$/.test(ln.trim())) { out.push(`<p style="margin:8px 0;color:#737373"><em>${note}</em></p>`); continue; }
+    const pre = ln.trim().match(/^@@PRE([A-Za-z0-9+/=]*)@@$/);
+    if (pre) {
+      out.push(`<pre style="background:#f7f7f5;border:1px solid #e3e0db;padding:10px;overflow-x:auto;font-size:13px">${_escHtml(Buffer.from(pre[1], 'base64').toString('utf8'))}</pre>`);
+      continue;
+    }
+    out.push(`<p style="margin:8px 0">${_mdInline(ln)}</p>`);
+  }
+  closeList();
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#1a1a1a;max-width:680px">${out.join('\n')}</div>`;
+}
+// Readable plain-text fallback for the multipart/alternative — markdown tokens stripped.
+function _mdToPlain(md) {
+  return String(md || '').replace(/\r/g, '')
+    .replace(/```mermaid[\s\S]*?```/g, '(diagram omitted)')
+    .replace(/```\w*\n?([\s\S]*?)```/g, '$1')
+    .replace(/^\s*\|[\s:|-]+\|\s*$/gm, '')
+    .replace(/^\s*\|(.*)\|\s*$/gm, (_, r) => r.split('|').map(c => c.trim()).join(' — '))
+    .replace(/\*\*(.+?)\*\*/g, '$1').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1$2')
+    .replace(/^#{1,4}\s+/gm, '').replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '$1 ($2)');
+}
+
 // RFC-2822 MIME → base64url for Gmail send/draft. threadId/inReplyTo optional.
-function _gmailRaw({ to, subject, body, cc, inReplyTo, references }) {
-  const headers = [
+// html → multipart/alternative (plain + html). attachments [{filename, mime, data_b64}]
+// → multipart/mixed wrapping the alternative. No html/attachments → text/plain (unchanged).
+function _gmailRaw({ to, subject, body, html, cc, inReplyTo, references, attachments }) {
+  const top = [
     to ? `To: ${to}` : null,
     cc ? `Cc: ${cc}` : null,
     `Subject: ${_encodeHeader(subject)}`,
     inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
     references ? `References: ${references}` : null,
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset="UTF-8"',
-  ].filter(Boolean).join('\r\n');
-  return Buffer.from(`${headers}\r\n\r\n${body || ''}`, 'utf8').toString('base64')
+  ].filter(Boolean);
+  let payload;
+  const atts = (attachments || []).filter(a => a && a.filename && a.data_b64).slice(0, 6); // bounded
+  if (!html && !atts.length) {
+    payload = top.concat(['Content-Type: text/plain; charset="UTF-8"']).join('\r\n')
+      + `\r\n\r\n${body || ''}`;
+  } else {
+    const altB = `alt${Date.now().toString(36)}`;
+    const alt = [
+      `--${altB}`, 'Content-Type: text/plain; charset="UTF-8"', '', body || '',
+      `--${altB}`, 'Content-Type: text/html; charset="UTF-8"', '', html || `<pre>${_escHtml(body || '')}</pre>`,
+      `--${altB}--`,
+    ].join('\r\n');
+    if (!atts.length) {
+      payload = top.concat([`Content-Type: multipart/alternative; boundary="${altB}"`]).join('\r\n')
+        + `\r\n\r\n${alt}`;
+    } else {
+      const mixB = `mix${Date.now().toString(36)}`;
+      const parts = [
+        `--${mixB}`, `Content-Type: multipart/alternative; boundary="${altB}"`, '', alt,
+      ];
+      for (const a of atts) {
+        parts.push(
+          `--${mixB}`,
+          `Content-Type: ${a.mime || 'application/octet-stream'}; name="${a.filename}"`,
+          'Content-Transfer-Encoding: base64',
+          `Content-Disposition: attachment; filename="${a.filename}"`,
+          '', String(a.data_b64).replace(/[^A-Za-z0-9+/=]/g, ''),
+        );
+      }
+      parts.push(`--${mixB}--`);
+      payload = top.concat([`Content-Type: multipart/mixed; boundary="${mixB}"`]).join('\r\n')
+        + `\r\n\r\n${parts.join('\r\n')}`;
+    }
+  }
+  return Buffer.from(payload, 'utf8').toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
@@ -256,7 +372,12 @@ export const GOOGLE_TOOLS = {
     description: 'Send an email directly. args: { to, subject, body, cc }. (In HyperAgents the agent path saves a draft + approval; this is the raw send used as a fallback.)',
     run: async (token, a) => {
       if (!a.to || !a.subject) throw new Error('gmail_send requires { to, subject, body }');
-      const raw = _gmailRaw(a);
+      // markdown:true → the body is agent-written markdown: send polished HTML
+      // (multipart/alternative) instead of raw asterisks/pipes in the inbox.
+      const args = a.markdown
+        ? { ...a, html: _mdToHtml(a.body, { hasAttachments: (a.attachments || []).length > 0 }), body: _mdToPlain(a.body) }
+        : a;
+      const raw = _gmailRaw(args);
       const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', token, {
         method: 'POST', body: JSON.stringify({ raw, threadId: a.threadId || undefined }),
       });
@@ -268,7 +389,11 @@ export const GOOGLE_TOOLS = {
     description: 'Save an email as a Gmail DRAFT (not sent). args: { to, subject, body, cc, threadId (for replies) }. Returns draftId + a Drafts link.',
     run: async (token, a) => {
       if (!a.to && !a.threadId) throw new Error('gmail_create_draft requires { to } (or threadId for a reply)');
-      const raw = _gmailRaw(a);
+      // markdown:true → draft saved with a polished HTML alternative (see gmail_send).
+      const args = a.markdown
+        ? { ...a, html: _mdToHtml(a.body, { hasAttachments: (a.attachments || []).length > 0 }), body: _mdToPlain(a.body) }
+        : a;
+      const raw = _gmailRaw(args);
       const message = { raw };
       if (a.threadId) message.threadId = a.threadId;
       const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/drafts', token, {

@@ -131,13 +131,16 @@ def drain_artifacts() -> List[Dict[str, Any]]:
     return list(arts) if isinstance(arts, list) else []
 
 
-def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") -> str:
+def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "",
+                         body_md: str = "") -> str:
     """Orchestrator-side: record a produced draft as an artifact AND queue its
     send for the user's approval. Used as a deterministic fallback when the
     agents composed an email but did not fire gmail_send themselves — so an
-    email turn ALWAYS yields a draft + approval card. Returns the approval_id."""
+    email turn ALWAYS yields a draft + approval card. Returns the approval_id.
+    body_md (the draft's markdown) rides the artifact + approval events so the
+    FE can PREVIEW / edit / one-click-send in-app without opening Gmail."""
     _record_artifact("gmail", url or "https://mail.google.com/mail/u/0/#drafts",
-                     title=subject or "Draft", label="Review draft")
+                     title=subject or "Draft", label="Review draft", body_md=body_md)
     approval_id = uuid.uuid4().hex[:12]
     rec = {
         "approval_id": approval_id,
@@ -145,6 +148,7 @@ def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") ->
         "summary": f"Send email to {to} — “{subject}”",
         "bridge": "google",
         "descriptor": {"tool": "gmail_send_draft", "arguments": {"draftId": draft_id}},
+        "to": to, "subject": subject, "body_md": str(body_md or "")[:20000],
     }
     pend = _PENDING_WRITES.get()
     if isinstance(pend, list):
@@ -166,20 +170,24 @@ def _consensus_gate(label: str) -> Optional[ToolResponse]:
     )
 
 
-def _record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def _record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                     body_md: str = "") -> None:
     """Record a produced artifact (doc/sheet) so the orchestrator can emit a
     `connector_logo` 'view in new tab' event to the FE. After the FIRST artifact
     lands, RE-LOCK output so the turn produces ONE high-quality deliverable
-    rather than a pile of near-duplicate drafts from racing agents/retries."""
+    rather than a pile of near-duplicate drafts from racing agents/retries.
+    body_md: the artifact's textual content (bounded) → in-app FE preview."""
     arts = _TURN_ARTIFACTS.get()
     if isinstance(arts, list) and url:
-        arts.append({"connector": connector, "url": url, "title": title, "label": label})
+        arts.append({"connector": connector, "url": url, "title": title, "label": label,
+                     "body_md": str(body_md or "")[:20000]})
         _OUTPUT_UNLOCKED.set(False)
 
 
-def record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                    body_md: str = "") -> None:
     """Public: orchestrator records a produced doc/sheet artifact (→ connector_logo)."""
-    _record_artifact(connector, url, title=title, label=label)
+    _record_artifact(connector, url, title=title, label=label, body_md=body_md)
 
 
 def _artifact_url(payload: object) -> str:

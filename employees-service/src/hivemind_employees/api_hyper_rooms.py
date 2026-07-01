@@ -196,6 +196,10 @@ async def _register_and_emit_approvals(
             # control-plane can resolve + execute the approval durably (survives
             # sidecar restarts / replicas). The FE ignores it.
             "descriptor": rec.get("descriptor"),
+            # Draft content → the FE's in-app Preview/edit/one-click-send popup
+            # (no Gmail redirect needed). Bounded; absent for non-email writes.
+            "to": rec.get("to"), "subject": rec.get("subject"),
+            "body_md": str(rec.get("body_md") or "")[:20000] or None,
         })
     log.info("[approval] room=%s queued=%d writes for approval",
              req.room_id, len(pending))
@@ -2093,7 +2097,7 @@ async def _produce_doc(req: "RoomTurnRequest", plan: Dict[str, Any],
         "docs_create", {"title": title, "content": body}, user_id=req.user_id, org_id=req.org_id)
     url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
     if url:
-        record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
+        record_artifact("google-docs", url, title=title, label=f"Open “{title}”", body_md=ctx.get("body") or "")
         log.info("[produce] doc → %s", url)
         return {"url": url, "title": title}
     if isinstance(res, dict) and res.get("error"):
@@ -2163,7 +2167,7 @@ async def _produce_notion(req: "RoomTurnRequest", plan: Dict[str, Any],
         user_id=req.user_id, org_id=req.org_id)
     url = _extract_notion_url(res)
     if url:
-        record_artifact("notion", url, title=title, label=f"Open “{title}” in Notion")
+        record_artifact("notion", url, title=title, label=f"Open “{title}” in Notion", body_md=ctx.get("body") or "")
         log.info("[produce] notion page → %s", url)
         return {"url": url, "title": title}
     err = (res or {}).get("error") if isinstance(res, dict) else None
@@ -2209,6 +2213,10 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     if ctx.get("expects_prior_artifact") and not ctx.get("last_artifact_url"):
         return {"skipped": "the file this email was meant to link was never created, so no email was drafted"}
     body = ctx.get("body") or ""
+    # Synth appends non-email material (prospect tables, timelines) under this marker —
+    # it stays in the room; ONLY the part above it is the email.
+    body = re.split(r"^-{3,}\s*SUPPORTING MATERIAL\s*-{3,}\s*$", body,
+                    maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)[0].strip() or body
     subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
     email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
                         flags=re.IGNORECASE | re.MULTILINE).strip() or body
@@ -2227,7 +2235,9 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
         email_body = _PLACEHOLDER_URL_RE.sub("", email_body)
         email_body = _GDOCS_URL_RE.sub("", email_body).strip()
     res = await google_exec_emulated(
-        "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
+        # markdown:True → the core bridge converts the agent's markdown into a polished
+        # HTML alternative (real bold/tables, mermaid stripped) instead of raw ** | ``` in Gmail.
+        "gmail_create_draft", {"to": to, "subject": subject, "body": email_body, "markdown": True},
         user_id=req.user_id, org_id=req.org_id)
     draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
     url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
@@ -2237,7 +2247,7 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
             return {"draft_id": draft_id, "url": url, "to": "", "needs_recipient": True,
                     "note": "Drafted in Gmail with no recipient — no verified contact was found. "
                             "Review it, add recipients, and send from Gmail."}
-        queue_email_approval(to, subject, draft_id, url)
+        queue_email_approval(to, subject, draft_id, url, body_md=email_body)
         log.info("[produce] email draft → %s", to)
         return {"draft_id": draft_id, "url": url, "to": to}
     if isinstance(res, dict) and res.get("error"):
@@ -3162,6 +3172,9 @@ async def post_room_turn(
                 "url": art.get("url"),
                 "title": art.get("title"),
                 "label": art.get("label") or "Open",
+                # Textual content (bounded) → in-app FE Preview popup for ANY
+                # textual artifact (email/doc/notion) without leaving the room.
+                "body_md": str(art.get("body_md") or "")[:20000] or None,
             })
         resp.artifacts = final_artifacts
         log.info("[artifacts] room=%s produced=%d", req.room_id, len(final_artifacts))

@@ -1450,11 +1450,18 @@ class Director:
             r"\b(?:prospects?|leads?|potential clients?|new clients?|outreach|reach out|find clients?)\b",
             (self.user_message or "").lower()))
         if _io == "email":
-            _fmt = ("\n\nThe deliverable is an EMAIL. Write it ready to send: a 'Subject:' line, then the body "
-                    "(greeting, 2-4 tight paragraphs, ONE clear ask/CTA, sign-off). NOT a report or doc. "
+            # Auto-load the polished-email skill (the director rarely calls load_skill itself) +
+            # email-medium rules: an email is read in an inbox — minimal markdown (bold + simple
+            # lists only), no headings/tables/diagrams in the BODY, one screen max.
+            _fmt = ("\n\nThe deliverable is an EMAIL. Write it ready to send: a 'Subject:' line, then the body. "
+                    "NOT a report or doc.\n" + _SKILLS.get("polished-email", "") +
+                    "\nEMAIL MEDIUM RULES: keep the BODY inbox-native — short paragraphs, bold sparingly, "
+                    "simple '-' lists only; NO markdown headings (#), NO tables, NO code fences, NO mermaid "
+                    "inside the email body. If a table/diagram genuinely helps, put it AFTER the email under "
+                    "'--- SUPPORTING MATERIAL ---' (the producer attaches/links it; it is not the email). "
                     + ("This is OUTREACH to prospects — open by naming the prospect and why they fit; if you "
                        "identified specific companies, write the email so it can be personalised per prospect, "
-                       "and list the prospects (name + why + how to reach) ABOVE the email so the user can send it. "
+                       "and list the prospects (name + why + how to reach) under SUPPORTING MATERIAL. "
                        if _is_prospecting else ""))
         elif _io in ("doc", "notion"):
             _fmt = "\n\nThe deliverable is a DOCUMENT — structured, publish-ready prose with headings + tables."

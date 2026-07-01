@@ -6720,6 +6720,83 @@ Write the persona now.`;
       }
     }
 
+    // POST /v1/hyper-rooms/:id/send-email — one-click send from the FE preview
+    // popup: the user reviewed (and possibly EDITED) the draft in-app, so this IS
+    // the human approval. Sends via the core Gmail bridge with markdown→HTML
+    // polish + optional image attachments (client-rendered mermaid PNGs).
+    // Resolves the pending approval card (if any) so it can't double-send.
+    const roomSendEmailMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/send-email$/);
+    if (roomSendEmailMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const roomId = roomSendEmailMatch[1];
+      const body = await parseBody(req).catch(() => ({}));
+      const to = String(body.to || '').trim();
+      const subject = String(body.subject || '').trim();
+      const bodyMd = String(body.body_md || '').trim();
+      if (!to || !subject || !bodyMd) {
+        return jsonResponse(res, { error: 'to, subject and body_md are required' }, 400);
+      }
+      if (!/^[\w.+-]+@[\w.-]+\.\w+$/.test(to)) {
+        return jsonResponse(res, { error: 'to must be a valid email address' }, 400);
+      }
+      // Bounded attachments: max 6 images, ~2MB base64 each (mermaid PNGs are ~100KB).
+      const attachments = (Array.isArray(body.attachments) ? body.attachments : [])
+        .filter((a) => a && a.filename && a.data_b64 && String(a.mime || '').startsWith('image/'))
+        .slice(0, 6)
+        .map((a) => ({
+          filename: String(a.filename).replace(/[^\w.-]/g, '_').slice(0, 80),
+          mime: String(a.mime).slice(0, 60),
+          data_b64: String(a.data_b64).slice(0, 2_000_000),
+        }));
+      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      try {
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/google/exec`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': MASTER,
+            'X-HM-User-Id': room.userId,
+            'X-HM-Org-Id': room.orgId,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            tool: 'gmail_send',
+            arguments: { to, subject, body: bodyMd, markdown: true, attachments },
+          }),
+          signal: AbortSignal.timeout(60000),
+        });
+        const tx = await r.text();
+        let result; try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
+        if (!r.ok) return jsonResponse(res, { error: `gmail send failed (${r.status})`, result }, 502);
+        // Mark the approval card resolved (best-effort) so the stale card can't re-send.
+        const approvalId = String(body.approval_id || '').trim();
+        if (approvalId) {
+          try {
+            const turns = await prisma.hyperTurn.findMany({
+              where: { roomId }, orderBy: { seq: 'desc' }, take: 30, select: { id: true, lines: true },
+            });
+            for (const t of turns) {
+              const lines = Array.isArray(t.lines) ? t.lines : [];
+              if (lines.some((l) => l && l.t === 'approval_request' && l.approval_id === approvalId)) {
+                const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+                await appendTurnEvent(prisma, t.id, {
+                  t: 'approval_resolved', approval_id: approvalId, decision: 'approve',
+                  label: 'gmail_send', result: { sent: true, edited_in_preview: true }, ts: Date.now(),
+                });
+                break;
+              }
+            }
+          } catch (e) { console.warn('[hyper-rooms] send-email approval mark failed:', e.message); }
+        }
+        return jsonResponse(res, { ok: true, sent: true, to, subject, result }, 200);
+      } catch (err) {
+        console.warn('[hyper-rooms] send-email failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // POST /v1/hyper-rooms/:id/turns — submit user message, kick a turn
     if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'POST') {
       const current = await requireSession(req, res);

@@ -5420,6 +5420,11 @@ exit \$RC
             if (t.status === 429) {
               return jsonResponse(res, { error: 'transcription_busy', message: 'Transcription service is busy right now — please try again in a moment.' }, 503);
             }
+            if (t.status === 402) {
+              // Provider billing (e.g. OpenRouter "requires $0.50 balance for audio",
+              // Groq overdue-payment restriction) — an ops problem, not a user one.
+              return jsonResponse(res, { error: 'stt_billing', message: 'Transcription provider account needs attention (billing/balance). Contact your administrator.' }, 503);
+            }
             if (t.status === 400 || t.status === 415) {
               return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : t.detail }, 400);
             }

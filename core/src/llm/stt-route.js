@@ -40,11 +40,17 @@ export function sttRoute(featureModel, providerOverride) {
       model: (providerOverride ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT,
     };
   }
+  // Mirror of the openrouter branch's model guard: an OpenRouter model id
+  // (e.g. nvidia/parakeet…) is meaningless to Groq whisper. When we're FORCED
+  // onto groq (failover) — or the global STT_MODEL is an openrouter-style id —
+  // fall back to the Groq whisper model instead of shipping a bad model id.
+  const _globalModel = process.env.STT_MODEL || '';
+  const _groqSafeGlobal = _globalModel && !_globalModel.includes('/') ? _globalModel : '';
   return {
     provider: 'groq',
     url: (process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '') + '/audio/transcriptions',
     key: process.env.GROQ_API_KEY || '',
-    model: featureModel || process.env.STT_MODEL || process.env.GROQ_WHISPER_MODEL || GROQ_STT_DEFAULT,
+    model: (providerOverride ? null : featureModel) || _groqSafeGlobal || process.env.GROQ_WHISPER_MODEL || GROQ_STT_DEFAULT,
   };
 }
 

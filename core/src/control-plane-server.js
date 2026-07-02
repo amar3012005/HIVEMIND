@@ -1808,6 +1808,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Zitadel SSO Login ──────────────────────────────────────
+  // idp_hint=microsoft|apple|google routes through the matching ZITADEL
+  // federated IdP (env ZITADEL_IDP_MICROSOFT_ID / _APPLE_ID / _GOOGLE_ID).
+  // Without the env id the hint still passes through as idp_hint, so ZITADEL
+  // shows its own chooser rather than erroring — buttons stay safe to ship
+  // before the IdPs are registered in the ZITADEL console.
+  const applyIdpHint = (opts, hint) => {
+    const h = (hint || '').trim().toLowerCase();
+    if (!h) return;
+    const envId = process.env[`ZITADEL_IDP_${h.toUpperCase()}_ID`];
+    if (envId) opts.idpId = envId;
+    else opts.idpHint = h;
+  };
   if (pathname === '/auth/login' && req.method === 'GET') {
     if (!zitadelClient) {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
@@ -1819,6 +1831,7 @@ const server = http.createServer(async (req, res) => {
     if (url.searchParams.get('login_hint')) {
       authorizeOptions.loginHint = url.searchParams.get('login_hint');
     }
+    applyIdpHint(authorizeOptions, url.searchParams.get('idp_hint'));
     return redirect(res, zitadelClient.buildAuthorizeUrl(state, authorizeOptions));
   }
 
@@ -1834,6 +1847,7 @@ const server = http.createServer(async (req, res) => {
     if (url.searchParams.get('login_hint')) {
       authorizeOptions.loginHint = url.searchParams.get('login_hint');
     }
+    applyIdpHint(authorizeOptions, url.searchParams.get('idp_hint'));
     return redirect(res, zitadelClient.buildAuthorizeUrl(state, authorizeOptions));
   }
 

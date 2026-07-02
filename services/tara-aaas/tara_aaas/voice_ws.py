@@ -91,6 +91,12 @@ async def handle_voice(ws: WebSocket, *, user_id: Optional[str], org_id: Optiona
                        mode: str = "external") -> None:
     await ws.accept()
     stt_cfg = GroqWhisperConfig()
+    # Lock STT decode to the caller's chosen language (else Whisper falls back to
+    # the GROQ_LANGUAGE env default — German — and mis-transcribes every other
+    # language). The per-session language is the single source of truth for the
+    # whole turn: STT decode hint, LLM reply language, and TTS phonology.
+    if language:
+        stt_cfg.language = language.strip().lower()
     tts = CartesiaManager(CartesiaConfig.from_env())
     turn_task: Optional[asyncio.Task] = None
     turn_lock = asyncio.Lock()          # one turn at a time (no races)
@@ -159,7 +165,7 @@ async def handle_voice(ws: WebSocket, *, user_id: Optional[str], org_id: Optiona
                 if buf.strip():
                     yield buf
             try:
-                await tts.stream_text_to_audio(token_text(), audio_callback=send_audio, context_id=session_id, voice_id=voice_id)
+                await tts.stream_text_to_audio(token_text(), audio_callback=send_audio, context_id=session_id, voice_id=voice_id, language=language)
                 await _safe_send_json(ws, {"type": "turn_done"})
             except asyncio.CancelledError:
                 raise
@@ -235,7 +241,7 @@ async def handle_voice(ws: WebSocket, *, user_id: Optional[str], org_id: Optiona
                         yield buf
 
             try:
-                await tts.stream_text_to_audio(gen(), audio_callback=send_audio, context_id=session_id, voice_id=voice_id)
+                await tts.stream_text_to_audio(gen(), audio_callback=send_audio, context_id=session_id, voice_id=voice_id, language=language)
                 if not got["any"]:
                     raise RuntimeError("empty greeting")
                 await _safe_send_json(ws, {"type": "turn_done"})
@@ -244,7 +250,7 @@ async def handle_voice(ws: WebSocket, *, user_id: Optional[str], org_id: Optiona
                 fb = "Hello! I'm TARA. How can I help you today?"
                 try:
                     await _safe_send_json(ws, {"type": "agent_text", "text": fb})
-                    await tts.stream_text_to_audio(fb, audio_callback=send_audio, context_id=session_id, voice_id=voice_id)
+                    await tts.stream_text_to_audio(fb, audio_callback=send_audio, context_id=session_id, voice_id=voice_id, language=language)
                     await _safe_send_json(ws, {"type": "turn_done"})
                 except Exception:  # noqa: BLE001
                     pass

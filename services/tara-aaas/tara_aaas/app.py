@@ -32,7 +32,7 @@ app = FastAPI(title="TARA AaaS", version="0.1.0")
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://([a-z0-9-]+\.)*davinciai\.eu",
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*(davinciai\.eu|singulancelabs\.com)",
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -1750,6 +1750,16 @@ _COMPANY_BRIEF_PROBES = [
     "goals, strategy, priorities, and current initiatives",
 ]
 
+# Per-(org, project) TTL cache for the company brief. The brief is STANDING identity
+# (who the org is / products / customers / goals) — it changes slowly, but was rebuilt
+# via a 5-probe recall fan-out on EVERY turn, sitting on the critical path (up to 8s
+# before the director starts). Within the TTL every turn reuses it: latency ~0, recall
+# load -5 probes/turn. Query-specific facts still arrive fresh via the gather plan's
+# own recalls, so staleness only affects the standing block. Empty briefs (recall
+# outage) are never cached — the next turn retries.
+_BRIEF_CACHE: Dict[str, tuple] = {}
+_BRIEF_TTL_S = max(60, int(os.environ.get("HYPER_BRIEF_TTL_S", "600") or "600"))
+
 
 async def _build_company_brief(query: str, user_id: str, org_id: str,
                                api_key: str = "", max_memories: int = 25,
@@ -1759,6 +1769,10 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
     COMPANY CONTEXT block. Recalls via master+emulation (recall_emulated) so
     it reaches the org brain even when the rotated lead has no minted key.
     Best-effort: returns '' on any failure so the turn still runs."""
+    _ck = f"{org_id}|{project_id or ''}"
+    _hit = _BRIEF_CACHE.get(_ck)
+    if _hit and (time.time() - _hit[0]) < _BRIEF_TTL_S:
+        return _hit[1]
     seen_ids: Set[str] = set()
     seen_titles: Set[str] = set()
     collected: List[Dict[str, Any]] = []
@@ -1810,13 +1824,17 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
         return ""
     log.info("[brief] built company context: %d memories from %d probes",
              len(lines_out), len(probes))
-    return (
+    _brief = (
         "COMPANY CONTEXT — standing facts about this business, its people, "
         "products, customers and goals. Ground every claim in these; this is "
         "WHO and WHAT you are reasoning about:\n"
         + "\n".join(lines_out)
         + "\n"
     )
+    _BRIEF_CACHE[_ck] = (time.time(), _brief)
+    if len(_BRIEF_CACHE) > 512:  # bound: multi-tenant sidecar, never grow unbounded
+        _BRIEF_CACHE.pop(next(iter(_BRIEF_CACHE)), None)
+    return _brief
 
 
 # ─── Main orchestrator ─────────────────────────────────────────────────

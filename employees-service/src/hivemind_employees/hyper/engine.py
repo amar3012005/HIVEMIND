@@ -907,6 +907,10 @@ class Director:
                 self._last_tok = t
                 self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
                 self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+                # Provider prompt-cache hits (OpenRouter passes prompt_tokens_details
+                # through). Prod runs OpenRouter-PRIMARY, so without this the seal's
+                # tokens_cached was always 0 — cache savings were invisible.
+                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
                 return j["choices"][0]["message"]
             return None
         max_attempts = 3
@@ -985,6 +989,7 @@ class Director:
             self._last_tok = t
             self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
             self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+            self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
             return j["choices"][0]["message"]
         return None
 

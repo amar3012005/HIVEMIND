@@ -56,10 +56,31 @@ PY"
   the happy path.)
 - Use real data, not toy inputs. Clean up any test memories you inject.
 
-## 3. Deploy DURABLY (the #1 lesson)
+## 3. Deploy DURABLY
 
 `docker cp` hot-patching the running container is **ephemeral** — a recreate reverts to the
-stale image. Durable deploy = **rebuild the image from box source**:
+stale image. Ship a real image instead.
+
+### PREFERRED (2026-07-03): off-box CI build + pull (no build cache on the engine)
+
+On-box `docker compose build` piled up **193GB of build cache** on the engine box. The engine
+must NOT be a build box. Pipeline (all wired + verified):
+
+```
+git push origin feat/mneme-foundation        # or main
+  → CI 'build-core-image' (.github/workflows/build-image.yml) runs the test gate,
+    builds Dockerfile.production, pushes ghcr.io/amar3012005/hivemind-core:<sha> (+ :latest)
+  → on the engine box:  IMAGE_TAG=<sha> scripts/deploy-image.sh
+    (pulls the immutable tag, health-gates it in an EPHEMERAL container FIRST,
+     swaps each replica with auto-revert, records previous-tag for rollback)
+```
+
+- CI triggers on `main` + `feat/mneme-foundation`, paths `core/**` / `Dockerfile.production` / the workflow file.
+- ghcr package is **public** → the box pulls with no auth.
+- Get the built sha: `gh run view <run-id> --json headSha -q .headSha`.
+- Rollback: `scripts/rollback.sh` (uses the recorded previous-tag).
+
+### FALLBACK — build from box source (only if CI is unavailable)
 
 ```bash
 # a. land code in git

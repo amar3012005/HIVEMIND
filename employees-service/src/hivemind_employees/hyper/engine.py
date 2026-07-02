@@ -1419,23 +1419,71 @@ class Director:
                  bool(plan["web_query"]), plan["needs_debate"])
         return plan
 
-    async def _gather_one(self, fn: str, args: Dict[str, Any]) -> None:
+    # What each gather task reads as, in a teammate's voice — start note + done line.
+    # Attribution is TRUTHFUL: the task genuinely ran under that agent's name; only the
+    # phrasing is human. Zero extra LLM calls (pure string building).
+    def _task_phrase(self, fn: str, args: Dict[str, Any]) -> tuple:
+        q = str(args.get("query") or args.get("q") or "")[:80]
+        if fn == "recall":
+            return (f"searching the company brain for “{q}”…",
+                    f"Pulled what we know on “{q}” onto the board.")
+        if fn == "web_search":
+            return (f"running a live web search for “{q}”…",
+                    f"Brought back live web findings on “{q}” (sources on the board).")
+        prov = fn.split("__")[0].replace("_", " ")
+        return (f"reading {prov} ({fn.split('__')[-1]})…",
+                f"Checked {prov} — result is on the board.")
+
+    async def _gather_one(self, fn: str, args: Dict[str, Any],
+                          owner: Optional[Dict[str, Any]] = None) -> None:
         try:
-            await self._emit_tool_start(fn, args)
+            start, done = self._task_phrase(fn, args)
+            if owner:
+                # The crew visibly at work: this task runs under a REAL participant's
+                # name — typing while it runs, a persistent contribution bubble when it
+                # lands. Without this, a no-debate turn (needs_debate=false) showed ZERO
+                # agent activity — the room looked like background magic, not employees.
+                nm = owner.get("name") or owner.get("slug")
+                await self.emit({"t": "typing", "agent": owner.get("slug"), "note": f"{nm} — {start}"})
+            else:
+                await self._emit_tool_start(fn, args)
             await self._exec(fn, args)
+            if owner:
+                await self.emit({"t": "react", "agent": owner.get("slug"),
+                                 "name": owner.get("name") or owner.get("slug"),
+                                 "lane": owner.get("_lane") or "Communicator",
+                                 "agreement": "contribute", "content": done,
+                                 "line": done, "confidence": 0.8})
         except Exception as exc:  # noqa: BLE001 — one failed gather never fails the turn
             log.warning("[hyper-engine] gather %s failed: %s", fn, exc)
+
+    def _gather_owner(self, idx: int, fn: str) -> Optional[Dict[str, Any]]:
+        """Deterministic task→participant assignment. Lane-aware where it reads
+        naturally (web → an investigator/strategist if the room has one), else
+        round-robin so every teammate visibly carries part of the work."""
+        ps = self.participants or []
+        if not ps:
+            return None
+        if fn == "web_search":
+            for p in ps:
+                if str(p.get("_lane") or "").lower() in ("investigator", "strategist"):
+                    return p
+        return ps[idx % len(ps)]
 
     async def _run_gather(self, plan: Dict[str, Any]) -> int:
         """Run every planned recall / connector read / web search CONCURRENTLY — gather
         wall-time is the slowest single call, not the sum of 7 sequential ones."""
         tasks: List[Awaitable[None]] = []
+        _i = 0
         for q in plan["recall_queries"]:
-            tasks.append(self._gather_one("recall", {"query": q, "max": 6}))
+            tasks.append(self._gather_one("recall", {"query": q, "max": 6},
+                                          owner=self._gather_owner(_i, "recall"))); _i += 1
         for c in plan["connector_calls"]:
-            tasks.append(self._gather_one(c["name"], dict(c.get("args") or {})))
+            tasks.append(self._gather_one(c["name"], dict(c.get("args") or {}),
+                                          owner=self._gather_owner(_i, c["name"]))); _i += 1
         if plan["web_query"]:
-            tasks.append(self._gather_one("web_search", {"query": plan["web_query"]}))
+            tasks.append(self._gather_one("web_search", {"query": plan["web_query"]},
+                                          owner=self._gather_owner(_i, "web_search")))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
@@ -1664,6 +1712,9 @@ class Director:
                 log.warning("[hyper-engine] debate failed: %s", exc)
         # PHASE 4 — STRONG-MODEL SYNTHESIS from the gathered board + debate. Clean context
         # (no tool-call transcript) on the synth model → no harmony glitch, full quality.
+        _lead_p = self.participants[0] if self.participants else {}
+        await self.emit({"t": "typing", "agent": _lead_p.get("slug") or "director",
+                         "note": f"{_lead_p.get('name') or 'The lead'} — drafting the final deliverable from the team's board…"})
         final_text = await self._synthesize(forced_debate, transcript_json)
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.

@@ -1758,7 +1758,9 @@ _COMPANY_BRIEF_PROBES = [
 # own recalls, so staleness only affects the standing block. Empty briefs (recall
 # outage) are never cached — the next turn retries.
 _BRIEF_CACHE: Dict[str, tuple] = {}
-_BRIEF_TTL_S = max(60, int(os.environ.get("HYPER_BRIEF_TTL_S", "600") or "600"))
+# Standing identity changes slowly — 30min keeps sporadic rooms warm (was 600s: any
+# turn >10min after the last re-paid the 5-probe fan-out).
+_BRIEF_TTL_S = max(60, int(os.environ.get("HYPER_BRIEF_TTL_S", "1800") or "1800"))
 
 
 async def _build_company_brief(query: str, user_id: str, org_id: str,
@@ -2722,6 +2724,15 @@ async def _orchestrate_single_agent(
     log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d models=(%s, %s, %s)",
              req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks),
              _dir_m, _per_m, _syn_m)
+
+    # FIRST PAINT ≤ ~0.3s: a typing note BEFORE the brief build. The cold brief takes up
+    # to 8s and the engine's own first typing only fires after it — the room looked dead
+    # from send until then.
+    try:
+        await _emit({"t": "typing", "agent": (lead or {}).get("slug") or "director",
+                     "note": f"{(lead or {}).get('name') or 'The lead'} — on it, pulling the company context…"})
+    except Exception:  # noqa: BLE001
+        pass
 
     # Org grounding — recall a standing COMPANY CONTEXT (name, products, customers, market) ONCE
     # before the director plans, so its gather-PLAN (recall_queries + web_query) AND the synthesis

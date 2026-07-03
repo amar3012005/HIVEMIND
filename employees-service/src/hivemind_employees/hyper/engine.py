@@ -734,7 +734,8 @@ def _flatten_for_text(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # any gathering. Cache the tool list per connector so only the first turn pays it;
 # every later turn (within the TTL) skips the inspect entirely and starts instantly.
 _INSPECT_CACHE: Dict[str, tuple] = {}
-_INSPECT_TTL = float(os.environ.get("HYPER_CONNECTOR_INSPECT_TTL", "900") or "900")
+# Tool lists change ~never — 1h TTL so sporadic rooms (turns >15min apart) stay warm.
+_INSPECT_TTL = float(os.environ.get("HYPER_CONNECTOR_INSPECT_TTL", "3600") or "3600")
 
 
 async def _inspect_connector_tools(norm: str, *, user_id: str, org_id: str) -> List[Dict[str, Any]]:
@@ -1010,6 +1011,19 @@ class Director:
             registered.append(_tool(tname, tdesc, props, req))
             routes[tname] = (bridge, provider, real_tool)
 
+        # Prefetch every non-Google inspect CONCURRENTLY. Each cold MCP inspect is ~20s
+        # and they ran SEQUENTIALLY — N cold connectors = N×20s of dead air before the
+        # first gather (measured 25-66s on a slack+notion room). Wall-time is now the
+        # slowest single inspect, and the warm path (TTL cache) is unchanged.
+        _need = [n for n in dict.fromkeys(_norm_connector(c) for c in self.connectors)
+                 if n not in _GOOGLE_READ_TOOLS]
+        _pre: Dict[str, list] = {}
+        if _need:
+            _res = await asyncio.gather(
+                *[_inspect_connector_tools(n, user_id=self.user_id, org_id=self.org_id) for n in _need],
+                return_exceptions=True)
+            _pre = {n: (r if isinstance(r, list) else []) for n, r in zip(_need, _res)}
+
         for cid in self.connectors:
             if len(registered) >= _CONNECTOR_TOOL_CAP:
                 break
@@ -1019,9 +1033,7 @@ class Director:
                 for (n, d, p, rq) in google:
                     _add(n, d, p, rq, "google", norm, n)
                 continue
-            # Non-Google → discover the connector's read tools via the bridge (cached:
-            # the cold inspect is ~20s and was stalling every turn at run() start).
-            raw = await _inspect_connector_tools(norm, user_id=self.user_id, org_id=self.org_id)
+            raw = _pre.get(norm) or []
             count = 0
             for tspec in (raw if isinstance(raw, list) else []):
                 if count >= _MCP_TOOLS_PER_CONNECTOR or len(registered) >= _CONNECTOR_TOOL_CAP:

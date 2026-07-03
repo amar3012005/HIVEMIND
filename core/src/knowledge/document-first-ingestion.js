@@ -791,14 +791,28 @@ Output the JSON object and nothing else.`;
    */
   async _consolidateDocFacts(uFacts, { docTitle = '', documentId = null } = {}) {
     const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const isGptOss = /gpt-oss/i.test(model);
     const list = uFacts.map((f, i) => `${i}: ${String(f.content || '').slice(0, 240)}`).join('\n');
     const sys = `You deduplicate extracted document facts. Group facts that state the SAME underlying fact (same subject + same attribute/claim, possibly different wording or detail level). Do NOT group facts that are merely about the same topic — only true near-duplicates. Output STRICT JSON: {"groups":[{"keep":<index of the most complete/specific fact>,"drop":[<indexes of its duplicates>]}]}. Facts with no duplicate are omitted entirely. If there are no duplicates output {"groups":[]}.`;
+    // gpt-oss is a reasoning model: with a plain json_object format it can emit its chain-of-thought
+    // as `content` (prose, unparseable). Strict json_schema + low reasoning_effort forces clean JSON
+    // — the exact pattern _extractUnified uses.
+    const GROUP_SCHEMA = {
+      type: 'object', additionalProperties: false, required: ['groups'],
+      properties: { groups: { type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['keep', 'drop'],
+        properties: { keep: { type: 'integer' }, drop: { type: 'array', items: { type: 'integer' } } },
+      } } },
+    };
     const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        model, temperature: 0, max_tokens: 1200,
-        response_format: { type: 'json_object' },
+        model, temperature: 0, max_tokens: 1600,
+        ...(isGptOss ? { reasoning_effort: 'low' } : {}),
+        response_format: isGptOss
+          ? { type: 'json_schema', json_schema: { name: 'fact_dedup_groups', strict: true, schema: GROUP_SCHEMA } }
+          : { type: 'json_object' },
         messages: [
           { role: 'system', content: sys },
           { role: 'user', content: `Document: ${docTitle}\nFacts:\n${list}` },

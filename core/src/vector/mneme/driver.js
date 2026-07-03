@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -270,6 +270,14 @@ export function amrUpdate(orgId, id, patch) {
       return remoteUpdate(orgId, id, patch);
     }).catch(() => remoteUpdate(orgId, id, patch));
   }
+  return undefined;
+}
+
+// Delete a remote org's memory ON ITS AGENT (tombstone; hard=true purges the row). Direct call,
+// not outboxed: callers need the definitive result and the agent-side delete is idempotent.
+export function amrDelete(orgId, id, hard = false) {
+  if (!orgId || !id) return undefined;
+  if (orgIsRemote(orgId)) return remoteDelete(orgId, id, hard);
   return undefined;
 }
 

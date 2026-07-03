@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, mnemeMode, amrMemEdgeCounts } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -573,6 +573,14 @@ export class PrismaGraphStore {
   }
 
   async deleteMemory(id) {
+    // Remote (self-host) orgs have NO central row — the memory lives on the agent's shard.
+    // Without this seam every engine cleanup delete (supersession, consolidation, user delete)
+    // threw "record not found" centrally and the agent kept serving the stale memory forever.
+    const _remoteDelOrg = currentOrg();
+    if (_remoteDelOrg && orgIsRemote(_remoteDelOrg)) {
+      await amrDelete(_remoteDelOrg, id);
+      return { id, deleted: true };
+    }
     const deleted = await this.client.memory.update({
       where: { id },
       data: {

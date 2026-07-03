@@ -876,19 +876,34 @@ const routes = {
       for (const r of segs) segMap[r.document_id] = r.c;
     }
     if (filenames.length) {
-      // promoted = memories tagged 'filename:<filename>'
-      const tagPatterns = filenames.map((f) => `filename:${f}`);
-      const { rows: prows } = await pg.query(
-        `SELECT unnest(tags) AS tag, count(*)::int AS c
-         FROM memories
-         WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
-         GROUP BY tag`,
-        [ORG, tagPatterns]
-      );
-      for (const r of prows) {
-        if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
-          const fn = r.tag.slice('filename:'.length);
-          proMap[fn] = (proMap[fn] || 0) + r.c;
+      // promoted = memories tagged 'filename:<filename>' — counted from the ACTIVE memory store.
+      // In amr mode PG's memories table is frozen at cutover; counting from it showed 0 for every
+      // post-cutover doc (the "14 seg · 0 mem" bug) and stale counts for pre-cutover ones.
+      if (effectiveStore === 'amr' && amr) {
+        const wanted = new Set(filenames.map((f) => `filename:${f}`));
+        const { memories } = amr.list({}, undefined, 100000, 0);
+        for (const m of memories) {
+          for (const t of (m.tags || [])) {
+            if (typeof t === 'string' && wanted.has(t)) {
+              const fn = t.slice('filename:'.length);
+              proMap[fn] = (proMap[fn] || 0) + 1;
+            }
+          }
+        }
+      } else {
+        const tagPatterns = filenames.map((f) => `filename:${f}`);
+        const { rows: prows } = await pg.query(
+          `SELECT unnest(tags) AS tag, count(*)::int AS c
+           FROM memories
+           WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
+           GROUP BY tag`,
+          [ORG, tagPatterns]
+        );
+        for (const r of prows) {
+          if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
+            const fn = r.tag.slice('filename:'.length);
+            proMap[fn] = (proMap[fn] || 0) + r.c;
+          }
         }
       }
     }
@@ -945,16 +960,25 @@ const routes = {
       metadata: s.metadata || {},
       createdAt: s.created_at,
     }));
-    // Promoted memories: tagged filename:<filename>.
+    // Promoted memories: tagged filename:<filename> — from the ACTIVE memory store (same
+    // amr-vs-frozen-PG split as /v1/kb-docs above).
     let promotedMemories = [];
     if (d.filename) {
       const tag = `filename:${d.filename}`;
-      const { rows: mems } = await pg.query(
-        `SELECT id, title, content, memory_type, confidence, tags, created_at
-         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
-         ORDER BY created_at DESC LIMIT 100`,
-        [ORG, tag]
-      );
+      let mems;
+      if (effectiveStore === 'amr' && amr) {
+        mems = amr.list({}, undefined, 100000, 0).memories
+          .filter((m) => (m.tags || []).includes(tag))
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+          .slice(0, 100);
+      } else {
+        ({ rows: mems } = await pg.query(
+          `SELECT id, title, content, memory_type, confidence, tags, created_at
+           FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
+           ORDER BY created_at DESC LIMIT 100`,
+          [ORG, tag]
+        ));
+      }
       promotedMemories = mems.map((m) => ({
         id: m.id,
         title: m.title,

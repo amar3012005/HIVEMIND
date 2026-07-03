@@ -41,6 +41,31 @@ impl Segment {
         self.hydrate(idx, &slot, f32::NAN)
     }
 
+    /// Rewrite a live slot's TEXT payload in place, keeping its vector, layer, temporal anchors,
+    /// entity bitmap and adjacency untouched. Append-only compatible: the new text block is
+    /// APPENDED to `.txt` and the slot's TextRef repointed — the old block becomes dead bytes
+    /// reclaimed by `compact()` (same lifecycle as a deleted memory's text, SPEC §6.4).
+    ///
+    /// This is the durability primitive for metadata-only mutations (tags, recall reinforcement,
+    /// supersession flags baked into the record JSON) — without it, callers that can't reproduce
+    /// the slot's vector had no way to persist a record change.
+    pub fn rewrite_text(&mut self, id: SlotId, text: &str) -> Result<()> {
+        let idx = id as usize;
+        if idx >= self.slot_count() as usize {
+            return Err(MsegError::NoSuchSlot(id));
+        }
+        let mut slot = self.slot(idx)?;
+        if slot.is_tombstoned() {
+            return Err(MsegError::TombstonedSlot(id));
+        }
+        let tref = self.append_text_block(text.as_bytes())?;
+        slot.set_text_ptr(tref.text_ptr);
+        slot.set_text_len_lz4(tref.text_len_lz4);
+        slot.set_text_len_raw(tref.text_len_raw);
+        self.write_slot(idx, &slot)?;
+        Ok(())
+    }
+
     /// Tombstone a memory and push its slot onto the free list (SPEC §6.4). Idempotent: a
     /// second delete of the same id is a no-op (already tombstoned).
     pub fn delete(&mut self, id: SlotId) -> Result<()> {

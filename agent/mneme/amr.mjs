@@ -9,6 +9,7 @@
 // millions, of memories) this is fast and simple, and it's ALWAYS consistent with the shard
 // because every write goes through this module.
 import { createRequire } from 'module';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
@@ -42,7 +43,15 @@ export class AmrMemoryStore {
   constructor({ dataRoot, org, dim }) {
     this.org = org;
     this.dim = dim;
-    this.store = MnemeStore.open(dataRoot, org.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64), dim);
+    const orgDir = org.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+    this.store = MnemeStore.open(dataRoot, orgDir, dim);
+    // Metadata patch log — the durability layer for slot-less mutations (bump-recall, tag resync,
+    // is_latest supersession flips, memory_type upgrades). The native API can't rewrite a slot's
+    // JSON without its vector (no vector readback), so in-memory patches alone were LOST on
+    // restart — recall reinforcement reset, entity tags vanished, superseded memories came back
+    // as latest. Every such mutation now also appends {id, ...fields} here; replayed over the
+    // slot records on boot, compacted to one line per live id after replay.
+    this.patchFile = path.join(dataRoot, orgDir, 'patches.jsonl');
     // id -> { slotId, rec }. rec mirrors the old Postgres row shape exactly, so route handlers
     // built against that shape barely change.
     this.byId = new Map();
@@ -58,6 +67,39 @@ export class AmrMemoryStore {
       if (!rec?.id) continue;
       this.byId.set(rec.id, { slotId, rec });
     }
+    this._replayPatches();
+  }
+
+  _appendPatch(id, fields) {
+    try { fs.appendFileSync(this.patchFile, `${JSON.stringify({ id, ...fields })}\n`); }
+    catch (e) { console.warn('[amr] patch persist failed:', e.message); }
+  }
+
+  _replayPatches() {
+    let lines = [];
+    try { lines = fs.readFileSync(this.patchFile, 'utf8').split('\n').filter(Boolean); } catch { return; }
+    for (const line of lines) {
+      let p; try { p = JSON.parse(line); } catch { continue; }
+      const existing = p?.id && this.byId.get(p.id);
+      if (!existing) continue; // deleted / unknown — patch is obsolete
+      const { id, ...fields } = p;
+      Object.assign(existing.rec, fields);
+    }
+    // Compact: rewrite as one line per patched live id (patch fields only, latest values), so the
+    // log stays bounded by memory count instead of growing per recall.
+    try {
+      const PATCH_FIELDS = ['recall_count', 'strength', 'last_accessed_at', 'tags', 'is_latest', 'memory_type'];
+      const out = [];
+      const patchedIds = new Set(lines.map((l) => { try { return JSON.parse(l).id; } catch { return null; } }).filter(Boolean));
+      for (const id of patchedIds) {
+        const e = this.byId.get(id);
+        if (!e) continue;
+        const fields = {};
+        for (const f of PATCH_FIELDS) if (e.rec[f] !== undefined) fields[f] = e.rec[f];
+        out.push(JSON.stringify({ id, ...fields }));
+      }
+      fs.writeFileSync(this.patchFile, out.length ? `${out.join('\n')}\n` : '');
+    } catch { /* compaction is best-effort; append-only still correct */ }
   }
 
   liveCount() { return this.byId.size; }
@@ -245,8 +287,8 @@ export class AmrMemoryStore {
     const existing = this.byId.get(id);
     if (!existing) return;
     existing.rec.tags = tags;
-    // no vector change — patch in place (slot text is stale until next vector write, matching
-    // the write()'s metadata-only-update behavior above).
+    // Durable via the patch log (the slot itself can't be rewritten without its vector).
+    this._appendPatch(id, { tags });
   }
 
   bumpRecall(ids) {
@@ -257,6 +299,11 @@ export class AmrMemoryStore {
       existing.rec.recall_count = (existing.rec.recall_count || 0) + 1;
       existing.rec.strength = Math.min(1.0, (existing.rec.strength ?? 1.0) + 0.05);
       existing.rec.last_accessed_at = new Date().toISOString();
+      this._appendPatch(id, {
+        recall_count: existing.rec.recall_count,
+        strength: existing.rec.strength,
+        last_accessed_at: existing.rec.last_accessed_at,
+      });
       bumped++;
     }
     return bumped;
@@ -279,15 +326,19 @@ export class AmrMemoryStore {
     for (const [, v] of this.byId) { try { this.store.delete(v.slotId); n++; } catch { /* ignore */ } }
     this.byId.clear();
     this.store.flush();
+    try { fs.writeFileSync(this.patchFile, ''); } catch { /* best-effort */ }
     return n;
   }
 
   patchUpdate(id, patch) {
     const existing = this.byId.get(id);
     if (!existing) return false;
-    if (Array.isArray(patch.tags)) existing.rec.tags = patch.tags;
-    if (patch.is_latest !== undefined) existing.rec.is_latest = !!patch.is_latest;
-    if (patch.memory_type !== undefined) existing.rec.memory_type = patch.memory_type;
+    const fields = {};
+    if (Array.isArray(patch.tags)) { existing.rec.tags = patch.tags; fields.tags = patch.tags; }
+    if (patch.is_latest !== undefined) { existing.rec.is_latest = !!patch.is_latest; fields.is_latest = !!patch.is_latest; }
+    if (patch.memory_type !== undefined) { existing.rec.memory_type = patch.memory_type; fields.memory_type = patch.memory_type; }
+    // is_latest supersession flips + type upgrades MUST survive restart — durable patch log.
+    if (Object.keys(fields).length) this._appendPatch(id, fields);
     return true;
   }
 

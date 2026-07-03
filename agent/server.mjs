@@ -1287,6 +1287,54 @@ if (STORE === 'amr') {
       await ensureQdrant().catch(() => {});
       return { ok: true, shard_deleted: shardDeleted };
     },
+    // Relationship reads MUST come from the shard — the PG relationships table is frozen at
+    // cutover; reading it missed every post-cutover edge (stale graph counts + node detail).
+    '/v1/mem-edges': async (b) => {
+      const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+      if (!ids.length) return {};
+      const idSet = new Set(ids);
+      const result = {};
+      for (const id of ids) result[id] = { in: 0, out: 0 };
+      for (const e of amr._allEdges()) {
+        if (idSet.has(e.from_id)) result[e.from_id].out++;
+        if (idSet.has(e.to_id)) result[e.to_id].in++;
+      }
+      return result;
+    },
+    '/v1/mem-relationships': async (b) => {
+      if (!b.memoryId) return { error: 'memoryId required' };
+      const memId = b.memoryId;
+      const edges = amr._allEdges();
+      const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
+      const peer = (id) => amr.byId.get(id)?.rec || null;
+      const enrichOut = edges.filter((e) => e.from_id === memId).slice(0, 200).map((e) => {
+        const p = peer(e.to_id);
+        return {
+          id: e.id, type: e.type || 'Mentions', confidence: e.confidence, created_by: null,
+          created_at: null, metadata: {}, direction: 'out',
+          target_id: e.to_id, target_title: peerTitle(p), target_memory_type: p?.memory_type || null,
+          target_is_latest: p?.is_latest ?? null, target_deleted: !!(p?.deleted_at),
+        };
+      });
+      const enrichIn = edges.filter((e) => e.to_id === memId).slice(0, 200).map((e) => {
+        const p = peer(e.from_id);
+        return {
+          id: e.id, type: e.type || 'Mentions', confidence: e.confidence, created_by: null,
+          created_at: null, metadata: {}, direction: 'in',
+          source_id: e.from_id, source_title: peerTitle(p), source_memory_type: p?.memory_type || null,
+          source_is_latest: p?.is_latest ?? null, source_deleted: !!(p?.deleted_at),
+        };
+      });
+      const by_type = {};
+      for (const e of [...enrichOut, ...enrichIn]) {
+        const t = e.type || 'Other';
+        (by_type[t] = by_type[t] || []).push(e);
+      }
+      return {
+        memory_id: memId, out: enrichOut, in: enrichIn, by_type,
+        counts: { out: enrichOut.length, in: enrichIn.length, total: enrichOut.length + enrichIn.length },
+      };
+    },
   });
   } catch (e) {
     // The operator chose .amr but the engine can't start here (e.g. no native binding for this

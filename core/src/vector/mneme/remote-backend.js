@@ -198,6 +198,13 @@ export async function remoteKbDocs(orgId, opts = {}) {
   catch (e) { console.warn(`[mneme/remote] kb-docs failed org=${orgId}: ${e.message}`); return null; }
 }
 
+// KB doc DELETE for remote org — the agent runs the FULL cascade (fact memories from the active
+// store, segments + their vectors, the doc row). Accepts document_id or filename.
+export async function remoteKbDocDelete(orgId, { documentId, filename } = {}) {
+  try { return await _call(orgId, '/v1/kb-doc-delete', { document_id: documentId || null, filename: filename || null }); }
+  catch (e) { console.warn(`[mneme/remote] kb-doc-delete failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount } or null.
 export async function remoteKbDocDetail(orgId, documentId) {
   try { const out = await _call(orgId, '/v1/kb-doc-detail', { documentId }); return out?.error ? null : out; }

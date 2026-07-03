@@ -13668,6 +13668,31 @@ exit \$RC
               else deleteUploadId = rawId;
             }
 
+            // ── Remote (self-host) orgs: the doc + segments + fact memories live on the AGENT,
+            // central Prisma holds no rows — the 600-line cascade below would resolve nothing and
+            // silently no-op ("delete button does nothing" / memories survive doc deletion). One
+            // agent call runs the FULL cascade against whichever storage engine the box runs
+            // (.amr or pg-qdrant) — features identical across backends by construction.
+            if (orgId && orgIsRemote(orgId)) {
+              try {
+                const { amrKbDocDelete } = await import('./vector/mneme/driver.js');
+                const out = await amrKbDocDelete(orgId, {
+                  documentId: deleteMemoryId || rawId || null,
+                  filename: body.filename || body.title || null,
+                });
+                if (out?.ok) {
+                  return jsonResponse(res, {
+                    success: true, deleted: out.deleted_memories,
+                    deleted_count: out.deleted_memories, deleted_segments: out.deleted_segments,
+                    document_id: out.document_id, strategy: 'remote-agent-cascade',
+                  });
+                }
+                return jsonResponse(res, { error: out?.error || 'document not found on the org agent' }, 404);
+              } catch (remErr) {
+                return jsonResponse(res, { error: `agent delete failed: ${remErr.message}` }, 502);
+              }
+            }
+
             try {
               let memoryIds = [];
               let resolutionStrategy = null;

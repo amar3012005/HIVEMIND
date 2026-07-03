@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -239,6 +239,9 @@ export function amrKbDocs(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDoc
 // KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount }
 // from the agent. null for non-remote (caller uses central Prisma). Async.
 export function amrKbDocDetail(orgId, documentId) { return orgIsRemote(orgId) ? remoteKbDocDetail(orgId, documentId) : null; }
+
+// KB doc DELETE (full cascade on the agent) for remote orgs. null for non-remote.
+export function amrKbDocDelete(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDocDelete(orgId, opts) : null; }
 
 // Per-memory edge counts for remote org — returns { <id>: { in, out } } for a batch of memory ids.
 // {} / null for non-remote (caller uses central Prisma). Async.

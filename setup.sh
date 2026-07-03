@@ -56,9 +56,30 @@ else
   ORG="$(printf '%s' "$RESP" | grep -oE '"orgId":"[^"]+"' | cut -d'"' -f4)"; [ -n "$ORG" ] || die "no org for key: $RESP"
   log "key OK → org $ORG"
 
-  # ── 3. EXPOSURE ────────────────────────────────────────────────────────────────────────────────
+  # ── 3. STORAGE ENGINE — the operator's choice ─────────────────────────────────────────────────
+  # Where do this org's memories live on this box?
+  #   1) pg-qdrant (default) — battle-tested: rows in Postgres, vectors in Qdrant.
+  #   2) amr                 — the .amr engine: memories + vectors + relationship graph in ONE
+  #                            memory-mapped file per org (./data/mneme). Postgres/Qdrant still
+  #                            serve the knowledge-base layer either way.
+  # Switching later is safe: flipping AGENT_STORE=amr in .env + restart auto-migrates existing
+  # memories (with their real vectors) into the shard on first boot.
+  STORE_CHOICE="${AGENT_STORE:-}"
+  if [ -z "$STORE_CHOICE" ] && [ -t 0 ]; then
+    printf "
+  ${C}Storage engine for your memories:${Z}
+    ${C}1)${Z} pg-qdrant  ${D}Postgres + Qdrant — the battle-tested default${Z}
+    ${C}2)${Z} amr        ${D}.amr — one memory-mapped file per org (vectors + graph inline)${Z}
+  Choose [1/2, default 1]: "
+    read -r _sc </dev/tty || true
+    case "${_sc:-1}" in 2|amr|AMR) STORE_CHOICE="amr" ;; *) STORE_CHOICE="pg-qdrant" ;; esac
+  fi
+  STORE_CHOICE="${STORE_CHOICE:-pg-qdrant}"
+  log "memory storage engine → $STORE_CHOICE"
+
+  # ── 4. EXPOSURE ────────────────────────────────────────────────────────────────────────────────
   # How will the central engine reach this agent? Direct HTTPS (a domain) or Tailscale (private).
-  # Blank → auto-detect in step 7 (Tailscale IP, else public IP). Only ask interactively, and only
+  # Blank → auto-detect in step 8 (Tailscale IP, else public IP). Only ask interactively, and only
   # if a terminal is attached — piped/non-interactive installs proceed fully unattended.
   PUBURL="${AGENT_PUBLIC_URL:-}"
   if [ -z "$PUBURL" ] && [ -t 0 ]; then
@@ -66,12 +87,12 @@ else
     read -r PUBURL </dev/tty || true
   fi
 
-  # ── 4. WAIT FOR WARM ───────────────────────────────────────────────────────────────────────────
+  # ── 5. WAIT FOR WARM ───────────────────────────────────────────────────────────────────────────
   log "finishing warm-up (image build + Postgres + Qdrant pull)…"
   if ! wait "$WARM_PID"; then die "warm-up failed — see $(pwd)/.byod-warm.log"; fi
   log "warm-up done — box is primed."
 
-  # ── 5. WRITE .env ──────────────────────────────────────────────────────────────────────────────
+  # ── 6. WRITE .env ──────────────────────────────────────────────────────────────────────────────
   cat > .env <<EOF
 HIVEMIND_API_KEY=$API_KEY
 HIVEMIND_ORG_ID=$ORG
@@ -82,6 +103,9 @@ POSTGRES_DB=hivemind
 AGENT_TOKEN=$(gen 32)
 AGENT_PORT=8787
 AGENT_BIND=0.0.0.0
+# Memory storage engine chosen at setup: pg-qdrant | amr. Switching to amr later is safe
+# (auto-migrates existing memories + vectors into the .amr shard on next boot).
+AGENT_STORE=$STORE_CHOICE
 # Direct-HTTPS exposure: the URL the central engine POSTs to (put your TLS proxy in front). Leave blank
 # to use Tailscale instead (set TS_AUTHKEY + run with --profile tailnet).
 AGENT_PUBLIC_URL=$PUBURL
@@ -93,14 +117,14 @@ fi
 
 set -a; . ./.env; set +a
 
-# ── 6. BRING UP (fast — image already built + Postgres/Qdrant pulled during warm) ────────────────────
+# ── 7. BRING UP (fast — image already built + Postgres/Qdrant pulled during warm) ────────────────────
 if [ -n "${TS_AUTHKEY:-}" ]; then
   log "starting Postgres + Qdrant + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
 else
   log "starting Postgres + Qdrant + .amr agent…"; $COMPOSE up -d
 fi
 
-# ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
+# ── 8. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
 # Zero-config: if no explicit AGENT_PUBLIC_URL, AUTO-DETECT a reachable address so the box connects
 # with no input. Priority: (1) host Tailscale IP (private mesh — best), (2) Tailscale tunnel container
 # if TS_AUTHKEY set, (3) the box's public IP. The agent binds 0.0.0.0:${AGENT_PORT} and is bearer-token
@@ -126,7 +150,7 @@ if [ -z "$AGENT_URL" ]; then
 fi
 [ -n "$AGENT_URL" ] || die "could not auto-detect a URL — set AGENT_PUBLIC_URL in .env (https://… with TLS) or join Tailscale"
 
-# ── 8. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
+# ── 9. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
 log "waiting for the agent to be ready…"
 for i in $(seq 1 30); do
   if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT:-8787}/health" >/dev/null 2>&1; then break; fi

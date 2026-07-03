@@ -12,10 +12,19 @@
 //   QDRANT_URL    local Qdrant (vectors)                                 [required]
 //   AGENT_PORT    listen port (default 8787)
 //   MNEME_DIM     embedding dim (default 1024)
+//   AGENT_STORE   memory storage engine: 'pg-qdrant' (default) | 'amr' — the operator's choice,
+//                 asked by setup.sh and recorded in .env. See STORE below.
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
 const ORG = process.env.ORG_ID || die('ORG_ID required');
+// Storage engine for memories + relationships — the OPERATOR'S CHOICE, made at setup time:
+//   pg-qdrant (default) — proven Phase-1 path: rows in Postgres, vectors in Qdrant.
+//   amr                 — the .amr engine: one mmap'd shard per org (memories + vectors + graph
+//                         in one file). Postgres+Qdrant still serve the KB layer (docs/segments).
+// Switching pg-qdrant → amr later is safe: on first amr boot the shard auto-migrates all existing
+// rows + their real Qdrant vectors (mneme/amr.mjs migrateFromPostgres, idempotent).
+const STORE = (process.env.AGENT_STORE || 'pg-qdrant').toLowerCase() === 'amr' ? 'amr' : 'pg-qdrant';
 const TOKEN = process.env.AGENT_TOKEN || die('AGENT_TOKEN required');
 // Optional: pin the engine origin. The engine calls server-to-server (no Origin header), so ANY
 // request bearing an Origin/Referer is a browser and is rejected outright (blocks CSRF/SSRF from a
@@ -246,27 +255,47 @@ async function dashboardStats() {
   const qOk = await qdrantHealthy();
   let counts = { total: 0, by_layer: [], by_type: [], users: 0, oldest: null, newest: null };
   try {
-    const [tot, layer, type, users, span] = await Promise.all([
-      pg.query(`SELECT count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-      pg.query(`SELECT coalesce(layer,'memory') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC`, [ORG]),
-      pg.query(`SELECT coalesce(memory_type,'unspecified') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [ORG]),
-      pg.query(`SELECT count(DISTINCT user_id)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-      pg.query(`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-    ]);
-    counts = {
-      total: tot.rows[0]?.n || 0,
-      by_layer: layer.rows,
-      by_type: type.rows,
-      users: users.rows[0]?.n || 0,
-      oldest: span.rows[0]?.oldest || null,
-      newest: span.rows[0]?.newest || null,
-    };
+    if (effectiveStore === 'amr' && amr) {
+      // Counts straight from the .amr in-process index (the memory source of truth in this mode).
+      const { memories } = amr.list({}, undefined, 100000, 0);
+      const byLayer = new Map(); const byType = new Map(); const users = new Set();
+      let oldest = null, newest = null;
+      for (const m of memories) {
+        const lk = m.layer || 'memory'; byLayer.set(lk, (byLayer.get(lk) || 0) + 1);
+        const tk = m.memory_type || 'unspecified'; byType.set(tk, (byType.get(tk) || 0) + 1);
+        if (m.user_id) users.add(m.user_id);
+        if (!oldest || new Date(m.created_at) < new Date(oldest)) oldest = m.created_at;
+        if (!newest || new Date(m.created_at) > new Date(newest)) newest = m.created_at;
+      }
+      counts = {
+        total: memories.length,
+        by_layer: [...byLayer].map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n),
+        by_type: [...byType].map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n).slice(0, 8),
+        users: users.size, oldest, newest,
+      };
+    } else {
+      const [tot, layer, type, users, span] = await Promise.all([
+        pg.query(`SELECT count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+        pg.query(`SELECT coalesce(layer,'memory') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC`, [ORG]),
+        pg.query(`SELECT coalesce(memory_type,'unspecified') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [ORG]),
+        pg.query(`SELECT count(DISTINCT user_id)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+        pg.query(`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+      ]);
+      counts = {
+        total: tot.rows[0]?.n || 0,
+        by_layer: layer.rows,
+        by_type: type.rows,
+        users: users.rows[0]?.n || 0,
+        oldest: span.rows[0]?.oldest || null,
+        newest: span.rows[0]?.newest || null,
+      };
+    }
   } catch (e) { console.warn('[hm-agent] dashboard stats query failed:', e.message); }
   return {
     ok: true, org: ORG, dim: DIM, schemaVersion: SCHEMA_VERSION,
     uptime_seconds: Math.floor((Date.now() - BOOT_AT) / 1000),
-    connections: { postgres: pgOk, qdrant: qOk },
-    storage_backend: 'pg-qdrant', // Phase 1 build (see file header) — Phase 12 swaps to .amr, same contract
+    connections: { postgres: pgOk, qdrant: qOk, ...(effectiveStore === 'amr' ? { amr: !!amr } : {}) },
+    storage_backend: effectiveStore, // the operator's setup-time choice (AGENT_STORE)
     memories: counts,
   };
 }
@@ -1107,12 +1136,66 @@ const routes = {
 
 await ensureSchema();
 await ensureQdrant();
-console.log(`[hm-agent] org=${ORG} store=pg-qdrant dim=${DIM}`);
+
+// ── .amr engine (only when the operator chose it at setup) ─────────────────────────────────────
+// Dynamic import so pg-qdrant boxes never load (or need) the native binding. When active, the 11
+// memory/relationship routes below are OVERRIDDEN with .amr-backed implementations — the KB routes
+// (kb-doc / kb-segment / kb-recall / kb-hydrate / erase) keep using Postgres+Qdrant either way.
+let amr = null;
+let effectiveStore = STORE;
+if (STORE === 'amr') {
+  try {
+  const { AmrMemoryStore, migrateFromPostgres } = await import('./mneme/amr.mjs');
+  amr = new AmrMemoryStore({ dataRoot: process.env.MNEME_DATA_ROOT || '/data/mneme', org: ORG, dim: DIM });
+  const migration = await migrateFromPostgres(amr, pg, qFetch, QCOLL, ORG).catch((e) => {
+    console.error('[hm-agent] .amr migration failed (shard stays empty, retried next boot):', e.message);
+    return { migrated: 0, error: e.message };
+  });
+  console.log(`[hm-agent] .amr active: live=${amr.liveCount()} migration=${JSON.stringify(migration)}`);
+  Object.assign(routes, {
+    '/v1/write': async (b) => {
+      const r = b.record || {};
+      if (!r.id) return { ok: false, error: 'record.id required' };
+      amr.write(r, Array.isArray(b.vector) ? b.vector : undefined);
+      for (const rel of (b.rels || [])) if (rel?.fromId && rel?.toId) amr.addEdge(rel);
+      return { ok: true };
+    },
+    '/v1/recall': async (b) => Array.isArray(b.vector)
+      ? { results: amr.recall(b.vector, b.limit || 10, b.filter || {}) } : { results: [] },
+    '/v1/lexical': async (b) => b.text
+      ? { results: amr.lexical(b.text, b.filter || {}, b.limit || 10) } : { results: [] },
+    '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
+    '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
+    '/v1/stats': async (b) => amr.stats(b.filter || {}),
+    '/v1/graph': async (b) => amr.graph(b.filter || {}, b.limit || 500),
+    '/v1/edge': async (b) => { if (b.rel?.fromId && b.rel?.toId) amr.addEdge(b.rel); return { ok: true }; },
+    '/v1/update-tags': async (b) => { if (b.id && Array.isArray(b.tags)) amr.updateTags(b.id, b.tags); return { ok: true }; },
+    '/v1/bump-recall': async (b) => {
+      const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+      return { ok: true, bumped: ids.length ? amr.bumpRecall(ids) : 0 };
+    },
+    '/v1/update': async (b) => {
+      if (!b.id) return { ok: false, error: 'id required' };
+      amr.patchUpdate(b.id, b);
+      return { ok: true };
+    },
+  });
+  } catch (e) {
+    // The operator chose .amr but the engine can't start here (e.g. no native binding for this
+    // platform yet). Fail OPEN to the proven pg-qdrant path — the agent must never crash-loop and
+    // take the org's memory offline over a storage-engine preference. Loud, so it's fixable.
+    console.error(`[hm-agent] AGENT_STORE=amr requested but .amr failed to start — FALLING BACK to pg-qdrant. Fix and restart to activate .amr. Cause: ${e.message}`);
+    amr = null;
+    effectiveStore = 'pg-qdrant';
+  }
+}
+
+console.log(`[hm-agent] org=${ORG} store=${effectiveStore} dim=${DIM}`);
 
 http.createServer(async (req, res) => {
   if (req.url === '/health') {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
-    return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
+    return send(res, 200, { ok: true, org: ORG, store: effectiveStore, pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
   // Dashboard — read-only, GET, no token (same trust boundary as /health: private tailnet/LAN only,
   // counts never content). Lets the operator open http://<agent>:8787/ in a browser.

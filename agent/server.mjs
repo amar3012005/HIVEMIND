@@ -233,7 +233,134 @@ function payloadOf(rec) {
 }
 
 const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+const sendHtml = (res, code, html) => { res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' }); res.end(html); };
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
+
+// ── Dashboard — read-only status page for the box operator ─────────────────────────────────────
+// GET-only, no bearer token (matches /health): the agent listens only on the private tailnet/LAN
+// per TRANSPORT.md, and this exposes counts only, never memory content. Separate from the POST-only
+// engine API below (which stays bearer-token + origin-locked).
+const BOOT_AT = Date.now();
+async function dashboardStats() {
+  const pgOk = await pg.query('SELECT 1').then(() => true).catch(() => false);
+  const qOk = await qdrantHealthy();
+  let counts = { total: 0, by_layer: [], by_type: [], users: 0, oldest: null, newest: null };
+  try {
+    const [tot, layer, type, users, span] = await Promise.all([
+      pg.query(`SELECT count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+      pg.query(`SELECT coalesce(layer,'memory') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC`, [ORG]),
+      pg.query(`SELECT coalesce(memory_type,'unspecified') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [ORG]),
+      pg.query(`SELECT count(DISTINCT user_id)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+      pg.query(`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
+    ]);
+    counts = {
+      total: tot.rows[0]?.n || 0,
+      by_layer: layer.rows,
+      by_type: type.rows,
+      users: users.rows[0]?.n || 0,
+      oldest: span.rows[0]?.oldest || null,
+      newest: span.rows[0]?.newest || null,
+    };
+  } catch (e) { console.warn('[hm-agent] dashboard stats query failed:', e.message); }
+  return {
+    ok: true, org: ORG, dim: DIM, schemaVersion: SCHEMA_VERSION,
+    uptime_seconds: Math.floor((Date.now() - BOOT_AT) / 1000),
+    connections: { postgres: pgOk, qdrant: qOk },
+    memories: counts,
+  };
+}
+
+const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HIVEMIND — Self-host Agent</title>
+<style>
+  :root{--bg:#0a0a0a;--panel:#141414;--line:#252525;--ink:#f5f5f4;--dim:#8a8a86;--accent:#117dff;--good:#22c55e;--bad:#ef4444}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;-webkit-font-smoothing:antialiased}
+  header{padding:28px 32px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+  header h1{font-size:16px;font-weight:700;margin:0;font-family:'Space Grotesk',sans-serif;letter-spacing:.01em}
+  header h1 span{color:var(--accent)}
+  .badge{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;padding:5px 10px;border-radius:999px;border:1px solid var(--line)}
+  main{max-width:1040px;margin:0 auto;padding:28px 32px 60px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card .label{font:10px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:10px}
+  .card .value{font:26px/1 'Space Grotesk',sans-serif;font-weight:700}
+  .card .sub{margin-top:6px;font-size:12px;color:var(--dim)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle}
+  .dot.good{background:var(--good);box-shadow:0 0 6px var(--good)}
+  .dot.bad{background:var(--bad)}
+  .section-title{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin:26px 0 10px}
+  table{width:100%;border-collapse:collapse}
+  td{padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+  td:last-child{text-align:right;font-family:ui-monospace,monospace;color:var(--accent)}
+  .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .empty{color:var(--dim);font-size:13px;padding:16px 0}
+  footer{color:var(--dim);font-size:11px;text-align:center;padding:20px;font-family:ui-monospace,monospace}
+  a{color:var(--accent);text-decoration:none}
+</style></head>
+<body>
+  <header>
+    <h1>HIVE<span>MIND</span> — self-host agent</h1>
+    <span class="badge" id="live-badge">loading…</span>
+  </header>
+  <main>
+    <div class="grid">
+      <div class="card"><div class="label">Org</div><div class="value" id="org" style="font-size:14px;font-family:ui-monospace,monospace">—</div></div>
+      <div class="card"><div class="label">Memories</div><div class="value" id="total">—</div><div class="sub" id="users-sub"></div></div>
+      <div class="card"><div class="label">Postgres</div><div class="value" id="pg-status" style="font-size:16px">—</div></div>
+      <div class="card"><div class="label">Qdrant</div><div class="value" id="q-status" style="font-size:16px">—</div></div>
+      <div class="card"><div class="label">Agent uptime</div><div class="value" id="uptime" style="font-size:16px">—</div></div>
+    </div>
+
+    <div class="section-title">Memory by layer</div>
+    <div class="card"><table id="layer-table"><tbody></tbody></table></div>
+
+    <div class="section-title">Memory by type</div>
+    <div class="card"><table id="type-table"><tbody></tbody></table></div>
+
+    <div class="section-title">Timeline</div>
+    <div class="card">
+      <table><tbody>
+        <tr><td>Oldest memory</td><td id="oldest">—</td></tr>
+        <tr><td>Newest memory</td><td id="newest">—</td></tr>
+        <tr><td>Embedding dimension</td><td id="dim">—</td></tr>
+        <tr><td>Schema version</td><td id="schema">—</td></tr>
+      </tbody></table>
+    </div>
+  </main>
+  <footer>Your data lives here — content + vectors never leave this box. Refreshes every 10s.</footer>
+<script>
+function fmtTime(s){ if(s==null) return '—'; const d=new Date(s); return d.toLocaleDateString()+' '+d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+function fmtUptime(s){ if(s<60) return s+'s'; const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0 ? h+'h '+m+'m' : m+'m'; }
+function row(k,n,max){ return '<tr><td>'+k+'</td><td>'+n+'</td></tr>'; }
+async function refresh(){
+  try{
+    const r = await fetch('/v1/dashboard/stats'); const d = await r.json();
+    document.getElementById('live-badge').textContent = d.ok ? 'live' : 'error';
+    document.getElementById('live-badge').style.color = d.ok ? '#22c55e' : '#ef4444';
+    document.getElementById('live-badge').style.borderColor = d.ok ? '#22c55e55' : '#ef444455';
+    document.getElementById('org').textContent = d.org;
+    document.getElementById('total').textContent = d.memories.total.toLocaleString();
+    document.getElementById('users-sub').textContent = d.memories.users + ' user' + (d.memories.users===1?'':'s');
+    document.getElementById('pg-status').innerHTML = '<span class="dot '+(d.connections.postgres?'good':'bad')+'"></span>'+(d.connections.postgres?'Connected':'Down');
+    document.getElementById('q-status').innerHTML = '<span class="dot '+(d.connections.qdrant?'good':'bad')+'"></span>'+(d.connections.qdrant?'Connected':'Down');
+    document.getElementById('uptime').textContent = fmtUptime(d.uptime_seconds);
+    document.getElementById('dim').textContent = d.dim;
+    document.getElementById('schema').textContent = 'v'+d.schemaVersion;
+    document.getElementById('oldest').textContent = fmtTime(d.memories.oldest);
+    document.getElementById('newest').textContent = fmtTime(d.memories.newest);
+    const lt = document.querySelector('#layer-table tbody');
+    lt.innerHTML = d.memories.by_layer.length ? d.memories.by_layer.map(r=>row(r.k,r.n)).join('') : '<tr><td class="empty" colspan="2">No memories yet — the engine will push them here as it ingests.</td></tr>';
+    const tt = document.querySelector('#type-table tbody');
+    tt.innerHTML = d.memories.by_type.length ? d.memories.by_type.map(r=>row(r.k,r.n)).join('') : '<tr><td class="empty" colspan="2">No memories yet.</td></tr>';
+  }catch(e){
+    document.getElementById('live-badge').textContent = 'unreachable';
+    document.getElementById('live-badge').style.color = '#ef4444';
+  }
+}
+refresh(); setInterval(refresh, 10000);
+</script>
+</body></html>`;
 
 const routes = {
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
@@ -952,6 +1079,10 @@ http.createServer(async (req, res) => {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
     return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
+  // Dashboard — read-only, GET, no token (same trust boundary as /health: private tailnet/LAN only,
+  // counts never content). Lets the operator open http://<agent>:8787/ in a browser.
+  if (req.method === 'GET' && req.url === '/') return sendHtml(res, 200, DASHBOARD_HTML);
+  if (req.method === 'GET' && req.url === '/v1/dashboard/stats') return send(res, 200, await dashboardStats());
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
   // is calling the agent → reject (CSRF/SSRF guard). If ALLOWED_ENGINE_ORIGIN is set, it must match.

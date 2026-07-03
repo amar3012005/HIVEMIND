@@ -779,6 +779,78 @@ Output the JSON object and nothing else.`;
   }
 
   /**
+   * Cross-window fact consolidation (KB_CONSOLIDATE=1). Different windows of the same document
+   * extract near-duplicate facts independently ("X was founded in 1998" appears in the intro AND
+   * the timeline). One structured LLM call groups near-duplicates; for each group we KEEP the
+   * canonical fact (unioning the dupes' tags into it) and DELETE the duplicates — fewer, richer
+   * memories per doc, less graph noise. Mutates `uFacts` in place (removes deleted entries) so the
+   * document-parent PartOf pass that follows only wires the kept set. Residency-safe: tag update +
+   * delete both route through the store's remote seam for self-host orgs. Best-effort — any
+   * failure keeps all facts.
+   * @returns {Promise<number>} how many duplicate facts were merged away
+   */
+  async _consolidateDocFacts(uFacts, { docTitle = '', documentId = null } = {}) {
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const list = uFacts.map((f, i) => `${i}: ${String(f.content || '').slice(0, 240)}`).join('\n');
+    const sys = `You deduplicate extracted document facts. Group facts that state the SAME underlying fact (same subject + same attribute/claim, possibly different wording or detail level). Do NOT group facts that are merely about the same topic — only true near-duplicates. Output STRICT JSON: {"groups":[{"keep":<index of the most complete/specific fact>,"drop":[<indexes of its duplicates>]}]}. Facts with no duplicate are omitted entirely. If there are no duplicates output {"groups":[]}.`;
+    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 1200,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: `Document: ${docTitle}\nFacts:\n${list}` },
+        ],
+      }),
+    });
+    if (!resp.ok) throw new Error(`consolidate LLM ${resp.status}`);
+    const j = await resp.json();
+    let parsed;
+    try { parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}'); } catch { parsed = {}; }
+    const groups = Array.isArray(parsed.groups) ? parsed.groups : [];
+    if (!groups.length) return 0;
+
+    const store = this.memoryGraphEngine?.store;
+    if (!store?.deleteMemory) return 0;
+    const dropSet = new Set();
+    let removed = 0;
+    for (const g of groups) {
+      const keepIdx = Number(g.keep);
+      const drops = (Array.isArray(g.drop) ? g.drop : []).map(Number)
+        .filter((d) => Number.isInteger(d) && d >= 0 && d < uFacts.length && d !== keepIdx && !dropSet.has(d));
+      if (!Number.isInteger(keepIdx) || keepIdx < 0 || keepIdx >= uFacts.length || !drops.length) continue;
+      if (dropSet.has(keepIdx)) continue; // canonical already merged away by an earlier group — skip
+      const keep = uFacts[keepIdx];
+      // Union the dupes' tags into the canonical (entity:/ts:/filename: coverage survives the merge).
+      const mergedTags = new Set(keep.tags || []);
+      for (const d of drops) for (const t of (uFacts[d].tags || [])) mergedTags.add(t);
+      try {
+        if (mergedTags.size > (keep.tags || []).length && store.updateMemory) {
+          await store.updateMemory(keep.id, { tags: [...mergedTags] });
+          keep.tags = [...mergedTags];
+        }
+      } catch { /* tag union is best-effort */ }
+      for (const d of drops) {
+        try {
+          await store.deleteMemory(uFacts[d].id);
+          dropSet.add(d);
+          removed++;
+        } catch (e) {
+          this.logger.warn?.(`[kb-consolidate] delete ${String(uFacts[d].id).slice(0, 8)} failed: ${e.message}`);
+        }
+      }
+    }
+    if (dropSet.size) {
+      const keptEntries = uFacts.filter((_, i) => !dropSet.has(i));
+      uFacts.length = 0;
+      uFacts.push(...keptEntries);
+    }
+    return removed;
+  }
+
+  /**
    * Canonical Document parent + PartOf edges for the facts-only / unified paths.
    * Per-doc: create ONE document-anchor memory (title=filename, summary, high
    * importance, ts tag) and wire every distilled fact to it via a PartOf edge.
@@ -2044,17 +2116,33 @@ Output the JSON object and nothing else.`;
         } catch { /* keep targets */ }
         const uFacts = [];
         let wi = 0;
+        // RESERVE the budget synchronously BEFORE each window's async call. The old code clamped
+        // against uFacts.length, which is stale while other workers are mid-flight — 4 workers ×
+        // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
+        // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
+        let uBudget = DOC_CAP;
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
-          while (wi < uWindows.length && uFacts.length < DOC_CAP) {
+          while (wi < uWindows.length && uBudget > 0) {
             const w = { ...uWindows[wi++] };
-            // Clamp this window's budget to the remaining doc cap so the total stays bounded + coverage
-            // doesn't get front-loaded out by early dense windows.
-            w.maxFacts = Math.max(1, Math.min(w.maxFacts || 8, DOC_CAP - uFacts.length));
+            const grant = Math.max(1, Math.min(w.maxFacts || 8, uBudget));
+            uBudget -= grant;
+            w.maxFacts = grant;
             const fo = await this._ingestUnifiedWindow(w, { userId, orgId, documentId, metadata, docTitle, entityContext: '' });
-            if (Array.isArray(fo) && fo.length) uFacts.push(...fo);
+            const got = Array.isArray(fo) ? fo.length : 0;
+            if (got) uFacts.push(...fo);
+            uBudget += Math.max(0, grant - got); // return the unused part of the reservation
           }
         });
         await Promise.all(uWorkers);
+        // Cross-window consolidation (flag: KB_CONSOLIDATE=1) — different windows extract
+        // near-duplicate facts independently; merge them so the doc yields FEWER, RICHER
+        // memories (keep one canonical fact w/ merged content+tags, delete the dupes).
+        try {
+          if (String(process.env.KB_CONSOLIDATE || '') === '1' && uFacts.length >= 8) {
+            const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
+            if (removed > 0) this.logger.info?.(`[kb-unified] consolidated: merged ${removed} near-duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+          }
+        } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         if (uFacts.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
           this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
             .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))

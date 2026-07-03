@@ -1014,6 +1014,56 @@ const routes = {
     return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
   },
 
+  // Delete a KB document + FULL cascade — segments (PG + segment vectors), promoted fact
+  // memories (from the ACTIVE store: .amr shard or PG+Qdrant), and the doc row. One call =
+  // the whole cascade, so the engine's delete works identically regardless of storage mode.
+  // Accepts document_id OR filename (the engine resolves whichever it has).
+  '/v1/kb-doc-delete': async (b) => {
+    let doc = null;
+    if (b.document_id) {
+      const { rows } = await pg.query('SELECT id, filename FROM knowledge_documents WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.document_id, ORG]);
+      doc = rows[0] || null;
+    }
+    if (!doc && b.filename) {
+      const { rows } = await pg.query('SELECT id, filename FROM knowledge_documents WHERE filename=$1 AND org_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1', [b.filename, ORG]);
+      doc = rows[0] || null;
+    }
+    if (!doc) return { ok: false, error: 'document not found', deleted_memories: 0 };
+
+    // 1. Promoted memories: everything tagged filename:<f> or doc-id:<id> — from the ACTIVE store.
+    const fnTag = `filename:${doc.filename}`;
+    const idTag = `doc-id:${doc.id}`;
+    let memIds = [];
+    if (effectiveStore === 'amr' && amr) {
+      memIds = amr.list({}, undefined, 100000, 0).memories
+        .filter((m) => (m.tags || []).includes(fnTag) || (m.tags || []).includes(idTag))
+        .map((m) => m.id);
+      for (const id of memIds) amr.remove(id);
+    } else {
+      const { rows } = await pg.query('SELECT id FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND (tags && $2::text[])', [ORG, [fnTag, idTag]]);
+      memIds = rows.map((r) => r.id);
+      if (memIds.length) await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2', [memIds, ORG]);
+    }
+    // Mirror copies: pre-cutover PG rows + memory vectors in Qdrant (both modes keep these in sync).
+    if (memIds.length) {
+      await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2 AND deleted_at IS NULL', [memIds, ORG]).catch(() => {});
+      await qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: memIds }) }).catch(() => {});
+      await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))', [ORG, memIds]).catch(() => {});
+    }
+
+    // 2. Segments: rows + their layer='segment' vectors (payload carries document_id).
+    const { rows: segRows } = await pg.query('SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
+    const segIds = segRows.map((r) => r.id);
+    await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
+    if (segIds.length) {
+      await qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});
+    }
+
+    // 3. The document row itself.
+    await pg.query('UPDATE knowledge_documents SET deleted_at=now() WHERE id=$1 AND org_id=$2', [doc.id, ORG]);
+    return { ok: true, document_id: doc.id, deleted_memories: memIds.length, deleted_segments: segIds.length };
+  },
+
   // ── Per-memory edge counts (self-host READ) ───────────────────────────────
   // Returns { <id>: { in: N, out: N } } for each requested memory id.
   // "in"  = relationships where to_id = this memory

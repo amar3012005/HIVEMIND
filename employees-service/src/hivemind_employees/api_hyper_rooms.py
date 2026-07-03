@@ -3124,6 +3124,60 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     return (not verdict.get("artifact_ok")) or (not verdict.get("grounded_ok"))
 
 
+class PrewarmRequest(BaseModel):
+    room_id: str = ""
+    user_id: str
+    org_id: str
+    project_id: Optional[str] = None
+    goal: str = ""
+    connectors: List[str] = []
+
+
+_PREWARM_GUARD: Dict[str, float] = {}  # org|room → last prewarm ts (throttle repeated opens)
+
+
+@router.post("/prewarm")
+async def post_prewarm(
+    body: PrewarmRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Room-open prewarm — fire-and-forget from the control-plane when a user OPENS a
+    room, so by the time they type their first message the caches are hot: the company
+    brief (5-probe recall, ~5s cold) and every non-Google connector inspect (~20-30s
+    cold MCP spin-up, the dominant initial-latency source). Returns 202-style instantly;
+    the warm work runs as a background task. Throttled per (org, room) so FE re-opens /
+    refreshes don't stampede the bridge."""
+    _require_master_key(x_api_key)
+    key = f"{body.org_id}|{body.room_id}"
+    now = time.time()
+    if now - _PREWARM_GUARD.get(key, 0.0) < 300:
+        return {"ok": True, "skipped": "recently prewarmed"}
+    _PREWARM_GUARD[key] = now
+    if len(_PREWARM_GUARD) > 1024:
+        _PREWARM_GUARD.pop(next(iter(_PREWARM_GUARD)), None)
+
+    async def _warm() -> None:
+        try:
+            await _build_company_brief(body.goal or "", body.user_id, body.org_id, "",
+                                       project_id=body.project_id)
+        except Exception as exc:  # noqa: BLE001 — prewarm must never surface
+            log.info("[prewarm] brief warm failed (non-fatal): %s", exc)
+        try:
+            from .hyper.engine import _inspect_connector_tools, _norm_connector, _GOOGLE_READ_TOOLS
+            need = [n for n in dict.fromkeys(_norm_connector(c) for c in (body.connectors or []))
+                    if n not in _GOOGLE_READ_TOOLS]
+            if need:
+                await asyncio.gather(
+                    *[_inspect_connector_tools(n, user_id=body.user_id, org_id=body.org_id) for n in need],
+                    return_exceptions=True)
+            log.info("[prewarm] room=%s brief+%d connector inspects warm", body.room_id, len(need))
+        except Exception as exc:  # noqa: BLE001
+            log.info("[prewarm] inspect warm failed (non-fatal): %s", exc)
+
+    asyncio.create_task(_warm())
+    return {"ok": True}
+
+
 @router.post("/room-turn", response_model=RoomTurnResponse)
 async def post_room_turn(
     req: RoomTurnRequest,

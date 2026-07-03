@@ -6357,6 +6357,27 @@ Write the persona now.`;
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
       } catch { /* leave undefined */ }
+      // Prewarm the sidecar on room OPEN (fire-and-forget): warms the company brief
+      // + the cold MCP connector inspects (~20-30s, the dominant first-turn latency)
+      // while the user is still typing — their first message then starts hot. The
+      // sidecar throttles per (org, room), so refreshes/re-opens are no-ops.
+      try {
+        fetch(`${process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060'}/internal/hyper/prewarm`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            room_id: roomId,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            project_id: room.projectId || null,
+            goal: room.goal || '',
+            connectors: room.enabledConnectors || [],
+          }),
+        }).catch(() => { /* best-effort — never blocks room open */ });
+      } catch { /* best-effort */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
         orderBy: { seq: 'asc' },

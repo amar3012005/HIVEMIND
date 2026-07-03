@@ -242,6 +242,26 @@ export class AmrMemoryStore {
     return bumped;
   }
 
+  // Delete a memory (tombstones the slot — supersession/cleanup deletes MUST reach the shard,
+  // else the graph keeps serving stale memories).
+  remove(id) {
+    const existing = this.byId.get(id);
+    if (!existing) return false;
+    try { this.store.delete(existing.slotId); } catch { /* already gone */ }
+    this.byId.delete(id);
+    this.store.flush();
+    return true;
+  }
+
+  // Wipe every memory in the shard (account-deletion purge).
+  purge() {
+    let n = 0;
+    for (const [, v] of this.byId) { try { this.store.delete(v.slotId); n++; } catch { /* ignore */ } }
+    this.byId.clear();
+    this.store.flush();
+    return n;
+  }
+
   patchUpdate(id, patch) {
     const existing = this.byId.get(id);
     if (!existing) return false;

@@ -1203,6 +1203,27 @@ if (STORE === 'amr') {
       amr.patchUpdate(b.id, b);
       return { ok: true };
     },
+    // Deletes MUST reach the shard — routed to frozen PG they'd leave stale memories serving
+    // from .amr forever (the "relationship graph keeps stale memories" bug class).
+    '/v1/delete': async (b) => {
+      if (!b.id) return { ok: false, error: 'id required' };
+      const deleted = amr.remove(b.id) ? 1 : 0;
+      // Also clear any pre-cutover PG row + Qdrant point so every copy agrees.
+      await pg.query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, ORG]).catch(() => {});
+      qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: [b.id] }) }).catch(() => {});
+      return { ok: true, deleted };
+    },
+    '/v1/purge': async () => {
+      const shardDeleted = amr.purge();
+      await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]).catch(() => {});
+      await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]).catch(() => {});
+      await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1', [ORG]).catch(() => {});
+      await pg.query('DELETE FROM knowledge_documents WHERE org_id=$1', [ORG]).catch(() => {});
+      await pg.query('DELETE FROM meetings WHERE org_id=$1', [ORG]).catch(() => {});
+      await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
+      await ensureQdrant().catch(() => {});
+      return { ok: true, shard_deleted: shardDeleted };
+    },
   });
   } catch (e) {
     // The operator chose .amr but the engine can't start here (e.g. no native binding for this

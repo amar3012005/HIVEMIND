@@ -17821,6 +17821,47 @@ exit \$RC
               // (Updates/Extends/Derives only) silently skipped them, so traversals
               // missed provenance + entity-linked context. Caller can still narrow
               // via body.relationship_types.
+              const allowedTypesEarly = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
+                ? body.relationship_types
+                : ['Updates', 'Extends', 'Derives', 'PartOf', 'Mentions'];
+
+              // Remote (self-host) orgs have NO central rows — prisma.memory.findFirst always 404'd
+              // ("Memory not found or not accessible") even for memories that genuinely exist on the
+              // agent's shard. BFS over the agent's full node+edge snapshot instead (amrGraph already
+              // exists for the Memory Graph view — same shape, so the exact same BFS logic applies).
+              if (orgId && orgIsRemote(orgId)) {
+                const { nodes: rNodes, edges: rEdges } = await amrGraph(orgId, { limit: 5000, filter: {} }) || { nodes: [], edges: [] };
+                const nodeMap = new Map(rNodes.map((n) => [n.id, n]));
+                if (!nodeMap.has(startId)) {
+                  return jsonResponse(res, { error: 'Memory not found or not accessible' }, 404);
+                }
+                const rVisited = new Set([startId]);
+                const rNodesById = new Map([[startId, nodeMap.get(startId)]]);
+                const rEdgesOut = [];
+                let rFrontier = [startId];
+                for (let d = 0; d < maxDepth && rFrontier.length > 0; d++) {
+                  const frontierSet = new Set(rFrontier);
+                  const hopEdges = rEdges.filter((e) => allowedTypesEarly.includes(e.type) && (frontierSet.has(e.from_id) || frontierSet.has(e.to_id)));
+                  const nextFrontier = new Set();
+                  for (const e of hopEdges) {
+                    rEdgesOut.push(e);
+                    for (const nbr of [e.from_id, e.to_id]) {
+                      if (!rVisited.has(nbr) && nodeMap.has(nbr)) { rVisited.add(nbr); nextFrontier.add(nbr); rNodesById.set(nbr, nodeMap.get(nbr)); }
+                    }
+                  }
+                  rFrontier = [...nextFrontier];
+                }
+                const polishRNode = (m) => ({
+                  id: m.id, title: m.title || '', content: (m.content || '').slice(0, 200),
+                  memory_type: m.memory_type || null, tags: m.tags || [], project: m.project || null,
+                  is_latest: m.is_latest !== false, version: m.version || 1,
+                  created_at: m.created_at, document_date: m.document_date || null,
+                });
+                return jsonResponse(res, {
+                  start_id: startId, depth: maxDepth, relationship_types: allowedTypesEarly,
+                  nodes: [...rNodesById.values()].map(polishRNode), edges: rEdgesOut, paths: [],
+                });
+              }
               const allowedTypes = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
                 ? body.relationship_types
                 : ['Updates', 'Extends', 'Derives', 'PartOf', 'Mentions'];

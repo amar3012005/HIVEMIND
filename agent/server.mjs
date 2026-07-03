@@ -266,6 +266,7 @@ async function dashboardStats() {
     ok: true, org: ORG, dim: DIM, schemaVersion: SCHEMA_VERSION,
     uptime_seconds: Math.floor((Date.now() - BOOT_AT) / 1000),
     connections: { postgres: pgOk, qdrant: qOk },
+    storage_backend: 'pg-qdrant', // Phase 1 build (see file header) — Phase 12 swaps to .amr, same contract
     memories: counts,
   };
 }
@@ -273,29 +274,41 @@ async function dashboardStats() {
 const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HIVEMIND — Self-host Agent</title>
 <style>
-  :root{--bg:#0a0a0a;--panel:#141414;--line:#252525;--ink:#f5f5f4;--dim:#8a8a86;--accent:#117dff;--good:#22c55e;--bad:#ef4444}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;-webkit-font-smoothing:antialiased}
-  header{padding:28px 32px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+  :root{--paper:#faf9f4;--panel:#fff;--wash:#f3f1ec;--line:#e3e0db;--line-hover:#d4d0ca;--ink:#0a0a0a;--dim:#525252;--dim2:#a3a3a3;--accent:#117dff;--accent2:#0066e0;--good:#16a34a;--bad:#e0443e}
+  *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;-webkit-font-smoothing:antialiased}
+  header{padding:26px 32px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;background:var(--panel)}
   header h1{font-size:16px;font-weight:700;margin:0;font-family:'Space Grotesk',sans-serif;letter-spacing:.01em}
   header h1 span{color:var(--accent)}
-  .badge{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;padding:5px 10px;border-radius:999px;border:1px solid var(--line)}
-  main{max-width:1040px;margin:0 auto;padding:28px 32px 60px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
-  .card .label{font:10px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:10px}
-  .card .value{font:26px/1 'Space Grotesk',sans-serif;font-weight:700}
-  .card .sub{margin-top:6px;font-size:12px;color:var(--dim)}
+  .badge{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--wash);color:var(--dim)}
+  .badge.live{background:rgba(22,163,74,.08);border-color:rgba(22,163,74,.3);color:var(--good)}
+  .badge.bad{background:rgba(224,68,62,.08);border-color:rgba(224,68,62,.3);color:var(--bad)}
+  main{max-width:1080px;margin:0 auto;padding:32px 32px 60px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:border-color .15s}
+  .card:hover{border-color:var(--line-hover)}
+  .card .label{font:10px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim2);margin-bottom:10px}
+  .card .value{font:26px/1 'Space Grotesk',sans-serif;font-weight:700;color:var(--ink)}
+  .card .sub{margin-top:6px;font-size:12px;color:var(--dim2)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle}
-  .dot.good{background:var(--good);box-shadow:0 0 6px var(--good)}
+  .dot.good{background:var(--good);box-shadow:0 0 6px rgba(22,163,74,.5)}
   .dot.bad{background:var(--bad)}
-  .section-title{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin:26px 0 10px}
+  .section-title{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim2);margin:28px 0 10px;display:flex;align-items:center;justify-content:space-between}
+  .section-title small{font:10px/1 ui-monospace,monospace;color:var(--dim2);text-transform:none;letter-spacing:0}
+  .row{padding:12px 0;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:none}
+  .row .rhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px}
+  .row .rname{font-size:13px;color:var(--ink);font-weight:500}
+  .row .rmeta{font:12px/1 ui-monospace,monospace;color:var(--accent);display:flex;align-items:baseline;gap:6px}
+  .row .rmeta b{font-size:13px;color:var(--ink);font-weight:700}
+  .bar{height:7px;border-radius:4px;background:var(--wash);overflow:hidden;border:1px solid var(--line)}
+  .bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .5s cubic-bezier(.4,0,.2,1);box-shadow:0 0 10px rgba(17,125,255,.25)}
   table{width:100%;border-collapse:collapse}
   td{padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
-  td:last-child{text-align:right;font-family:ui-monospace,monospace;color:var(--accent)}
-  .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:6px}
-  .bar i{display:block;height:100%;background:var(--accent)}
-  .empty{color:var(--dim);font-size:13px;padding:16px 0}
-  footer{color:var(--dim);font-size:11px;text-align:center;padding:20px;font-family:ui-monospace,monospace}
+  td:last-child{text-align:right;font-family:ui-monospace,monospace;color:var(--accent);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  .empty{color:var(--dim2);font-size:13px;padding:16px 0}
+  .pill{display:inline-flex;align-items:center;gap:6px;font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;padding:4px 10px;border-radius:999px;border:1px solid rgba(17,125,255,.2);background:rgba(17,125,255,.06);color:var(--accent2)}
+  footer{color:var(--dim2);font-size:11px;text-align:center;padding:24px;font-family:ui-monospace,monospace}
   a{color:var(--accent);text-decoration:none}
 </style></head>
 <body>
@@ -305,18 +318,26 @@ const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta n
   </header>
   <main>
     <div class="grid">
-      <div class="card"><div class="label">Org</div><div class="value" id="org" style="font-size:14px;font-family:ui-monospace,monospace">—</div></div>
+      <div class="card"><div class="label">Org</div><div class="value" id="org" style="font-size:13px;font-family:ui-monospace,monospace;word-break:break-all">—</div></div>
       <div class="card"><div class="label">Memories</div><div class="value" id="total">—</div><div class="sub" id="users-sub"></div></div>
       <div class="card"><div class="label">Postgres</div><div class="value" id="pg-status" style="font-size:16px">—</div></div>
       <div class="card"><div class="label">Qdrant</div><div class="value" id="q-status" style="font-size:16px">—</div></div>
       <div class="card"><div class="label">Agent uptime</div><div class="value" id="uptime" style="font-size:16px">—</div></div>
     </div>
 
-    <div class="section-title">Memory by layer</div>
-    <div class="card"><table id="layer-table"><tbody></tbody></table></div>
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div>
+        <div class="label" style="margin-bottom:6px">Storage engine</div>
+        <div style="font:15px 'Space Grotesk',sans-serif;font-weight:700" id="backend-name">—</div>
+      </div>
+      <span class="pill" id="backend-pill">checking…</span>
+    </div>
 
-    <div class="section-title">Memory by type</div>
-    <div class="card"><table id="type-table"><tbody></tbody></table></div>
+    <div class="section-title">Memory by layer <small id="layer-total"></small></div>
+    <div class="card" id="layer-rows"></div>
+
+    <div class="section-title">Memory by type <small id="type-total"></small></div>
+    <div class="card" id="type-rows"></div>
 
     <div class="section-title">Timeline</div>
     <div class="card">
@@ -332,13 +353,21 @@ const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta n
 <script>
 function fmtTime(s){ if(s==null) return '—'; const d=new Date(s); return d.toLocaleDateString()+' '+d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
 function fmtUptime(s){ if(s<60) return s+'s'; const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0 ? h+'h '+m+'m' : m+'m'; }
-function row(k,n,max){ return '<tr><td>'+k+'</td><td>'+n+'</td></tr>'; }
+function barRows(items, total){
+  if (!items.length) return '<div class="empty">No memories yet — the engine will push them here as it ingests.</div>';
+  const max = Math.max(...items.map(r=>r.n), 1);
+  return items.map(r => {
+    const pct = total ? Math.round((r.n/total)*100) : 0;
+    const w = Math.max(4, Math.round((r.n/max)*100));
+    return '<div class="row"><div class="rhead"><span class="rname">'+r.k+'</span><span class="rmeta"><b>'+r.n+'</b> · '+pct+'%</span></div><div class="bar"><i style="width:'+w+'%"></i></div></div>';
+  }).join('');
+}
 async function refresh(){
+  const badge = document.getElementById('live-badge');
   try{
     const r = await fetch('/v1/dashboard/stats'); const d = await r.json();
-    document.getElementById('live-badge').textContent = d.ok ? 'live' : 'error';
-    document.getElementById('live-badge').style.color = d.ok ? '#22c55e' : '#ef4444';
-    document.getElementById('live-badge').style.borderColor = d.ok ? '#22c55e55' : '#ef444455';
+    badge.textContent = d.ok ? 'live' : 'error';
+    badge.className = 'badge ' + (d.ok ? 'live' : 'bad');
     document.getElementById('org').textContent = d.org;
     document.getElementById('total').textContent = d.memories.total.toLocaleString();
     document.getElementById('users-sub').textContent = d.memories.users + ' user' + (d.memories.users===1?'':'s');
@@ -349,13 +378,19 @@ async function refresh(){
     document.getElementById('schema').textContent = 'v'+d.schemaVersion;
     document.getElementById('oldest').textContent = fmtTime(d.memories.oldest);
     document.getElementById('newest').textContent = fmtTime(d.memories.newest);
-    const lt = document.querySelector('#layer-table tbody');
-    lt.innerHTML = d.memories.by_layer.length ? d.memories.by_layer.map(r=>row(r.k,r.n)).join('') : '<tr><td class="empty" colspan="2">No memories yet — the engine will push them here as it ingests.</td></tr>';
-    const tt = document.querySelector('#type-table tbody');
-    tt.innerHTML = d.memories.by_type.length ? d.memories.by_type.map(r=>row(r.k,r.n)).join('') : '<tr><td class="empty" colspan="2">No memories yet.</td></tr>';
+    const isAmr = d.storage_backend === 'amr';
+    document.getElementById('backend-name').textContent = isAmr ? '.amr — one mmap\\'d file, no server' : 'Postgres + Qdrant';
+    const bp = document.getElementById('backend-pill');
+    bp.textContent = isAmr ? '.amr active' : 'phase 1 · pg-qdrant';
+    bp.style.color = isAmr ? '#16a34a' : '#0066e0';
+    bp.style.background = isAmr ? 'rgba(22,163,74,.08)' : 'rgba(17,125,255,.06)';
+    bp.style.borderColor = isAmr ? 'rgba(22,163,74,.3)' : 'rgba(17,125,255,.2)';
+    document.getElementById('layer-total').textContent = d.memories.total ? d.memories.total + ' total' : '';
+    document.getElementById('type-total').textContent = d.memories.total ? d.memories.total + ' total' : '';
+    document.getElementById('layer-rows').innerHTML = barRows(d.memories.by_layer, d.memories.total);
+    document.getElementById('type-rows').innerHTML = barRows(d.memories.by_type, d.memories.total);
   }catch(e){
-    document.getElementById('live-badge').textContent = 'unreachable';
-    document.getElementById('live-badge').style.color = '#ef4444';
+    badge.textContent = 'unreachable'; badge.className = 'badge bad';
   }
 }
 refresh(); setInterval(refresh, 10000);

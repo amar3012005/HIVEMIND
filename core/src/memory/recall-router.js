@@ -29,6 +29,7 @@ import { ClusterIndex } from './cluster-index.js';
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
+import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -396,7 +397,26 @@ export function inspectMemories(memories) {
 // (legacy data pre-`aebf344`).
 
 async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) {
-  if (!prisma?.knowledgeDocument || !filenames.length) return [];
+  if (!filenames.length) return [];
+  // Remote (self-host): KB docs live on the agent — list them and match filename→title client-side.
+  if (orgIsRemote(orgId)) {
+    try {
+      const out = await amrKbDocs(orgId, { limit: 200 });
+      const docs = out?.documents || [];
+      const lows = filenames.map((f) => String(f).toLowerCase());
+      return docs
+        .filter((d) => {
+          const t = String(d.title || d.filename || '').toLowerCase();
+          return lows.some((f) => t.includes(f));
+        })
+        .slice(0, 12)
+        .map((d) => d.id || d.document_id)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: {
@@ -416,7 +436,11 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
 // hop-2 dig the WHOLE project corpus when hop-1 gave no doc anchors — so a
 // buried term in a project doc that hop-1 never surfaced still reaches evidence.
 async function resolveProjectDocIds({ prisma, projectId, orgId }) {
-  if (!prisma?.knowledgeDocument || !projectId) return [];
+  if (!projectId) return [];
+  // Remote (self-host): agent kb-docs listing doesn't expose the scope-key project tag —
+  // return [] and let the caller's lexical fallback cover it.
+  if (orgIsRemote(orgId)) return [];
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: { orgId, tags: { has: `scope-key:project:${projectId}` } },

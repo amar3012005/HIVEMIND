@@ -13,6 +13,7 @@
 
 import crypto from 'node:crypto';
 import { chatCompletion, getDefaultModel } from '../knowledge/enterprise/litellm-client.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const MIN_MEMORIES_FOR_SYNTHESIS = Number(process.env.SYNTHESIS_MIN_MEMORIES || 8);
 const SYNTHESIS_REFRESH_DAYS = Number(process.env.SYNTHESIS_REFRESH_DAYS || 7);
@@ -38,6 +39,11 @@ export class MemorySynthesizer {
   }
 
   async synthesizeForOrg(orgId, { limit = 10 } = {}) {
+    // Remote (self-host): topicState/entityMention/memory tables are central-empty — the agent-routed cognition loop already covers self-host synthesis; skip this central-batch job.
+    if (orgIsRemote(orgId)) {
+      this.logger.log?.(`[synthesizer] skip remote org=${String(orgId).slice(0, 8)} — central-batch synthesis not applicable`);
+      return 0;
+    }
     const cutoff = new Date(Date.now() - SYNTHESIS_REFRESH_DAYS * 86400000);
     const topics = await this.prisma.topicState.findMany({
       where: {

@@ -27,6 +27,7 @@
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { orgIsRemote, amrWrite, amrAddEdge, amrListRecent } from '../vector/mneme/driver.js';
+import { remoteList } from '../vector/mneme/remote-backend.js';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
@@ -88,6 +89,14 @@ async function deriveClusterMin(prisma, orgId) {
     ).catch(() => null);
     const override = o?.[0]?.m;
     if (Number.isInteger(override) && override > 0) return override;
+
+    // Remote (self-host): memory rows live on the agent — central count is always 0. Count
+    // fact/decision from a bounded agent list instead (same adaptive purpose).
+    if (orgIsRemote(orgId)) {
+      const out = await remoteList(orgId, { memory_type: ['fact', 'decision'], is_latest: true }, null, 400);
+      const adaptiveRemote = Math.floor((out?.memories?.length || 0) / CLUSTER_MIN_DIVISOR);
+      return Math.max(CANONICAL_CLUSTER_MIN_SOFT, Math.min(CANONICAL_CLUSTER_MIN_HARD, adaptiveRemote));
+    }
 
     const cnt = await prisma.memory.count({
       where: {

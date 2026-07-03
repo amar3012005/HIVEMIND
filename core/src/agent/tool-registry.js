@@ -12,7 +12,8 @@
 
 import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
-import { amrBumpRecall } from '../vector/mneme/driver.js';
+import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
+import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -404,10 +405,17 @@ const TOOL_HANDLERS = {
           const evIds = synth.synthesis_evidence_ids || synth.synthesisEvidenceIds || [];
           if (!evIds.length) continue;
           try {
-            const rows = await ctx.prisma.memory.findMany({
-              where: { id: { in: evIds.slice(0, 4) }, deletedAt: null },
-              select: { id: true, title: true, content: true, tags: true, createdAt: true },
-            });
+            // Remote (self-host): evidence rows live on the agent — hydrate over HTTP and map to the central shape.
+            const rows = orgIsRemote(ctx.orgId)
+              ? (await remoteHydrate(ctx.orgId, evIds.slice(0, 4))).map((r) => ({
+                  id: r.memory_id || r.id, title: r.title || null,
+                  content: r.content || '', tags: r.tags || [],
+                  createdAt: r.created_at || r.createdAt || null,
+                }))
+              : await ctx.prisma.memory.findMany({
+                  where: { id: { in: evIds.slice(0, 4) }, deletedAt: null },
+                  select: { id: true, title: true, content: true, tags: true, createdAt: true },
+                });
             synthEvidenceChains.push({
               synthesis_id: synth.id,
               synthesis_title: synth.title,

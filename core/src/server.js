@@ -13,7 +13,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete } from './vector/mneme/driver.js';
+import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -2340,12 +2341,18 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // (a cosmetic follow-up), but the headline counts are now correct for every org type.
     const [{ memories: memoryCount, relationships }, recentMemories] = await Promise.all([
       getOrgCounts(prisma, orgId, userId),
-      prisma.memory.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        take: 20,
-        select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
-      }).catch(() => []),
+      // Remote (self-host) orgs have NO central memory rows — sample recent titles/tags from the agent.
+      (orgId && orgIsRemote(orgId))
+        ? remoteList(orgId, { is_latest: true }, null, 15).then(({ memories }) => (memories || []).map((m) => ({
+            id: m.id, title: m.title, tags: m.tags || [], sourcePlatform: m.source_platform || null,
+            memoryType: m.memory_type || null, content: m.content || '', createdAt: m.created_at,
+          }))).catch(() => [])
+        : prisma.memory.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+            select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
+          }).catch(() => []),
     ]);
 
     // Count observations from recent memories tags
@@ -7686,6 +7693,45 @@ exit \$RC
       if (pathname.match(/^\/api\/memories\/[^/]+\/evolution$/) && req.method === 'GET') {
         const memoryId = pathname.split('/')[3];
         try {
+          // Remote (self-host) orgs have NO central rows — BFS the agent's node+edge snapshot instead.
+          if (orgId && orgIsRemote(orgId)) {
+            const { nodes: rNodes, edges: rEdges } = await amrGraph(orgId, { limit: 5000, filter: {} }) || { nodes: [], edges: [] };
+            const nodeMap = new Map(rNodes.map((n) => [n.id, n]));
+            const rRoot = nodeMap.get(memoryId);
+            if (!rRoot) return jsonResponse(res, { error: 'Memory not found' }, 404);
+            const rTypes = ['Updates', 'Extends', 'Derives', 'Contradicts'];
+            const rVisited = new Set([memoryId]);
+            const rQueue = [memoryId];
+            const rTimeline = [{ ...rRoot, _role: 'current' }];
+            const rEdgesOut = [];
+            while (rQueue.length > 0 && rVisited.size < 20) {
+              const currentId = rQueue.shift();
+              const rels = rEdges.filter((e) => rTypes.includes(e.type) && (e.from_id === currentId || e.to_id === currentId));
+              for (const rel of rels) {
+                rEdgesOut.push({
+                  from: rel.from_id,
+                  to: rel.to_id,
+                  type: rel.type,
+                  confidence: rel.confidence,
+                  metadata: null,
+                  created_at: undefined,
+                });
+                const otherId = rel.from_id === currentId ? rel.to_id : rel.from_id;
+                if (!rVisited.has(otherId)) {
+                  rVisited.add(otherId);
+                  rQueue.push(otherId);
+                  const other = nodeMap.get(otherId);
+                  if (other) rTimeline.push({ ...other, _role: rel.type === 'Updates' ? 'superseded' : 'related' });
+                }
+              }
+            }
+            rTimeline.sort((a, b) => {
+              const da = new Date(a.document_date || a.created_at || 0);
+              const db = new Date(b.document_date || b.created_at || 0);
+              return da - db;
+            });
+            return jsonResponse(res, { memory: rRoot, timeline: rTimeline, edges: rEdgesOut, chain_length: rTimeline.length });
+          }
           const memory = await persistentMemoryStore.getMemory(memoryId);
           if (!memory) return jsonResponse(res, { error: 'Memory not found' }, 404);
 
@@ -10871,6 +10917,44 @@ exit \$RC
           // roadmap fixes touch: salience coverage (P2), supersession/forgetting
           // (P3), and DB↔Qdrant vector drift. Cheap counts only, no scan.
           try {
+            // Remote (self-host) orgs have NO central rows — derive metrics from the agent
+            // (stats + a bounded list sample). Metrics not computable remotely stay 0/null.
+            if (orgId && orgIsRemote(orgId)) {
+              const [rStats, rListed] = await Promise.all([
+                amrStats(orgId, {}),
+                remoteList(orgId, {}, null, 5000),
+              ]);
+              const rRows = rListed?.memories || [];
+              const rLatest = rRows.filter((m) => m.is_latest !== false);
+              const rScored = rLatest.filter((m) => typeof m.importance_score === 'number' && m.importance_score !== 0.5).length;
+              const rReinforced = rLatest.filter((m) => (m.recall_count || 0) > 0).length;
+              const rAvg = (arr, key) => {
+                const vals = arr.map((m) => m[key]).filter((v) => typeof v === 'number');
+                return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+              };
+              return jsonResponse(res, {
+                org_id: orgId,
+                remote: true,
+                counts: {
+                  total: rStats?.memories ?? rRows.length,
+                  latest: rLatest.length,
+                  superseded: rRows.length - rLatest.length,
+                  deleted: 0, // agent list excludes deleted rows; not computable centrally
+                },
+                salience: {
+                  scored_off_default: rScored,
+                  coverage_pct: rLatest.length > 0 ? Math.round((rScored / rLatest.length) * 1000) / 10 : 0,
+                  avg_importance_latest: rAvg(rLatest, 'importance_score'),
+                  avg_strength_latest: rAvg(rLatest, 'strength'),
+                },
+                reinforcement: {
+                  recalled_at_least_once: rReinforced,
+                  max_recall_count: rLatest.reduce((mx, m) => Math.max(mx, m.recall_count || 0), 0),
+                },
+                vector_drift: null, // vectors live on the agent's .amr, not central Qdrant
+                generated_at: new Date().toISOString(),
+              });
+            }
             if (!prisma?.memory) return jsonResponse(res, { error: 'memory store unavailable' }, 503);
             const baseWhere = { orgId, deletedAt: null };
             // Types NOT vectorized by design (born via direct-save paths,
@@ -10990,6 +11074,23 @@ exit \$RC
           // Last N synthesis + summary memories the loop produced. Read-only.
           try {
             const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10)));
+            // Remote (self-host) orgs have NO central rows — list synthesis/summary memories from the agent.
+            if (orgId && orgIsRemote(orgId)) {
+              const { memories: rRows } = await remoteList(orgId, { memory_type: ['synthesis', 'summary'] }, null, 200);
+              const rItems = (rRows || [])
+                .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+                .slice(0, limit)
+                .map((r) => ({
+                  id: r.id,
+                  title: r.title,
+                  type: r.memory_type,
+                  preview: (r.content || '').slice(0, 280),
+                  full_chars: (r.content || '').length,
+                  tags: r.tags,
+                  created_at: r.created_at,
+                }));
+              return jsonResponse(res, { count: rItems.length, items: rItems });
+            }
             const rows = await prisma.memory.findMany({
               where: {
                 orgId,
@@ -11290,6 +11391,48 @@ exit \$RC
             if (!memoryId) return jsonResponse(res, { error: 'memory_id required' }, 400);
             const maxDepth = Math.min(parseInt(url.searchParams.get('depth'), 10) || 3, 6);
 
+            // Remote (self-host) orgs have NO central rows — resolve the memory on the agent and
+            // walk Derives edges from the agent's graph snapshot. Snapshot edges carry no created_by,
+            // so cross-synthesis dependency links can't be split out: everything counts as grounding.
+            if (orgId && orgIsRemote(orgId)) {
+              const [rRows, rGraph] = await Promise.all([
+                remoteHydrate(orgId, [memoryId]),
+                amrGraph(orgId, { limit: 5000, filter: {} }),
+              ]);
+              const rRoot = (rRows || [])[0];
+              if (!rRoot) return jsonResponse(res, { error: 'memory not found in your org' }, 404);
+              const { nodes: rNodes, edges: rEdges } = rGraph || { nodes: [], edges: [] };
+              const rNodeIds = new Set(rNodes.map((n) => n.id));
+              const rVisited = new Set([memoryId]);
+              let rFrontier = [memoryId];
+              const rGrounded = new Set();
+              for (let depth = 0; depth < maxDepth && rFrontier.length; depth++) {
+                const frontierSet = new Set(rFrontier);
+                const next = [];
+                for (const e of rEdges) {
+                  if (e.type !== 'Derives' || !frontierSet.has(e.from_id)) continue;
+                  rGrounded.add(e.to_id);
+                  if (!rVisited.has(e.to_id)) { rVisited.add(e.to_id); next.push(e.to_id); }
+                }
+                rFrontier = next;
+              }
+              const rEvidence = Array.isArray(rRoot.synthesis_evidence_ids) ? rRoot.synthesis_evidence_ids : [];
+              const rAllSources = Array.from(new Set([...rGrounded, ...rEvidence]));
+              const rLive = rAllSources.filter((id) => rNodeIds.has(id)).length;
+              const rStatus = rAllSources.length === 0 ? 'ungrounded' : rLive === rAllSources.length ? 'grounded' : 'partial';
+              return jsonResponse(res, {
+                memory_id: rRoot.id,
+                claim: rRoot.title || (rRoot.content || '').slice(0, 200),
+                role: rRoot.cognitive_layer_role ?? null,
+                confidence: rRoot.synthesis_confidence ?? null,
+                depends_on: [],
+                grounded_in: rAllSources,
+                grounding_status: rStatus,
+                sources_live: rLive,
+                sources_total: rAllSources.length,
+              });
+            }
+
             const root = await prisma.memory.findFirst({
               where: { id: memoryId, orgId, deletedAt: null },
               select: { id: true, title: true, content: true, cognitiveLayerRole: true, synthesisConfidence: true, synthesisEvidenceIds: true },
@@ -11371,6 +11514,51 @@ exit \$RC
               : typeFilter === 'synthesis-bridge'
                 ? { hasSome: ['synthesis:bridge'] }
                 : { hasSome: ['synthesis:canonical', 'synthesis:bridge'] };
+
+            // Remote (self-host) orgs have NO central rows — over-fetch latest memories from the
+            // agent (its /v1/list has no tag/cluster-hash filter) and apply the synthesis filters JS-side.
+            if (orgId && orgIsRemote(orgId)) {
+              const { memories: rAll } = await remoteList(orgId, { is_latest: true, user_id: userId }, null, 2000);
+              const rSynth = (rAll || []).filter((m) => m.synthesis_cluster_hash != null
+                && (m.tags || []).some((t) => t === 'synthesis:canonical' || t === 'synthesis:bridge'));
+              const wantTag = typeFilter === 'canonical-fact' ? 'synthesis:canonical'
+                : typeFilter === 'synthesis-bridge' ? 'synthesis:bridge' : null;
+              const rFiltered = wantTag ? rSynth.filter((m) => (m.tags || []).includes(wantTag)) : rSynth;
+              rFiltered.sort((a, b) =>
+                ((b.synthesis_revision ?? 1) - (a.synthesis_revision ?? 1))
+                || ((b.synthesis_confidence ?? 0) - (a.synthesis_confidence ?? 0))
+                || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+              const rPage = rFiltered.slice(offset, offset + limit);
+              const rEvidenceIds = [...new Set(rPage.flatMap((r) => (r.synthesis_evidence_ids || []).slice(0, 3)))];
+              const rEvidenceCache = new Map();
+              if (rEvidenceIds.length > 0) {
+                for (const ev of await remoteHydrate(orgId, rEvidenceIds)) rEvidenceCache.set(ev.id, ev);
+              }
+              const rGetType = (tags) => (tags || []).includes('synthesis:canonical') ? 'canonical-fact'
+                : (tags || []).includes('synthesis:bridge') ? 'synthesis-bridge' : 'unknown';
+              return jsonResponse(res, {
+                synthesis: rPage.map((r) => ({
+                  id: r.id,
+                  type: rGetType(r.tags),
+                  claim: r.content || '',
+                  confidence: r.synthesis_confidence ?? null,
+                  revision: r.synthesis_revision ?? 1,
+                  evidence_count: (r.synthesis_evidence_ids || []).length,
+                  cluster_hash: r.synthesis_cluster_hash,
+                  created_at: r.created_at,
+                  updated_at: r.updated_at ?? r.created_at,
+                  evidence_recent: (r.synthesis_evidence_ids || []).slice(0, 3)
+                    .map((eid) => rEvidenceCache.get(eid))
+                    .filter(Boolean)
+                    .map((ev) => ({ id: ev.id, title: ev.title || '', snippet: (ev.content || '').slice(0, 200), created_at: ev.created_at })),
+                })),
+                total: rFiltered.length,
+                by_type: {
+                  'canonical-fact':   rSynth.filter((m) => (m.tags || []).includes('synthesis:canonical')).length,
+                  'synthesis-bridge': rSynth.filter((m) => (m.tags || []).includes('synthesis:bridge')).length,
+                },
+              });
+            }
 
             // Fetch synthesis memories: isLatest=true, clusterHash NOT NULL, tenant-scoped
             const [rows, total] = await Promise.all([
@@ -12662,6 +12850,52 @@ exit \$RC
               // ?soft=true or body.soft=true.
               const soft = url.searchParams.get('soft') === 'true' || body.soft === true;
               const hard = !soft;
+
+              // Remote (self-host) orgs have NO central memory rows — the data lives on the agent.
+              // Over-fetch the agent's list, match the same gmail tag/source conditions JS-side,
+              // then delete each matched id on the agent (soft or hard per the caller's flag).
+              if (orgId && orgIsRemote(orgId)) {
+                const { memories: rAll } = await remoteList(orgId, { user_id: userId }, null, 5000);
+                const gmailTags = ['gmail', 'gmail_thread', 'gmail-thread'];
+                const rMatches = (rAll || []).filter((m) =>
+                  (m.tags || []).some((t) => gmailTags.includes(t))
+                  || m.source_type === 'gmail' || m.source_platform === 'gmail'
+                  || m.metadata?.source_type === 'gmail' || m.metadata?.source_platform === 'gmail');
+                let rDeleted = 0;
+                for (const m of rMatches) {
+                  if (await amrDelete(orgId, m.id, hard)) rDeleted++;
+                }
+                if (hard) {
+                  // Reset the central gmail sync cursor so "Start fresh" truly resets (connector
+                  // sync state is central even for remote orgs).
+                  try {
+                    const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+                    const cs = new ConnectorStore(prisma);
+                    await cs.updateMetadata(userId, 'gmail', { cursor: null, historyId: null });
+                    await prisma.platformIntegration.update({
+                      where: { userId_platformType: { userId, platformType: 'gmail' } },
+                      data: { syncStatus: 'idle', lastSyncedAt: null },
+                    }).catch(() => {});
+                  } catch (curErr) {
+                    console.warn('[gmail-flush:remote] cursor reset failed (non-fatal):', curErr.message);
+                  }
+                }
+                try { invalidateAggregateCache({ userId, orgId, project: null }); } catch { /* noop */ }
+                auditLog({
+                  organizationId: orgId, userId,
+                  actorType: 'user', actorUserId: userId,
+                  eventType: hard ? 'connector.gmail.flush.hard' : 'connector.gmail.flush', eventCategory: 'connector',
+                  action: hard ? 'purge' : 'flush', resourceType: 'memory_bulk', resourceId: 'gmail',
+                  metadata: { deleted_count: rDeleted, hard, remote: true },
+                });
+                return jsonResponse(res, {
+                  ok: true,
+                  deleted: rDeleted,
+                  ...(hard ? { qdrant_deleted: 0 } : {}),
+                  mode: hard ? 'hard' : 'soft',
+                  message: `${hard ? 'Hard' : 'Soft'}-deleted ${rDeleted} Gmail-sourced memor${rDeleted === 1 ? 'y' : 'ies'} on the self-host agent (vectors purged agent-side).`,
+                });
+              }
 
               if (!hard) {
                 // ── Soft delete (default, recoverable) ──
@@ -22614,6 +22848,18 @@ ${injectionText}`;
             if (!query) return jsonResponse(res, { error: 'q query parameter is required' }, 400);
 
             try {
+              // Remote (self-host) orgs have NO central KB rows — list docs from the agent and
+              // apply the same title/tag/platform match JS-side.
+              if (orgId && orgIsRemote(orgId)) {
+                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+                const q = query.toLowerCase();
+                const rMatches = (rOut?.documents || []).filter((doc) =>
+                  (doc.title || '').toLowerCase().includes(q)
+                  || (doc.tags || []).includes(query)
+                  || (doc.sourcePlatform || '').toLowerCase().includes(q)
+                  || (doc.filename || '').toLowerCase().includes(q));
+                return jsonResponse(res, { results: rMatches.slice(0, limit) });
+              }
               const documents = await prisma.knowledgeDocument.findMany({
                 where: {
                   userId,

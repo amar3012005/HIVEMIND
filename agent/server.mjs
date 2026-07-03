@@ -267,21 +267,13 @@ async function dashboardStats() {
   try {
     if (effectiveStore === 'amr' && amr) {
       // Counts straight from the .amr in-process index (the memory source of truth in this mode).
-      const { memories } = amr.list({}, undefined, 100000, 0);
-      const byLayer = new Map(); const byType = new Map(); const users = new Set();
-      let oldest = null, newest = null;
-      for (const m of memories) {
-        const lk = m.layer || 'memory'; byLayer.set(lk, (byLayer.get(lk) || 0) + 1);
-        const tk = m.memory_type || 'unspecified'; byType.set(tk, (byType.get(tk) || 0) + 1);
-        if (m.user_id) users.add(m.user_id);
-        if (!oldest || new Date(m.created_at) < new Date(oldest)) oldest = m.created_at;
-        if (!newest || new Date(m.created_at) > new Date(newest)) newest = m.created_at;
-      }
+      // Streaming one-pass summary (O(1) resident — never materializes the store).
+      const s = amr.summary();
       counts = {
-        total: memories.length,
-        by_layer: [...byLayer].map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n),
-        by_type: [...byType].map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n).slice(0, 8),
-        users: users.size, oldest, newest,
+        total: s.total,
+        by_layer: Object.entries(s.byLayer).map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n),
+        by_type: Object.entries(s.byType).map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n).slice(0, 8),
+        users: s.users, oldest: s.oldest, newest: s.newest,
       };
     } else {
       const [tot, layer, type, users, span] = await Promise.all([
@@ -894,14 +886,9 @@ const routes = {
       // post-cutover doc (the "14 seg · 0 mem" bug) and stale counts for pre-cutover ones.
       if (effectiveStore === 'amr' && amr) {
         const wanted = new Set(filenames.map((f) => `filename:${f}`));
-        const { memories } = amr.list({}, undefined, 100000, 0);
-        for (const m of memories) {
-          for (const t of (m.tags || [])) {
-            if (typeof t === 'string' && wanted.has(t)) {
-              const fn = t.slice('filename:'.length);
-              proMap[fn] = (proMap[fn] || 0) + 1;
-            }
-          }
+        const tagCounts = amr.countByTags(wanted); // streaming one-pass
+        for (const [t, c] of Object.entries(tagCounts)) {
+          proMap[t.slice('filename:'.length)] = c;
         }
       } else {
         const tagPatterns = filenames.map((f) => `filename:${f}`);
@@ -980,8 +967,7 @@ const routes = {
       const tag = `filename:${d.filename}`;
       let mems;
       if (effectiveStore === 'amr' && amr) {
-        mems = amr.list({}, undefined, 100000, 0).memories
-          .filter((m) => (m.tags || []).includes(tag))
+        mems = amr.findByTags([tag], 5000)
           .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
           .slice(0, 100);
       } else {
@@ -1048,9 +1034,7 @@ const routes = {
     const idTag = `doc-id:${doc.id}`;
     let memIds = [];
     if (effectiveStore === 'amr' && amr) {
-      memIds = amr.list({}, undefined, 100000, 0).memories
-        .filter((m) => (m.tags || []).includes(fnTag) || (m.tags || []).includes(idTag))
-        .map((m) => m.id);
+      memIds = amr.findByTags([fnTag, idTag], 100000).map((m) => m.id);
       for (const id of memIds) amr.remove(id);
     } else {
       const { rows } = await pg.query('SELECT id FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND (tags && $2::text[])', [ORG, [fnTag, idTag]]);
@@ -1292,39 +1276,30 @@ if (STORE === 'amr') {
     '/v1/mem-edges': async (b) => {
       const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
       if (!ids.length) return {};
-      const idSet = new Set(ids);
       const result = {};
-      for (const id of ids) result[id] = { in: 0, out: 0 };
-      for (const e of amr._allEdges()) {
-        if (idSet.has(e.from_id)) result[e.from_id].out++;
-        if (idSet.has(e.to_id)) result[e.to_id].in++;
+      for (const id of ids) {
+        const { out, in: inn } = amr.edgesOf(id); // per-id point reads — O(ids), not O(shard)
+        result[id] = { in: inn.length, out: out.length };
       }
       return result;
     },
     '/v1/mem-relationships': async (b) => {
       if (!b.memoryId) return { error: 'memoryId required' };
       const memId = b.memoryId;
-      const edges = amr._allEdges();
       const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
-      const peer = (id) => amr.byId.get(id)?.rec || null;
-      const enrichOut = edges.filter((e) => e.from_id === memId).slice(0, 200).map((e) => {
-        const p = peer(e.to_id);
-        return {
-          id: e.id, type: e.type || 'Mentions', confidence: e.confidence, created_by: null,
-          created_at: null, metadata: {}, direction: 'out',
-          target_id: e.to_id, target_title: peerTitle(p), target_memory_type: p?.memory_type || null,
-          target_is_latest: p?.is_latest ?? null, target_deleted: !!(p?.deleted_at),
-        };
-      });
-      const enrichIn = edges.filter((e) => e.to_id === memId).slice(0, 200).map((e) => {
-        const p = peer(e.from_id);
-        return {
-          id: e.id, type: e.type || 'Mentions', confidence: e.confidence, created_by: null,
-          created_at: null, metadata: {}, direction: 'in',
-          source_id: e.from_id, source_title: peerTitle(p), source_memory_type: p?.memory_type || null,
-          source_is_latest: p?.is_latest ?? null, source_deleted: !!(p?.deleted_at),
-        };
-      });
+      const { out: outE, in: inE } = amr.edgesOf(memId); // point reads, not a full-shard walk
+      const enrichOut = outE.slice(0, 200).map((e) => ({
+        id: `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+        created_by: null, created_at: null, metadata: {}, direction: 'out',
+        target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
+        target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
+      }));
+      const enrichIn = inE.slice(0, 200).map((e) => ({
+        id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+        created_by: null, created_at: null, metadata: {}, direction: 'in',
+        source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
+        source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
+      }));
       const by_type = {};
       for (const e of [...enrichOut, ...enrichIn]) {
         const t = e.type || 'Other';

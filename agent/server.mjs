@@ -218,6 +218,16 @@ async function qdrantHealthy() {
 
 // Build a Qdrant payload filter from the engine's filter spec. org_id is always forced.
 function qdrantFilter(f = {}) {
+  // The engine sends the FULL Qdrant-shaped filter (must/must_not clauses incl. project_ids,
+  // tags, promoted-exclusion). Pass it through verbatim — rebuilding from simple keys silently
+  // dropped every clause but org. org_id is still forced (defense in depth).
+  if (Array.isArray(f.must) || Array.isArray(f.must_not)) {
+    const must = [...(f.must || [])];
+    if (!must.some((c) => c && c.key === 'org_id')) must.push({ key: 'org_id', match: { value: ORG } });
+    const out = { must };
+    if (Array.isArray(f.must_not) && f.must_not.length) out.must_not = f.must_not;
+    return out;
+  }
   const must = [{ key: 'org_id', match: { value: ORG } }];
   if (f.is_latest !== undefined) must.push({ key: 'is_latest', match: { value: !!f.is_latest } });
   if (f.layer) must.push({ key: 'layer', match: { value: f.layer } });
@@ -664,6 +674,9 @@ const routes = {
   '/v1/kb-segment': async (b) => {
     const s = b.segment || {};
     if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
+    // Postgres text columns reject NUL bytes (22P05 "invalid byte sequence for encoding UTF8:
+    // 0x00") — common in PDF-extracted text. Strip them or the segment (evidence) is lost.
+    if (typeof s.content === 'string') s.content = s.content.replace(/\u0000/g, '');
     await pg.query(
       `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,
          segment_index, previous_segment_id, metadata, vector_synced, created_at)

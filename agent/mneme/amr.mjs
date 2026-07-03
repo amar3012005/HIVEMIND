@@ -136,11 +136,31 @@ export class AmrMemoryStore {
     return out;
   }
 
+  // One Qdrant match clause ({value} / {any:[]} / {except:[]}) vs a scalar-or-array field.
+  static _matchCond(val, match) {
+    if (!match) return true;
+    const hit = (x) => (Array.isArray(val) ? val.includes(x) : val === x);
+    if ('value' in match) return hit(match.value);
+    if ('any' in match) return Array.isArray(match.any) && match.any.some(hit);
+    if ('except' in match) return Array.isArray(match.except) && !match.except.some(hit);
+    return true;
+  }
+
+  // The engine's recall sends the FULL Qdrant-shaped filter ({must:[{key,match}],must_not:[...]})
+  // — org_id, user_id, project, project_ids, layer, tags, is_latest, promoted-exclusion. Dropping
+  // it (the old simple-key check) silently disabled project scoping + exclusions on this box.
+  // Records here already store snake_case keys, so clause keys match fields directly. The simple
+  // {is_latest, layer, must_not:{layer}} shape (internal callers: lexical/list) is still honored.
   _passesFilter(rec, f = {}) {
+    if (rec.deleted_at) return false;
+    if (Array.isArray(f.must) || Array.isArray(f.must_not)) {
+      for (const c of f.must || []) if (!AmrMemoryStore._matchCond(rec[c.key], c.match)) return false;
+      for (const c of f.must_not || []) if (AmrMemoryStore._matchCond(rec[c.key], c.match)) return false;
+      return true;
+    }
     if (f.is_latest !== undefined && !!rec.is_latest !== !!f.is_latest) return false;
     if (f.layer && rec.layer !== f.layer) return false;
     if (f.must_not?.layer && rec.layer === f.must_not.layer) return false;
-    if (rec.deleted_at) return false;
     return true;
   }
 

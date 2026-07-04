@@ -142,6 +142,50 @@ function createWindow() {
     if (!isDev) checkForUpdates();
   });
 
+  // ── Live frontend updates ────────────────────────────────────
+  // The window shows the LIVE site, so every React deploy is already the new
+  // version on reload. This watcher makes that automatic: poll the CRA
+  // asset-manifest (changes on every FE build) every 10 min + on window focus,
+  // and when a new build ships, prompt once to reload. The quick recorder
+  // survives reloads by design, so refreshing is safe mid-session.
+  if (!isDev) {
+    const MANIFEST_URL = new URL('/asset-manifest.json', APP_URL).toString();
+    let feBuildId = null;
+    let fePromptOpen = false;
+    let feLastCheck = 0;
+    const checkFrontendUpdate = async () => {
+      const now = Date.now();
+      if (fePromptOpen || now - feLastCheck < 60_000) return; // focus-throttle
+      feLastCheck = now;
+      try {
+        const res = await fetch(`${MANIFEST_URL}?t=${now}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const m = await res.json();
+        const id = m && m.files && m.files['main.js'];
+        if (!id) return;
+        if (feBuildId === null) { feBuildId = id; return; } // baseline = build we loaded
+        if (id === feBuildId) return;
+        fePromptOpen = true;
+        const { response } = await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: 'HIVEMIND updated',
+          message: 'A new version of HIVEMIND just went live.',
+          detail: 'Reload to get the latest — your session and any active recording are preserved.',
+          buttons: ['Reload Now', 'Later'],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        fePromptOpen = false;
+        if (response === 0) { feBuildId = id; mainWindow.webContents.reload(); }
+        else { feBuildId = id; } // don't nag again for this same build
+      } catch (_) { /* offline / transient — next tick */ }
+    };
+    const feTimer = setInterval(checkFrontendUpdate, 10 * 60_000);
+    mainWindow.on('focus', checkFrontendUpdate);
+    mainWindow.webContents.once('did-finish-load', checkFrontendUpdate); // set baseline
+    mainWindow.on('closed', () => clearInterval(feTimer));
+  }
+
   // Open external links in default browser; first-party targets stay in-window.
   const isInApp = (url) => {
     try {

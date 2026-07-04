@@ -85,6 +85,13 @@ _OR_PROVIDER_PIN = {
     "google/": ["Google", "Google AI Studio"],
     "anthropic/": ["Anthropic"],
     "deepseek/": ["DeepSeek", "Fireworks"],
+    # Model-SPECIFIC: Cerebras hosts 120b but NOT 20b — a bare "openai/gpt-oss" pin made
+    # every 20b call (plan + debate personas) fall to a slow provider (measured: DekaLLM
+    # ~60 tok/s, 3-25s/call = the room's latency gap) while 120b flew on Cerebras
+    # (1.9k tok in 1.5s). 20b pins to OpenRouter's own Groq capacity (~1000 tok/s;
+    # OpenRouter's account — unaffected by our dead Groq key).
+    "openai/gpt-oss-120b": ["Cerebras"],
+    "openai/gpt-oss-20b": ["Groq", "Fireworks"],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],

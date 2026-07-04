@@ -78,7 +78,8 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director, evo_reflect_and_merge
+from .hyper.engine import (run_director, evo_reflect_and_merge, run_mention_reply,
+                           _persona_fields, _evo_recall)
 
 log = logging.getLogger(__name__)
 
@@ -3073,11 +3074,85 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _ag_conns = []
+    # ── @MENTION FAST-PATH — "@maya do X" tags ONE employee: she answers directly,
+    #    in character, with her global playbook + the org brief + a fresh recall.
+    #    No director, no debate, no produce — a direct exchange with that employee
+    #    (the room sees it; nothing is journalised/reflected — single voice, no verify).
+    _mm = re.match(r"^\s*@([A-Za-z0-9_-]{2,32})\b", req.user_message or "")
+    if _mm:
+        _tag = _mm.group(1).lower()
+        _target = next((p for p in participants
+                        if str(p.get("slug", "")).lower() == _tag
+                        or str(p.get("name", "")).split()[0].lower() == _tag), None)
+        if _target is not None:
+            return await _run_mention_turn(req, _target, started)
+
     # The room executor: a single Groq native-tool-calling director. Everything above
     # this line (tenant scope, participant resolution, router/template/skeptic/trust) is
     # shared. The legacy AgentScope swarm orchestrator was removed — git history + the
     # box api_hyper_rooms.py.pre-single backup are the rollback; this is the only path.
     return await _orchestrate_single_agent(req, participants, lead, _ag_conns, started, room_template)
+
+
+async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started: float) -> RoomTurnResponse:
+    """Direct single-employee turn for an @mention. Grounding: cached company brief +
+    the employee's GLOBAL learned playbook (lexical top-k on the message) + one recall.
+    One LLM call, events typing → line → seal (the same contract the FE renders).
+    Read-only: no artifact produce, no reflection write-back, no approval gate."""
+    async def _emit(ev: Dict[str, Any]) -> None:
+        await _emit_event(req.callback_url, req.turn_id, ev)
+
+    name, lane, sysp = _persona_fields(emp)
+    slug = emp.get("slug") or emp.get("id")
+    msg = re.sub(r"^\s*@[A-Za-z0-9_-]{2,32}\b[,:]?\s*", "", req.user_message or "").strip() or req.user_message
+    await _emit({"t": "typing", "agent": slug, "note": f"{name} — on it…"})
+
+    brief, facts, lessons = "", [], []
+    try:
+        brief = await asyncio.wait_for(
+            _build_company_brief(msg, req.user_id, req.org_id, "", project_id=req.project_id), timeout=8.0)
+    except Exception:  # noqa: BLE001
+        brief = ""
+    try:
+        resp = await recall_emulated(msg, user_id=req.user_id, org_id=req.org_id,
+                                     api_key="", max_memories=6, project_id=req.project_id)
+        rows = resp.get("memories") or resp.get("combined") or []
+        facts = [f"- {str(r.get('content') or r.get('summary') or '')[:300]}" for r in rows[:6]
+                 if (r.get("content") or r.get("summary"))]
+        if facts:
+            await _emit({"t": "gather", "sources": ["hivemind"], "memory_hits": len(facts), "query": msg[:160]})
+    except Exception:  # noqa: BLE001
+        facts = []
+    try:
+        _pb = await get_employee_playbooks_map(req.org_id, [str(slug)])
+        lessons = _evo_recall(_pb.get(str(slug), []), f"{req.room_goal or ''} {msg}")
+    except Exception:  # noqa: BLE001
+        lessons = []
+
+    sys_parts = [f"You are {name}, a {lane} on this team. {sysp}".strip(),
+                 "The user tagged YOU directly in the room — answer them yourself, in character, "
+                 "concise and concrete. Ground every specific in the context; never invent facts; "
+                 "flag anything unverifiable as UNVERIFIED. No process narration."]
+    if brief:
+        sys_parts.append(brief[:1500])
+    if lessons:
+        sys_parts.append("YOUR LEARNED LESSONS (apply them):\n" + "\n".join(f"- {l}" for l in lessons))
+    user_parts = []
+    if facts:
+        user_parts.append("RELEVANT COMPANY FACTS:\n" + "\n".join(facts))
+    user_parts.append(f"MESSAGE TO YOU: {msg}")
+
+    content, tokens = await run_mention_reply(
+        [{"role": "system", "content": "\n\n".join(sys_parts)},
+         {"role": "user", "content": "\n\n".join(user_parts)}])
+    if not content:
+        content = f"({name} could not reply this turn — the model was unreachable. Please retry.)"
+    await _emit({"t": "line", "agent": slug, "kind": "lead", "content": content})
+    await _emit({"t": "seal", "cost_tokens": tokens, "status": "complete",
+                 "duration_ms": int((time.time() - started) * 1000), "engine": "mention",
+                 "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+    log.info("[mention] room=%s agent=%s tokens=%d", req.room_id, slug, tokens)
+    return RoomTurnResponse(ok=True, cost_tokens=tokens, status="complete")
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     """Phase 4 — pick the write-approval policy for this turn. Explicit

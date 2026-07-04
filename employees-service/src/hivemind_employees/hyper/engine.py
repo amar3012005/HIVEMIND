@@ -478,6 +478,39 @@ def _evo_merge(playbook: List[str], new_lessons: List[str], cap: int = _EVO_CAP)
     return out[-cap:]
 
 
+async def run_mention_reply(messages: List[Dict[str, Any]], *, model: Optional[str] = None,
+                            temp: float = 0.4) -> tuple:
+    """One plain chat call for the @mention fast-path (a single employee answering a
+    direct tag in the room — no director, no debate, no tools). Honors the same
+    OpenRouter-primary routing as the Director; returns (content, total_tokens) so the
+    seal reports honest spend. ("", 0) on total failure — the caller seals gracefully."""
+    m = model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
+    body: Dict[str, Any] = {"model": m, "messages": messages, "temperature": temp}
+    j = None
+    if not _route_direct_openrouter(m):
+        key = _groq_key()
+        if key:
+            for attempt in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
+                        r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                    if r.status_code == 200:
+                        j = r.json()
+                        break
+                    if r.status_code in (429, 500, 502, 503) and attempt < 1:
+                        await asyncio.sleep(2)
+                        continue
+                    break
+                except Exception:  # noqa: BLE001
+                    await asyncio.sleep(2)
+    if j is None:
+        j = await _openrouter_chat(body, timeout=httpx.Timeout(60.0, connect=5.0))
+    if j is None:
+        return "", 0
+    content = str((j.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+    return content, int(((j.get("usage") or {}).get("total_tokens", 0)) or 0)
+
+
 async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optional[Dict[str, Any]],
                     temp: float = 0.3) -> Optional[str]:
     """Minimal standalone Groq call for api-layer helpers (post-verify reflection + journal entry),

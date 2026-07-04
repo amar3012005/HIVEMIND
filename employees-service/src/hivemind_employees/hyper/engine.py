@@ -530,9 +530,15 @@ async def run_mention_reply(messages: List[Dict[str, Any]], *, model: Optional[s
     if j is None:
         j = await _openrouter_chat(body, timeout=httpx.Timeout(60.0, connect=5.0))
     if j is None:
-        return "", 0
+        return "", {"total": 0, "in": 0, "out": 0, "cached": 0}
     content = str((j.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
-    return content, int(((j.get("usage") or {}).get("total_tokens", 0)) or 0)
+    _u = j.get("usage") or {}
+    return content, {
+        "total": int(_u.get("total_tokens", 0) or 0),
+        "in": int(_u.get("prompt_tokens", 0) or 0),
+        "out": int(_u.get("completion_tokens", 0) or 0),
+        "cached": int(((_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0),
+    }
 
 
 async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optional[Dict[str, Any]],

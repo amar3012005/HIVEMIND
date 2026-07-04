@@ -3082,9 +3082,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     _mm = re.match(r"^\s*@([A-Za-z0-9_-]{2,32})\b", req.user_message or "")
     if _mm:
         _tag = _mm.group(1).lower()
+        def _first_name(p: Dict[str, Any]) -> str:
+            # A blank/missing name → "".split() is [] → [0] IndexError crashed the turn.
+            parts = str(p.get("name", "") or "").split()
+            return parts[0].lower() if parts else ""
         _target = next((p for p in participants
-                        if str(p.get("slug", "")).lower() == _tag
-                        or str(p.get("name", "")).split()[0].lower() == _tag), None)
+                        if str(p.get("slug", "") or "").lower() == _tag
+                        or _first_name(p) == _tag), None)
         if _target is not None:
             return await _run_mention_turn(req, _target, started)
 
@@ -3158,15 +3162,18 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
         user_parts.append("RELEVANT COMPANY FACTS:\n" + "\n".join(facts))
     user_parts.append(f"MESSAGE TO YOU: {msg}")
 
-    content, tokens = await run_mention_reply(
+    content, usage = await run_mention_reply(
         [{"role": "system", "content": "\n\n".join(sys_parts)},
          {"role": "user", "content": "\n\n".join(user_parts)}])
     if not content:
         content = f"({name} could not reply this turn — the model was unreachable. Please retry.)"
+    tokens = int((usage or {}).get("total", 0))
     await _emit({"t": "line", "agent": slug, "kind": "lead", "content": content})
     await _emit({"t": "seal", "cost_tokens": tokens, "status": "complete",
                  "duration_ms": int((time.time() - started) * 1000), "engine": "mention",
-                 "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+                 "tokens_in": int((usage or {}).get("in", 0)),
+                 "tokens_out": int((usage or {}).get("out", 0)),
+                 "tokens_cached": int((usage or {}).get("cached", 0))})
     log.info("[mention] room=%s agent=%s tokens=%d", req.room_id, slug, tokens)
     return RoomTurnResponse(ok=True, cost_tokens=tokens, status="complete")
 

@@ -81,6 +81,13 @@ export function qdrantUrlFor(orgId) {
 async function _call(orgId, path, body) {
   const a = agentFor(orgId);
   if (!a) throw new Error(`no hm-agent registered for org ${orgId}`);
+  // EMBEDDED agent: registry url 'local:' = this org's .amr storage runs IN-PROCESS on central
+  // (personal/managed .amr orgs — self-host semantics where the box is central itself). Same
+  // route table, same shapes, no HTTP. Lazy import keeps deployments without the binding inert.
+  if (a.url === 'local:') {
+    const { dispatch } = await import('./embedded-agent.mjs');
+    return dispatch(orgId, path, body);
+  }
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {

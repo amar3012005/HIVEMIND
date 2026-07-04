@@ -2182,6 +2182,26 @@ const server = http.createServer(async (req, res) => {
       }
     });
 
+    // .amr-by-default for NEW personal orgs (flag: MNEME_PERSONAL_DEFAULT=1, default off):
+    // register the org in the agent registry with url 'local:' — every memory-domain seam then
+    // routes to the EMBEDDED agent (the same hardened v2 .amr engine self-host runs, in-process
+    // on central; hm.* schema + org_<id> collection for its KB). New orgs only — existing orgs
+    // keep their current backend until an explicit migration. Never blocks signup.
+    if (String(process.env.MNEME_PERSONAL_DEFAULT || '') === '1'
+        && hostingMode === 'managed' && requestedPlan !== 'enterprise' && requestedPlan !== 'managed') {
+      try {
+        const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+        const fsm = await import('node:fs');
+        let reg = {};
+        try { reg = JSON.parse(fsm.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
+        reg[org.id] = { url: 'local:', token: '', kind: 'amr-central' };
+        fsm.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
+        console.log(`[org-create] .amr-central registered for new personal org ${org.id}`);
+      } catch (e) {
+        console.warn('[org-create] .amr-central registration failed (org stays central):', e.message);
+      }
+    }
+
     // Route the org to its Qdrant home by PLAN:
     //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)
     //   free (personal)    → shared HIVEMIND_PERSONAL pool (no collection created)

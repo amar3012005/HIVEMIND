@@ -363,6 +363,27 @@ export class PrismaGraphStore {
           ...(memory.source_metadata ? { source_metadata: memory.source_metadata } : {}),
         },
       }, null, []);
+      // PQC-by-default holds on the .amr path too: the signing side-table is central raw SQL
+      // (memory_signatures, no FK on the memories table), so agent-routed writes — self-host
+      // AND embedded amr-central — get the same ML-DSA-65 signature as central rows. The
+      // canonical payload is built EXACTLY like the central hook below (same fields, same
+      // null-byte-stripped content) so /verify-memory validates both identically. Best-effort:
+      // a signing failure never blocks the write.
+      try {
+        const sigPayload = pqcCanonical({
+          id: memory.id, user_id: memory.user_id, org_id: memory.org_id || null,
+          content: stripNullBytes(memory.content),
+        });
+        const sig = await signMemory(sigPayload);
+        if (sig) {
+          await this.client.$executeRawUnsafe(
+            `INSERT INTO memory_signatures (memory_id, org_id, alg, payload_hash, signature)
+             VALUES ($1::uuid, $2::uuid, 'ML-DSA-65', $3, $4)
+             ON CONFLICT (memory_id) DO NOTHING`,
+            memory.id, memory.org_id || null, sha256Hex(sigPayload), sig,
+          );
+        }
+      } catch { /* integrity signing is best-effort — never block the write */ }
       return;
     }
     // Strip null bytes (\u0000) — common in web-scraped content, rejected by Postgres text columns

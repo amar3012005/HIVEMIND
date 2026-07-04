@@ -234,6 +234,48 @@ async def set_permanent_lead_id(room_id: str, employee_id: Optional[str]) -> boo
         return False
 
 
+async def get_recent_turn_context(room_id: str, org_id: Optional[str] = None,
+                                  limit: int = 4) -> List[Dict[str, Any]]:
+    """Event-driven room memory for direct exchanges (@mention turns): the last N
+    SEALED turns' (user_message, answering agent, answer text) read straight from
+    hyper_turns.lines — the turn row IS the event bus, no extra store. Answer = the
+    LAST 'line' event's content (the synthesis/lead reply). Oldest-first. Empty list
+    on any failure (grounding is best-effort, never fatal). org_id tenant-scopes."""
+    import json as _json
+    out: List[Dict[str, Any]] = []
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                rows = await conn.fetch(
+                    "SELECT t.user_message, t.lines FROM hivemind.hyper_turns t "
+                    "JOIN hivemind.hyper_rooms r ON r.id = t.room_id "
+                    "WHERE t.room_id = $1 AND r.org_id = $2::uuid AND t.status = 'complete' "
+                    "ORDER BY t.seq DESC LIMIT $3",
+                    room_id, org_id, max(1, min(int(limit or 4), 8)),
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT user_message, lines FROM hivemind.hyper_turns "
+                    "WHERE room_id = $1 AND status = 'complete' ORDER BY seq DESC LIMIT $2",
+                    room_id, max(1, min(int(limit or 4), 8)),
+                )
+            for row in rows:
+                raw = row["lines"]
+                lines = _json.loads(raw) if isinstance(raw, str) else list(raw or [])
+                agent, answer = None, ""
+                for ev in reversed(lines):
+                    if isinstance(ev, dict) and ev.get("t") == "line" and (ev.get("content") or "").strip():
+                        agent, answer = ev.get("agent"), str(ev.get("content") or "")
+                        break
+                if answer:
+                    out.append({"user_message": str(row["user_message"] or ""),
+                                "agent": agent, "answer": answer})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_recent_turn_context fallback: %s", exc)
+    return list(reversed(out))
+
+
 async def get_turn_seq(turn_id: str, org_id: Optional[str] = None) -> Optional[int]:
     """Return the monotonic per-room seq for a turn (rotation ordinal).
 

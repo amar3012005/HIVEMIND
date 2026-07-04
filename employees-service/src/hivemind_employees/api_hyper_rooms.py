@@ -65,6 +65,7 @@ from .db import (
     get_room_sim_mode,
     get_room_sim_agents,
     get_room_evo_mode,
+    get_recent_turn_context,
     get_employee_playbooks_map,
     update_employee_playbook,
     get_room_template,
@@ -3137,7 +3138,22 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
         sys_parts.append(brief[:1500])
     if lessons:
         sys_parts.append("YOUR LEARNED LESSONS (apply them):\n" + "\n".join(f"- {l}" for l in lessons))
+    # Event-driven room memory: the last few sealed turns (who asked what, which agent
+    # answered what) — read from the turn rows themselves. Without this, "@maya do you
+    # agree with jonah?" fails: Jonah's answer lives in the PRIOR turn's events, and the
+    # mention prompt never saw it (live-observed miss).
+    history = []
+    try:
+        recent = await get_recent_turn_context(req.room_id, org_id=req.org_id, limit=4)
+        for h in recent:
+            history.append(f"USER asked: {h['user_message'][:220]}")
+            history.append(f"{(h.get('agent') or 'team').upper()} answered: {h['answer'][:700]}")
+    except Exception:  # noqa: BLE001
+        history = []
     user_parts = []
+    if history:
+        user_parts.append("RECENT ROOM DISCUSSION (oldest first — this is what your team already said; "
+                          "when asked about a teammate's position, it is HERE):\n" + "\n".join(history)[:3000])
     if facts:
         user_parts.append("RELEVANT COMPANY FACTS:\n" + "\n".join(facts))
     user_parts.append(f"MESSAGE TO YOU: {msg}")

@@ -92,7 +92,11 @@ _OR_PROVIDER_PIN = {
     # OpenRouter's account — unaffected by our dead Groq key).
     # Deep fast tier: a single-provider pin meant one hiccup dumped the call into the
     # open pool (measured: synth on DeepInfra 44 tok/s = 55s; debate on DekaLLM 20 tok/s).
-    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Fireworks"],
+    # Groq FIRST for both — cheapest that's also fast (120b: Groq $0.60 < Cerebras $0.75;
+    # 20b: Groq $0.30, proven 695ms live). Fast alternates follow for when a parallel burst
+    # throttles OpenRouter's Groq capacity. Our DIRECT Groq key is delinquent — this is
+    # OpenRouter's Groq host; paying the Groq bill + HYPER_OPENROUTER_PRIMARY=0 = direct (no margin).
+    "openai/gpt-oss-120b": ["Groq", "Cerebras", "Together"],
     "openai/gpt-oss-20b": ["Groq", "Fireworks", "Together"],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],

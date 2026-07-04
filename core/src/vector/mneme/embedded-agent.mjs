@@ -188,10 +188,14 @@ async function ensureSchema() {
   console.log(`[embedded-agent] ready (schema hm, dataRoot ${DATA_ROOT}, dim ${DIM})`);
 }
 
-// ── Qdrant (vectors) — ported verbatim, per-org collection ─────────────────────────────────────
+// ── Qdrant (vectors) — per-org collection. Central Qdrant is API-key-protected (a self-host box's
+// Qdrant is keyless — the byod agent never sent a key); send api-key when QDRANT_API_KEY is set,
+// else the embedded agent's KB-segment vector ops 401 on central.
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY || process.env.QDRANT_CLOUD_API_KEY || '';
 const qFetch = (path, opts = {}, ms = 4000) => {
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
-  return fetch(`${QDRANT_URL}${path}`, { ...opts, headers: { 'content-type': 'application/json', ...(opts.headers || {}) }, signal: ac.signal }).finally(() => clearTimeout(t));
+  const headers = { 'content-type': 'application/json', ...(QDRANT_API_KEY ? { 'api-key': QDRANT_API_KEY } : {}), ...(opts.headers || {}) };
+  return fetch(`${QDRANT_URL}${path}`, { ...opts, headers, signal: ac.signal }).finally(() => clearTimeout(t));
 };
 async function ensureQdrant(qcoll) {
   if (!QDRANT_URL) throw new Error('QDRANT_URL required for embedded agent');
@@ -377,7 +381,7 @@ function routesFor(ctx) {
       const s = b.segment || {};
       if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
       // Postgres text columns reject NUL bytes — strip them or the segment (evidence) is lost.
-      if (typeof s.content === 'string') s.content = s.content.replace(/ /g, '');
+      if (typeof s.content === 'string') s.content = s.content.replace(/\u0000/g, '');
       await db().query(
         `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,
            segment_index, previous_segment_id, metadata, vector_synced, created_at)

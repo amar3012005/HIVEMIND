@@ -423,25 +423,15 @@ ipcMain.handle('install-update', () => {
 
 // IPC: splash "launch" button → open main window, close splash
 ipcMain.handle('launch-app', () => {
-  createWindow();
-  createTray();
-  createMenu();
-  // Mark as launched so future opens skip splash
-  fs.writeFileSync(FIRST_RUN_FLAG, '1');
-  setTimeout(() => {
-    if (splashWindow) splashWindow.close();
-  }, 400);
+  if (!mainWindow) { createWindow(); createTray(); createMenu(); }
+  else { mainWindow.show(); }
+  // Let the splash finish its fade, then dismiss it.
+  setTimeout(() => { if (splashWindow) splashWindow.close(); }, 450);
 });
 
 app.whenReady().then(() => {
-  const isFirstRun = !fs.existsSync(FIRST_RUN_FLAG);
-  if (isFirstRun) {
-    createSplash();
-  } else {
-    createWindow();
-    createTray();
-    createMenu();
-  }
+  // Cinematic B&W signature intro on every open, then the workspace.
+  createSplash();
 });
 
 app.on('activate', () => {

@@ -5,8 +5,11 @@ const log = require('electron-log');
 const fs = require('fs');
 
 const isDev = process.env.ELECTRON_IS_DEV === '1';
+// The desktop app is a first-class window onto the live product. file:// builds
+// broke BrowserRouter + same-site cookie auth, so prod loads the real origin.
+const APP_URL = process.env.SINGULANCE_APP_URL || 'https://singulancelabs.com/hivemind/app/overview';
 const FIRST_RUN_FLAG = path.join(app.getPath('userData'), '.launched');
-const PROTOCOL = 'hivemind';
+const PROTOCOL = 'singulance';
 
 let mainWindow = null;
 let splashWindow = null;
@@ -15,9 +18,9 @@ let isQuitting = false;
 let updateState = 'idle'; // idle | checking | downloading | downloaded | none | error
 
 // ── App metadata ──────────────────────────────────────────────
-app.setName('HIVEMIND');
+app.setName('SINGULANCE');
 
-// ── Logging (also captures updater diagnostics → ~/Library/Logs/HIVEMIND) ──
+// ── Logging (also captures updater diagnostics → ~/Library/Logs/SINGULANCE) ──
 log.transports.file.level = 'info';
 log.transports.console.level = isDev ? 'debug' : 'warn';
 autoUpdater.logger = log;
@@ -94,20 +97,16 @@ function createSplash() {
 
 // ── Window creation ───────────────────────────────────────────
 function createWindow() {
-  const reactBuildPath = isDev
-    ? null
-    : path.join(__dirname, '..', 'react-build');
-
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    title: 'HIVEMIND',
+    title: 'SINGULANCE',
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
-    backgroundColor: '#0a0a0f',
+    backgroundColor: '#faf9f4',
     show: false,
     webPreferences: {
       nodeIntegration: false,
@@ -124,9 +123,18 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools();
   } else {
-    // Prod: load bundled React build
-    mainWindow.loadFile(path.join(reactBuildPath, 'index.html'));
+    // Prod: live product — sessions/cookies/OAuth behave exactly like a browser.
+    mainWindow.loadURL(APP_URL);
   }
+
+  // Offline / load-failure → local fallback page with retry (never a white void).
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame || isDev || code === -3 /* aborted (normal on redirects) */) return;
+    log.warn('load failed', code, desc, failedUrl);
+    mainWindow.loadFile(path.join(__dirname, 'offline.html'));
+  });
+  ipcMain.removeHandler('retry-connect');
+  ipcMain.handle('retry-connect', () => { if (mainWindow) mainWindow.loadURL(APP_URL); });
 
   // Show once ready (avoids white flash)
   mainWindow.once('ready-to-show', () => {
@@ -134,19 +142,28 @@ function createWindow() {
     if (!isDev) checkForUpdates();
   });
 
-  // Open external links in default browser, not Electron
+  // Open external links in default browser; first-party targets stay in-window.
+  const isInApp = (url) => {
+    try {
+      const host = new URL(url).hostname;
+      return INAPP_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+    } catch { return false; }
+  };
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isInApp(url)) { mainWindow.loadURL(url); } else { shell.openExternal(url); }
     return { action: 'deny' };
   });
 
   // Intercept nav to external URLs — keep first-party in-app, open the rest in the browser.
-  const INAPP_HOSTS = ['singulancelabs.com', 'hivemind.davinciai.eu', 'davinciai.eu'];
+  const INAPP_HOSTS = [
+    'singulancelabs.com',            // product + control plane + core
+    'zitadel.cloud',                 // Enterprise SSO / register (EU sovereign)
+    'accounts.google.com',           // Google OAuth
+    'login.microsoftonline.com',     // Microsoft OAuth (via ZITADEL IdP)
+    'appleid.apple.com',             // Apple OAuth (via ZITADEL IdP)
+  ];
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const appUrl = isDev ? 'http://localhost:3000' : 'file://';
-    let host = '';
-    try { host = new URL(url).hostname; } catch (_) {}
-    const inApp = url.startsWith(appUrl) || INAPP_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+    const inApp = (isDev && url.startsWith('http://localhost:3000')) || url.startsWith('file://') || isInApp(url);
     if (!inApp) {
       event.preventDefault();
       shell.openExternal(url);
@@ -171,11 +188,11 @@ function createTray() {
   const trayIconPath = path.join(__dirname, '..', 'assets', 'tray-icon.png');
   const icon = nativeImage.createFromPath(trayIconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('HIVEMIND');
+  tray.setToolTip('SINGULANCE');
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: 'Open HIVEMIND',
+      label: 'Open SINGULANCE',
       click: () => {
         if (mainWindow) {
           mainWindow.show();
@@ -192,7 +209,7 @@ function createTray() {
     },
     { type: 'separator' },
     {
-      label: 'Quit HIVEMIND',
+      label: 'Quit SINGULANCE',
       click: () => {
         isQuitting = true;
         app.quit();
@@ -212,18 +229,18 @@ function createTray() {
 function createMenu() {
   const template = [
     {
-      label: 'HIVEMIND',
+      label: 'SINGULANCE',
       submenu: [
-        { label: 'About HIVEMIND', role: 'about' },
+        { label: 'About SINGULANCE', role: 'about' },
         { type: 'separator' },
         { label: 'Check for Updates…', click: () => checkForUpdates(true) },
         { type: 'separator' },
-        { label: 'Hide HIVEMIND', role: 'hide' },
+        { label: 'Hide SINGULANCE', role: 'hide' },
         { label: 'Hide Others', role: 'hideOthers' },
         { label: 'Show All', role: 'unhide' },
         { type: 'separator' },
         {
-          label: 'Quit HIVEMIND',
+          label: 'Quit SINGULANCE',
           accelerator: 'Cmd+Q',
           click: () => {
             isQuitting = true;
@@ -316,7 +333,7 @@ autoUpdater.on('update-available', (info) => {
 autoUpdater.on('update-not-available', () => {
   sendUpdate('none');
   if (manualCheck) {
-    dialog.showMessageBox(mainWindow, { type: 'info', title: 'You’re up to date', message: `HIVEMIND ${app.getVersion()} is the latest version.` });
+    dialog.showMessageBox(mainWindow, { type: 'info', title: 'You’re up to date', message: `SINGULANCE ${app.getVersion()} is the latest version.` });
     manualCheck = false;
   }
 });
@@ -340,7 +357,7 @@ autoUpdater.on('update-downloaded', (info) => {
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'Update Ready',
-    message: `HIVEMIND ${info && info.version ? info.version : ''} is ready.`,
+    message: `SINGULANCE ${info && info.version ? info.version : ''} is ready.`,
     detail: 'Restart now to apply, or it will install automatically next time you quit.',
     buttons: ['Restart Now', 'Later'],
     defaultId: 0,

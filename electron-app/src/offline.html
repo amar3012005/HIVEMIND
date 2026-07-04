@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SINGULANCE — offline</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: #faf9f4;
+      color: #0a0a0a;
+      font-family: 'Space Grotesk', Inter, -apple-system, sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      background-image: radial-gradient(rgba(17,125,255,0.12) 1px, transparent 1px);
+      background-size: 22px 22px;
+      -webkit-app-region: drag;
+    }
+    .card {
+      background: #fff; border: 1px solid #e3e0db; padding: 40px 48px;
+      text-align: center; max-width: 420px; -webkit-app-region: no-drag;
+    }
+    .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: .28em; color: #a3a3a3; text-transform: uppercase; }
+    h1 { font-size: 22px; font-weight: 600; margin-top: 10px; letter-spacing: -0.01em; }
+    p { font-size: 13px; color: #737373; line-height: 1.6; margin-top: 8px; }
+    button {
+      margin-top: 22px; height: 44px; padding: 0 28px; border: none; cursor: pointer;
+      background: #117dff; color: #fff; font-size: 11px; font-weight: 600;
+      letter-spacing: .2em; text-transform: uppercase; font-family: inherit;
+    }
+    button:hover { background: #0066e0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="eyebrow">〉 SINGULANCE</div>
+    <h1>Can’t reach your HIVEMIND</h1>
+    <p>The app couldn’t connect to singulancelabs.com. Check your internet connection and try again.</p>
+    <button onclick="(window.electron && window.electron.retryConnect) ? window.electron.retryConnect() : location.reload()">Retry</button>
+  </div>
+</body>
+</html>

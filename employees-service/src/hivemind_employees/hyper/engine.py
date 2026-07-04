@@ -95,6 +95,13 @@ _OR_PROVIDER_PIN = {
 # route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
 # on process restart (re-probes Groq once), so funding Groq self-heals.
 _GROQ_DEAD = False
+# Judgment-shaped tasks (plans/strategy/recommendations/priorities/trade-offs) must
+# convene the room even when the model-judged gate says "lookup" — deterministic backstop.
+_JUDGMENT_RE = re.compile(
+    r"\b(plan|plans|planning|strateg\w*|recommend\w*|priorit\w*|roadmap|budget\w*|"
+    r"should we|what should|decide|decision|trade.?off|compare|versus|\bvs\b|"
+    r"campaign|approach|proposal|options?)\b", re.IGNORECASE)
+
 _BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
 
 
@@ -146,6 +153,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     or_body["provider"] = {**({"order": _pin} if _pin else {}),
                            "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
     or_body.pop("stream", None)
+    _t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(
@@ -169,7 +177,16 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
         # NOTE: this fires for the INTENDED OpenRouter-primary direct route too, not just
         # Groq failover — info-level + neutral wording (the old "Groq unavailable" text
         # spammed WARNs and misread as an outage on every healthy direct-routed call).
-        log.info("[hyper-engine] OpenRouter served model=%s (direct-route primary or Groq failover)", or_model)
+        # WHICH provider actually served + generation time = the latency truth. A live
+        # 45s synth meant the call fell off the Cerebras pin onto a slow fallback —
+        # invisible without this line.
+        _ms = int((time.time() - _t0) * 1000)
+        _prov = j.get("provider") or "?"
+        _ctok = int(((j.get("usage") or {}).get("completion_tokens", 0)) or 0)
+        (log.warning if _ms > 15000 else log.info)(
+            "[hyper-engine] OpenRouter served model=%s provider=%s ms=%d out_tok=%d%s",
+            or_model, _prov, _ms, _ctok,
+            " SLOW — fell off the fast-provider pin?" if _ms > 15000 else "")
         return j
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         log.warning("[hyper-engine] OpenRouter fallback transport error: %s", exc)
@@ -1423,8 +1440,10 @@ class Director:
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
-            "- needs_debate: true ONLY if the task needs a decision, judgment, trade-off, or genuine discussion; "
-            "false for a pure lookup / factual answer.\n"
+            "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "
+            "and PLANS, STRATEGIES, RECOMMENDATIONS, prioritisations, budget splits, and 'what should we do' "
+            "deliverables ALWAYS qualify (they are judgment, not lookup). false ONLY for a pure factual "
+            "lookup or a mechanical retrieval/formatting task.\n"
             "GROUND recall_queries AND web_query in the COMPANY CONTEXT when one is given — reference the company's "
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
@@ -1459,6 +1478,14 @@ class Director:
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
         plan["needs_debate"] = bool(plan.get("needs_debate"))
+        # Deterministic backstop — the model-judged gate misclassified judgment tasks as
+        # lookups twice in live use ("marketing plan", "social media plan" → no debate,
+        # the room's core feature silently skipped). A judgment-shaped task with a real
+        # team ALWAYS convenes the room; the LLM gate now only decides the ambiguous rest.
+        if not plan["needs_debate"] and len(self.participants) >= 2 and _JUDGMENT_RE.search(
+                f"{self.user_message or ''} {self.room_goal or ''}"):
+            plan["needs_debate"] = True
+            log.info("[hyper-engine] debate FORCED by judgment backstop (model gate said lookup)")
         log.info("[hyper-engine] plan recalls=%d connectors=%d web=%s debate=%s",
                  len(plan["recall_queries"]), len(plan["connector_calls"]),
                  bool(plan["web_query"]), plan["needs_debate"])

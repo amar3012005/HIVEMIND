@@ -161,7 +161,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     _pin = _or_provider_pin(or_model)
     # ignore: measured-slow hosts that keep winning price-ranked fallbacks (DekaLLM
     # served 20-60 tok/s twice). Env-overridable; empty string disables the blacklist.
-    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM").split(",") if s.strip()]
+    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM,WandB").split(",") if s.strip()]
     or_body["provider"] = {**({"order": _pin} if _pin else {}),
                            **({"ignore": _ignore} if _ignore else {}),
                            "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}

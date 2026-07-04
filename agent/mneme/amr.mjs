@@ -164,8 +164,14 @@ export class AmrMemoryStore {
 
   // ── recall (vector) ─────────────────────────────────────────────────────────────────────────
   recall(vector, limit = 10, filter = {}) {
-    if (!this.store.liveCount()) return [];
-    try { this.store.enableHnsw(); } catch { /* already built */ }
+    const n = this.store.liveCount();
+    if (!n) return [];
+    // Below HNSW_MIN: skip the HNSW overlay → the native engine does an EXACT brute-force scan,
+    // which is sub-ms at this size AND always includes just-written slots (the async HNSW indexer
+    // lags fresh inserts — write-then-immediately-recall would miss them). Above the threshold,
+    // enable HNSW for sublinear recall (a few un-indexed recent items among millions is fine).
+    const HNSW_MIN = Number(process.env.MNEME_HNSW_MIN || 50000);
+    if (n > HNSW_MIN) { try { this.store.enableHnsw(); } catch { /* already built */ } }
     const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
     const hits = this.store.recall(vec, Math.min(limit * 4, 200));
     const out = [];

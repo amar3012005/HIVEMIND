@@ -146,7 +146,7 @@ export class AmrMemoryStore {
       const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
       const layerId = merged.layer === 'evidence' ? 1 : merged.layer === 'cognitive' ? 2 : 0;
       this.store.insertLayered(JSON.stringify(merged), vec, dateToNs(merged.valid_from), layerId);
-      if (found) { try { this.store.delete(found.slot); } catch { /* ignore */ } this._revDropSlot(found.slot); }
+      if (found) { this._revDropSlot(found.slot); try { this.store.delete(found.slot); } catch { /* ignore */ } }
       this.store.flush();
     } else if (found) {
       // Metadata-only update — durable via native rewriteText (vector untouched).
@@ -310,8 +310,14 @@ export class AmrMemoryStore {
 
   _revDropSlot(slot) {
     if (!this._revEdges) return;
+    // Precise edge-count decrement: this slot's OUT edges + every IN edge pointing at it.
+    let dropped = 0;
+    try { dropped += this.store.slotEdges(slot).length; } catch { /* slot may be gone */ }
+    const inSet = this._revEdges.get(slot);
+    if (inSet) dropped += inSet.size;
     this._revEdges.delete(slot);
-    for (const s of this._revEdges.values()) s.delete(slot);
+    for (const s of this._revEdges.values()) if (s.delete(slot)) { /* counted above only for IN — OUT already counted */ }
+    if (this._edgeCount != null) this._edgeCount = Math.max(0, this._edgeCount - dropped);
   }
 
   // Both-direction edges of one memory id, endpoints resolved to records (bounded per-id work).
@@ -412,8 +418,8 @@ export class AmrMemoryStore {
   remove(id) {
     const slot = this.store.findById(id);
     if (slot < 0) return false;
+    this._revDropSlot(slot); // BEFORE the tombstone — needs the slot's out-edges for the count
     try { this.store.delete(slot); } catch { /* already gone */ }
-    this._revDropSlot(slot);
     this.store.flush();
     return true;
   }

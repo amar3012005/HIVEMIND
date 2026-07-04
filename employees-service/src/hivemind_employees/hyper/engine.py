@@ -90,8 +90,10 @@ _OR_PROVIDER_PIN = {
     # ~60 tok/s, 3-25s/call = the room's latency gap) while 120b flew on Cerebras
     # (1.9k tok in 1.5s). 20b pins to OpenRouter's own Groq capacity (~1000 tok/s;
     # OpenRouter's account — unaffected by our dead Groq key).
-    "openai/gpt-oss-120b": ["Cerebras"],
-    "openai/gpt-oss-20b": ["Groq", "Fireworks"],
+    # Deep fast tier: a single-provider pin meant one hiccup dumped the call into the
+    # open pool (measured: synth on DeepInfra 44 tok/s = 55s; debate on DekaLLM 20 tok/s).
+    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Fireworks"],
+    "openai/gpt-oss-20b": ["Groq", "Fireworks", "Together"],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],
@@ -157,7 +159,11 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     # Fastest provider that supports the request's params (tools / response_format),
     # with OpenRouter's own cross-provider fallback enabled.
     _pin = _or_provider_pin(or_model)
+    # ignore: measured-slow hosts that keep winning price-ranked fallbacks (DekaLLM
+    # served 20-60 tok/s twice). Env-overridable; empty string disables the blacklist.
+    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM").split(",") if s.strip()]
     or_body["provider"] = {**({"order": _pin} if _pin else {}),
+                           **({"ignore": _ignore} if _ignore else {}),
                            "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
     or_body.pop("stream", None)
     _t0 = time.time()
@@ -1352,16 +1358,26 @@ class Director:
         # Round 1 — independent stances (parallel sub-calls = genuine independence)
         self._round_seq += 1
         await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
+        # REALTIME: each persona's take streams to the FE the moment it returns —
+        # not after the whole round gathers (which batched all reacts into one
+        # instant and made the debate look pre-baked). Parallelism unchanged;
+        # transcript is appended AFTER the round in stable member order (synth
+        # input identical), only the emit moved inside the per-persona task.
+        async def _consult_and_emit(m: Dict[str, Any], prompt: str, rn: int, agreement_pair: tuple) -> Dict[str, Any]:
+            c = await self._consult(m, prompt, rn)
+            await self.emit({"t": "react", "round": rn, "agent": c["slug"],
+                             "name": c["name"], "lane": c["lane"],
+                             "agreement": agreement_pair[0] if c["is_skeptic"] else agreement_pair[1],
+                             "content": c["text"], "line": c["text"], "confidence": 0.7})
+            return c
+
         r1 = await asyncio.gather(*[
-            self._consult(m, f"What is your stance on: {topic}? Give your view + your single biggest concern.", self._round_seq)
+            _consult_and_emit(m, f"What is your stance on: {topic}? Give your view + your single biggest concern.",
+                              self._round_seq, ("challenge", "contribute"))
             for m in members
         ])
         for c in r1:
             self.transcript.append({"round": 1, "agent": c["name"], "text": c["text"]})
-            await self.emit({"t": "react", "round": self._round_seq, "agent": c["slug"],
-                             "name": c["name"], "lane": c["lane"],
-                             "agreement": "challenge" if c["is_skeptic"] else "contribute",
-                             "content": c["text"], "line": c["text"], "confidence": 0.7})
 
         # Round 2 — react/challenge each other on the shared board
         if rounds >= 2:
@@ -1369,16 +1385,13 @@ class Director:
             await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
             prior = "\n".join(f"{c['name']}: {c['text']}" for c in r1)[:3500]
             r2 = await asyncio.gather(*[
-                self._consult(m, (f"Your teammates said:\n{prior}\n\nREACT: whose point is weakest? Challenge "
-                                  f"or build on it — be specific. Do you change your view on '{topic}'?"), self._round_seq)
+                _consult_and_emit(m, (f"Your teammates said:\n{prior}\n\nREACT: whose point is weakest? Challenge "
+                                      f"or build on it — be specific. Do you change your view on '{topic}'?"),
+                                  self._round_seq, ("challenge", "support"))
                 for m in members
             ])
             for c in r2:
                 self.transcript.append({"round": 2, "agent": c["name"], "text": c["text"]})
-                await self.emit({"t": "react", "round": self._round_seq, "agent": c["slug"],
-                                 "name": c["name"], "lane": c["lane"],
-                                 "agreement": "challenge" if c["is_skeptic"] else "support",
-                                 "content": c["text"], "line": c["text"], "confidence": 0.7})
 
         await self.emit({"t": "swarm_verdict", "round": self._round_seq, "converged": True})
         return json.dumps({

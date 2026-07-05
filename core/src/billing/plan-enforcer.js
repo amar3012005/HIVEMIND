@@ -12,6 +12,7 @@
  */
 
 import { currentApiKey } from '../db/prisma.js';
+import { getOrgCounts } from '../memory/org-counts.js';
 
 /**
  * Plan-tier ladder for upgrade suggestions.
@@ -84,6 +85,7 @@ export class PlanEnforcer {
       tokensProcessed: 0,
       searchQueries: 0,
       knowledgeBaseUploads: 0,
+      knowledgeBasePages: 0,
       memoriesIngested: 0,
       deepResearchJobs: 0,
       webIntelJobs: 0,
@@ -99,6 +101,7 @@ export class PlanEnforcer {
       tokens: dbUsage.tokensProcessed || 0,
       searches: dbUsage.searchQueries || 0,
       uploads: dbUsage.knowledgeBaseUploads || 0,
+      kbPages: dbUsage.knowledgeBasePages || 0,
       memories: dbUsage.memoriesIngested || 0,
       deepResearch: dbUsage.deepResearchJobs || 0,
       webIntel: dbUsage.webIntelJobs || 0,
@@ -354,6 +357,7 @@ export class PlanEnforcer {
       }
       if (type === 'searches') this.usageTracker.recordQuery(orgId).catch(() => {});
       if (type === 'uploads') this.usageTracker.recordUpload(orgId).catch(() => {});
+      if (type === 'kbPages') this.usageTracker.recordKbPages?.(orgId, amount).catch(() => {});
       if (type === 'memories') this.usageTracker.recordMemory(orgId).catch(() => {});
       if (type === 'deepResearch') this.usageTracker.recordDeepResearch(orgId).catch(() => {});
       if (type === 'webIntel') this.usageTracker.recordWebIntel(orgId).catch(() => {});
@@ -367,7 +371,7 @@ export class PlanEnforcer {
   /**
    * Get current usage summary for an org.
    */
-  async getUsageSummary(orgId) {
+  async getUsageSummary(orgId, opts = {}) {
     const planDef = await this.planStore.getOrgPlan(orgId);
     const limits = planDef?.limits || {};
     // Read the DURABLE OrgUsage row (DB) for display — NOT the per-replica
@@ -388,6 +392,16 @@ export class PlanEnforcer {
     try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId } }); } catch { /* skip */ }
     try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId } }); } catch { /* skip */ }
 
+    // memories = TOTAL live memory count for the org (lifetime cap vs maxMemories),
+    // NOT the monthly memoriesIngested counter. Prefer a caller-supplied total (avoids a
+    // duplicate count when the endpoint already fetched it via getOrgCounts); otherwise
+    // query the SAME uniform seam getOrgCounts uses (routes central-vs-agent internally).
+    let memoriesUsed = Number(opts.memoriesTotal);
+    if (!Number.isFinite(memoriesUsed)) {
+      try { memoriesUsed = Number((await getOrgCounts(this.prisma, orgId)).memories) || 0; }
+      catch { memoriesUsed = 0; }
+    }
+
     return {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
@@ -395,7 +409,8 @@ export class PlanEnforcer {
       tokens: { used: Number(dbUsage.tokensProcessed) || 0, limit: limits.llmTokensPerMonth ?? -1 },
       searches: { used: Number(dbUsage.searchQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
       uploads: { used: Number(dbUsage.knowledgeBaseUploads) || 0, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
-      memories: { used: Number(dbUsage.memoriesIngested) || 0, limit: limits.maxMemories ?? -1 },
+      kbPages: { used: Number(dbUsage.knowledgeBasePages) || 0, limit: limits.knowledgeBasePagesPerMonth ?? -1 },
+      memories: { used: memoriesUsed, limit: limits.maxMemories ?? -1 },
       deepResearch: { used: Number(dbUsage.deepResearchJobs) || 0, limit: limits.deepResearchPerMonth ?? -1 },
       webIntel: { used: Number(webIntelToday) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
       graphQueries: { used: Number(dbUsage.graphQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },

@@ -34,6 +34,7 @@ export function meterTokens(orgId, n, apiKeyId = null, model = null, feature = n
 }
 export function meterQuery(orgId)      { if (_tracker && orgId) _safe(_tracker.recordQuery(orgId)); }
 export function meterUpload(orgId)     { if (_tracker && orgId) _safe(_tracker.recordUpload(orgId)); }
+export function meterKbPages(orgId, n = 1) { if (_tracker && orgId && n > 0) _safe(_tracker.recordKbPages(orgId, n)); }
 export function meterMemory(orgId)     { if (_tracker && orgId) _safe(_tracker.recordMemory(orgId)); }
 export function meterDeepResearch(orgId) { if (_tracker && orgId) _safe(_tracker.recordDeepResearch(orgId)); }
 export function meterWebIntel(orgId)   { if (_tracker && orgId) _safe(_tracker.recordWebIntel(orgId)); }
@@ -144,6 +145,30 @@ export class UsageTracker {
   }
 
   /**
+   * Record N knowledge-base pages ingested this month (DURABLE).
+   * Mirrors recordUpload's upsert exactly, incrementing the knowledgeBasePages
+   * column by `pages` instead of the upload counter by 1. This makes the kbPages
+   * plan gate + Usage summary read a persisted value instead of a per-replica
+   * in-memory counter that reset on restart.
+   */
+  async recordKbPages(orgId, pages = 1) {
+    if (!this.prisma || !orgId || !(pages > 0)) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, $3, 0, 0, 0, 0, 0, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "knowledgeBasePages" = "OrgUsage"."knowledgeBasePages" + $3, "updatedAt" = NOW()`,
+        orgId, month, pages
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record KB pages failed:', err.message);
+    }
+  }
+
+  /**
    * Record a memory ingestion.
    */
   async recordMemory(orgId) {
@@ -246,6 +271,7 @@ export class UsageTracker {
   // type → OrgUsageDaily column. (Internal constant — safe to interpolate.)
   static _DAILY_COL = {
     tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads',
+    kbPages: 'knowledgeBasePages',
     memories: 'memoriesIngested', deepResearch: 'deepResearchJobs', webIntel: 'webIntelJobs',
     graphQueries: 'graphQueries', tara: 'taraUsage',
   };
@@ -320,7 +346,7 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       const rows = await this.prisma.$queryRawUnsafe(
-        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "connectorCount"
+        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "connectorCount"
          FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "month" = $2 LIMIT 1`,
         orgId, month
       );
@@ -329,6 +355,7 @@ export class UsageTracker {
         tokensProcessed: Number(usage.tokensProcessed || 0),
         searchQueries: Number(usage.searchQueries || 0),
         knowledgeBaseUploads: Number(usage.knowledgeBaseUploads || 0),
+        knowledgeBasePages: Number(usage.knowledgeBasePages || 0),
         memoriesIngested: Number(usage.memoriesIngested || 0),
         deepResearchJobs: Number(usage.deepResearchJobs || 0),
         webIntelJobs: Number(usage.webIntelJobs || 0),
@@ -467,6 +494,7 @@ export class UsageTracker {
       tokensProcessed: 0,
       searchQueries: 0,
       knowledgeBaseUploads: 0,
+      knowledgeBasePages: 0,
       memoriesIngested: 0,
       deepResearchJobs: 0,
       webIntelJobs: 0,

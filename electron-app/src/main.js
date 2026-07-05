@@ -186,19 +186,7 @@ function createWindow() {
     mainWindow.on('closed', () => clearInterval(feTimer));
   }
 
-  // Open external links in default browser; first-party targets stay in-window.
-  const isInApp = (url) => {
-    try {
-      const host = new URL(url).hostname;
-      return INAPP_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
-    } catch { return false; }
-  };
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isInApp(url)) { mainWindow.loadURL(url); } else { shell.openExternal(url); }
-    return { action: 'deny' };
-  });
-
-  // Intercept nav to external URLs — keep first-party in-app, open the rest in the browser.
+  // First-party hosts that stay in the main window on top-level navigation.
   const INAPP_HOSTS = [
     'singulancelabs.com',            // product + control plane + core
     'zitadel.cloud',                 // Enterprise SSO / register (EU sovereign)
@@ -206,6 +194,42 @@ function createWindow() {
     'login.microsoftonline.com',     // Microsoft OAuth (via ZITADEL IdP)
     'appleid.apple.com',             // Apple OAuth (via ZITADEL IdP)
   ];
+  // Hosts allowed to open as a REAL child popup window (window.open). Connector
+  // OAuth (Nango Connect UI + the provider consent screens) opens a popup that
+  // must postMessage back to its opener — denying it or shoving it to the system
+  // browser breaks the flow ("Auth pop-up blocked by your browser"). These share
+  // the app session so cookies/tokens land correctly.
+  const POPUP_HOSTS = [
+    ...INAPP_HOSTS,
+    'davinciai.eu',                  // central Nango Connect UI + host (:8043/:8042)
+    'oauth2.googleapis.com',
+    'nango.dev', 'nango.cloud',      // Nango-hosted variants
+  ];
+  const hostMatches = (url, list) => {
+    try {
+      const host = new URL(url).hostname;
+      return list.some((h) => host === h || host.endsWith(`.${h}`));
+    } catch { return false; }
+  };
+  const isInApp = (url) => hostMatches(url, INAPP_HOSTS);
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // OAuth / connector popups → allow as a genuine child window (postMessage
+    // to opener works, session shared). Everything else → default browser.
+    if (hostMatches(url, POPUP_HOSTS)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520, height: 720, resizable: true,
+          autoHideMenuBar: true,
+          webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+        },
+      };
+    }
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const inApp = (isDev && url.startsWith('http://localhost:3000')) || url.startsWith('file://') || isInApp(url);
     if (!inApp) {

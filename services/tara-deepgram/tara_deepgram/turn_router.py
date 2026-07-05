@@ -46,14 +46,16 @@ action:
 history_turns: previous turns the answer needs (2-8). Minimum 2; more when the
 user refers back (pronouns, "as I said", follow-ups).
 
-directive: ONE line = tone + the concrete NEXT MOVE toward the goal
-(e.g. "warm; answer, then ask their timeline — budget already known").
-Every directive must advance the goal. If the user changed topic or resists,
-ADAPT the route to the goal, don't repeat the failed move.
+directive: ONE line = tone + the concrete NEXT MOVE toward the goal.
+HARD RULES: never ask for anything already known (in goal_state or facts) —
+that is the worst failure. Name the ONE genuinely missing item, or if nothing
+is missing, direct the close (summarize + next step). Never repeat the
+previous directive's move — if it didn't land, try a DIFFERENT angle.
 
-goal_state: one line of goal progress, updated every turn
-(e.g. "qualify lead: interest=high, budget=unknown, timeline=Q3").
-Carry forward what's known; never drop established progress.
+goal_state: one line of goal progress. It MUST change when the user gives new
+information — mark items as known with their value, mark finished stages DONE
+(e.g. "qualify: budget=1-2M ✓, timeline=ASAP ✓, decision-maker=unknown ← next").
+Carry known items forward verbatim; never drop established progress.
 
 new_facts: 0-3 NEW durable facts the user just revealed (name, role, company,
 constraints, preferences, commitments). Only genuinely new ones. [] if none."""
@@ -134,6 +136,8 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
         + (f"\n[REMEMBER] Facts from this call: {'; '.join(facts)}" if facts else "")
         + (f"\n[GOAL] {goal_state}" if goal_state else "")
         + (f"\n[STRATEGY] {directive}" if directive else "")
+        + "\n[NEVER] Never ask for anything already in [REMEMBER] or [GOAL] — "
+          "acknowledge it instead. Never re-ask a question visible in the conversation."
     )
     payload = {
         "model": config.DIRECT_MODEL,

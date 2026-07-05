@@ -133,12 +133,18 @@ async def think(request: Request):
             )
             core_first = asyncio.ensure_future(core_gen.__anext__())
             if use_router:
-                persona, decision = await asyncio.gather(
-                    get_persona(user_id, org_id),
-                    route(persona_name="TARA", goal="",
-                          messages=messages, prev_directive=prev_directive,
-                          goal_state=state.get("goal_state", ""),
-                          facts=state.get("facts", [])),
+                # Persona reaches the strategist too: the skill's opening lines
+                # define who TARA is + what the call is FOR — cached, so only the
+                # first turn pays the fetch before routing.
+                persona = await get_persona(user_id, org_id)
+                prompt_key = "internal_prompt" if mode == "internal" else "system_prompt"
+                persona_hint = str(persona.get(prompt_key) or "")[:280].replace("\n", " ")
+                decision = await route(
+                    persona_name=persona_hint or "TARA",
+                    goal="",
+                    messages=messages, prev_directive=prev_directive,
+                    goal_state=state.get("goal_state", ""),
+                    facts=state.get("facts", []),
                 )
                 state["directive"] = decision.get("directive") or prev_directive
                 state["goal_state"] = decision.get("goal_state") or state.get("goal_state", "")

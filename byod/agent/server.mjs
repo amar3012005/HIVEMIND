@@ -936,6 +936,10 @@ const routes = {
         args.push(b.completion_tokens_inc); sets.push(`completion_tokens=completion_tokens+$${args.length}`);
       }
       if (typeof b.status === 'string') { args.push(b.status); sets.push(`status=$${args.length}`); }
+      if (b.metadata_merge && typeof b.metadata_merge === 'object') {
+        args.push(JSON.stringify(b.metadata_merge));
+        sets.push(`metadata = metadata || $${args.length}::jsonb`);
+      }
       if (!sets.length) return { ok: true };
       await pg.query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
       return { ok: true };

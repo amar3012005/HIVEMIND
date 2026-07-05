@@ -6939,10 +6939,40 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
-          // Remote (self-host) orgs: mark call completed on agent. Summary memory still fires (memories route to agent).
+          // Remote (self-host) orgs: mark completed, then generate the same
+          // post-call insight as central — stored in the agent's call metadata
+          // (the agent has no tara_insights table; detail maps metadata.insight).
           if (orgIsRemote(tOrg)) {
             try {
               await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), status: 'completed' });
+              (async () => {
+                try {
+                  const g = await amrTaraCall(tOrg, { op: 'get', session_id: String(body.session_id) });
+                  const callId = g?.call?.id;
+                  if (!callId || !process.env.GROQ_API_KEY) return;
+                  const d = await amrTaraCall(tOrg, { op: 'detail', id: callId });
+                  const transcript = (d?.turns || []).map(t => {
+                    let p = {}; try { p = typeof t.content === 'string' ? JSON.parse(t.content) : (t.content || {}); } catch { /* raw */ }
+                    return `User: ${p.user_text || ''}\nTARA: ${p.agent_text || ''}`;
+                  }).join('\n');
+                  if (!transcript.trim()) return;
+                  const r = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                    method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
+                      messages: [
+                        { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
+                        { role: 'user', content: transcript.slice(0, 40000) },
+                      ] }),
+                    signal: AbortSignal.timeout(60_000),
+                  });
+                  if (!r.ok) return;
+                  const j = await r.json();
+                  let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
+                  if (parsed?.summary) {
+                    await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), metadata_merge: { insight: parsed } });
+                  }
+                } catch (e) { console.warn('[tara/calls] remote insight failed:', e.message); }
+              })();
               return jsonResponse(res, { ok: true, duration_ms: 0, turns: 0 });
             } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
           }
@@ -7037,11 +7067,13 @@ exit \$RC
                 return { seq: p.seq || i + 1, userText: p.user_text || '', agentText: p.agent_text || '',
                          llmTtfbMs: p.llm_ttfb_ms ?? null, createdAt: t.created_at };
               });
+              const ins = c.metadata?.insight || null;
               return jsonResponse(res, {
                 call: { id: c.id, sessionId: c.session_id, status: c.status,
                         mode: c.metadata?.mode || 'external', language: c.metadata?.language || 'en',
                         turnCount: Number(c.turn_count) || 0, startedAt: c.created_at },
-                turns, insight: null,
+                turns,
+                insight: ins ? { summary: ins.summary || null, data: ins } : null,
               });
             } catch { return jsonResponse(res, { error: 'not_found' }, 404); }
           }

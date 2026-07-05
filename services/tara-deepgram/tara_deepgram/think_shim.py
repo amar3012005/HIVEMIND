@@ -105,8 +105,17 @@ async def think(request: Request):
             persona = {}
             if len(_session_state) > 500:  # bound memory across long uptimes
                 _session_state.clear()
-            state = _session_state.setdefault(session_id, {"directive": ""})
+            state = _session_state.setdefault(
+                session_id, {"directive": "", "goal_state": "", "facts": []})
             prev_directive = state.get("directive", "")
+            # The brief = the call's working memory: goal progress + user-revealed
+            # facts, injected into BOTH paths so nothing established gets forgotten.
+            brief_bits = []
+            if state.get("goal_state"):
+                brief_bits.append(f"Goal: {state['goal_state']}")
+            if state.get("facts"):
+                brief_bits.append("Known: " + "; ".join(state["facts"][-8:]))
+            brief = " | ".join(brief_bits)
             # Speculative parallel start: core recall stream launches immediately
             # (it is the latency-critical path) carrying the PREVIOUS turn's
             # directive (clinical semantics: insight steers the next turn). The
@@ -115,8 +124,9 @@ async def think(request: Request):
             extra: Dict[str, Any] = {}
             if use_router:
                 extra["skip_clinical"] = True
-                if prev_directive:
-                    extra["voice_directive"] = prev_directive
+                vd = " ".join(x for x in (prev_directive, brief) if x)
+                if vd:
+                    extra["voice_directive"] = vd[:300]
             core_gen = stream_tara(
                 query=query, session_id=session_id, user_id=user_id,
                 org_id=org_id, language=language, mode=mode, extra=extra or None,
@@ -126,9 +136,16 @@ async def think(request: Request):
                 persona, decision = await asyncio.gather(
                     get_persona(user_id, org_id),
                     route(persona_name="TARA", goal="",
-                          messages=messages, prev_directive=prev_directive),
+                          messages=messages, prev_directive=prev_directive,
+                          goal_state=state.get("goal_state", ""),
+                          facts=state.get("facts", [])),
                 )
                 state["directive"] = decision.get("directive") or prev_directive
+                state["goal_state"] = decision.get("goal_state") or state.get("goal_state", "")
+                for f in decision.get("new_facts", []):
+                    if f and f not in state["facts"]:
+                        state["facts"].append(f)
+                state["facts"] = state["facts"][-12:]  # cap the brief
 
             if use_router and decision["action"] == "direct":
                 path = "direct"
@@ -147,7 +164,9 @@ async def think(request: Request):
                     language=language,
                     directive=decision.get("directive", ""),
                     messages=messages,
-                    history_turns=decision.get("history_turns", 1),
+                    history_turns=decision.get("history_turns", 3),
+                    goal_state=state.get("goal_state", ""),
+                    facts=state.get("facts", []),
                 ):
                     if first_ms is None:
                         first_ms = round((time.monotonic() - t0) * 1000)

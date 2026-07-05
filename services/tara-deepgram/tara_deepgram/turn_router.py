@@ -31,40 +31,53 @@ from . import config
 
 log = logging.getLogger("tara_dg.router")
 
-_ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent.
-Decide how to answer the user's LAST message. Reply with ONLY minified JSON:
-{"action":"direct|recall","history_turns":N,"directive":"one short strategic line"}
+_ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent on a live call.
+Your job every turn: (1) route the answer, (2) DRIVE the call toward its goal,
+(3) keep a running memory of important facts. Reply ONLY minified JSON:
+{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."]}
 
-action rules:
-- "recall": the message asks about facts, people, products, prices, company info,
-  documents, history of the org, or anything you could get wrong without the
+action:
+- "recall": message needs facts about the company, people, products, prices,
+  documents, or org history — anything you could get wrong without the
   knowledge base. WHEN IN DOUBT → "recall".
-- "direct": pure conversation mechanics — greetings, thanks, confirmations,
-  small talk, asking the user to repeat, simple arithmetic, or rephrasing
-  something already said in the visible conversation.
+- "direct": conversation mechanics — greetings, thanks, confirmations, small
+  talk, repeats, or things fully answerable from the visible conversation.
 
-history_turns: how many previous turns the answer needs (0-8). 1 for standalone,
-more when the user refers back ("as I said", pronouns, follow-ups).
+history_turns: previous turns the answer needs (2-8). Minimum 2; more when the
+user refers back (pronouns, "as I said", follow-ups).
 
-directive: ONE line steering the next reply in persona — tone + move
-(e.g. "warm; answer plainly then ask which product line they mean").
-No markdown, no extra keys."""
+directive: ONE line = tone + the concrete NEXT MOVE toward the goal
+(e.g. "warm; answer, then ask their timeline — budget already known").
+Every directive must advance the goal. If the user changed topic or resists,
+ADAPT the route to the goal, don't repeat the failed move.
+
+goal_state: one line of goal progress, updated every turn
+(e.g. "qualify lead: interest=high, budget=unknown, timeline=Q3").
+Carry forward what's known; never drop established progress.
+
+new_facts: 0-3 NEW durable facts the user just revealed (name, role, company,
+constraints, preferences, commitments). Only genuinely new ones. [] if none."""
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
 async def route(*, persona_name: str, goal: str,
-                messages: List[Dict[str, Any]], prev_directive: str = "") -> Dict[str, Any]:
-    """One fast-model call → routing decision + strategic directive."""
-    fallback = {"action": "recall", "history_turns": 2, "directive": prev_directive or ""}
+                messages: List[Dict[str, Any]], prev_directive: str = "",
+                goal_state: str = "", facts: List[str] | None = None) -> Dict[str, Any]:
+    """One fast-model call → route + goal-directed directive + fact extraction."""
+    fallback = {"action": "recall", "history_turns": 3, "directive": prev_directive or "",
+                "goal_state": goal_state, "new_facts": []}
     if not config.OPENROUTER_API_KEY:
         return fallback
 
-    # Compact last 4 turns — router context stays tiny regardless of call length.
-    recent = [m for m in messages if m.get("role") in ("user", "assistant")][-4:]
+    # Compact last 6 turns — router context stays bounded regardless of call length;
+    # long-range memory lives in the session brief (facts + goal_state), not the window.
+    recent = [m for m in messages if m.get("role") in ("user", "assistant")][-6:]
     convo = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:200]}" for m in recent)
     user = (
-        f"Persona: {persona_name or 'TARA'} | Call goal: {goal or 'assist the caller'}\n"
+        f"Persona: {persona_name or 'TARA'} | Call goal: {goal or 'assist the caller and advance the persona goal'}\n"
+        + (f"Goal state so far: {goal_state}\n" if goal_state else "")
+        + (f"Known facts: {'; '.join(facts)}\n" if facts else "")
         + (f"Previous directive: {prev_directive}\n" if prev_directive else "")
         + f"Conversation (last turns):\n{convo}"
     )
@@ -80,7 +93,7 @@ async def route(*, persona_name: str, goal: str,
                     "model": config.ROUTER_MODEL,
                     "messages": [{"role": "system", "content": _ROUTER_SYS},
                                  {"role": "user", "content": user}],
-                    "max_tokens": 200,
+                    "max_tokens": 300,
                     "temperature": 0.2,
                     "provider": {"sort": "latency", "allow_fallbacks": True},
                 },
@@ -92,25 +105,34 @@ async def route(*, persona_name: str, goal: str,
         m = _JSON_RE.search(text)
         out = json.loads(m.group(0)) if m else {}
         action = out.get("action") if out.get("action") in ("direct", "recall") else "recall"
-        turns = min(max(int(out.get("history_turns", 2) or 2), 0), 8)
+        turns = min(max(int(out.get("history_turns", 3) or 3), 2), 8)
         directive = str(out.get("directive") or "")[:300]
+        new_goal = str(out.get("goal_state") or goal_state or "")[:300]
+        new_facts = [str(f)[:160] for f in (out.get("new_facts") or []) if f][:3]
         ms = round((time.monotonic() - t0) * 1000)
-        log.info("router action=%s turns=%d ms=%d", action, turns, ms)
-        return {"action": action, "history_turns": turns, "directive": directive, "router_ms": ms}
+        log.info("router action=%s turns=%d facts+%d ms=%d goal=%s",
+                 action, turns, len(new_facts), ms, new_goal[:60])
+        return {"action": action, "history_turns": turns, "directive": directive,
+                "goal_state": new_goal, "new_facts": new_facts, "router_ms": ms}
     except Exception as e:  # noqa: BLE001
         log.warning("router failed (%s) — fallback to recall", e)
         return fallback
 
 
 async def answer_direct(*, persona_prompt: str, language: str, directive: str,
-                        messages: List[Dict[str, Any]], history_turns: int):
+                        messages: List[Dict[str, Any]], history_turns: int,
+                        goal_state: str = "", facts: List[str] | None = None):
     """Local persona answer (no recall, no core): async generator of text chunks."""
     convo = [m for m in messages if m.get("role") in ("user", "assistant")]
-    window = convo[-(max(history_turns, 0) * 2 + 1):] if history_turns >= 0 else convo[-1:]
+    # Floor of 3 turns so pronouns/follow-ups always have context even when the
+    # router under-estimates; long-range memory rides the [REMEMBER] brief.
+    window = convo[-(max(history_turns, 3) * 2 + 1):]
     sys = (
         f"[LANGUAGE] Respond ONLY in {language}.\n\n"
         + (persona_prompt or "You are TARA, a warm professional voice agent.")
         + "\n\n[VOICE] Spoken reply: 1-2 short natural sentences, no lists, no markdown."
+        + (f"\n[REMEMBER] Facts from this call: {'; '.join(facts)}" if facts else "")
+        + (f"\n[GOAL] {goal_state}" if goal_state else "")
         + (f"\n[STRATEGY] {directive}" if directive else "")
     )
     payload = {

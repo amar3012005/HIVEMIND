@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
+
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -71,27 +73,64 @@ async def browser_voice(ws: WebSocket):
     )
 
 
-# Aura-2 voices for the picker (mirrors tara-aaas /voices shape).
-_AURA_VOICES = [
+# Aura-2 voices — full catalog fetched live from Deepgram /v1/models (90 voices,
+# 7 languages as of 2026-07) with a 1h cache; static fallback if the API is down.
+_AURA_FALLBACK = [
     {"id": "aura-2-thalia-en",  "name": "Thalia",  "gender": "feminine",  "language": "en", "description": "Clear, confident, energetic (US)"},
-    {"id": "aura-2-andromeda-en", "name": "Andromeda", "gender": "feminine", "language": "en", "description": "Casual, expressive (US)"},
     {"id": "aura-2-apollo-en",  "name": "Apollo",  "gender": "masculine", "language": "en", "description": "Confident, casual (US)"},
-    {"id": "aura-2-arcas-en",   "name": "Arcas",   "gender": "masculine", "language": "en", "description": "Natural, smooth (US)"},
-    {"id": "aura-2-draco-en",   "name": "Draco",   "gender": "masculine", "language": "en", "description": "Warm, trustworthy (GB)"},
     {"id": "aura-2-eos-de",     "name": "Eos",     "gender": "feminine",  "language": "de", "description": "Warm, natural (DE)"},
     {"id": "aura-2-celeste-es", "name": "Celeste", "gender": "feminine",  "language": "es", "description": "Clear, energetic (ES)"},
     {"id": "aura-2-agathe-fr",  "name": "Agathe",  "gender": "feminine",  "language": "fr", "description": "Warm, natural (FR)"},
     {"id": "aura-2-lotte-nl",   "name": "Lotte",   "gender": "feminine",  "language": "nl", "description": "Natural (NL)"},
 ]
+_voice_cache: dict = {"at": 0.0, "voices": []}
+
+
+async def _aura_catalog() -> list[dict]:
+    import time as _t
+    if _voice_cache["voices"] and _t.time() - _voice_cache["at"] < 3600:
+        return _voice_cache["voices"]
+    if not config.DEEPGRAM_API_KEY:
+        return _AURA_FALLBACK
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get("https://api.deepgram.com/v1/models",
+                            headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}"})
+        models = (r.json() or {}).get("tts", []) if r.status_code == 200 else []
+        out = []
+        for m in models:
+            cn = m.get("canonical_name", "")
+            if not cn.startswith("aura-2-"):
+                continue
+            meta = m.get("metadata") or {}
+            tags = meta.get("tags") or []
+            gender = "feminine" if "feminine" in tags else ("masculine" if "masculine" in tags else "")
+            lang = (m.get("languages") or ["en"])[0].split("-")[0]
+            traits = [t for t in tags if t not in ("feminine", "masculine")][:3]
+            out.append({
+                "id": cn,
+                "name": meta.get("display_name") or m.get("name", "").title(),
+                "gender": gender, "language": lang,
+                "description": f"{', '.join(traits).title()} ({meta.get('accent', '')})".strip(),
+                "sample": meta.get("sample"),
+            })
+        if out:
+            out.sort(key=lambda v: (v["language"] != "en", v["language"], v["name"]))
+            _voice_cache.update({"at": _t.time(), "voices": out})
+            return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("aura catalog fetch failed: %s", e)
+    return _voice_cache["voices"] or _AURA_FALLBACK
 
 
 @app.get("/voices")
 async def list_voices(language: str | None = None, gender: str | None = None):
-    out = [v for v in _AURA_VOICES if not language or v["language"] == language]
+    catalog = await _aura_catalog()
+    out = [v for v in catalog if not language or v["language"] == language]
     if gender:
         g = gender.lower()[:3]  # 'fem'/'mas' matches feminine/masculine
         out = [v for v in out if v["gender"].startswith(g)]
-    langs = sorted({v["language"] for v in _AURA_VOICES})
+    langs = sorted({v["language"] for v in catalog})
     return {"voices": out, "languages": langs, "count": len(out)}
 
 

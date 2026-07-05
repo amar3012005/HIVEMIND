@@ -34,6 +34,8 @@ _AURA_BY_LANG = {
     "es": "aura-2-celeste-es",
     "fr": "aura-2-agathe-fr",
     "nl": "aura-2-lotte-nl",
+    "it": "aura-2-livia-it",
+    "ja": "aura-2-izanami-ja",
 }
 
 

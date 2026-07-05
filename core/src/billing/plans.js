@@ -41,6 +41,7 @@ export const PLANS = {
       maxUsers: 1,
       maxConnectors: 3,
       knowledgeBaseUploadsPerMonth: 10,
+      knowledgeBasePagesPerMonth: 100,
       maxHyperRooms: 1,
     },
     features: {
@@ -56,7 +57,7 @@ export const PLANS = {
   pro: {
     id: 'pro',
     name: 'Pro',
-    price: 19,
+    price: 79,
     currency: 'EUR',
     limits: {
       maxMemories: 25_000,
@@ -67,6 +68,7 @@ export const PLANS = {
       maxUsers: 5,
       maxConnectors: 10,
       knowledgeBaseUploadsPerMonth: -1, // unlimited
+      knowledgeBasePagesPerMonth: 1_000,
       maxHyperRooms: 5,
     },
     features: {
@@ -80,7 +82,7 @@ export const PLANS = {
   scale: {
     id: 'scale',
     name: 'Scale',
-    price: 199,
+    price: 239,
     currency: 'EUR',
     limits: {
       maxMemories: 250_000,
@@ -91,6 +93,7 @@ export const PLANS = {
       maxUsers: 25,
       maxConnectors: -1, // unlimited
       knowledgeBaseUploadsPerMonth: -1,
+      knowledgeBasePagesPerMonth: 10_000,
       maxHyperRooms: 25,
     },
     features: {
@@ -120,6 +123,7 @@ export const PLANS = {
       maxUsers: -1,
       maxConnectors: -1,
       knowledgeBaseUploadsPerMonth: -1,
+      knowledgeBasePagesPerMonth: -1,
       maxHyperRooms: -1,
     },
     features: {

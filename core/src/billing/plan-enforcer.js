@@ -13,6 +13,40 @@
 
 import { currentApiKey } from '../db/prisma.js';
 
+/**
+ * Plan-tier ladder for upgrade suggestions.
+ * free → pro → scale → enterprise → null (top).
+ */
+const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
+
+/**
+ * Build the canonical plan-limit-exceeded response body (the LIMIT-EXCEEDED
+ * RESPONSE CONTRACT the frontend keys off). Pure function — no I/O.
+ *
+ * @param {{allowed:boolean, reason?:string, limit?:number, current?:number, plan?:string}} check
+ *        The object returned by PlanEnforcer.checkLimit().
+ * @param {'kbPages'|'uploads'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'hyperRooms'|'users'} resource
+ * @returns {object} Contract body to send with HTTP 402.
+ */
+export function planLimitBody(check, resource) {
+  const c = check || {};
+  const plan = c.plan || 'free';
+  const suggested = Object.prototype.hasOwnProperty.call(PLAN_LADDER, plan)
+    ? PLAN_LADDER[plan]
+    : 'pro';
+  return {
+    error: 'plan_limit_exceeded',   // stable string (machine + legacy display)
+    code: 'plan_limit_exceeded',    // stable machine code the FE keys off
+    message: c.reason || 'Plan limit exceeded',
+    resource,
+    plan,
+    limit: c.limit ?? null,
+    current: c.current ?? null,
+    suggested_plan: suggested,      // next tier up, or null at enterprise
+    upgrade_url: '/hivemind/app/billing',
+  };
+}
+
 export class PlanEnforcer {
   /**
    * @param {object} prisma       Prisma client

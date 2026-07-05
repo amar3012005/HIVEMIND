@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from . import campaigns, config, telephony
 from .agent_session import run_bridge
+from .browser_voice import handle_browser_voice
 from .think_shim import router as think_router
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +54,67 @@ async def health():
         "allowlist_size": len(config.TELNYX_ALLOWED_NUMBERS),
         "max_parallel": config.CAMPAIGN_MAX_PARALLEL,
     }
+
+
+# Browser mic widget (Talk to TARA) — same protocol as tara-aaas /voice.
+@app.websocket("/voice")
+async def browser_voice(ws: WebSocket):
+    qp = ws.query_params
+    await handle_browser_voice(
+        ws,
+        session_id=qp.get("session_id") or "dg-web-session",
+        user_id=qp.get("user_id") or None,
+        org_id=qp.get("org_id") or None,
+        language=(qp.get("language") or "en").split("-")[0],
+        voice_id=qp.get("voice_id") or None,
+        mode=qp.get("mode") or "external",
+    )
+
+
+# Aura-2 voices for the picker (mirrors tara-aaas /voices shape).
+_AURA_VOICES = [
+    {"id": "aura-2-thalia-en",  "name": "Thalia",  "gender": "feminine",  "language": "en", "description": "Clear, confident, energetic (US)"},
+    {"id": "aura-2-andromeda-en", "name": "Andromeda", "gender": "feminine", "language": "en", "description": "Casual, expressive (US)"},
+    {"id": "aura-2-apollo-en",  "name": "Apollo",  "gender": "masculine", "language": "en", "description": "Confident, casual (US)"},
+    {"id": "aura-2-arcas-en",   "name": "Arcas",   "gender": "masculine", "language": "en", "description": "Natural, smooth (US)"},
+    {"id": "aura-2-draco-en",   "name": "Draco",   "gender": "masculine", "language": "en", "description": "Warm, trustworthy (GB)"},
+    {"id": "aura-2-eos-de",     "name": "Eos",     "gender": "feminine",  "language": "de", "description": "Warm, natural (DE)"},
+    {"id": "aura-2-celeste-es", "name": "Celeste", "gender": "feminine",  "language": "es", "description": "Clear, energetic (ES)"},
+    {"id": "aura-2-agathe-fr",  "name": "Agathe",  "gender": "feminine",  "language": "fr", "description": "Warm, natural (FR)"},
+    {"id": "aura-2-lotte-nl",   "name": "Lotte",   "gender": "feminine",  "language": "nl", "description": "Natural (NL)"},
+]
+
+
+@app.get("/voices")
+async def list_voices(language: str | None = None, gender: str | None = None):
+    out = [v for v in _AURA_VOICES if not language or v["language"] == language]
+    if gender:
+        g = gender.lower()[:3]  # 'fem'/'mas' matches feminine/masculine
+        out = [v for v in out if v["gender"].startswith(g)]
+    langs = sorted({v["language"] for v in _AURA_VOICES})
+    return {"voices": out, "languages": langs, "count": len(out)}
+
+
+@app.get("/voice-preview")
+async def voice_preview(voice_id: str, text: str | None = None, language: str = "en"):
+    if not config.DEEPGRAM_API_KEY:
+        return JSONResponse({"error": "tts_unavailable"}, status_code=503)
+    import httpx
+    from fastapi.responses import Response
+    sample = (text or "Hi, this is how I sound. How can I help you today?")[:200]
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                f"https://api.deepgram.com/v1/speak?model={voice_id}",
+                headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"text": sample},
+            )
+        if r.status_code != 200:
+            return JSONResponse({"error": "preview_failed", "detail": r.text[:200]}, status_code=502)
+        return Response(content=r.content, media_type="audio/mpeg")
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=502)
 
 
 if config.TARA_DG_ENABLED:

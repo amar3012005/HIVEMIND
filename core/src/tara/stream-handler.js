@@ -153,7 +153,11 @@ export class TaraStreamHandler {
       // mode='internal' → direct humanized recall, NO clinical reasoning layer.
       // mode='external' (default) → full current behavior (clinical if configured).
       const internalMode = (params.mode || 'external') === 'internal';
-      const hasClinical = !internalMode && !!config.clinical_prompt;
+      // skip_clinical=true (voice-v2 shim): the caller runs its own strategic
+      // per-turn directive and passes it as voice_directive — the accumulating
+      // clinical loop is skipped entirely for these sessions (token saving).
+      const skipClinical = params.skip_clinical === true;
+      const hasClinical = !internalMode && !skipClinical && !!config.clinical_prompt;
 
       // Store clinical config in session state for post-turn use
       if (hasClinical) {
@@ -182,8 +186,12 @@ export class TaraStreamHandler {
         voiceOptimized: config.voice_optimized !== false,
         interruptedText,
         interruptionType,
-        // Pass the latest clinical insight (single directive, not the full history)
-        clinicalInsight: hasClinical ? (sessionState.clinical_insights || null) : null,
+        // Pass the latest clinical insight (single directive, not the full history).
+        // voice_directive: caller-supplied one-line strategy (voice-v2 shim) —
+        // same prompt slot, no clinical engine run.
+        clinicalInsight: params.voice_directive
+          ? { directive: String(params.voice_directive).slice(0, 300) }
+          : (hasClinical ? (sessionState.clinical_insights || null) : null),
       });
 
       this._writeLine(res, {

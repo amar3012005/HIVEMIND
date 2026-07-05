@@ -319,6 +319,14 @@ _GOOGLE_TOOL_NAMES = {n for tools in _GOOGLE_READ_TOOLS.values() for (n, *_rest)
 # connector tools exposed to the director, and per-connector cap for MCP discovery.
 _CONNECTOR_TOOL_CAP = max(0, int(os.environ.get("HYPER_CONNECTOR_TOOL_CAP", "8") or "8"))
 _MCP_TOOLS_PER_CONNECTOR = max(1, int(os.environ.get("HYPER_MCP_TOOLS_PER_CONNECTOR", "4") or "4"))
+# connection_search (eve's lazy connector-tool discovery, adapted): instead of listing EVERY
+# registered connector tool in the gather-plan prompt, surface only the ones lexically relevant
+# to this task + one entry-point tool per connector (so none becomes unreachable). Deterministic
+# — NO extra LLM call, because an LLM "search" call would cost more tokens than the compact
+# name-list (~60-120 tok) it saves at this scale. The win scales with connector count / a raised
+# HYPER_CONNECTOR_TOOL_CAP. Flag-gated, default OFF. Full routes stay reachable if named.
+_CONNECTION_SEARCH = os.environ.get("HYPER_CONNECTION_SEARCH", "0").strip().lower() not in ("0", "false", "no", "off")
+_CONN_SEARCH_KEEP = max(2, int(os.environ.get("HYPER_CONN_SEARCH_KEEP", "6") or "6"))
 _READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "lookup", "describe", "recent", "view")
 
 # ── Population-Sim (ADDITIONAL, opt-in) — a cheap many-voice social simulation that runs
@@ -1436,12 +1444,40 @@ class Director:
         )
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
+    def _relevant_connector_names(self, all_names: List[str], topic: str) -> List[str]:
+        """connection_search: rank registered connector tools by lexical relevance to the
+        task and keep the top-K, ALWAYS keeping one entry-point (search/list/fetch/query)
+        tool per connector so no connector becomes unreachable. Deterministic — no extra
+        LLM call. Flag OFF (or a small list) → returns all_names unchanged."""
+        if not _CONNECTION_SEARCH or len(all_names) <= _CONN_SEARCH_KEEP:
+            return all_names
+        toks = {w for w in re.split(r"\W+", (topic or "").lower()) if len(w) > 2}
+        def _score(n: str) -> int:
+            parts = {p for p in re.split(r"[_\-]+", n.lower()) if len(p) > 2}
+            return len(parts & toks)
+        by_conn: Dict[str, List[str]] = {}
+        for n in all_names:
+            c = n.split("__")[0] if "__" in n else n.split("_")[0]
+            by_conn.setdefault(c, []).append(n)
+        keep = set()
+        for _c, names in by_conn.items():
+            entry = next((n for n in names if any(k in n.lower() for k in ("search", "list", "fetch", "query"))), names[0])
+            keep.add(entry)
+        for n in sorted(all_names, key=_score, reverse=True):
+            if len(keep) >= _CONN_SEARCH_KEEP:
+                break
+            keep.add(n)
+        return [n for n in all_names if n in keep]
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
         tool-calling — reliable on gpt-oss + a single round-trip (replaces the old 15-call
-        sequential agentic loop)."""
-        conn = list(self._connector_routes.keys())
+        sequential agentic loop). connection_search (flag) trims the surfaced tool list."""
+        conn_all = list(self._connector_routes.keys())
+        conn = self._relevant_connector_names(conn_all, f"{self.user_message or ''} {self.room_goal or ''}")
+        if _CONNECTION_SEARCH and len(conn) < len(conn_all):
+            log.info("[hyper-engine] connection_search: surfaced %d/%d connector tools", len(conn), len(conn_all))
         conn_line = (f"Connector READ tools available (use these EXACT names): {conn}."
                      if conn else "No external connectors are connected.")
         web_line = ("Web search IS available (external/public facts only)." if self._web_budget > 0

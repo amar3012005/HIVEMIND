@@ -49,6 +49,13 @@ TELNYX_ALLOWED_NUMBERS = [
     n.strip() for n in os.getenv("TELNYX_ALLOWED_NUMBERS", "").split(",") if n.strip()
 ]
 
+# ── Voice-v2 turn strategy (router replaces per-turn recall + clinical loop) ─
+VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-20b")
+DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "meta-llama/llama-3.3-70b-instruct")
+
 # ── Campaign engine ──────────────────────────────────────────────────────────
 # Deepgram PAYG cap = 15 concurrent agent sessions; stay well under.
 CAMPAIGN_MAX_PARALLEL = int(os.getenv("TARA_DG_CAMPAIGN_MAX_PARALLEL", "3"))

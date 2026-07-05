@@ -67,6 +67,19 @@ FUNCTION_DEFS: list[dict] = [
         "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}},
     },
     {
+        "name": "get_conversation_history",
+        "description": (
+            "Retrieve earlier turns of THIS phone call when the caller refers to "
+            "something said before that you can no longer see."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"turns_behind": {"type": "integer",
+                                            "description": "How many turns back to retrieve (1-20)"}},
+            "required": ["turns_behind"],
+        },
+    },
+    {
         "name": "end_call",
         "description": "End the phone call after saying goodbye, or when the conversation is complete.",
         "parameters": {
@@ -89,13 +102,15 @@ class FunctionExecutor:
 
     def __init__(self, *, session_id: str, user_id: str | None, org_id: str | None,
                  language: str, event_logger: Callable[[str, dict], None],
-                 request_hangup: Callable[[], Coroutine[Any, Any, None]]):
+                 request_hangup: Callable[[], Coroutine[Any, Any, None]],
+                 get_history: Callable[[int], str] | None = None):
         self.session_id = session_id
         self.user_id = user_id
         self.org_id = org_id
         self.language = language
         self._log_event = event_logger
         self._request_hangup = request_hangup
+        self._get_history = get_history
         self.hangup_requested = False
 
     async def execute(self, name: str, arguments: str) -> str:
@@ -117,6 +132,12 @@ class FunctionExecutor:
                 elif evt["type"] == "final" and evt.get("full_text"):
                     full = evt["full_text"]
             return full or "No relevant information found."
+
+        if name == "get_conversation_history":
+            n = min(max(int(args.get("turns_behind", 5) or 5), 1), 20)
+            if self._get_history:
+                return self._get_history(n) or "No earlier turns recorded."
+            return "History unavailable."
 
         if name in ("log_lead", "schedule_callback", "mark_do_not_call"):
             # Durable record = the JSONL event log (campaign engine collects it).

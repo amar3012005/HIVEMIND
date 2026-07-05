@@ -353,6 +353,7 @@ const routes = {
     if (f.cognitive_layer_role === null) conds.push('cognitive_layer_role IS NULL');
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
     if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
+    if (Array.isArray(f.tags) && f.tags.length) { args.push(f.tags); conds.push(`tags @> $${args.length}`); }
     if (f.created_after) { args.push(f.created_after); conds.push(`created_at >= $${args.length}::timestamptz`); }
     if (b.cursor) { args.push(b.cursor); conds.push(`created_at < $${args.length}::timestamptz`); }
     args.push(Math.min(b.limit || 100, 500));
@@ -938,6 +939,40 @@ const routes = {
       if (!sets.length) return { ok: true };
       await pg.query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
       return { ok: true };
+    }
+    if (op === 'turn') {
+      // One row per conversational turn: role='turn', content = JSON payload
+      // {seq, user_text, agent_text, llm_ttfb_ms} — the FE pair shape without
+      // a schema change.
+      const sid = b.session_id;
+      if (!sid) return { ok: false, error: 'session_id required' };
+      const { rows } = await pg.query('SELECT id FROM tara_calls WHERE session_id=$1 AND org_id=$2', [sid, ORG]);
+      const callId = rows[0]?.id;
+      if (!callId) return { ok: false, error: 'call not found' };
+      await pg.query(
+        'INSERT INTO tara_turns (org_id, call_id, role, content) VALUES ($1,$2,$3,$4)',
+        [ORG, callId, 'turn', JSON.stringify({
+          seq: b.seq || null, user_text: b.user_text || '', agent_text: b.agent_text || '',
+          llm_ttfb_ms: b.llm_ttfb_ms || null,
+        })]);
+      return { ok: true };
+    }
+    if (op === 'list') {
+      const lim = Math.min(100, Number(b.limit) || 30);
+      const { rows } = await pg.query(
+        `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+         FROM tara_calls WHERE org_id=$1 ORDER BY created_at DESC LIMIT $2`, [ORG, lim]);
+      return { calls: rows };
+    }
+    if (op === 'detail') {
+      const { rows } = await pg.query(
+        `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+         FROM tara_calls WHERE id=$1 AND org_id=$2`, [b.id, ORG]);
+      if (!rows[0]) return { call: null, turns: [] };
+      const t = await pg.query(
+        'SELECT content, created_at FROM tara_turns WHERE call_id=$1 AND org_id=$2 ORDER BY created_at ASC',
+        [b.id, ORG]);
+      return { call: rows[0], turns: t.rows };
     }
     return { ok: false, error: `unknown op: ${op}` };
   },

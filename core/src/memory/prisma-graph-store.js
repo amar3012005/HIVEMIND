@@ -675,6 +675,9 @@ export class PrismaGraphStore {
       if (memory_type) filter.memory_type = Array.isArray(memory_type) ? memory_type : [memory_type];
       if (is_latest !== undefined) filter.is_latest = is_latest;
       if (user_id) filter.user_id = user_id;
+      // Tags MUST reach the agent: tara-config / skills / any tag-scoped lookup
+      // otherwise returns the newest arbitrary memories (config-as-session-junk bug).
+      if (Array.isArray(tags) && tags.length) filter.tags = tags;
       // Pass offset so the FE's offset-based "load more" actually pages through the agent (was stuck on
       // page 1 — agent ignored offset and the FE doesn't use cursors).
       const { memories } = await remoteList(_org, filter, null, limit, offset);

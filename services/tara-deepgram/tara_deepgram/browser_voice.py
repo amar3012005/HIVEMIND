@@ -23,6 +23,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from . import config
 from .agent_session import build_settings
+from .core_client import core_post
 
 log = logging.getLogger("tara_dg.browser")
 
@@ -90,6 +91,10 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
                         await dg.send(data)
                 closed.set()
 
+            # Call-history state: pair each assistant reply with the preceding
+            # user utterance and ingest as a turn (same core API as tara-aaas).
+            turn = {"n": 0, "user_text": "", "latency_ms": None}
+
             async def dg_to_browser() -> None:
                 while not closed.is_set():
                     try:
@@ -105,14 +110,34 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
                     etype = evt.get("type")
                     if etype == "SettingsApplied":
                         await ws.send_text(json.dumps({"type": "ready"}))
+                        asyncio.create_task(core_post("/api/tara/calls/start", {
+                            "session_id": session_id, "mode": mode,
+                            "voice_id": voice_id, "language": language,
+                        }, user_id, org_id))
                     elif etype == "ConversationText":
+                        role, content = evt.get("role"), evt.get("content")
                         await ws.send_text(json.dumps({
-                            "type": "transcript",
-                            "role": evt.get("role"),
-                            "text": evt.get("content"),
+                            "type": "transcript", "role": role, "text": content,
                         }))
+                        if role == "user":
+                            turn["user_text"] = content
+                        elif role == "assistant":
+                            turn["n"] += 1
+                            asyncio.create_task(core_post("/api/tara/calls/turn", {
+                                "session_id": session_id, "seq": turn["n"],
+                                "user_text": turn["user_text"], "agent_text": content,
+                                "llm_ttfb_ms": turn["latency_ms"],
+                            }, user_id, org_id))
+                            turn["user_text"] = ""
                     elif etype == "UserStartedSpeaking":
                         await ws.send_text(json.dumps({"type": "speech_start"}))
+                    elif etype == "AgentStartedSpeaking":
+                        turn["latency_ms"] = round(float(evt.get("total_latency") or 0) * 1000) or None
+                        log.info("latency session=%s total=%.0fms ttt=%.0fms tts=%.0fms",
+                                 session_id,
+                                 float(evt.get("total_latency") or 0) * 1000,
+                                 float(evt.get("ttt_latency") or 0) * 1000,
+                                 float(evt.get("tts_latency") or 0) * 1000)
                     elif etype == "AgentAudioDone":
                         await ws.send_text(json.dumps({"type": "turn_done"}))
                     elif etype == "Error":
@@ -143,6 +168,11 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
         except Exception:  # noqa: BLE001
             pass
     finally:
+        # Finalize call history (+ triggers core-side session insights).
+        try:
+            await core_post("/api/tara/calls/end", {"session_id": session_id}, user_id, org_id)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await ws.close()
         except Exception:  # noqa: BLE001

@@ -1,16 +1,24 @@
 """
-OpenAI-Chat-Completions-compatible shim over HIVEMIND /api/tara/stream.
+OpenAI-Chat-Completions-compatible shim over HIVEMIND — the Deepgram Voice
+Agent's `think` endpoint.
 
-Deepgram Voice Agent's `think.endpoint` points here. Each turn Deepgram POSTs the
-conversation in OpenAI format; we take the latest user utterance, run it through
-stream_tara (recall-grounded, skill-prompted, external-mode hardened) and stream
-the answer back as SSE chunks — so the voice agent's brain IS HIVEMIND.
+Voice-v2 strategy (TARA_DG_STRATEGY=router, default):
+  Each turn, ONE tiny fast-model call (turn_router.route) decides:
+    direct → answer locally with the selected skill's persona + the last N
+             turns Deepgram already sent (no recall, no memory in prompt)
+    recall → HIVEMIND /api/tara/stream with skip_clinical=true and the
+             router's one-line directive as voice_directive (memory only
+             when needed; the accumulating clinical loop never runs)
+  The router's directive IS the strategic clinical layer — persona-aware,
+  refreshed every turn, ~150 tokens instead of an unbounded analysis chain.
 
-Per-call identity (session/user/org/language/mode) is carried in the endpoint URL
-query string, set when we build the Deepgram Settings for that call.
+Legacy strategy (TARA_DG_STRATEGY=legacy): every turn straight to core.
+
+Per-call identity rides the endpoint URL query string (set in Settings).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -21,11 +29,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config
+from .core_client import get_persona
 from .tara_stream import stream_tara
+from .turn_router import answer_direct, route
 
 log = logging.getLogger("tara_dg.think")
 
 router = APIRouter()
+
+# Per-session strategy state (last directive). Single replica; tiny.
+_session_state: dict[str, dict] = {}
 
 
 def _authorized(request: Request) -> bool:
@@ -36,13 +49,16 @@ def _authorized(request: Request) -> bool:
     return secrets.compare_digest(token, config.THINK_SHIM_SECRET)
 
 
+def _content_str(c: Any) -> str:
+    if isinstance(c, list):  # OpenAI content-parts form
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+    return str(c or "")
+
+
 def _last_user_message(messages: list[dict]) -> str:
     for m in reversed(messages or []):
         if m.get("role") == "user":
-            c = m.get("content")
-            if isinstance(c, list):  # OpenAI content-parts form
-                return " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-            return str(c or "")
+            return _content_str(m.get("content"))
     return ""
 
 
@@ -63,7 +79,8 @@ async def think(request: Request):
 
     body = await request.json()
     qp = request.query_params
-    query = _last_user_message(body.get("messages", []))
+    messages = body.get("messages", [])
+    query = _last_user_message(messages)
     if not query.strip():
         return JSONResponse({"error": "no user message"}, status_code=400)
 
@@ -74,22 +91,98 @@ async def think(request: Request):
     mode = qp.get("mode") or "external"
     model = body.get("model") or "hivemind-tara"
     chunk_id = f"chatcmpl-{secrets.token_hex(8)}"
+    t0 = time.monotonic()
+
+    use_router = config.VOICE_STRATEGY == "router" and bool(config.OPENROUTER_API_KEY)
 
     async def sse() -> AsyncGenerator[str, None]:
         yield _chunk(chunk_id, model, {"role": "assistant"})
         produced = False
-        async for evt in stream_tara(
-            query=query, session_id=session_id, user_id=user_id,
-            org_id=org_id, language=language, mode=mode,
-        ):
-            if evt["type"] == "token" and evt["text"]:
-                produced = True
-                yield _chunk(chunk_id, model, {"content": evt["text"]})
-            elif evt["type"] == "error":
-                log.error("think shim upstream error session=%s: %s", session_id, evt["error"])
-                if not produced:
-                    yield _chunk(chunk_id, model, {"content": "I'm sorry, I couldn't reach my knowledge base just now."})
-                break
+        first_ms = None
+        path = "core-legacy"
+        decision = {"action": "recall", "history_turns": 2, "directive": ""}
+        try:
+            persona = {}
+            if len(_session_state) > 500:  # bound memory across long uptimes
+                _session_state.clear()
+            state = _session_state.setdefault(session_id, {"directive": ""})
+            prev_directive = state.get("directive", "")
+            # Speculative parallel start: core recall stream launches immediately
+            # (it is the latency-critical path) carrying the PREVIOUS turn's
+            # directive (clinical semantics: insight steers the next turn). The
+            # router races it: "direct" → core stream cancelled before the LLM
+            # matters; "recall" → the router added zero latency.
+            extra: Dict[str, Any] = {}
+            if use_router:
+                extra["skip_clinical"] = True
+                if prev_directive:
+                    extra["voice_directive"] = prev_directive
+            core_gen = stream_tara(
+                query=query, session_id=session_id, user_id=user_id,
+                org_id=org_id, language=language, mode=mode, extra=extra or None,
+            )
+            core_first = asyncio.ensure_future(core_gen.__anext__())
+            if use_router:
+                persona, decision = await asyncio.gather(
+                    get_persona(user_id, org_id),
+                    route(persona_name="TARA", goal="",
+                          messages=messages, prev_directive=prev_directive),
+                )
+                state["directive"] = decision.get("directive") or prev_directive
+
+            if use_router and decision["action"] == "direct":
+                path = "direct"
+                core_first.cancel()
+                try:
+                    await core_first  # let the cancellation land before closing
+                except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
+                    pass
+                try:
+                    await core_gen.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+                prompt_key = "internal_prompt" if mode == "internal" else "system_prompt"
+                async for text in answer_direct(
+                    persona_prompt=persona.get(prompt_key) or "",
+                    language=language,
+                    directive=decision.get("directive", ""),
+                    messages=messages,
+                    history_turns=decision.get("history_turns", 1),
+                ):
+                    if first_ms is None:
+                        first_ms = round((time.monotonic() - t0) * 1000)
+                    produced = True
+                    yield _chunk(chunk_id, model, {"content": text})
+            else:
+                path = "recall" if use_router else "core-legacy"
+
+                async def _events():
+                    try:
+                        yield await core_first
+                    except StopAsyncIteration:
+                        return
+                    async for e in core_gen:
+                        yield e
+
+                async for evt in _events():
+                    if evt["type"] == "token" and evt["text"]:
+                        if first_ms is None:
+                            first_ms = round((time.monotonic() - t0) * 1000)
+                        produced = True
+                        yield _chunk(chunk_id, model, {"content": evt["text"]})
+                    elif evt["type"] == "error":
+                        log.error("think upstream error session=%s: %s", session_id, evt["error"])
+                        break
+        except Exception as e:  # noqa: BLE001
+            log.exception("think turn failed session=%s", session_id)
+            if not produced:
+                yield _chunk(chunk_id, model, {"content": "I'm sorry, I hit a snag — could you say that again?"})
+        if not produced:
+            yield _chunk(chunk_id, model, {"content": "I'm sorry, I couldn't reach my knowledge base just now."})
+        total_ms = round((time.monotonic() - t0) * 1000)
+        log.info("turn session=%s path=%s router_ms=%s first_token_ms=%s total_ms=%s",
+                 session_id, path, decision.get("router_ms", "-") if use_router else "-",
+                 first_ms, total_ms)
         yield _chunk(chunk_id, model, {}, finish="stop")
         yield "data: [DONE]\n\n"
 

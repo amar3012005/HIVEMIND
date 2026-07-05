@@ -26,6 +26,7 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import config
+from .core_client import core_post
 from .functions import FUNCTION_DEFS, FunctionExecutor
 
 log = logging.getLogger("tara_dg.session")
@@ -105,9 +106,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     async def request_hangup() -> None:
         hangup.set()
 
+    def _history(n: int) -> str:
+        turns = [e for e in events.events if e["kind"] == "transcript"][-n * 2:]
+        return "\n".join(f"{t.get('role')}: {t.get('content')}" for t in turns)
+
     executor = FunctionExecutor(
         session_id=session_id, user_id=user_id, org_id=org_id,
         language=language, event_logger=events.write, request_hangup=request_hangup,
+        get_history=_history,
     )
 
     settings = build_settings(
@@ -122,6 +128,11 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         ) as dg:
             await dg.send(json.dumps(settings))
             events.write("session_start", {"session_id": session_id, "language": language})
+            asyncio.create_task(core_post("/api/tara/calls/start", {
+                "session_id": session_id, "mode": "phone",
+                "voice_id": voice_id, "language": language,
+            }, user_id, org_id))
+            turn = {"n": 0, "user_text": "", "latency_ms": None}
 
             async def telnyx_to_dg() -> None:
                 nonlocal stream_id
@@ -161,8 +172,18 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                     msg = json.loads(frame)
                     mtype = msg.get("type")
                     if mtype == "ConversationText":
-                        events.write("transcript", {"role": msg.get("role"),
-                                                    "content": msg.get("content")})
+                        role, content = msg.get("role"), msg.get("content")
+                        events.write("transcript", {"role": role, "content": content})
+                        if role == "user":
+                            turn["user_text"] = content
+                        elif role == "assistant":
+                            turn["n"] += 1
+                            asyncio.create_task(core_post("/api/tara/calls/turn", {
+                                "session_id": session_id, "seq": turn["n"],
+                                "user_text": turn["user_text"], "agent_text": content,
+                                "llm_ttfb_ms": turn["latency_ms"],
+                            }, user_id, org_id))
+                            turn["user_text"] = ""
                     elif mtype == "UserStartedSpeaking":
                         # Barge-in: flush queued TTS audio on the phone leg.
                         await telnyx_ws.send_text(json.dumps({"event": "clear"}))
@@ -179,8 +200,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                         events.write("dg_error", {"description": msg.get("description"),
                                                   "code": msg.get("code")})
                         log.error("deepgram error session=%s: %s", session_id, msg)
-                    elif mtype in ("Welcome", "SettingsApplied", "AgentStartedSpeaking",
-                                   "AgentAudioDone", "AgentThinking"):
+                    elif mtype == "AgentStartedSpeaking":
+                        turn["latency_ms"] = round(float(msg.get("total_latency") or 0) * 1000) or None
+                        log.info("latency session=%s total=%.0fms ttt=%.0fms tts=%.0fms",
+                                 session_id,
+                                 float(msg.get("total_latency") or 0) * 1000,
+                                 float(msg.get("ttt_latency") or 0) * 1000,
+                                 float(msg.get("tts_latency") or 0) * 1000)
+                    elif mtype in ("Welcome", "SettingsApplied", "AgentAudioDone", "AgentThinking"):
                         pass
                 hangup.set()
 
@@ -202,6 +229,10 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         events.write("bridge_error", {"error": str(e)})
     finally:
         events.write("session_end", {"hangup_by_agent": executor.hangup_requested})
+        try:
+            await core_post("/api/tara/calls/end", {"session_id": session_id}, user_id, org_id)
+        except Exception:  # noqa: BLE001
+            pass
         if on_end:
             try:
                 on_end(events.events)

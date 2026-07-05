@@ -700,6 +700,40 @@ function routesFor(ctx) {
         await db().query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
         return { ok: true };
       }
+      if (op === 'turn') {
+        // One row per conversational turn: role='turn', content = JSON payload
+        // {seq, user_text, agent_text, llm_ttfb_ms} — matches the FE pair shape
+        // without a schema change.
+        const sid = b.session_id;
+        if (!sid) return { ok: false, error: 'session_id required' };
+        const { rows } = await db().query('SELECT id FROM tara_calls WHERE session_id=$1 AND org_id=$2', [sid, org]);
+        const callId = rows[0]?.id;
+        if (!callId) return { ok: false, error: 'call not found' };
+        await db().query(
+          'INSERT INTO tara_turns (org_id, call_id, role, content) VALUES ($1,$2,$3,$4)',
+          [org, callId, 'turn', JSON.stringify({
+            seq: b.seq || null, user_text: b.user_text || '', agent_text: b.agent_text || '',
+            llm_ttfb_ms: b.llm_ttfb_ms || null,
+          })]);
+        return { ok: true };
+      }
+      if (op === 'list') {
+        const lim = Math.min(100, Number(b.limit) || 30);
+        const { rows } = await db().query(
+          `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+           FROM tara_calls WHERE org_id=$1 ORDER BY created_at DESC LIMIT $2`, [org, lim]);
+        return { calls: rows };
+      }
+      if (op === 'detail') {
+        const { rows } = await db().query(
+          `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+           FROM tara_calls WHERE id=$1 AND org_id=$2`, [b.id, org]);
+        if (!rows[0]) return { call: null, turns: [] };
+        const t = await db().query(
+          'SELECT content, created_at FROM tara_turns WHERE call_id=$1 AND org_id=$2 ORDER BY created_at ASC',
+          [b.id, org]);
+        return { call: rows[0], turns: t.rows };
+      }
       return { ok: false, error: `unknown op: ${op}` };
     },
   };

@@ -6905,12 +6905,18 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
-          // Remote (self-host) orgs: increment counters on agent (turns not stored — rate-limiting only).
+          // Remote (self-host) orgs: counters + full turn text on agent (Call History parity).
           if (orgIsRemote(tOrg)) {
             try {
               const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
               try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
               await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), turn_count_inc: 1, prompt_tokens_inc: pt, completion_tokens_inc: ct });
+              await amrTaraCall(tOrg, {
+                op: 'turn', session_id: String(body.session_id),
+                seq: Number(body.seq) || null,
+                user_text: body.user_text || '', agent_text: body.agent_text || '',
+                llm_ttfb_ms: body.llm_ttfb_ms ?? null,
+              });
               return jsonResponse(res, { ok: true });
             } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
           }
@@ -6996,8 +7002,22 @@ exit \$RC
         }
 
         if (pathname === '/api/tara/calls' && req.method === 'GET') {
-          // Remote (self-host) orgs: no call list available from agent (not needed for runtime).
-          if (orgIsRemote(tOrg)) return jsonResponse(res, { calls: [] });
+          // Remote (self-host) orgs: list from the agent ledger, mapped to the FE shape.
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'list', limit: Number(url.searchParams.get('limit')) || 30 });
+              const calls = (r?.calls || []).map(c => ({
+                id: c.id, sessionId: c.session_id, status: c.status,
+                mode: c.metadata?.mode || 'external', language: c.metadata?.language || 'en',
+                voiceId: c.metadata?.voice_id || null,
+                turnCount: Number(c.turn_count) || 0,
+                promptTokens: Number(c.prompt_tokens) || 0,
+                completionTokens: Number(c.completion_tokens) || 0,
+                startedAt: c.created_at, durationMs: null,
+              }));
+              return jsonResponse(res, { calls });
+            } catch { return jsonResponse(res, { calls: [] }); }
+          }
           const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
           const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
           return jsonResponse(res, { calls });
@@ -7005,8 +7025,26 @@ exit \$RC
 
         const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);
         if (cm && req.method === 'GET') {
-          // Remote (self-host) orgs: call detail not available from agent.
-          if (orgIsRemote(tOrg)) return jsonResponse(res, { error: 'not_found' }, 404);
+          // Remote (self-host) orgs: detail from the agent ledger (turns stored as JSON rows).
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'detail', id: cm[1] });
+              if (!r?.call) return jsonResponse(res, { error: 'not_found' }, 404);
+              const c = r.call;
+              const turns = (r.turns || []).map((t, i) => {
+                let p = {};
+                try { p = typeof t.content === 'string' ? JSON.parse(t.content) : (t.content || {}); } catch { /* raw */ }
+                return { seq: p.seq || i + 1, userText: p.user_text || '', agentText: p.agent_text || '',
+                         llmTtfbMs: p.llm_ttfb_ms ?? null, createdAt: t.created_at };
+              });
+              return jsonResponse(res, {
+                call: { id: c.id, sessionId: c.session_id, status: c.status,
+                        mode: c.metadata?.mode || 'external', language: c.metadata?.language || 'en',
+                        turnCount: Number(c.turn_count) || 0, startedAt: c.created_at },
+                turns, insight: null,
+              });
+            } catch { return jsonResponse(res, { error: 'not_found' }, 404); }
+          }
           const call = await prisma.taraCall.findUnique({ where: { id: cm[1] } });
           if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'not_found' }, 404);
           const [turns, insight] = await Promise.all([

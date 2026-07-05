@@ -57,7 +57,6 @@ services:
       QDRANT_URL: http://qdrant:6333               # local Qdrant backup the agent mirrors vectors to
       AGENT_PORT: "8787"
       AGENT_TOKEN: ${AGENT_TOKEN}                   # bearer the central engine must present
-      AGENT_STORE: ${AGENT_STORE:-pg-qdrant}        # memory engine: pg-qdrant (default) | amr — setup.sh asks
     volumes:
       - ./data/mneme:/data/mneme                    # .amr persisted on the customer disk
     ports:

@@ -12,19 +12,10 @@
 //   QDRANT_URL    local Qdrant (vectors)                                 [required]
 //   AGENT_PORT    listen port (default 8787)
 //   MNEME_DIM     embedding dim (default 1024)
-//   AGENT_STORE   memory storage engine: 'pg-qdrant' (default) | 'amr' — the operator's choice,
-//                 asked by setup.sh and recorded in .env. See STORE below.
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
 const ORG = process.env.ORG_ID || die('ORG_ID required');
-// Storage engine for memories + relationships — the OPERATOR'S CHOICE, made at setup time:
-//   pg-qdrant (default) — proven Phase-1 path: rows in Postgres, vectors in Qdrant.
-//   amr                 — the .amr engine: one mmap'd shard per org (memories + vectors + graph
-//                         in one file). Postgres+Qdrant still serve the KB layer (docs/segments).
-// Switching pg-qdrant → amr later is safe: on first amr boot the shard auto-migrates all existing
-// rows + their real Qdrant vectors (mneme/amr.mjs migrateFromPostgres, idempotent).
-const STORE = (process.env.AGENT_STORE || 'pg-qdrant').toLowerCase() === 'amr' ? 'amr' : 'pg-qdrant';
 const TOKEN = process.env.AGENT_TOKEN || die('AGENT_TOKEN required');
 // Optional: pin the engine origin. The engine calls server-to-server (no Origin header), so ANY
 // request bearing an Origin/Referer is a browser and is rejected outright (blocks CSRF/SSRF from a
@@ -218,16 +209,6 @@ async function qdrantHealthy() {
 
 // Build a Qdrant payload filter from the engine's filter spec. org_id is always forced.
 function qdrantFilter(f = {}) {
-  // The engine sends the FULL Qdrant-shaped filter (must/must_not clauses incl. project_ids,
-  // tags, promoted-exclusion). Pass it through verbatim — rebuilding from simple keys silently
-  // dropped every clause but org. org_id is still forced (defense in depth).
-  if (Array.isArray(f.must) || Array.isArray(f.must_not)) {
-    const must = [...(f.must || [])];
-    if (!must.some((c) => c && c.key === 'org_id')) must.push({ key: 'org_id', match: { value: ORG } });
-    const out = { must };
-    if (Array.isArray(f.must_not) && f.must_not.length) out.must_not = f.must_not;
-    return out;
-  }
   const must = [{ key: 'org_id', match: { value: ORG } }];
   if (f.is_latest !== undefined) must.push({ key: 'is_latest', match: { value: !!f.is_latest } });
   if (f.layer) must.push({ key: 'layer', match: { value: f.layer } });
@@ -252,181 +233,7 @@ function payloadOf(rec) {
 }
 
 const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const sendHtml = (res, code, html) => { res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' }); res.end(html); };
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
-
-// ── Dashboard — read-only status page for the box operator ─────────────────────────────────────
-// GET-only, no bearer token (matches /health): the agent listens only on the private tailnet/LAN
-// per TRANSPORT.md, and this exposes counts only, never memory content. Separate from the POST-only
-// engine API below (which stays bearer-token + origin-locked).
-const BOOT_AT = Date.now();
-async function dashboardStats() {
-  const pgOk = await pg.query('SELECT 1').then(() => true).catch(() => false);
-  const qOk = await qdrantHealthy();
-  let counts = { total: 0, by_layer: [], by_type: [], users: 0, oldest: null, newest: null };
-  try {
-    if (effectiveStore === 'amr' && amr) {
-      // Counts straight from the .amr in-process index (the memory source of truth in this mode).
-      // Streaming one-pass summary (O(1) resident — never materializes the store).
-      const s = amr.summary();
-      counts = {
-        total: s.total,
-        by_layer: Object.entries(s.byLayer).map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n),
-        by_type: Object.entries(s.byType).map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n).slice(0, 8),
-        users: s.users, oldest: s.oldest, newest: s.newest,
-      };
-    } else {
-      const [tot, layer, type, users, span] = await Promise.all([
-        pg.query(`SELECT count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-        pg.query(`SELECT coalesce(layer,'memory') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC`, [ORG]),
-        pg.query(`SELECT coalesce(memory_type,'unspecified') AS k, count(*)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [ORG]),
-        pg.query(`SELECT count(DISTINCT user_id)::int AS n FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-        pg.query(`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM hm.memories WHERE org_id=$1 AND deleted_at IS NULL`, [ORG]),
-      ]);
-      counts = {
-        total: tot.rows[0]?.n || 0,
-        by_layer: layer.rows,
-        by_type: type.rows,
-        users: users.rows[0]?.n || 0,
-        oldest: span.rows[0]?.oldest || null,
-        newest: span.rows[0]?.newest || null,
-      };
-    }
-  } catch (e) { console.warn('[hm-agent] dashboard stats query failed:', e.message); }
-  return {
-    ok: true, org: ORG, dim: DIM, schemaVersion: SCHEMA_VERSION,
-    uptime_seconds: Math.floor((Date.now() - BOOT_AT) / 1000),
-    connections: { postgres: pgOk, qdrant: qOk, ...(effectiveStore === 'amr' ? { amr: !!amr } : {}) },
-    storage_backend: effectiveStore, // the operator's setup-time choice (AGENT_STORE)
-    memories: counts,
-  };
-}
-
-const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HIVEMIND — Self-host Agent</title>
-<style>
-  :root{--paper:#faf9f4;--panel:#fff;--wash:#f3f1ec;--line:#e3e0db;--line-hover:#d4d0ca;--ink:#0a0a0a;--dim:#525252;--dim2:#a3a3a3;--accent:#117dff;--accent2:#0066e0;--good:#16a34a;--bad:#e0443e}
-  *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;-webkit-font-smoothing:antialiased}
-  header{padding:26px 32px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;background:var(--panel)}
-  header h1{font-size:16px;font-weight:700;margin:0;font-family:'Space Grotesk',sans-serif;letter-spacing:.01em}
-  header h1 span{color:var(--accent)}
-  .badge{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--wash);color:var(--dim)}
-  .badge.live{background:rgba(22,163,74,.08);border-color:rgba(22,163,74,.3);color:var(--good)}
-  .badge.bad{background:rgba(224,68,62,.08);border-color:rgba(224,68,62,.3);color:var(--bad)}
-  main{max-width:1080px;margin:0 auto;padding:32px 32px 60px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:16px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:border-color .15s}
-  .card:hover{border-color:var(--line-hover)}
-  .card .label{font:10px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim2);margin-bottom:10px}
-  .card .value{font:26px/1 'Space Grotesk',sans-serif;font-weight:700;color:var(--ink)}
-  .card .sub{margin-top:6px;font-size:12px;color:var(--dim2)}
-  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle}
-  .dot.good{background:var(--good);box-shadow:0 0 6px rgba(22,163,74,.5)}
-  .dot.bad{background:var(--bad)}
-  .section-title{font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--dim2);margin:28px 0 10px;display:flex;align-items:center;justify-content:space-between}
-  .section-title small{font:10px/1 ui-monospace,monospace;color:var(--dim2);text-transform:none;letter-spacing:0}
-  .row{padding:12px 0;border-bottom:1px solid var(--line)}
-  .row:last-child{border-bottom:none}
-  .row .rhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px}
-  .row .rname{font-size:13px;color:var(--ink);font-weight:500}
-  .row .rmeta{font:12px/1 ui-monospace,monospace;color:var(--accent);display:flex;align-items:baseline;gap:6px}
-  .row .rmeta b{font-size:13px;color:var(--ink);font-weight:700}
-  .bar{height:7px;border-radius:4px;background:var(--wash);overflow:hidden;border:1px solid var(--line)}
-  .bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .5s cubic-bezier(.4,0,.2,1);box-shadow:0 0 10px rgba(17,125,255,.25)}
-  table{width:100%;border-collapse:collapse}
-  td{padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
-  td:last-child{text-align:right;font-family:ui-monospace,monospace;color:var(--accent);font-weight:600}
-  tr:last-child td{border-bottom:none}
-  .empty{color:var(--dim2);font-size:13px;padding:16px 0}
-  .pill{display:inline-flex;align-items:center;gap:6px;font:11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;padding:4px 10px;border-radius:999px;border:1px solid rgba(17,125,255,.2);background:rgba(17,125,255,.06);color:var(--accent2)}
-  footer{color:var(--dim2);font-size:11px;text-align:center;padding:24px;font-family:ui-monospace,monospace}
-  a{color:var(--accent);text-decoration:none}
-</style></head>
-<body>
-  <header>
-    <h1>HIVE<span>MIND</span> — self-host agent</h1>
-    <span class="badge" id="live-badge">loading…</span>
-  </header>
-  <main>
-    <div class="grid">
-      <div class="card"><div class="label">Org</div><div class="value" id="org" style="font-size:13px;font-family:ui-monospace,monospace;word-break:break-all">—</div></div>
-      <div class="card"><div class="label">Memories</div><div class="value" id="total">—</div><div class="sub" id="users-sub"></div></div>
-      <div class="card"><div class="label">Postgres</div><div class="value" id="pg-status" style="font-size:16px">—</div></div>
-      <div class="card"><div class="label">Qdrant</div><div class="value" id="q-status" style="font-size:16px">—</div></div>
-      <div class="card"><div class="label">Agent uptime</div><div class="value" id="uptime" style="font-size:16px">—</div></div>
-    </div>
-
-    <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-      <div>
-        <div class="label" style="margin-bottom:6px">Storage engine</div>
-        <div style="font:15px 'Space Grotesk',sans-serif;font-weight:700" id="backend-name">—</div>
-      </div>
-      <span class="pill" id="backend-pill">checking…</span>
-    </div>
-
-    <div class="section-title">Memory by layer <small id="layer-total"></small></div>
-    <div class="card" id="layer-rows"></div>
-
-    <div class="section-title">Memory by type <small id="type-total"></small></div>
-    <div class="card" id="type-rows"></div>
-
-    <div class="section-title">Timeline</div>
-    <div class="card">
-      <table><tbody>
-        <tr><td>Oldest memory</td><td id="oldest">—</td></tr>
-        <tr><td>Newest memory</td><td id="newest">—</td></tr>
-        <tr><td>Embedding dimension</td><td id="dim">—</td></tr>
-        <tr><td>Schema version</td><td id="schema">—</td></tr>
-      </tbody></table>
-    </div>
-  </main>
-  <footer>Your data lives here — content + vectors never leave this box. Refreshes every 10s.</footer>
-<script>
-function fmtTime(s){ if(s==null) return '—'; const d=new Date(s); return d.toLocaleDateString()+' '+d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
-function fmtUptime(s){ if(s<60) return s+'s'; const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0 ? h+'h '+m+'m' : m+'m'; }
-function barRows(items, total){
-  if (!items.length) return '<div class="empty">No memories yet — the engine will push them here as it ingests.</div>';
-  const max = Math.max(...items.map(r=>r.n), 1);
-  return items.map(r => {
-    const pct = total ? Math.round((r.n/total)*100) : 0;
-    const w = Math.max(4, Math.round((r.n/max)*100));
-    return '<div class="row"><div class="rhead"><span class="rname">'+r.k+'</span><span class="rmeta"><b>'+r.n+'</b> · '+pct+'%</span></div><div class="bar"><i style="width:'+w+'%"></i></div></div>';
-  }).join('');
-}
-async function refresh(){
-  const badge = document.getElementById('live-badge');
-  try{
-    const r = await fetch('/v1/dashboard/stats'); const d = await r.json();
-    badge.textContent = d.ok ? 'live' : 'error';
-    badge.className = 'badge ' + (d.ok ? 'live' : 'bad');
-    document.getElementById('org').textContent = d.org;
-    document.getElementById('total').textContent = d.memories.total.toLocaleString();
-    document.getElementById('users-sub').textContent = d.memories.users + ' user' + (d.memories.users===1?'':'s');
-    document.getElementById('pg-status').innerHTML = '<span class="dot '+(d.connections.postgres?'good':'bad')+'"></span>'+(d.connections.postgres?'Connected':'Down');
-    document.getElementById('q-status').innerHTML = '<span class="dot '+(d.connections.qdrant?'good':'bad')+'"></span>'+(d.connections.qdrant?'Connected':'Down');
-    document.getElementById('uptime').textContent = fmtUptime(d.uptime_seconds);
-    document.getElementById('dim').textContent = d.dim;
-    document.getElementById('schema').textContent = 'v'+d.schemaVersion;
-    document.getElementById('oldest').textContent = fmtTime(d.memories.oldest);
-    document.getElementById('newest').textContent = fmtTime(d.memories.newest);
-    const isAmr = d.storage_backend === 'amr';
-    document.getElementById('backend-name').textContent = isAmr ? '.amr — one mmap\\'d file, no server' : 'Postgres + Qdrant';
-    const bp = document.getElementById('backend-pill');
-    bp.textContent = isAmr ? '.amr active' : 'phase 1 · pg-qdrant';
-    bp.style.color = isAmr ? '#16a34a' : '#0066e0';
-    bp.style.background = isAmr ? 'rgba(22,163,74,.08)' : 'rgba(17,125,255,.06)';
-    bp.style.borderColor = isAmr ? 'rgba(22,163,74,.3)' : 'rgba(17,125,255,.2)';
-    document.getElementById('layer-total').textContent = d.memories.total ? d.memories.total + ' total' : '';
-    document.getElementById('type-total').textContent = d.memories.total ? d.memories.total + ' total' : '';
-    document.getElementById('layer-rows').innerHTML = barRows(d.memories.by_layer, d.memories.total);
-    document.getElementById('type-rows').innerHTML = barRows(d.memories.by_type, d.memories.total);
-  }catch(e){
-    badge.textContent = 'unreachable'; badge.className = 'badge bad';
-  }
-}
-refresh(); setInterval(refresh, 10000);
-</script>
-</body></html>`;
 
 const routes = {
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
@@ -546,6 +353,7 @@ const routes = {
     if (f.cognitive_layer_role === null) conds.push('cognitive_layer_role IS NULL');
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
     if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
+    if (Array.isArray(f.tags) && f.tags.length) { args.push(f.tags); conds.push(`tags @> $${args.length}`); }
     if (f.created_after) { args.push(f.created_after); conds.push(`created_at >= $${args.length}::timestamptz`); }
     if (b.cursor) { args.push(b.cursor); conds.push(`created_at < $${args.length}::timestamptz`); }
     args.push(Math.min(b.limit || 100, 500));
@@ -666,9 +474,6 @@ const routes = {
   '/v1/kb-segment': async (b) => {
     const s = b.segment || {};
     if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
-    // Postgres text columns reject NUL bytes (22P05 "invalid byte sequence for encoding UTF8:
-    // 0x00") — common in PDF-extracted text. Strip them or the segment (evidence) is lost.
-    if (typeof s.content === 'string') s.content = s.content.replace(/\u0000/g, '');
     await pg.query(
       `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,
          segment_index, previous_segment_id, metadata, vector_synced, created_at)
@@ -881,29 +686,19 @@ const routes = {
       for (const r of segs) segMap[r.document_id] = r.c;
     }
     if (filenames.length) {
-      // promoted = memories tagged 'filename:<filename>' — counted from the ACTIVE memory store.
-      // In amr mode PG's memories table is frozen at cutover; counting from it showed 0 for every
-      // post-cutover doc (the "14 seg · 0 mem" bug) and stale counts for pre-cutover ones.
-      if (effectiveStore === 'amr' && amr) {
-        const wanted = new Set(filenames.map((f) => `filename:${f}`));
-        const tagCounts = amr.countByTags(wanted); // streaming one-pass
-        for (const [t, c] of Object.entries(tagCounts)) {
-          proMap[t.slice('filename:'.length)] = c;
-        }
-      } else {
-        const tagPatterns = filenames.map((f) => `filename:${f}`);
-        const { rows: prows } = await pg.query(
-          `SELECT unnest(tags) AS tag, count(*)::int AS c
-           FROM memories
-           WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
-           GROUP BY tag`,
-          [ORG, tagPatterns]
-        );
-        for (const r of prows) {
-          if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
-            const fn = r.tag.slice('filename:'.length);
-            proMap[fn] = (proMap[fn] || 0) + r.c;
-          }
+      // promoted = memories tagged 'filename:<filename>'
+      const tagPatterns = filenames.map((f) => `filename:${f}`);
+      const { rows: prows } = await pg.query(
+        `SELECT unnest(tags) AS tag, count(*)::int AS c
+         FROM memories
+         WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
+         GROUP BY tag`,
+        [ORG, tagPatterns]
+      );
+      for (const r of prows) {
+        if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
+          const fn = r.tag.slice('filename:'.length);
+          proMap[fn] = (proMap[fn] || 0) + r.c;
         }
       }
     }
@@ -960,24 +755,16 @@ const routes = {
       metadata: s.metadata || {},
       createdAt: s.created_at,
     }));
-    // Promoted memories: tagged filename:<filename> — from the ACTIVE memory store (same
-    // amr-vs-frozen-PG split as /v1/kb-docs above).
+    // Promoted memories: tagged filename:<filename>.
     let promotedMemories = [];
     if (d.filename) {
       const tag = `filename:${d.filename}`;
-      let mems;
-      if (effectiveStore === 'amr' && amr) {
-        mems = amr.findByTags([tag], 5000)
-          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-          .slice(0, 100);
-      } else {
-        ({ rows: mems } = await pg.query(
-          `SELECT id, title, content, memory_type, confidence, tags, created_at
-           FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
-           ORDER BY created_at DESC LIMIT 100`,
-          [ORG, tag]
-        ));
-      }
+      const { rows: mems } = await pg.query(
+        `SELECT id, title, content, memory_type, confidence, tags, created_at
+         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
+         ORDER BY created_at DESC LIMIT 100`,
+        [ORG, tag]
+      );
       promotedMemories = mems.map((m) => ({
         id: m.id,
         title: m.title,
@@ -1011,54 +798,6 @@ const routes = {
       metadata: d.metadata || {},
     };
     return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
-  },
-
-  // Delete a KB document + FULL cascade — segments (PG + segment vectors), promoted fact
-  // memories (from the ACTIVE store: .amr shard or PG+Qdrant), and the doc row. One call =
-  // the whole cascade, so the engine's delete works identically regardless of storage mode.
-  // Accepts document_id OR filename (the engine resolves whichever it has).
-  '/v1/kb-doc-delete': async (b) => {
-    let doc = null;
-    if (b.document_id) {
-      const { rows } = await pg.query('SELECT id, filename FROM knowledge_documents WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.document_id, ORG]);
-      doc = rows[0] || null;
-    }
-    if (!doc && b.filename) {
-      const { rows } = await pg.query('SELECT id, filename FROM knowledge_documents WHERE filename=$1 AND org_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1', [b.filename, ORG]);
-      doc = rows[0] || null;
-    }
-    if (!doc) return { ok: false, error: 'document not found', deleted_memories: 0 };
-
-    // 1. Promoted memories: everything tagged filename:<f> or doc-id:<id> — from the ACTIVE store.
-    const fnTag = `filename:${doc.filename}`;
-    const idTag = `doc-id:${doc.id}`;
-    let memIds = [];
-    if (effectiveStore === 'amr' && amr) {
-      memIds = amr.findByTags([fnTag, idTag], 100000).map((m) => m.id);
-      for (const id of memIds) amr.remove(id);
-    } else {
-      const { rows } = await pg.query('SELECT id FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND (tags && $2::text[])', [ORG, [fnTag, idTag]]);
-      memIds = rows.map((r) => r.id);
-      if (memIds.length) await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2', [memIds, ORG]);
-    }
-    // Mirror copies: pre-cutover PG rows + memory vectors in Qdrant (both modes keep these in sync).
-    if (memIds.length) {
-      await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2 AND deleted_at IS NULL', [memIds, ORG]).catch(() => {});
-      await qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: memIds }) }).catch(() => {});
-      await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))', [ORG, memIds]).catch(() => {});
-    }
-
-    // 2. Segments: rows + their layer='segment' vectors (payload carries document_id).
-    const { rows: segRows } = await pg.query('SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
-    const segIds = segRows.map((r) => r.id);
-    await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
-    if (segIds.length) {
-      await qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});
-    }
-
-    // 3. The document row itself.
-    await pg.query('UPDATE knowledge_documents SET deleted_at=now() WHERE id=$1 AND org_id=$2', [doc.id, ORG]);
-    return { ok: true, document_id: doc.id, deleted_memories: memIds.length, deleted_segments: segIds.length };
   },
 
   // ── Per-memory edge counts (self-host READ) ───────────────────────────────
@@ -1201,137 +940,53 @@ const routes = {
       await pg.query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
       return { ok: true };
     }
+    if (op === 'turn') {
+      // One row per conversational turn: role='turn', content = JSON payload
+      // {seq, user_text, agent_text, llm_ttfb_ms} — the FE pair shape without
+      // a schema change.
+      const sid = b.session_id;
+      if (!sid) return { ok: false, error: 'session_id required' };
+      const { rows } = await pg.query('SELECT id FROM tara_calls WHERE session_id=$1 AND org_id=$2', [sid, ORG]);
+      const callId = rows[0]?.id;
+      if (!callId) return { ok: false, error: 'call not found' };
+      await pg.query(
+        'INSERT INTO tara_turns (org_id, call_id, role, content) VALUES ($1,$2,$3,$4)',
+        [ORG, callId, 'turn', JSON.stringify({
+          seq: b.seq || null, user_text: b.user_text || '', agent_text: b.agent_text || '',
+          llm_ttfb_ms: b.llm_ttfb_ms || null,
+        })]);
+      return { ok: true };
+    }
+    if (op === 'list') {
+      const lim = Math.min(100, Number(b.limit) || 30);
+      const { rows } = await pg.query(
+        `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+         FROM tara_calls WHERE org_id=$1 ORDER BY created_at DESC LIMIT $2`, [ORG, lim]);
+      return { calls: rows };
+    }
+    if (op === 'detail') {
+      const { rows } = await pg.query(
+        `SELECT id, session_id, status, turn_count, prompt_tokens, completion_tokens, metadata, created_at
+         FROM tara_calls WHERE id=$1 AND org_id=$2`, [b.id, ORG]);
+      if (!rows[0]) return { call: null, turns: [] };
+      const t = await pg.query(
+        'SELECT content, created_at FROM tara_turns WHERE call_id=$1 AND org_id=$2 ORDER BY created_at ASC',
+        [b.id, ORG]);
+      return { call: rows[0], turns: t.rows };
+    }
     return { ok: false, error: `unknown op: ${op}` };
   },
 };
 
 await ensureSchema();
 await ensureQdrant();
-
-// ── .amr engine (only when the operator chose it at setup) ─────────────────────────────────────
-// Dynamic import so pg-qdrant boxes never load (or need) the native binding. When active, the 11
-// memory/relationship routes below are OVERRIDDEN with .amr-backed implementations — the KB routes
-// (kb-doc / kb-segment / kb-recall / kb-hydrate / erase) keep using Postgres+Qdrant either way.
-let amr = null;
-let effectiveStore = STORE;
-if (STORE === 'amr') {
-  try {
-  const { AmrMemoryStore, migrateFromPostgres } = await import('./mneme/amr.mjs');
-  amr = new AmrMemoryStore({ dataRoot: process.env.MNEME_DATA_ROOT || '/data/mneme', org: ORG, dim: DIM });
-  const migration = await migrateFromPostgres(amr, pg, qFetch, QCOLL, ORG).catch((e) => {
-    console.error('[hm-agent] .amr migration failed (shard stays empty, retried next boot):', e.message);
-    return { migrated: 0, error: e.message };
-  });
-  console.log(`[hm-agent] .amr active: live=${amr.liveCount()} migration=${JSON.stringify(migration)}`);
-  Object.assign(routes, {
-    '/v1/write': async (b) => {
-      const r = b.record || {};
-      if (!r.id) return { ok: false, error: 'record.id required' };
-      amr.write(r, Array.isArray(b.vector) ? b.vector : undefined);
-      for (const rel of (b.rels || [])) if (rel?.fromId && rel?.toId) amr.addEdge(rel);
-      return { ok: true };
-    },
-    '/v1/recall': async (b) => Array.isArray(b.vector)
-      ? { results: amr.recall(b.vector, b.limit || 10, b.filter || {}) } : { results: [] },
-    '/v1/lexical': async (b) => b.text
-      ? { results: amr.lexical(b.text, b.filter || {}, b.limit || 10) } : { results: [] },
-    '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
-    '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
-    '/v1/stats': async (b) => amr.stats(b.filter || {}),
-    '/v1/graph': async (b) => amr.graph(b.filter || {}, b.limit || 500),
-    '/v1/edge': async (b) => { if (b.rel?.fromId && b.rel?.toId) amr.addEdge(b.rel); return { ok: true }; },
-    '/v1/update-tags': async (b) => { if (b.id && Array.isArray(b.tags)) amr.updateTags(b.id, b.tags); return { ok: true }; },
-    '/v1/bump-recall': async (b) => {
-      const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
-      return { ok: true, bumped: ids.length ? amr.bumpRecall(ids) : 0 };
-    },
-    '/v1/update': async (b) => {
-      if (!b.id) return { ok: false, error: 'id required' };
-      amr.patchUpdate(b.id, b);
-      return { ok: true };
-    },
-    // Deletes MUST reach the shard — routed to frozen PG they'd leave stale memories serving
-    // from .amr forever (the "relationship graph keeps stale memories" bug class).
-    '/v1/delete': async (b) => {
-      if (!b.id) return { ok: false, error: 'id required' };
-      const deleted = amr.remove(b.id) ? 1 : 0;
-      // Also clear any pre-cutover PG row + Qdrant point so every copy agrees.
-      await pg.query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, ORG]).catch(() => {});
-      qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: [b.id] }) }).catch(() => {});
-      return { ok: true, deleted };
-    },
-    '/v1/purge': async () => {
-      const shardDeleted = amr.purge();
-      await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]).catch(() => {});
-      await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]).catch(() => {});
-      await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1', [ORG]).catch(() => {});
-      await pg.query('DELETE FROM knowledge_documents WHERE org_id=$1', [ORG]).catch(() => {});
-      await pg.query('DELETE FROM meetings WHERE org_id=$1', [ORG]).catch(() => {});
-      await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
-      await ensureQdrant().catch(() => {});
-      return { ok: true, shard_deleted: shardDeleted };
-    },
-    // Relationship reads MUST come from the shard — the PG relationships table is frozen at
-    // cutover; reading it missed every post-cutover edge (stale graph counts + node detail).
-    '/v1/mem-edges': async (b) => {
-      const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
-      if (!ids.length) return {};
-      const result = {};
-      for (const id of ids) {
-        const { out, in: inn } = amr.edgesOf(id); // per-id point reads — O(ids), not O(shard)
-        result[id] = { in: inn.length, out: out.length };
-      }
-      return result;
-    },
-    '/v1/mem-relationships': async (b) => {
-      if (!b.memoryId) return { error: 'memoryId required' };
-      const memId = b.memoryId;
-      const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
-      const { out: outE, in: inE } = amr.edgesOf(memId); // point reads, not a full-shard walk
-      const enrichOut = outE.slice(0, 200).map((e) => ({
-        id: `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-        created_by: null, created_at: null, metadata: {}, direction: 'out',
-        target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
-        target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
-      }));
-      const enrichIn = inE.slice(0, 200).map((e) => ({
-        id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-        created_by: null, created_at: null, metadata: {}, direction: 'in',
-        source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
-        source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
-      }));
-      const by_type = {};
-      for (const e of [...enrichOut, ...enrichIn]) {
-        const t = e.type || 'Other';
-        (by_type[t] = by_type[t] || []).push(e);
-      }
-      return {
-        memory_id: memId, out: enrichOut, in: enrichIn, by_type,
-        counts: { out: enrichOut.length, in: enrichIn.length, total: enrichOut.length + enrichIn.length },
-      };
-    },
-  });
-  } catch (e) {
-    // The operator chose .amr but the engine can't start here (e.g. no native binding for this
-    // platform yet). Fail OPEN to the proven pg-qdrant path — the agent must never crash-loop and
-    // take the org's memory offline over a storage-engine preference. Loud, so it's fixable.
-    console.error(`[hm-agent] AGENT_STORE=amr requested but .amr failed to start — FALLING BACK to pg-qdrant. Fix and restart to activate .amr. Cause: ${e.message}`);
-    amr = null;
-    effectiveStore = 'pg-qdrant';
-  }
-}
-
-console.log(`[hm-agent] org=${ORG} store=${effectiveStore} dim=${DIM}`);
+console.log(`[hm-agent] org=${ORG} store=pg-qdrant dim=${DIM}`);
 
 http.createServer(async (req, res) => {
   if (req.url === '/health') {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
-    return send(res, 200, { ok: true, org: ORG, store: effectiveStore, pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
+    return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
-  // Dashboard — read-only, GET, no token (same trust boundary as /health: private tailnet/LAN only,
-  // counts never content). Lets the operator open http://<agent>:8787/ in a browser.
-  if (req.method === 'GET' && req.url === '/') return sendHtml(res, 200, DASHBOARD_HTML);
-  if (req.method === 'GET' && req.url === '/v1/dashboard/stats') return send(res, 200, await dashboardStats());
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
   // is calling the agent → reject (CSRF/SSRF guard). If ALLOWED_ENGINE_ORIGIN is set, it must match.

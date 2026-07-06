@@ -2971,11 +2971,15 @@ const server = http.createServer(async (req, res) => {
     // projects. Now routes through the same visibility engine as /v1/projects.
     const ts2 = await _getTeamStore();
     if (!ts2) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const projects = await ts2.store.listProjectsForUser({
+    let projects = await ts2.store.listProjectsForUser({
       userId: current.session.userId,
       orgId,
       orgRole: membership.role || null,
     });
+    // TARA-MEMORY is a reserved, system-managed project (call transcripts live
+    // there, surfaced only on the TARA Memory page) — hide it from the
+    // Workspace Admin projects list.
+    projects = projects.filter((p) => p.slug !== 'tara-memory' && p.name !== 'TARA-MEMORY');
 
     // The card "N memories" must reconcile with the Memories page + graph.
     // project._count.memories is the RAW join (also counts superseded/deleted/

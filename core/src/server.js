@@ -7037,7 +7037,7 @@ exit \$RC
                         id: crypto.randomUUID(),
                         user_id: tUser,
                         org_id: tOrg,
-                        project: `tara/${call.tenantId || 'default'}`,
+                        project: 'tara-memory',  // reserved system project (hidden from Workspace Admin)
                         content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}`,
                         title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
                         tags: ['tara-call-log', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],

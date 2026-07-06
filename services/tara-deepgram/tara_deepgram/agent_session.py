@@ -96,11 +96,17 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                      user_id: Optional[str], org_id: Optional[str],
                      language: str, voice_id: Optional[str],
                      prompt: str, company: str,
-                     on_end: Optional[Callable[[list[dict]], None]] = None) -> None:
-    """Bridge one Telnyx media stream to one Deepgram Agent session."""
-    await telnyx_ws.accept()
+                     on_end: Optional[Callable[[list[dict]], None]] = None,
+                     already_accepted: bool = False, seed_start: Optional[dict] = None) -> None:
+    """Bridge one Telnyx/Twilio media stream to one Deepgram Agent session."""
+    if not already_accepted:
+        await telnyx_ws.accept()
     events = CallEventLog(session_id)
-    stream_id: Optional[str] = None
+    stream_id: Optional[str] = None  # Twilio streamSid (echoed in outbound frames)
+    if seed_start:  # start event already consumed by the caller (Twilio peek)
+        st = seed_start.get("start", {}) or {}
+        stream_id = (seed_start.get("streamSid") or st.get("streamSid")
+                     or seed_start.get("stream_id") or st.get("stream_id"))
     hangup = asyncio.Event()
 
     async def request_hangup() -> None:
@@ -148,7 +154,9 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                         if payload:
                             await dg.send(base64.b64decode(payload))
                     elif ev == "start":
-                        stream_id = msg.get("stream_id") or msg.get("start", {}).get("stream_id")
+                        st = msg.get("start", {})
+                        stream_id = (msg.get("streamSid") or st.get("streamSid")
+                                     or msg.get("stream_id") or st.get("stream_id"))
                         events.write("stream_start", {"stream_id": stream_id})
                     elif ev == "stop":
                         events.write("stream_stop", {})
@@ -164,10 +172,11 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                     except websockets.ConnectionClosed:
                         break
                     if isinstance(frame, bytes):
-                        await telnyx_ws.send_text(json.dumps({
-                            "event": "media",
-                            "media": {"payload": base64.b64encode(frame).decode()},
-                        }))
+                        out = {"event": "media",
+                               "media": {"payload": base64.b64encode(frame).decode()}}
+                        if stream_id:  # Twilio requires streamSid; Telnyx omits it
+                            out["streamSid"] = stream_id
+                        await telnyx_ws.send_text(json.dumps(out))
                         continue
                     msg = json.loads(frame)
                     mtype = msg.get("type")
@@ -186,7 +195,10 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                             turn["user_text"] = ""
                     elif mtype == "UserStartedSpeaking":
                         # Barge-in: flush queued TTS audio on the phone leg.
-                        await telnyx_ws.send_text(json.dumps({"event": "clear"}))
+                        clr = {"event": "clear"}
+                        if stream_id:
+                            clr["streamSid"] = stream_id
+                        await telnyx_ws.send_text(json.dumps(clr))
                     elif mtype == "FunctionCallRequest":
                         for fn in msg.get("functions", []):
                             if not fn.get("client_side", True):

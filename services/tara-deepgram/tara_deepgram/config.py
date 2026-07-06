@@ -39,15 +39,28 @@ PUBLIC_WS_BASE   = os.getenv("TARA_DG_PUBLIC_WS",   "wss://core.singulancelabs.c
 # as an Authorization header we configure in Settings.think.endpoint.headers).
 THINK_SHIM_SECRET = os.getenv("TARA_DG_SHIM_SECRET", "")
 
-# ── Telnyx telephony ─────────────────────────────────────────────────────────
+# ── Telephony ────────────────────────────────────────────────────────────────
 TARA_DG_ENABLED   = os.getenv("TARA_DG_ENABLED", "false").lower() == "true"
+# Provider switch: "telnyx" (default) | "twilio". Both bridge to the same
+# Deepgram media loop (mulaw@8k); only dial + stream-start differ.
+TELEPHONY_PROVIDER = os.getenv("TELEPHONY_PROVIDER", "telnyx").lower()
+
 TELNYX_API_KEY     = os.getenv("TELNYX_API_KEY", "")
 TELNYX_APP_ID      = os.getenv("TELNYX_APP_ID", "")
 TELNYX_FROM_NUMBER = os.getenv("TELNYX_FROM_NUMBER", "")
-# Comma-separated E.164 allowlist. Empty = ALL outbound dialing blocked (safe default).
-TELNYX_ALLOWED_NUMBERS = [
-    n.strip() for n in os.getenv("TELNYX_ALLOWED_NUMBERS", "").split(",") if n.strip()
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
+
+# Unified comma-separated E.164 allowlist. Empty = ALL outbound dialing blocked
+# (safe default). TELNYX_ALLOWED_NUMBERS kept as an alias for back-compat.
+ALLOWED_NUMBERS = [
+    n.strip() for n in (
+        os.getenv("TELNYX_ALLOWED_NUMBERS", "") + "," + os.getenv("TWILIO_ALLOWED_NUMBERS", "")
+    ).split(",") if n.strip()
 ]
+TELNYX_ALLOWED_NUMBERS = ALLOWED_NUMBERS  # alias
 
 # ── Voice-v2 turn strategy (router replaces per-turn recall + clinical loop) ─
 VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"

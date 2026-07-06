@@ -43,12 +43,54 @@ class DialRequest(BaseModel):
     contact_name: Optional[str] = None
 
 
+def _b64_basic(user: str, pw: str) -> str:
+    import base64
+    return base64.b64encode(f"{user}:{pw}".encode()).decode()
+
+
+async def _dial_twilio(req: DialRequest) -> dict:
+    """Dial via Twilio; TwiML <Connect><Stream> opens the media WS directly
+    (no separate webhook/stream-start step). Media WS = our /telnyx/stream
+    endpoint — same run_bridge, streamSid echoed automatically."""
+    # Twilio does NOT forward URL query params on the media WS — it delivers
+    # them as <Parameter> tags (start.customParameters). session_id also carried
+    # on the URL for our own convenience, but the bridge reads customParameters.
+    from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_attr
+    stream_url = _xml_escape(f"{config.PUBLIC_WS_BASE}/telnyx/stream")
+    params = {
+        "session_id": req.session_id, "user_id": req.user_id or "",
+        "org_id": req.org_id or "", "language": req.language, "voice_id": req.voice_id or "",
+    }
+    param_tags = "".join(
+        f'<Parameter name={_xml_attr(k)} value={_xml_attr(v)} />' for k, v in params.items() if v
+    )
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<Response><Connect><Stream url="{stream_url}">{param_tags}</Stream></Connect></Response>'
+    )
+    sid = config.TWILIO_ACCOUNT_SID
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json"
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(url,
+            headers={"Authorization": f"Basic {_b64_basic(sid, config.TWILIO_AUTH_TOKEN)}"},
+            data={"To": req.to, "From": config.TWILIO_FROM_NUMBER, "Twiml": twiml})
+        r.raise_for_status()
+        data = r.json()
+    leg = data["sid"]  # Twilio Call SID
+    pending_calls[leg] = {"call_control_id": leg, "provider": "twilio",
+                          "status": "dialing", **req.model_dump()}
+    log.info("twilio dial leg=%s session=%s to=%s", leg, req.session_id, req.to)
+    return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
+
+
 async def dial(req: DialRequest) -> dict:
-    """Dial via Telnyx; register metadata for webhook → stream routing."""
-    if req.to not in config.TELNYX_ALLOWED_NUMBERS:
+    """Dial via the configured provider; register metadata for stream routing."""
+    if req.to not in config.ALLOWED_NUMBERS:
         raise ValueError(
-            f"Number {req.to!r} not in TELNYX_ALLOWED_NUMBERS — dialing blocked."
+            f"Number {req.to!r} not in the allowlist (TELNYX_/TWILIO_ALLOWED_NUMBERS) — dialing blocked."
         )
+    if config.TELEPHONY_PROVIDER == "twilio":
+        return await _dial_twilio(req)
     result = await _telnyx("post", "/calls", json={
         "connection_id": config.TELNYX_APP_ID,
         "to": req.to,
@@ -71,7 +113,15 @@ async def hangup(call_leg_id: str) -> None:
     meta = pending_calls.get(call_leg_id)
     if not meta:
         raise ValueError(f"Call {call_leg_id!r} not found or already ended")
-    await _telnyx("post", f"/calls/{meta['call_control_id']}/actions/hangup")
+    if meta.get("provider") == "twilio":
+        sid = config.TWILIO_ACCOUNT_SID
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls/{meta['call_control_id']}.json",
+                headers={"Authorization": f"Basic {_b64_basic(sid, config.TWILIO_AUTH_TOKEN)}"},
+                data={"Status": "completed"})
+    else:
+        await _telnyx("post", f"/calls/{meta['call_control_id']}/actions/hangup")
     meta["status"] = "ended"
 
 

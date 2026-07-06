@@ -50,10 +50,13 @@ async def health():
         "ok": True,
         "service": "tara-deepgram",
         "outbound_enabled": config.TARA_DG_ENABLED,
+        "telephony_provider": config.TELEPHONY_PROVIDER,
         "deepgram_key_set": bool(config.DEEPGRAM_API_KEY),
         "telnyx_key_set": bool(config.TELNYX_API_KEY),
+        "twilio_key_set": bool(config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN),
+        "from_number_set": bool(config.TWILIO_FROM_NUMBER if config.TELEPHONY_PROVIDER == "twilio" else config.TELNYX_FROM_NUMBER),
         "hivemind_key_set": bool(config.HIVEMIND_API_KEY),
-        "allowlist_size": len(config.TELNYX_ALLOWED_NUMBERS),
+        "allowlist_size": len(config.ALLOWED_NUMBERS),
         "max_parallel": config.CAMPAIGN_MAX_PARALLEL,
     }
 
@@ -195,8 +198,31 @@ if config.TARA_DG_ENABLED:
 
     @app.websocket("/telnyx/stream")
     async def telnyx_stream(ws: WebSocket):
-        session_id = ws.query_params.get("session_id") or "dg-session"
-        meta = telephony.find_by_session(session_id) or {}
+        import json as _json
+        session_id = ws.query_params.get("session_id") or None
+        seed_start = None
+        # Twilio delivers session params via the `start` event's customParameters
+        # (not URL query). Peek frames until `start`, extract them, then proceed.
+        if config.TELEPHONY_PROVIDER == "twilio" or not session_id:
+            await ws.accept()
+            for _ in range(5):  # connected → start within a few frames
+                try:
+                    raw = await ws.receive_text()
+                except Exception:  # noqa: BLE001
+                    break
+                msg = _json.loads(raw)
+                if msg.get("event") == "start":
+                    seed_start = msg
+                    cp = (msg.get("start", {}) or {}).get("customParameters", {}) or {}
+                    session_id = cp.get("session_id") or session_id or "dg-session"
+                    break
+            session_id = session_id or "dg-session"
+            meta = telephony.find_by_session(session_id) or {}
+            accepted = True
+        else:
+            meta = telephony.find_by_session(session_id) or {}
+            accepted = False
+
         prompt = _BASE_PROMPT.format(
             company=meta.get("org_id") or "the company",
             goal=meta.get("goal") or "have a helpful conversation",
@@ -209,6 +235,7 @@ if config.TARA_DG_ENABLED:
             language=meta.get("language") or "en",
             voice_id=meta.get("voice_id"),
             prompt=prompt, company=meta.get("org_id") or "the company",
+            already_accepted=accepted, seed_start=seed_start,
         )
 
     # ── Campaigns ────────────────────────────────────────────────────────────

@@ -67,7 +67,16 @@ VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-20b")
-DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "meta-llama/llama-3.3-70b-instruct")
+# Direct-answer model. gpt-oss-120b on Cerebras = ~3x faster full completion
+# than llama-70b (the TTS-blocking metric). Provider pin + low reasoning effort.
+DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "openai/gpt-oss-120b")
+# Comma-sep OpenRouter provider order for the direct model (empty = latency sort).
+DIRECT_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_DIRECT_PROVIDER", "Cerebras").split(",") if p.strip()]
+# gpt-oss reasoning effort for voice: low = fewer reasoning tokens = faster.
+DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "low")
+# Model core uses for spoken recall answers (voice_model override). Same fast
+# Cerebras gpt-oss-120b; empty = leave core's default.
+RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
 
 # ── Campaign engine ──────────────────────────────────────────────────────────
 # Deepgram PAYG cap = 15 concurrent agent sessions; stay well under.

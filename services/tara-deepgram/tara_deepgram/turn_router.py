@@ -146,8 +146,13 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
         "max_tokens": 150,
         "temperature": 0.6,
         "stream": True,
-        "provider": {"sort": "latency", "allow_fallbacks": True},
+        # Pin Cerebras when configured (fastest full completion); else latency sort.
+        "provider": ({"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
+                     if config.DIRECT_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
     }
+    # gpt-oss models accept reasoning effort — low cuts pre-answer reasoning tokens.
+    if "gpt-oss" in config.DIRECT_MODEL and config.DIRECT_REASONING_EFFORT:
+        payload["reasoning"] = {"effort": config.DIRECT_REASONING_EFFORT}
     async with httpx.AsyncClient(timeout=30) as c:
         async with c.stream(
             "POST", f"{config.OPENROUTER_BASE_URL}/chat/completions",

@@ -149,7 +149,9 @@ export class TaraStreamHandler {
       });
 
       // ── STEP 2: Build prompt (< 5ms) ──
-      const model = config.model || this.defaultModel;
+      // voice_model override (voice-v2 shim): lets the caller force a fast model
+      // (e.g. gpt-oss-120b on Cerebras) for low-latency spoken recall answers.
+      const model = params.voice_model || config.model || this.defaultModel;
       // mode='internal' → direct humanized recall, NO clinical reasoning layer.
       // mode='external' (default) → full current behavior (clinical if configured).
       const internalMode = (params.mode || 'external') === 'internal';
@@ -217,10 +219,16 @@ export class TaraStreamHandler {
           temperature: config.temperature ?? 0.7,
           max_tokens: config.max_tokens ?? 2048,  // gpt-oss reasoning models need headroom
           stream: true,
-          // OpenRouter: pick the fastest provider that can serve the request and
-          // keep its own cross-provider fallback on, so a single provider outage
-          // doesn't kill the voice turn.
-          ...(tgt.openrouter ? { provider: { sort: 'throughput', allow_fallbacks: true } } : {}),
+          // OpenRouter provider routing. voice_provider (voice-v2 shim) pins a
+          // specific fast provider (e.g. Cerebras); else fastest-throughput.
+          ...(tgt.openrouter ? {
+            provider: params.voice_provider
+              ? { order: String(params.voice_provider).split(',').map(s => s.trim()).filter(Boolean), allow_fallbacks: true }
+              : { sort: 'throughput', allow_fallbacks: true },
+          } : {}),
+          // Low reasoning effort for gpt-oss on voice = fewer pre-answer tokens.
+          ...(params.voice_reasoning_effort && /gpt-oss/.test(tgt.model)
+            ? { reasoning: { effort: String(params.voice_reasoning_effort) } } : {}),
         }),
       });
 

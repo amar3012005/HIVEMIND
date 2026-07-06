@@ -779,6 +779,66 @@ Output the JSON object and nothing else.`;
   }
 
   /**
+   * ALGORITHMIC cross-doc entity linking for KB facts (KB_ENTITY_LINK_MODE=algo) — the token
+   * optimization: the unified extractor ALREADY produced each fact's canonical entities (written
+   * as entity:* tags at insert), so paying one co-mention LLM call PER FACT (~24 calls/doc, each
+   * carrying the full canonicalization prompt + candidate list) just to re-derive tags + edges is
+   * redundant. This replaces that per-fact LLM pass with ONE candidate-pool fetch + exact
+   * entity-tag intersection: cross-doc memories sharing >=1 entity tag get a Mentions edge
+   * (confidence scaled by shared-tag count, capped per fact). Zero LLM tokens. The LLM co-mention
+   * path stays for chat/manual memories, whose entities are NOT pre-extracted.
+   * Residency-safe: pool via listLatestMemories (agent-routed for remote orgs), edges via
+   * store.createRelationship (same seam the intra-window rels use).
+   * @returns {Promise<number>} edges created
+   */
+  async _algoLinkKbFacts(uFacts, { orgId, userId, documentId }) {
+    const store = this.memoryGraphEngine?.store;
+    if (!store?.createRelationship || !store?.listLatestMemories) return 0;
+    const facts = (uFacts || []).filter((f) => f?.id && Array.isArray(f.tags));
+    if (!facts.length) return 0;
+    // ONE pool fetch for the whole doc (the per-fact LLM path re-fetched candidates per memory).
+    const pool = await store.listLatestMemories({ user_id: userId, org_id: orgId, scope: 'organization' }).catch(() => []);
+    const docTag = documentId ? `doc-id:${documentId}` : null;
+    const batchIds = new Set(facts.map((f) => f.id));
+    // entityTag -> [{id}] over OTHER-doc pool memories.
+    const byEntity = new Map();
+    for (const m of (pool || [])) {
+      if (!m?.id || batchIds.has(m.id)) continue;
+      const tags = m.tags || [];
+      if (docTag && tags.includes(docTag)) continue; // same-doc: intra-doc rels already exist
+      for (const t of tags) {
+        if (typeof t === 'string' && t.startsWith('entity:')) {
+          let arr = byEntity.get(t);
+          if (!arr) { arr = []; byEntity.set(t, arr); }
+          arr.push(m.id);
+        }
+      }
+    }
+    if (!byEntity.size) return 0;
+    const MAX_EDGES_PER_FACT = Number(process.env.KB_ALGO_LINK_MAX_EDGES || 3);
+    let created = 0;
+    for (const f of facts) {
+      const shared = new Map(); // peerId -> shared-entity count
+      for (const t of f.tags) {
+        if (!t.startsWith('entity:')) continue;
+        for (const peerId of (byEntity.get(t) || [])) shared.set(peerId, (shared.get(peerId) || 0) + 1);
+      }
+      const top = [...shared.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_EDGES_PER_FACT);
+      for (const [peerId, n] of top) {
+        try {
+          await store.createRelationship({
+            id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
+            confidence: Math.min(0.9, 0.6 + n * 0.1),
+            metadata: { created_by: 'kb_algo_link_v1', document_id: documentId, shared_entities: n },
+          });
+          created++;
+        } catch { /* best-effort; dup/FK tolerated */ }
+      }
+    }
+    return created;
+  }
+
+  /**
    * Cross-window fact consolidation (KB_CONSOLIDATE=1). Different windows of the same document
    * extract near-duplicate facts independently ("X was founded in 1998" appears in the intro AND
    * the timeline). One structured LLM call groups near-duplicates; for each group we KEEP the
@@ -1075,6 +1135,63 @@ Output the JSON object and nothing else.`;
     // any schema change — gin-indexed tags[] is already there.
     const _scopeTag = `scope-key:${_scopeKey}`;
     const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag]));
+
+    // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
+    // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
+    // windows, no consolidation, no entity linking). Re-uploading the same file used to re-run the
+    // FULL pipeline (observed: same PDF uploaded twice → 2×675s + 2× the LLM spend).
+    // Disable with KB_SKIP_UNCHANGED=0.
+    if (String(process.env.KB_SKIP_UNCHANGED ?? '1') !== '0') {
+      try {
+        if (!orgIsRemote(orgId)) {
+          // Central orgs: exact scoped-sourceId match on the central KB tables.
+          const prior = await this.db.knowledgeDocument.findFirst({
+            where: { orgId, sourceId: _scopedSourceId, archivedAt: null, parseStatus: 'parsed' },
+            select: { id: true },
+          });
+          if (prior) {
+            const [segs, memLinks] = await Promise.all([
+              this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
+              this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
+            ]);
+            if (segs > 0) {
+              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero tokens`);
+              emit('skipped-unchanged', 100, { documentId: prior.id });
+              return { documentId: prior.id, segmentCount: segs, candidateCount: 0, promotedCount: memLinks, skippedUnchanged: true };
+            }
+          }
+        } else {
+          const { agentFor } = await import('../vector/mneme/remote-backend.js');
+          if (agentFor(orgId)?.url === 'local:') {
+            // Embedded (.amr-central) orgs: their kb rows live in schema hm ON CENTRAL — query it
+            // directly. Agent rows persist checksum + the caller metadata (scope/team/project), so
+            // match those (the agent table has no source_id column). Scope fields compared so the
+            // same file legitimately filed under a DIFFERENT scope still ingests fresh.
+            const scopeVal = metadata.scope || null;
+            const teamVal = metadata.primary_team_id || null;
+            const projVal = metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null;
+            const rows = await this.db.$queryRawUnsafe(
+              `SELECT d.id, (SELECT count(*)::int FROM hm.knowledge_segments s WHERE s.document_id = d.id) AS segs
+                 FROM hm.knowledge_documents d
+                WHERE d.org_id = $1::uuid AND d.checksum = $2 AND d.filename = $3 AND d.deleted_at IS NULL
+                  AND (d.metadata->>'scope') IS NOT DISTINCT FROM $4
+                  AND (d.metadata->>'primary_team_id') IS NOT DISTINCT FROM $5
+                  AND COALESCE(d.metadata->>'project_id', d.metadata->'project_ids'->>0) IS NOT DISTINCT FROM $6
+                LIMIT 1`,
+              orgId, checksum, filename, scopeVal, teamVal, projVal,
+            ).catch(() => []);
+            const prior = rows?.[0];
+            if (prior && Number(prior.segs) > 0) {
+              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (embedded org, checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${prior.segs} segs) — zero tokens`);
+              emit('skipped-unchanged', 100, { documentId: prior.id });
+              return { documentId: prior.id, segmentCount: Number(prior.segs), candidateCount: 0, promotedCount: 0, skippedUnchanged: true };
+            }
+          }
+          // True self-host (agent on the customer box): no cheap checksum probe route yet — full
+          // ingest proceeds (honest gap; add a /v1/kb-doc-by-checksum probe later).
+        }
+      } catch (e) { this.logger.warn?.(`[kb-ingest] skip-unchanged check failed (proceeding with full ingest): ${e.message}`); }
+    }
 
     // Step 3: Create knowledge document — route to agent for remote orgs.
     let knowledgeDoc;
@@ -2157,10 +2274,19 @@ Output the JSON object and nothing else.`;
             if (removed > 0) this.logger.info?.(`[kb-unified] consolidated: merged ${removed} near-duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
           }
         } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
-        if (uFacts.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
-          this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
-            .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))
-            .catch((e) => this.logger.warn?.(`[kb-unified] cross-doc link failed: ${e.message}`));
+        if (uFacts.length) {
+          // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
+          // extractor already produced (one pool fetch + tag intersection). 'llm' (default) keeps
+          // the per-fact co-mention LLM queue.
+          if (String(process.env.KB_ENTITY_LINK_MODE || 'llm') === 'algo') {
+            this._algoLinkKbFacts(uFacts, { orgId, userId, documentId })
+              .then((n) => this.logger.info?.(`[kb-unified] algo cross-doc linked ${uFacts.length} facts → ${n} edges (0 LLM calls)`))
+              .catch((e) => this.logger.warn?.(`[kb-unified] algo link failed: ${e.message}`));
+          } else if (typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+            this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
+              .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))
+              .catch((e) => this.logger.warn?.(`[kb-unified] cross-doc link failed: ${e.message}`));
+          }
         }
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
         const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });

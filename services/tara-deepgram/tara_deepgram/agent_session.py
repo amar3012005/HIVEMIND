@@ -99,6 +99,7 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                      user_id: Optional[str], org_id: Optional[str],
                      language: str, voice_id: Optional[str],
                      prompt: str, company: str, goal: str = "", mode: str = "external",
+                     greeting_extra: str = "",
                      on_end: Optional[Callable[[list[dict]], None]] = None,
                      already_accepted: bool = False, seed_start: Optional[dict] = None) -> None:
     """Bridge one Telnyx/Twilio media stream to one Deepgram Agent session."""
@@ -128,7 +129,7 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     settings = build_settings(
         session_id=session_id, user_id=user_id, org_id=org_id,
         language=language, voice_id=voice_id, prompt=prompt, company=company,
-        goal=goal, mode=mode,
+        goal=goal, mode=mode, greeting_extra=greeting_extra,
     )
 
     try:
@@ -138,6 +139,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         ) as dg:
             await dg.send(json.dumps(settings))
             events.write("session_start", {"session_id": session_id, "language": language})
+            # Flip registry status → connected so the FE poll shows the live call.
+            try:
+                from . import telephony as _tel
+                _m = _tel.find_by_session(session_id)
+                if _m and _m.get("call_leg_id") in _tel.pending_calls:
+                    _tel.pending_calls[_m["call_leg_id"]]["status"] = "connected"
+            except Exception:  # noqa: BLE001
+                pass
             asyncio.create_task(core_post("/api/tara/calls/start", {
                 "session_id": session_id, "mode": "phone",
                 "voice_id": voice_id, "language": language,
@@ -269,6 +278,15 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         events.write("bridge_error", {"error": str(e)})
     finally:
         events.write("session_end", {"hangup_by_agent": executor.hangup_requested})
+        # Mark the call ended in the registry so the FE status poll flips the
+        # dialing animation to "ended" the moment the media stream closes.
+        try:
+            from . import telephony as _tel
+            m = _tel.find_by_session(session_id)
+            if m and m.get("call_leg_id") in _tel.pending_calls:
+                _tel.pending_calls[m["call_leg_id"]]["status"] = "ended"
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await core_post("/api/tara/calls/end", {"session_id": session_id}, user_id, org_id)
         except Exception:  # noqa: BLE001

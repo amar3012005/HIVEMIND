@@ -121,6 +121,56 @@ async def route(*, persona_name: str, goal: str,
         return fallback
 
 
+_PLAN_SYS = """You are the call planner for TARA, a spoken voice agent. Given the
+agent's PERSONA (skill) and the CALL GOAL, produce a short strategic opening.
+Reply ONLY minified JSON:
+{"opening":"the exact first thing TARA says after the AI disclosure — warm, in persona, 1-2 spoken sentences, ending with the single best FIRST question that starts moving toward the goal","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress"}
+Rules: sound human, not scripted. The opening must state why you're calling and
+ask ONE clear question. Never invent facts. Speak the company name naturally."""
+
+
+async def plan_opening(*, persona_prompt: str, goal: str, company: str,
+                       language: str) -> dict:
+    """One fast-model call at call start → {opening, strategy, goal_state}."""
+    fallback = {"opening": "", "strategy": "", "goal_state": f"Objective: {goal}" if goal else ""}
+    if not config.OPENROUTER_API_KEY or not goal:
+        return fallback
+    user = (
+        f"Company: {company}\nCall goal: {goal}\nLanguage: respond in {language}\n"
+        f"Persona (skill):\n{(persona_prompt or 'You are TARA, a warm professional voice agent.')[:1200]}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.post(
+                f"{config.OPENROUTER_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": config.DIRECT_MODEL,
+                    "messages": [{"role": "system", "content": _PLAN_SYS},
+                                 {"role": "user", "content": user}],
+                    "max_tokens": 300, "temperature": 0.4,
+                    "provider": ({"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
+                                 if config.DIRECT_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
+                    **({"reasoning": {"effort": config.DIRECT_REASONING_EFFORT}}
+                       if "gpt-oss" in config.DIRECT_MODEL and config.DIRECT_REASONING_EFFORT else {}),
+                },
+            )
+        if r.status_code != 200:
+            return fallback
+        text = r.json()["choices"][0]["message"]["content"] or ""
+        m = _JSON_RE.search(text)
+        out = json.loads(m.group(0)) if m else {}
+        return {
+            "opening": str(out.get("opening") or "")[:400],
+            "strategy": str(out.get("strategy") or "")[:300],
+            "goal_state": str(out.get("goal_state") or (f"Objective: {goal}" if goal else ""))[:300],
+        }
+    except Exception as e:  # noqa: BLE001
+        log.warning("plan_opening failed: %s", e)
+        return fallback
+
+
 async def answer_direct(*, persona_prompt: str, language: str, directive: str,
                         messages: List[Dict[str, Any]], history_turns: int,
                         goal_state: str = "", facts: List[str] | None = None):

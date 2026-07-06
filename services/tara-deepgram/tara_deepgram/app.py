@@ -228,27 +228,42 @@ if config.TARA_DG_ENABLED:
         # the dial is appended so every reply drives toward it.
         from .core_client import get_persona
         from .browser_voice import _resolve_voice
+        from .turn_router import plan_opening
+        from . import think_shim
         call_mode = meta.get("mode") or "external"
         call_goal = meta.get("goal") or ""
+        # Company name = the real org name from the dial (NEVER the org UUID, which
+        # Deepgram would spell out as gibberish like "B-A-9-2-3...").
+        company = meta.get("company") or "our team"
+        call_lang = (meta.get("language") or "en").split("-")[0]
         persona = await get_persona(meta.get("user_id"), meta.get("org_id"))
         skill_prompt = persona.get("internal_prompt" if call_mode == "internal" else "system_prompt") or ""
-        prompt = skill_prompt or _BASE_PROMPT.format(
-            company=meta.get("org_id") or "the company",
-            goal=call_goal or "have a helpful conversation",
-        )
+        prompt = skill_prompt or _BASE_PROMPT.format(company=company, goal=call_goal or "have a helpful conversation")
         if call_goal:
             prompt += f"\n\n[CALL GOAL] {call_goal} — steer every turn toward this; never lose sight of it."
         if meta.get("contact_name"):
             prompt += f"\n[CALLER] The person you are calling is named {meta['contact_name']}."
-        # Language-appropriate voice when none chosen (German call → German voice).
-        call_lang = (meta.get("language") or "en").split("-")[0]
+
+        # Strategic opening: plan the first move from skill + goal, so TARA opens
+        # by asking the right FIRST question (not a generic hello). Pre-seed the
+        # turn-strategist's session state so it continues that plan.
+        greeting_extra = ""
+        if call_goal:
+            plan = await plan_opening(persona_prompt=skill_prompt, goal=call_goal,
+                                      company=company, language=call_lang)
+            greeting_extra = plan.get("opening") or ""
+            think_shim._session_state[session_id] = {
+                "directive": plan.get("strategy") or "",
+                "goal_state": plan.get("goal_state") or f"Objective: {call_goal}",
+                "facts": [],
+            }
         await run_bridge(
             ws, session_id=session_id,
             user_id=meta.get("user_id"), org_id=meta.get("org_id"),
             language=call_lang,
             voice_id=_resolve_voice(meta.get("voice_id"), call_lang),
-            prompt=prompt, company=meta.get("org_id") or "the company",
-            goal=call_goal, mode=call_mode,
+            prompt=prompt, company=company,
+            goal=call_goal, mode=call_mode, greeting_extra=greeting_extra,
             already_accepted=accepted, seed_start=seed_start,
         )
 

@@ -41,6 +41,8 @@ class DialRequest(BaseModel):
     goal: Optional[str] = None
     campaign_id: Optional[str] = None
     contact_name: Optional[str] = None
+    company: Optional[str] = None      # real org/company name (never the UUID)
+    mode: Optional[str] = None
 
 
 def _b64_basic(user: str, pw: str) -> str:

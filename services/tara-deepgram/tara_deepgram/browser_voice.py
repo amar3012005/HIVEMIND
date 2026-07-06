@@ -28,12 +28,14 @@ from .core_client import core_post
 log = logging.getLogger("tara_dg.browser")
 
 # Default Aura-2 voice per language (Deepgram voice ids). English fallback.
+# Per-language default Aura-2 voice. NOTE: eos-de / lotte-nl are premium and
+# 403 on the current project — use plan-authorized voices (aurelia-de, beatrix-nl).
 _AURA_BY_LANG = {
     "en": "aura-2-thalia-en",
-    "de": "aura-2-eos-de",
+    "de": "aura-2-aurelia-de",
     "es": "aura-2-celeste-es",
     "fr": "aura-2-agathe-fr",
-    "nl": "aura-2-lotte-nl",
+    "nl": "aura-2-beatrix-nl",
     "it": "aura-2-livia-it",
     "ja": "aura-2-izanami-ja",
 }

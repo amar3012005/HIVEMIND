@@ -209,9 +209,21 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                                 "id": fn["id"], "name": fn["name"], "content": content,
                             }))
                     elif mtype == "Error":
-                        events.write("dg_error", {"description": msg.get("description"),
-                                                  "code": msg.get("code")})
+                        desc = str(msg.get("description") or "")
+                        events.write("dg_error", {"description": desc, "code": msg.get("code")})
                         log.error("deepgram error session=%s: %s", session_id, msg)
+                        # Recover from an unauthorized voice instead of dropping the
+                        # call: switch speak to the default authorized English voice.
+                        if "speak" in desc and "authorized" in desc:
+                            try:
+                                await dg.send(json.dumps({
+                                    "type": "UpdateSpeak",
+                                    "speak": {"provider": {"type": "deepgram",
+                                                           "model": config.DEEPGRAM_SPEAK_MODEL}},
+                                }))
+                                log.info("recovered speak → %s session=%s", config.DEEPGRAM_SPEAK_MODEL, session_id)
+                            except Exception:  # noqa: BLE001
+                                pass
                     elif mtype == "AgentStartedSpeaking":
                         turn["latency_ms"] = round(float(msg.get("total_latency") or 0) * 1000) or None
                         log.info("latency session=%s total=%.0fms ttt=%.0fms tts=%.0fms",

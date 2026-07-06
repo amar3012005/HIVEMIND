@@ -239,6 +239,14 @@ export async function remotePurge(orgId) {
   catch (e) { console.warn(`[mneme/remote] purge failed org=${orgId}: ${e.message}`); return null; }
 }
 
+// Clear ONLY the memory layer on the agent (hard) — memories + edges + vectors.
+// Leaves KB, meetings, TARA and all usage/billing intact. Returns { ok, deleted }
+// or null on failure. Backs the dashboard "Clear all memories" action.
+export async function remoteClearMemories(orgId) {
+  try { const out = await _call(orgId, '/v1/clear-memories', {}); return out || { ok: true }; }
+  catch (e) { console.warn(`[mneme/remote] clear-memories failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // ── Meetings layer (self-host) ───────────────────────────────────────────────
 // Upsert a full meeting row on the agent. Returns { ok, id, created_at } or null on failure.
 export async function remoteMeetingWrite(orgId, meeting) {

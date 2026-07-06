@@ -526,6 +526,17 @@ const routes = {
     return { ok: true, deleted };
   },
 
+  // Clear ONLY the memory layer for this org (hard) — memories + their edges +
+  // memory vectors. Leaves KB, meetings, TARA, and all usage/billing untouched.
+  // Backs the dashboard "Clear all memories" action. Idempotent.
+  '/v1/clear-memories': async () => {
+    const m = await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]);
+    await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
+    await ensureQdrant();
+    return { ok: true, deleted: m.rowCount };
+  },
+
   // Bulk erase the whole org (account deletion saga). Drops + recreates the Qdrant collection.
   '/v1/purge': async () => {
     const m = await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]);

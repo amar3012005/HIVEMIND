@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrClearMemories } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -16942,6 +16942,20 @@ exit \$RC
 
         case '/api/memories/delete-all':
           if (req.method === 'DELETE') {
+            // Self-host (remote) orgs keep memories on their agent, not central PG.
+            // Route the clear to the agent's memory-only endpoint — hard-deletes
+            // every memory + edge + vector for the org, leaving KB/meetings and
+            // ALL usage/billing counters untouched. No central prisma work.
+            if (orgIsRemote(orgId)) {
+              try {
+                const out = await amrClearMemories(orgId);
+                if (!out) return jsonResponse(res, { error: 'Delete all failed', message: 'agent unreachable' }, 502);
+                invalidateAggregateCache({ userId, orgId, project: null });
+                return jsonResponse(res, { success: true, deleted: out.deleted || 0, remaining: 0 });
+              } catch (error) {
+                return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
+              }
+            }
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;

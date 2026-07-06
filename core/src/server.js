@@ -37,6 +37,28 @@ const TARA_INSIGHT_PROMPT = `You are TARA's post-call analyst. Analyze this voic
 }
 Rules: faithful to the transcript, never invent facts or contact details. priority_stars: 5 = ready to buy/decision-maker+budget+timeline, 3 = genuine interest, 1 = weak/unqualified. If no real lead, lead_found=false and leads=[]. Empty arrays where nothing applies.`;
 
+// TARA-MEMORY: one reserved, admin-only project per org that holds every call
+// transcript as a HIVEMIND memory. Hidden from Workspace Admin (control-plane
+// filters slug 'tara-memory'); policy 'private' → only admins/creator see it.
+const _taraMemProjectCache = new Map(); // orgId → projectId
+async function ensureTaraMemoryProject(orgId, userId) {
+  if (!orgId || !prisma) return null;
+  if (_taraMemProjectCache.has(orgId)) return _taraMemProjectCache.get(orgId);
+  try {
+    let p = await prisma.project.findFirst({ where: { orgId, slug: 'tara-memory' } });
+    if (!p) {
+      p = await prisma.project.create({ data: {
+        orgId, name: 'TARA-MEMORY', slug: 'tara-memory',
+        description: 'TARA call transcripts — system-managed, admin-only.',
+        policy: 'private', selfEvolveEnabled: false,
+        createdBy: userId || orgId,
+      }});
+    }
+    _taraMemProjectCache.set(orgId, p.id);
+    return p.id;
+  } catch (e) { console.warn('[tara/mem] ensure project failed:', e.message); return null; }
+}
+
 // Global resilience: route EVERY Groq chat call (incl. the ~25 hardcoded api.groq.com sites) through
 // groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
 // blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
@@ -6994,6 +7016,23 @@ exit \$RC
                   if (parsed?.summary) {
                     await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), metadata_merge: { insight: parsed } });
                   }
+                  // Save the FULL transcript as a HIVEMIND memory in the reserved
+                  // admin-only TARA-MEMORY project (dedicated, out of org memories).
+                  if (persistentMemoryStore) {
+                    try {
+                      const pid = await ensureTaraMemoryProject(tOrg, tUser);
+                      await persistentMemoryStore.createMemory({
+                        id: crypto.randomUUID(), user_id: tUser, org_id: tOrg,
+                        project: 'tara-memory', project_ids: pid ? [pid] : [],
+                        scope: 'project',
+                        title: `TARA transcript — ${new Date().toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        content: `TARA call transcript (goal: ${goal || 'n/a'}):\n\n${transcript.slice(0, 40000)}`,
+                        tags: ['tara-transcript', `sid:${body.session_id}`],
+                        memory_type: 'event', document_date: new Date().toISOString(),
+                        metadata: { session_id: body.session_id, call_id: callId, kind: 'tara-transcript' },
+                      });
+                    } catch (e4) { console.warn('[tara/mem] transcript save failed:', e4.message); }
+                  }
                 } catch (e) { console.warn('[tara/calls] remote insight failed:', e.message); }
               })();
               return jsonResponse(res, { ok: true, duration_ms: durSec * 1000, turns: 0 });
@@ -7033,14 +7072,18 @@ exit \$RC
                         ? `\n\nKey points:\n- ${parsed.key_points.slice(0, 8).join('\n- ')}` : '';
                       const tp = Array.isArray(parsed.topics) && parsed.topics.length
                         ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
+                      const pid = await ensureTaraMemoryProject(tOrg, tUser);
+                      const fullTranscript = turns.map(t => `You: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
                       await persistentMemoryStore.createMemory({
                         id: crypto.randomUUID(),
                         user_id: tUser,
                         org_id: tOrg,
-                        project: 'tara-memory',  // reserved system project (hidden from Workspace Admin)
-                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}`,
+                        project: 'tara-memory',  // reserved admin-only project (hidden from Workspace Admin)
+                        project_ids: pid ? [pid] : [],
+                        scope: 'project',
+                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}\n\n--- Transcript ---\n${fullTranscript.slice(0, 38000)}`,
                         title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
-                        tags: ['tara-call-log', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
+                        tags: ['tara-call-log', 'tara-transcript', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
                         memory_type: 'event',
                         document_date: new Date().toISOString(),
                         metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal' },

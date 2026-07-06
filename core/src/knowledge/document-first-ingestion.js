@@ -13,6 +13,7 @@
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch } from '../llm/groq-fallback.js';
+import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
@@ -854,6 +855,107 @@ Output the JSON object and nothing else.`;
         }
       }
     }
+    // HYBRID (mode 'hybrid', default): the algo pass above nails the HIGH-CONFIDENCE edges
+    // (explicit change verbs, negation, numeric divergence, exact entity co-mention) for free.
+    // It MISSES the subtle cases — semantic contradiction with no shared words, entity-
+    // canonicalization drift across docs, non-numeric updates ("CTO"→"CEO"). Escalate ONLY those
+    // gray-zone pairs to ONE batched LLM call/doc (vs the old ~24 per-fact calls). Idempotent:
+    // any edge the LLM re-affirms that algo already made is a no-op (createRelationship dup-tolerant).
+    if (String(process.env.KB_ENTITY_LINK_MODE || 'hybrid') === 'hybrid') {
+      try { created += await this._hybridClassifyRelations(facts, pool, poolById, byEntity, { documentId }); }
+      catch (e) { this.logger.warn?.(`[kb-hybrid-rel] batched classify failed (algo edges kept): ${e.message}`); }
+    }
+    return created;
+  }
+
+  /**
+   * ONE batched LLM call per doc to catch the relationships the algorithmic pass misses. Builds a
+   * bounded set of gray-zone (fact, candidate) pairs — entity-overlapping peers PLUS the top
+   * token-similar peers even without a shared entity tag (this is what catches canonicalization
+   * drift: "TU München" vs "Technical University Munich" never share an entity tag) — and asks the
+   * LLM to classify each as Updates/Extends/Contradicts/Derives/Mentions/none in a single call.
+   * @returns {Promise<number>} edges created
+   */
+  async _hybridClassifyRelations(facts, pool, poolById, byEntity, { documentId }) {
+    const store = this.memoryGraphEngine?.store;
+    if (!store?.createRelationship) return 0;
+    const MAX_PAIRS = Number(process.env.KB_HYBRID_MAX_PAIRS || 40);
+    const PER_FACT = Number(process.env.KB_HYBRID_PER_FACT || 4);
+    const SIM_FLOOR = Number(process.env.KB_HYBRID_SIM_FLOOR || 0.12);
+    const otherPool = (pool || []).filter((m) => m?.id && m.content && !facts.some((f) => f.id === m.id));
+    if (!otherPool.length) return 0;
+    const pairs = [];
+    const seen = new Set();
+    for (const f of facts) {
+      const cand = new Map(); // peerId -> score
+      // entity-overlap peers (already ranked in the caller, recompute cheaply here)
+      for (const t of (f.tags || [])) {
+        if (!t.startsWith('entity:')) continue;
+        for (const pid of (byEntity.get(t) || [])) cand.set(pid, (cand.get(pid) || 0) + 1);
+      }
+      // token-similar peers WITHOUT a shared entity tag (canonicalization-drift catch)
+      for (const m of otherPool) {
+        if (cand.has(m.id)) continue;
+        const sim = computeTokenSimilarity(f.content || '', m.content || '');
+        if (sim >= SIM_FLOOR) cand.set(m.id, sim); // score < 1 keeps them below entity-overlap peers
+      }
+      const top = [...cand.entries()].sort((a, b) => b[1] - a[1]).slice(0, PER_FACT);
+      for (const [pid] of top) {
+        const key = `${f.id}|${pid}`;
+        if (seen.has(key)) continue;
+        const peer = poolById.get(pid) || otherPool.find((m) => m.id === pid);
+        if (!peer) continue;
+        seen.add(key);
+        pairs.push({ fromId: f.id, toId: pid, a: (f.content || '').slice(0, 220), b: (peer.content || '').slice(0, 220) });
+        if (pairs.length >= MAX_PAIRS) break;
+      }
+      if (pairs.length >= MAX_PAIRS) break;
+    }
+    if (!pairs.length) return 0;
+
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const isGptOss = /gpt-oss/i.test(model);
+    const list = pairs.map((p, i) => `${i}. NEW: ${p.a}\n   PRIOR: ${p.b}`).join('\n');
+    const sys = `You classify the relationship of a NEW memory to a PRIOR memory. For each numbered pair output the type of NEW relative to PRIOR:
+- "Updates": NEW supersedes/corrects PRIOR (belief changed, value revised, role changed, location moved) — even if worded differently.
+- "Extends": NEW adds detail to PRIOR without conflicting.
+- "Contradicts": NEW conflicts with PRIOR and neither clearly supersedes.
+- "Derives": NEW is a synthesis conclusion drawn from PRIOR (+ others).
+- "Mentions": same subject/entity but otherwise unrelated facts.
+- "none": unrelated.
+Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = Updates; "TU München" vs "Technical University Munich" = same entity → Mentions/Updates as fits). Output STRICT JSON: {"edges":[{"i":<pair index>,"type":<one of the above>}]}. Omit pairs that are "none".`;
+    const GS = { type: 'object', additionalProperties: false, required: ['edges'], properties: { edges: { type: 'array', items: {
+      type: 'object', additionalProperties: false, required: ['i', 'type'],
+      properties: { i: { type: 'integer' }, type: { type: 'string', enum: ['Updates', 'Extends', 'Contradicts', 'Derives', 'Mentions', 'none'] } } } } } };
+    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 2000,
+        ...(isGptOss ? { reasoning_effort: 'low' } : {}),
+        response_format: isGptOss
+          ? { type: 'json_schema', json_schema: { name: 'rel_edges', strict: true, schema: GS } }
+          : { type: 'json_object' },
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: list }],
+      }),
+    });
+    if (!resp.ok) throw new Error(`hybrid LLM ${resp.status}`);
+    const j = await resp.json();
+    let parsed; try { parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}'); } catch { parsed = {}; }
+    const edges = Array.isArray(parsed.edges) ? parsed.edges : [];
+    let created = 0;
+    for (const e of edges) {
+      const p = pairs[Number(e.i)];
+      if (!p || !e.type || e.type === 'none') continue;
+      try {
+        await store.createRelationship({
+          id: crypto.randomUUID(), from_id: p.fromId, to_id: p.toId, type: e.type, confidence: 0.8,
+          metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
+        });
+        created++;
+      } catch { /* dup/FK tolerated (algo may have made the same edge) */ }
+    }
+    if (created) this.logger.info?.(`[kb-hybrid-rel] doc ${String(documentId).slice(0, 8)}: 1 batched LLM call over ${pairs.length} gray-zone pairs → ${created} edges`);
     return created;
   }
 
@@ -2297,10 +2399,14 @@ Output the JSON object and nothing else.`;
           // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
           // extractor already produced (one pool fetch + tag intersection). 'llm' (default) keeps
           // the per-fact co-mention LLM queue.
-          if (String(process.env.KB_ENTITY_LINK_MODE || 'llm') === 'algo') {
+          const _linkMode = String(process.env.KB_ENTITY_LINK_MODE || 'hybrid');
+          if (_linkMode === 'algo' || _linkMode === 'hybrid') {
+            // algo: pure algorithmic (0 LLM). hybrid: algo edges + ONE batched LLM/doc for the
+            // gray-zone the regex misses (semantic contradiction, canonicalization drift). Both
+            // run _algoLinkKbFacts; the hybrid escalation inside is gated on mode==='hybrid'.
             this._algoLinkKbFacts(uFacts, { orgId, userId, documentId })
-              .then((n) => this.logger.info?.(`[kb-unified] algo cross-doc linked ${uFacts.length} facts → ${n} edges (0 LLM calls)`))
-              .catch((e) => this.logger.warn?.(`[kb-unified] algo link failed: ${e.message}`));
+              .then((n) => this.logger.info?.(`[kb-unified] ${_linkMode} cross-doc linked ${uFacts.length} facts → ${n} edges`))
+              .catch((e) => this.logger.warn?.(`[kb-unified] ${_linkMode} link failed: ${e.message}`));
           } else if (typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
             this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
               .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))

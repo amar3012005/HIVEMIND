@@ -229,11 +229,15 @@ if config.TARA_DG_ENABLED:
         )
         if meta.get("contact_name"):
             prompt += f" The person you are calling is named {meta['contact_name']}."
+        # Resolve a language-appropriate voice when none was chosen, so a German
+        # call speaks with a German voice (not the default English one).
+        from .browser_voice import _resolve_voice
+        call_lang = (meta.get("language") or "en").split("-")[0]
         await run_bridge(
             ws, session_id=session_id,
             user_id=meta.get("user_id"), org_id=meta.get("org_id"),
-            language=meta.get("language") or "en",
-            voice_id=meta.get("voice_id"),
+            language=call_lang,
+            voice_id=_resolve_voice(meta.get("voice_id"), call_lang),
             prompt=prompt, company=meta.get("org_id") or "the company",
             already_accepted=accepted, seed_start=seed_start,
         )

@@ -37,6 +37,16 @@ log = logging.getLogger("tara_dg.think")
 
 router = APIRouter()
 
+# Short, natural fillers spoken while recall runs (perceived-latency mask).
+_FILLERS = {
+    "en": "Let me check that for you.",
+    "de": "Einen Moment, ich schaue das kurz nach.",
+    "fr": "Un instant, je vérifie ça.",
+    "es": "Un momento, déjame revisar eso.",
+    "nl": "Momentje, ik zoek dat even op.",
+    "it": "Un attimo, controllo subito.",
+}
+
 # Per-session strategy state (last directive). Single replica; tiny.
 _session_state: dict[str, dict] = {}
 
@@ -187,6 +197,19 @@ async def think(request: Request):
                     yield _chunk(chunk_id, model, {"content": text})
             else:
                 path = "recall" if use_router else "core-legacy"
+
+                # Filler-first: if the grounded answer hasn't begun within the
+                # threshold, speak a short natural filler so the caller hears
+                # something at ~500ms instead of silence during recall. Skipped
+                # when recall is fast (no filler → no annoyance).
+                if use_router:
+                    await asyncio.wait({core_first}, timeout=config.FILLER_AFTER_MS / 1000.0)
+                    if not core_first.done():
+                        filler = _FILLERS.get(language, _FILLERS["en"])
+                        first_ms = round((time.monotonic() - t0) * 1000)
+                        produced = True
+                        path = "recall+filler"
+                        yield _chunk(chunk_id, model, {"content": filler + " "})
 
                 async def _events():
                     try:

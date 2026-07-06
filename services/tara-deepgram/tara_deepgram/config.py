@@ -77,6 +77,8 @@ DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "low")
 # Model core uses for spoken recall answers (voice_model override). Same fast
 # Cerebras gpt-oss-120b; empty = leave core's default.
 RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
+# Speak a filler if the grounded recall answer hasn't started within this many ms.
+FILLER_AFTER_MS = int(os.getenv("TARA_DG_FILLER_AFTER_MS", "400"))
 
 # ── Campaign engine ──────────────────────────────────────────────────────────
 # Deepgram PAYG cap = 15 concurrent agent sessions; stay well under.

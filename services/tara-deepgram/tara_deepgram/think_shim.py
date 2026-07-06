@@ -137,7 +137,8 @@ async def think(request: Request):
             if len(_session_state) > 500:  # bound memory across long uptimes
                 _session_state.clear()
             state = _session_state.setdefault(
-                session_id, {"directive": "", "goal_state": "", "facts": []})
+                session_id, {"directive": "", "goal_state": "", "facts": [], "tok": {"p": 0, "c": 0}})
+            state.setdefault("tok", {"p": 0, "c": 0})
             # Seed goal_state from the dial-time goal so the strategist is oriented
             # from turn 1 (it evolves it thereafter).
             if call_goal and not state.get("goal_state"):
@@ -223,6 +224,7 @@ async def think(request: Request):
                 except Exception:  # noqa: BLE001
                     pass
                 prompt_key = "internal_prompt" if mode == "internal" else "system_prompt"
+                _u: Dict[str, Any] = {}
                 async for text in answer_direct(
                     persona_prompt=persona.get(prompt_key) or "",
                     language=language,
@@ -231,11 +233,14 @@ async def think(request: Request):
                     history_turns=decision.get("history_turns", 3),
                     goal_state=state.get("goal_state", ""),
                     facts=state.get("facts", []),
+                    usage_out=_u,
                 ):
                     if first_ms is None:
                         first_ms = round((time.monotonic() - t0) * 1000)
                     produced = True
                     yield _chunk(chunk_id, model, {"content": text})
+                state["tok"]["p"] += int(_u.get("prompt_tokens", 0) or 0)
+                state["tok"]["c"] += int(_u.get("completion_tokens", 0) or 0)
             else:
                 path = "recall" if use_router else "core-legacy"
 
@@ -264,6 +269,10 @@ async def think(request: Request):
                             first_ms = round((time.monotonic() - t0) * 1000)
                         produced = True
                         yield _chunk(chunk_id, model, {"content": evt["text"]})
+                    elif evt["type"] == "final":
+                        u = evt.get("usage") or {}
+                        state["tok"]["p"] += int(u.get("prompt_tokens", 0) or 0)
+                        state["tok"]["c"] += int(u.get("completion_tokens", 0) or 0)
                     elif evt["type"] == "error":
                         log.error("think upstream error session=%s: %s", session_id, evt["error"])
                         break

@@ -105,6 +105,7 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     """Bridge one Telnyx/Twilio media stream to one Deepgram Agent session."""
     if not already_accepted:
         await telnyx_ws.accept()
+    call_start = time.monotonic()
     events = CallEventLog(session_id)
     stream_id: Optional[str] = None  # Twilio streamSid (echoed in outbound frames)
     if seed_start:  # start event already consumed by the caller (Twilio peek)
@@ -288,7 +289,18 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         except Exception:  # noqa: BLE001
             pass
         try:
-            await core_post("/api/tara/calls/end", {"session_id": session_id}, user_id, org_id)
+            duration_sec = int(time.monotonic() - call_start)
+            tok = {"p": 0, "c": 0}
+            try:
+                from . import think_shim as _ts
+                tok = (_ts._session_state.get(session_id) or {}).get("tok", tok)
+                _ts._session_state.pop(session_id, None)  # free per-call state
+            except Exception:  # noqa: BLE001
+                pass
+            await core_post("/api/tara/calls/end", {
+                "session_id": session_id, "duration_sec": duration_sec,
+                "prompt_tokens": tok.get("p", 0), "completion_tokens": tok.get("c", 0),
+            }, user_id, org_id)
         except Exception:  # noqa: BLE001
             pass
         if on_end:

@@ -173,7 +173,8 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
 
 async def answer_direct(*, persona_prompt: str, language: str, directive: str,
                         messages: List[Dict[str, Any]], history_turns: int,
-                        goal_state: str = "", facts: List[str] | None = None):
+                        goal_state: str = "", facts: List[str] | None = None,
+                        usage_out: Dict[str, Any] | None = None):
     """Local persona answer (no recall, no core): async generator of text chunks."""
     convo = [m for m in messages if m.get("role") in ("user", "assistant")]
     # Floor of 3 turns so pronouns/follow-ups always have context even when the
@@ -196,6 +197,7 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
         "max_tokens": 150,
         "temperature": 0.6,
         "stream": True,
+        "stream_options": {"include_usage": True},  # final chunk carries token usage
         # Pin Cerebras when configured (fastest full completion); else latency sort.
         "provider": ({"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
                      if config.DIRECT_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
@@ -220,8 +222,16 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
                 if data == "[DONE]":
                     return
                 try:
-                    delta = json.loads(data)["choices"][0]["delta"].get("content")
-                except (json.JSONDecodeError, KeyError, IndexError):
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if usage_out is not None and obj.get("usage"):
+                    u = obj["usage"]
+                    usage_out["prompt_tokens"] = u.get("prompt_tokens", 0)
+                    usage_out["completion_tokens"] = u.get("completion_tokens", 0)
+                try:
+                    delta = obj["choices"][0]["delta"].get("content")
+                except (KeyError, IndexError):
                     continue
                 if delta:
                     yield delta

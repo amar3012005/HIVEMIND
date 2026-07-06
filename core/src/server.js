@@ -20,6 +20,23 @@ import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
 
+// TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
+// transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
+const TARA_INSIGHT_PROMPT = `You are TARA's post-call analyst. Analyze this voice call against its goal and return STRICT JSON only:
+{
+ "summary": string (2-4 sentence outcome),
+ "goal_outcome": "achieved" | "partial" | "missed" | "n/a",
+ "key_points": string[],
+ "action_items": [{"task": string, "owner": string|null, "due": string|null}],
+ "topics": string[],
+ "questions": string[],
+ "sentiment": "positive" | "neutral" | "negative",
+ "tara_learnings": string[] (what TARA should do better next time — objections it handled poorly, info it lacked, moments it drifted from the goal),
+ "lead_found": boolean,
+ "leads": [{"name": string|null, "contact": string|null, "company": string|null, "interest": "hot"|"warm"|"cold", "priority_stars": 1-5, "budget": string|null, "timeline": string|null, "notes": string, "next_step": string}]
+}
+Rules: faithful to the transcript, never invent facts or contact details. priority_stars: 5 = ready to buy/decision-maker+budget+timeline, 3 = genuine interest, 1 = weak/unqualified. If no real lead, lead_found=false and leads=[]. Empty arrays where nothing applies.`;
+
 // Global resilience: route EVERY Groq chat call (incl. the ~25 hardcoded api.groq.com sites) through
 // groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
 // blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
@@ -6944,13 +6961,19 @@ exit \$RC
           // (the agent has no tara_insights table; detail maps metadata.insight).
           if (orgIsRemote(tOrg)) {
             try {
-              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), status: 'completed' });
+              const durSec = Number(body.duration_sec) || 0;
+              const pTok = Number(body.prompt_tokens) || 0, cTok = Number(body.completion_tokens) || 0;
+              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id),
+                status: 'completed',
+                ...(pTok ? { prompt_tokens_inc: pTok } : {}), ...(cTok ? { completion_tokens_inc: cTok } : {}),
+                metadata_merge: { duration_sec: durSec } });
               (async () => {
                 try {
                   const g = await amrTaraCall(tOrg, { op: 'get', session_id: String(body.session_id) });
                   const callId = g?.call?.id;
                   if (!callId || !process.env.GROQ_API_KEY) return;
                   const d = await amrTaraCall(tOrg, { op: 'detail', id: callId });
+                  const goal = g?.call?.metadata?.goal || d?.call?.metadata?.goal || '';
                   const transcript = (d?.turns || []).map(t => {
                     let p = {}; try { p = typeof t.content === 'string' ? JSON.parse(t.content) : (t.content || {}); } catch { /* raw */ }
                     return `User: ${p.user_text || ''}\nTARA: ${p.agent_text || ''}`;
@@ -6960,8 +6983,8 @@ exit \$RC
                     method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
                       messages: [
-                        { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
-                        { role: 'user', content: transcript.slice(0, 40000) },
+                        { role: 'system', content: TARA_INSIGHT_PROMPT },
+                        { role: 'user', content: `Call goal: ${goal || '(none set)'}\n\nTranscript:\n${transcript.slice(0, 40000)}` },
                       ] }),
                     signal: AbortSignal.timeout(60_000),
                   });
@@ -6973,7 +6996,7 @@ exit \$RC
                   }
                 } catch (e) { console.warn('[tara/calls] remote insight failed:', e.message); }
               })();
-              return jsonResponse(res, { ok: true, duration_ms: 0, turns: 0 });
+              return jsonResponse(res, { ok: true, duration_ms: durSec * 1000, turns: 0 });
             } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
           }
           try {
@@ -6989,8 +7012,8 @@ exit \$RC
                   method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                   body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
                     messages: [
-                      { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
-                      { role: 'user', content: transcript.slice(0, 40000) },
+                      { role: 'system', content: TARA_INSIGHT_PROMPT },
+                      { role: 'user', content: `Call goal: ${call.goal || '(none set)'}\n\nTranscript:\n${transcript.slice(0, 40000)}` },
                     ] }),
                   signal: AbortSignal.timeout(60_000),
                 });
@@ -7043,7 +7066,17 @@ exit \$RC
                 turnCount: Number(c.turn_count) || 0,
                 promptTokens: Number(c.prompt_tokens) || 0,
                 completionTokens: Number(c.completion_tokens) || 0,
-                startedAt: c.created_at, durationMs: null,
+                startedAt: c.created_at,
+                durationMs: c.metadata?.duration_sec ? c.metadata.duration_sec * 1000 : null,
+                // Insight summary for the Leads/Insights dashboard (no per-call fetch).
+                insight: c.metadata?.insight
+                  ? { summary: c.metadata.insight.summary || null,
+                      sentiment: c.metadata.insight.sentiment || null,
+                      goal_outcome: c.metadata.insight.goal_outcome || null,
+                      lead_found: !!c.metadata.insight.lead_found,
+                      leads: Array.isArray(c.metadata.insight.leads) ? c.metadata.insight.leads : [],
+                      tara_learnings: Array.isArray(c.metadata.insight.tara_learnings) ? c.metadata.insight.tara_learnings : [] }
+                  : null,
               }));
               return jsonResponse(res, { calls });
             } catch { return jsonResponse(res, { calls: [] }); }

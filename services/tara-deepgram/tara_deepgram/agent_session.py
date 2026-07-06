@@ -42,11 +42,13 @@ _DISCLOSURE = {
 
 def build_settings(*, session_id: str, user_id: Optional[str], org_id: Optional[str],
                    language: str, voice_id: Optional[str], prompt: str,
-                   company: str, greeting_extra: str = "") -> dict:
+                   company: str, greeting_extra: str = "", goal: str = "",
+                   mode: str = "external") -> dict:
     """Deepgram Settings message: mulaw@8k both ways, think → HIVEMIND shim."""
     qs = urlencode({
         "session_id": session_id, "user_id": user_id or "",
-        "org_id": org_id or "", "language": language, "mode": "external",
+        "org_id": org_id or "", "language": language, "mode": mode,
+        "goal": goal or "",
     })
     disclosure = _DISCLOSURE.get(language, _DISCLOSURE["en"]).format(company=company)
     return {
@@ -95,7 +97,7 @@ class CallEventLog:
 async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                      user_id: Optional[str], org_id: Optional[str],
                      language: str, voice_id: Optional[str],
-                     prompt: str, company: str,
+                     prompt: str, company: str, goal: str = "", mode: str = "external",
                      on_end: Optional[Callable[[list[dict]], None]] = None,
                      already_accepted: bool = False, seed_start: Optional[dict] = None) -> None:
     """Bridge one Telnyx/Twilio media stream to one Deepgram Agent session."""
@@ -125,6 +127,7 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     settings = build_settings(
         session_id=session_id, user_id=user_id, org_id=org_id,
         language=language, voice_id=voice_id, prompt=prompt, company=company,
+        goal=goal, mode=mode,
     )
 
     try:

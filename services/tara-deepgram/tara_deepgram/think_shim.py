@@ -99,6 +99,7 @@ async def think(request: Request):
     org_id = qp.get("org_id") or None
     language = qp.get("language") or "en"
     mode = qp.get("mode") or "external"
+    call_goal = qp.get("goal") or ""  # goal set at dial time (FE Outbound)
     model = body.get("model") or "hivemind-tara"
     chunk_id = f"chatcmpl-{secrets.token_hex(8)}"
     t0 = time.monotonic()
@@ -117,6 +118,10 @@ async def think(request: Request):
                 _session_state.clear()
             state = _session_state.setdefault(
                 session_id, {"directive": "", "goal_state": "", "facts": []})
+            # Seed goal_state from the dial-time goal so the strategist is oriented
+            # from turn 1 (it evolves it thereafter).
+            if call_goal and not state.get("goal_state"):
+                state["goal_state"] = f"Objective: {call_goal}"
             prev_directive = state.get("directive", "")
             # The brief = the call's working memory: goal progress + user-revealed
             # facts, injected into BOTH paths so nothing established gets forgotten.
@@ -158,7 +163,7 @@ async def think(request: Request):
                 persona_hint = str(persona.get(prompt_key) or "")[:280].replace("\n", " ")
                 decision = await route(
                     persona_name=persona_hint or "TARA",
-                    goal="",
+                    goal=call_goal,
                     messages=messages, prev_directive=prev_directive,
                     goal_state=state.get("goal_state", ""),
                     facts=state.get("facts", []),

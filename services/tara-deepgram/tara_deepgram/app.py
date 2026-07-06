@@ -223,15 +223,24 @@ if config.TARA_DG_ENABLED:
             meta = telephony.find_by_session(session_id) or {}
             accepted = False
 
-        prompt = _BASE_PROMPT.format(
-            company=meta.get("org_id") or "the company",
-            goal=meta.get("goal") or "have a helpful conversation",
-        )
-        if meta.get("contact_name"):
-            prompt += f" The person you are calling is named {meta['contact_name']}."
-        # Resolve a language-appropriate voice when none was chosen, so a German
-        # call speaks with a German voice (not the default English one).
+        # Persona = the operator's SELECTED skill (external system prompt), not a
+        # generic base — so the phone agent stays strictly in character. Goal from
+        # the dial is appended so every reply drives toward it.
+        from .core_client import get_persona
         from .browser_voice import _resolve_voice
+        call_mode = meta.get("mode") or "external"
+        call_goal = meta.get("goal") or ""
+        persona = await get_persona(meta.get("user_id"), meta.get("org_id"))
+        skill_prompt = persona.get("internal_prompt" if call_mode == "internal" else "system_prompt") or ""
+        prompt = skill_prompt or _BASE_PROMPT.format(
+            company=meta.get("org_id") or "the company",
+            goal=call_goal or "have a helpful conversation",
+        )
+        if call_goal:
+            prompt += f"\n\n[CALL GOAL] {call_goal} — steer every turn toward this; never lose sight of it."
+        if meta.get("contact_name"):
+            prompt += f"\n[CALLER] The person you are calling is named {meta['contact_name']}."
+        # Language-appropriate voice when none chosen (German call → German voice).
         call_lang = (meta.get("language") or "en").split("-")[0]
         await run_bridge(
             ws, session_id=session_id,
@@ -239,6 +248,7 @@ if config.TARA_DG_ENABLED:
             language=call_lang,
             voice_id=_resolve_voice(meta.get("voice_id"), call_lang),
             prompt=prompt, company=meta.get("org_id") or "the company",
+            goal=call_goal, mode=call_mode,
             already_accepted=accepted, seed_start=seed_start,
         )
 

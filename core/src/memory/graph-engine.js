@@ -2596,7 +2596,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true)
       ? 6
       : (_isGmailish || _isNoise) ? 2 : 3;
-    const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
+    const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts', 'Derives']);
 
     // Per-type confidence floor. Updates is destructive (flips
     // is_latest=false on target) so demand high confidence + entity

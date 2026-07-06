@@ -56,9 +56,11 @@ function _meterResponse(res, model, feature) {
 // path returns the exact Response type a caller using global fetch expects;
 // fall back to node-fetch only on older runtimes. This makes groqFetch a true
 // drop-in for both global-fetch and node-fetch call sites.
-const _fetch = (typeof globalThis !== 'undefined' && globalThis.fetch)
-  ? globalThis.fetch.bind(globalThis)
-  : nodeFetch;
+const _fetch = (...args) => (
+  typeof globalThis !== 'undefined' && globalThis.fetch
+    ? globalThis.fetch(...args)
+    : nodeFetch(...args)
+);
 const _Response = (typeof globalThis !== 'undefined' && globalThis.Response)
   ? globalThis.Response
   : NodeResponse;

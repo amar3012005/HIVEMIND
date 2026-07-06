@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
@@ -46,6 +47,25 @@ _FILLERS = {
     "nl": "Momentje, ik zoek dat even op.",
     "it": "Un attimo, controllo subito.",
 }
+
+# Cheap local heuristic: is this turn likely to need recall (→ speak a filler
+# immediately, before the router LLM, so Aura-2 starts talking at ~300ms)?
+_TRIVIAL_RE = re.compile(
+    r"^(hi+|hey+|hello|hi there|thanks|thank you|ok(ay)?|yes|yeah|yep|no|nope|sure|bye|"
+    r"good|great|cool|nice|got it|mm+|uh+|right|exactly|perfect)[\s.!,'-]*$", re.I)
+_QWORD_RE = re.compile(
+    r"\b(what|which|who|where|when|why|how|price|cost|do you|does|did|can you|could you|"
+    r"tell me|is there|are there|explain|list|show|details?|about)\b", re.I)
+
+
+def _likely_recall(q: str) -> bool:
+    q = (q or "").strip()
+    if not q or _TRIVIAL_RE.match(q):
+        return False
+    if "?" in q or _QWORD_RE.search(q):
+        return True
+    return len(q.split()) >= 6
+
 
 # Per-session strategy state (last directive). Single replica; tiny.
 _session_state: dict[str, dict] = {}
@@ -154,6 +174,22 @@ async def think(request: Request):
                 org_id=org_id, language=language, mode=mode, extra=extra or None,
             )
             core_first = asyncio.ensure_future(core_gen.__anext__())
+
+            # FILLER-FIRST (pre-router): if the turn clearly needs recall, speak a
+            # filler NOW — before the router LLM blocks — so Aura-2 (which starts
+            # TTS at the first sentence) talks at ~300ms instead of ~1s. Router
+            # still runs in parallel for goal/facts/directive.
+            filler_emitted = False
+            forced_recall = False
+            if use_router and _likely_recall(query):
+                filler = _FILLERS.get(language, _FILLERS["en"])
+                first_ms = round((time.monotonic() - t0) * 1000)
+                produced = True
+                filler_emitted = True
+                forced_recall = True
+                path = "recall+filler"
+                yield _chunk(chunk_id, model, {"content": filler + " "})
+
             if use_router:
                 # Persona reaches the strategist too: the skill's opening lines
                 # define who TARA is + what the call is FOR — cached, so only the
@@ -175,7 +211,7 @@ async def think(request: Request):
                         state["facts"].append(f)
                 state["facts"] = state["facts"][-12:]  # cap the brief
 
-            if use_router and decision["action"] == "direct":
+            if use_router and decision["action"] == "direct" and not forced_recall:
                 path = "direct"
                 core_first.cancel()
                 try:
@@ -203,11 +239,9 @@ async def think(request: Request):
             else:
                 path = "recall" if use_router else "core-legacy"
 
-                # Filler-first: if the grounded answer hasn't begun within the
-                # threshold, speak a short natural filler so the caller hears
-                # something at ~500ms instead of silence during recall. Skipped
-                # when recall is fast (no filler → no annoyance).
-                if use_router:
+                # Fallback filler: heuristic missed but recall is slow anyway —
+                # emit a filler if the answer hasn't begun within the threshold.
+                if use_router and not filler_emitted:
                     await asyncio.wait({core_first}, timeout=config.FILLER_AFTER_MS / 1000.0)
                     if not core_first.done():
                         filler = _FILLERS.get(language, _FILLERS["en"])

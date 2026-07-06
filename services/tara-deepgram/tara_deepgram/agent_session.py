@@ -28,6 +28,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from . import config
 from .core_client import core_post
 from .functions import FUNCTION_DEFS, FunctionExecutor
+from .tara_stream import stream_tara
 
 log = logging.getLogger("tara_dg.session")
 
@@ -141,6 +142,18 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                 "session_id": session_id, "mode": "phone",
                 "voice_id": voice_id, "language": language,
             }, user_id, org_id))
+            # Warm the recall pipeline (embedding + Qdrant + lexical) DURING the
+            # disclosure greeting so the caller's first real question isn't cold
+            # (~2.4s → ~1.1s). Fire-and-forget throwaway recall; result discarded.
+            async def _warm() -> None:
+                try:
+                    async for _ in stream_tara(query="hello", session_id=f"warm-{session_id}",
+                                               user_id=user_id, org_id=org_id, language=language,
+                                               mode="external", extra={"skip_clinical": True, "max_tokens": 1}):
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+            asyncio.create_task(_warm())
             turn = {"n": 0, "user_text": "", "latency_ms": None}
 
             async def telnyx_to_dg() -> None:

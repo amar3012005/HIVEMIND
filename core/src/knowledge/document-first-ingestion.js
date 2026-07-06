@@ -792,7 +792,7 @@ Output the JSON object and nothing else.`;
    * store.createRelationship (same seam the intra-window rels use).
    * @returns {Promise<number>} edges created
    */
-  async _algoLinkKbFacts(uFacts, { orgId, userId, documentId }) {
+  async _algoLinkKbFacts(uFacts, { orgId, userId, documentId, skipHybrid = false, skipMentions = false }) {
     const store = this.memoryGraphEngine?.store;
     if (!store?.createRelationship || !store?.listLatestMemories) return 0;
     const facts = (uFacts || []).filter((f) => f?.id && Array.isArray(f.tags));
@@ -826,16 +826,19 @@ Output the JSON object and nothing else.`;
         for (const peerId of (byEntity.get(t) || [])) shared.set(peerId, (shared.get(peerId) || 0) + 1);
       }
       const ranked = [...shared.entries()].sort((a, b) => b[1] - a[1]);
-      // (a) Mentions edges — co-mention topology (cap per fact).
-      for (const [peerId, n] of ranked.slice(0, MAX_EDGES_PER_FACT)) {
-        try {
-          await store.createRelationship({
-            id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
-            confidence: Math.min(0.9, 0.6 + n * 0.1),
-            metadata: { created_by: 'kb_algo_link_v1', document_id: documentId, shared_entities: n },
-          });
-          created++;
-        } catch { /* best-effort; dup/FK tolerated */ }
+      // (a) Mentions edges — co-mention topology (cap per fact). skipMentions when the co-mention
+      // LLM (llm mode) already produces Mentions; this pass then only adds deterministic evolution.
+      if (!skipMentions) {
+        for (const [peerId, n] of ranked.slice(0, MAX_EDGES_PER_FACT)) {
+          try {
+            await store.createRelationship({
+              id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
+              confidence: Math.min(0.9, 0.6 + n * 0.1),
+              metadata: { created_by: 'kb_algo_link_v1', document_id: documentId, shared_entities: n },
+            });
+            created++;
+          } catch { /* best-effort; dup/FK tolerated */ }
+        }
       }
       // (b) EVOLUTION edges — Updates / Extends / Contradicts + is_latest supersession. The
       // co-mention LLM used to emit these; the unified path never had the enrich pass, so `algo`
@@ -861,7 +864,7 @@ Output the JSON object and nothing else.`;
     // canonicalization drift across docs, non-numeric updates ("CTO"→"CEO"). Escalate ONLY those
     // gray-zone pairs to ONE batched LLM call/doc (vs the old ~24 per-fact calls). Idempotent:
     // any edge the LLM re-affirms that algo already made is a no-op (createRelationship dup-tolerant).
-    if (String(process.env.KB_ENTITY_LINK_MODE || 'hybrid') === 'hybrid') {
+    if (!skipHybrid && String(process.env.KB_ENTITY_LINK_MODE || 'llm') === 'hybrid') {
       try { created += await this._hybridClassifyRelations(facts, pool, poolById, byEntity, { documentId }); }
       catch (e) { this.logger.warn?.(`[kb-hybrid-rel] batched classify failed (algo edges kept): ${e.message}`); }
     }
@@ -2397,20 +2400,30 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         if (uFacts.length) {
           // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
-          // extractor already produced (one pool fetch + tag intersection). 'llm' (default) keeps
-          // the per-fact co-mention LLM queue.
-          const _linkMode = String(process.env.KB_ENTITY_LINK_MODE || 'hybrid');
+          // extractor already produced (one pool fetch + tag intersection).
+          // MODES (KB_ENTITY_LINK_MODE):
+          //   'llm'  (DEFAULT — graph-intelligence-first): full per-fact co-mention LLM (richest
+          //          edges — Mentions/Updates/Extends/Contradicts/Derives, best semantic recall)
+          //          PLUS the deterministic algo supersession sweep (guarantees numeric/negation
+          //          Updates the LLM might phrase-miss). Belt-and-suspenders = maximum graph quality.
+          //   'hybrid': algo edges + ONE batched LLM/doc for the gray-zone (cost-leaning).
+          //   'algo' : pure algorithmic, 0 LLM (cheapest, higher miss).
+          const _linkMode = String(process.env.KB_ENTITY_LINK_MODE || 'llm');
           if (_linkMode === 'algo' || _linkMode === 'hybrid') {
-            // algo: pure algorithmic (0 LLM). hybrid: algo edges + ONE batched LLM/doc for the
-            // gray-zone the regex misses (semantic contradiction, canonicalization drift). Both
-            // run _algoLinkKbFacts; the hybrid escalation inside is gated on mode==='hybrid'.
             this._algoLinkKbFacts(uFacts, { orgId, userId, documentId })
               .then((n) => this.logger.info?.(`[kb-unified] ${_linkMode} cross-doc linked ${uFacts.length} facts → ${n} edges`))
               .catch((e) => this.logger.warn?.(`[kb-unified] ${_linkMode} link failed: ${e.message}`));
           } else if (typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+            // Co-mention LLM (per-fact, all edge types incl Derives) — the richest relationship pass.
             this.memoryGraphEngine.linkEntitiesForMemories(uFacts, { concurrency: Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6), noPeers: true })
-              .then(() => this.logger.info?.(`[kb-unified] cross-doc linked ${uFacts.length} facts`))
-              .catch((e) => this.logger.warn?.(`[kb-unified] cross-doc link failed: ${e.message}`));
+              .then(() => this.logger.info?.(`[kb-unified] llm cross-doc co-mention linked ${uFacts.length} facts`))
+              .catch((e) => this.logger.warn?.(`[kb-unified] llm cross-doc link failed: ${e.message}`));
+            // PLUS deterministic supersession (Updates/Extends/Contradicts via the algorithmic
+            // conflict-detector, 0 extra LLM) — catches numeric/negation cases the LLM occasionally
+            // phrases past. Idempotent with the LLM's edges (dup-tolerant). skipHybrid: no 2nd LLM.
+            this._algoLinkKbFacts(uFacts, { orgId, userId, documentId, skipHybrid: true, skipMentions: true })
+              .then((n) => n && this.logger.info?.(`[kb-unified] llm+algo supersession added ${n} deterministic edges`))
+              .catch((e) => this.logger.warn?.(`[kb-unified] llm+algo supersession failed: ${e.message}`));
           }
         }
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).

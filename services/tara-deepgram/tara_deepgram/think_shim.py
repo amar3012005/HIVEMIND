@@ -38,15 +38,35 @@ log = logging.getLogger("tara_dg.think")
 
 router = APIRouter()
 
-# Short, natural fillers spoken while recall runs (perceived-latency mask).
+# Rotating fillers spoken while recall runs (perceived-latency mask). A list per
+# language; the shim rotates per turn and skips back-to-back fillers so the
+# caller never hears the same phrase twice in a row.
 _FILLERS = {
-    "en": "Let me check that for you.",
-    "de": "Einen Moment, ich schaue das kurz nach.",
-    "fr": "Un instant, je vérifie ça.",
-    "es": "Un momento, déjame revisar eso.",
-    "nl": "Momentje, ik zoek dat even op.",
-    "it": "Un attimo, controllo subito.",
+    "en": ["Let me check that for you.", "Good question — one moment.",
+           "Let me pull that up.", "Sure, just a second.", "Hmm, let me see."],
+    "de": ["Einen Moment, ich schaue das kurz nach.", "Gute Frage — Sekunde.",
+           "Moment, das habe ich gleich.", "Lassen Sie mich kurz nachsehen."],
+    "fr": ["Un instant, je vérifie ça.", "Bonne question — une seconde.",
+           "Laissez-moi regarder ça.", "Un petit moment."],
+    "es": ["Un momento, déjame revisar eso.", "Buena pregunta — un segundo.",
+           "Déjame verlo.", "Un momentito."],
+    "nl": ["Momentje, ik zoek dat even op.", "Goede vraag — momentje.",
+           "Even kijken.", "Seconde."],
+    "it": ["Un attimo, controllo subito.", "Bella domanda — un secondo.",
+           "Vediamo un attimo.", "Momento."],
 }
+
+
+def _next_filler(state: dict, language: str) -> Optional[str]:
+    """Rotate fillers; skip entirely if the previous turn also used one."""
+    if state.get("last_was_filler"):
+        state["last_was_filler"] = False
+        return None
+    pool = _FILLERS.get(language, _FILLERS["en"])
+    i = state.get("filler_i", 0)
+    state["filler_i"] = (i + 1) % len(pool)
+    state["last_was_filler"] = True
+    return pool[i % len(pool)]
 
 # Cheap local heuristic: is this turn likely to need recall (→ speak a filler
 # immediately, before the router LLM, so Aura-2 starts talking at ~300ms)?
@@ -183,13 +203,14 @@ async def think(request: Request):
             filler_emitted = False
             forced_recall = False
             if use_router and _likely_recall(query):
-                filler = _FILLERS.get(language, _FILLERS["en"])
-                first_ms = round((time.monotonic() - t0) * 1000)
-                produced = True
-                filler_emitted = True
                 forced_recall = True
-                path = "recall+filler"
-                yield _chunk(chunk_id, model, {"content": filler + " "})
+                filler = _next_filler(state, language)
+                if filler:
+                    first_ms = round((time.monotonic() - t0) * 1000)
+                    produced = True
+                    filler_emitted = True
+                    path = "recall+filler"
+                    yield _chunk(chunk_id, model, {"content": filler + " "})
 
             if use_router:
                 # Persona reaches the strategist too: the skill's opening lines
@@ -204,9 +225,13 @@ async def think(request: Request):
                     messages=messages, prev_directive=prev_directive,
                     goal_state=state.get("goal_state", ""),
                     facts=state.get("facts", []),
+                    phase=state.get("phase", "discover"),
+                    confidence=int(state.get("confidence", 50)),
                 )
                 state["directive"] = decision.get("directive") or prev_directive
                 state["goal_state"] = decision.get("goal_state") or state.get("goal_state", "")
+                state["phase"] = decision.get("phase", state.get("phase", "discover"))
+                state["confidence"] = decision.get("confidence", state.get("confidence", 50))
                 for f in decision.get("new_facts", []):
                     if f and f not in state["facts"]:
                         state["facts"].append(f)
@@ -214,6 +239,7 @@ async def think(request: Request):
 
             if use_router and decision["action"] == "direct" and not forced_recall:
                 path = "direct"
+                state["last_was_filler"] = False  # direct turn = no filler spoken
                 core_first.cancel()
                 try:
                     await core_first  # let the cancellation land before closing
@@ -249,11 +275,12 @@ async def think(request: Request):
                 if use_router and not filler_emitted:
                     await asyncio.wait({core_first}, timeout=config.FILLER_AFTER_MS / 1000.0)
                     if not core_first.done():
-                        filler = _FILLERS.get(language, _FILLERS["en"])
-                        first_ms = round((time.monotonic() - t0) * 1000)
-                        produced = True
-                        path = "recall+filler"
-                        yield _chunk(chunk_id, model, {"content": filler + " "})
+                        filler = _next_filler(state, language)
+                        if filler:
+                            first_ms = round((time.monotonic() - t0) * 1000)
+                            produced = True
+                            path = "recall+filler"
+                            yield _chunk(chunk_id, model, {"content": filler + " "})
 
                 async def _events():
                     try:

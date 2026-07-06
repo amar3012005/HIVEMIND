@@ -32,43 +32,54 @@ from . import config
 log = logging.getLogger("tara_dg.router")
 
 _ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent on a live call.
-Your job every turn: (1) route the answer, (2) DRIVE the call toward its goal,
-(3) keep a running memory of important facts. Reply ONLY minified JSON:
-{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."]}
+You run a CONFIDENCE-DRIVEN plan: hold a hypothesis about the caller, update
+your confidence every turn, and CONVERGE — calls must move forward and END,
+never loop. Reply ONLY minified JSON:
+{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100}
 
 action:
-- "recall": message needs facts about the company, people, products, prices,
-  documents, or org history — anything you could get wrong without the
-  knowledge base. WHEN IN DOUBT → "recall".
-- "direct": conversation mechanics — greetings, thanks, confirmations, small
-  talk, repeats, or things fully answerable from the visible conversation.
+- "recall": message needs facts about the company, products, prices, docs,
+  or org history — anything you could get wrong without the knowledge base.
+  WHEN IN DOUBT → "recall".
+- "direct": conversation mechanics — greetings, thanks, confirmations,
+  repeats, or things fully answerable from the visible conversation.
 
-history_turns: previous turns the answer needs (2-8). Minimum 2; more when the
-user refers back (pronouns, "as I said", follow-ups).
+history_turns: previous turns the answer needs (2-8).
 
-directive: ONE line = tone + the concrete NEXT MOVE toward the goal.
-HARD RULES: never ask for anything already known (in goal_state or facts) —
-that is the worst failure. Name the ONE genuinely missing item, or if nothing
-is missing, direct the close (summarize + next step). Never repeat the
-previous directive's move — if it didn't land, try a DIFFERENT angle.
+phase + confidence — the convergence engine:
+- confidence = how sure you are of your hypothesis (caller's interest + fit
+  for the goal). Update it EVERY turn from what they say and HOW they say it.
+- Each phase gets AT MOST 2 questions. Then you MUST advance:
+  discover → qualify → propose → close → wrapup. Never move backward.
+- confidence >= 70 (interested): stop probing, PROPOSE the concrete next step
+  toward the goal (demo, booking, commitment) and drive to close.
+- confidence <= 30 OR two short/flat/uninterested replies in a row: the
+  hypothesis failed — go straight to wrapup: one-sentence graceful summary,
+  thank them, say goodbye. A clean short call beats a dragging one.
+- In wrapup the directive must be: deliver closing line, then END the call.
 
-goal_state: one line of goal progress. It MUST change when the user gives new
-information — mark items as known with their value, mark finished stages DONE
-(e.g. "qualify: budget=1-2M ✓, timeline=ASAP ✓, decision-maker=unknown ← next").
-Carry known items forward verbatim; never drop established progress.
+directive: ONE line = tone + the single concrete NEXT MOVE for this phase.
+HARD RULES: max ONE question per reply — prefer statements that give value.
+Never ask anything already in goal_state/facts. Never repeat a previous move
+that didn't land — change angle or advance phase instead.
 
-new_facts: 0-3 NEW durable facts the user just revealed (name, role, company,
-constraints, preferences, commitments). Only genuinely new ones. [] if none."""
+goal_state: one line of plan progress incl. phase + confidence, e.g.
+"qualify(2/2 q used, conf=65): budget=50k ✓, timeline=Sept ✓ → propose demo".
+It MUST move every turn; carry known items forward verbatim.
+
+new_facts: 0-3 NEW durable facts the caller just revealed. [] if none."""
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
 async def route(*, persona_name: str, goal: str,
                 messages: List[Dict[str, Any]], prev_directive: str = "",
-                goal_state: str = "", facts: List[str] | None = None) -> Dict[str, Any]:
-    """One fast-model call → route + goal-directed directive + fact extraction."""
+                goal_state: str = "", facts: List[str] | None = None,
+                phase: str = "discover", confidence: int = 50) -> Dict[str, Any]:
+    """One fast-model call → route + confidence-driven directive + fact extraction."""
     fallback = {"action": "recall", "history_turns": 3, "directive": prev_directive or "",
-                "goal_state": goal_state, "new_facts": []}
+                "goal_state": goal_state, "new_facts": [],
+                "phase": phase, "confidence": confidence}
     if not config.OPENROUTER_API_KEY:
         return fallback
 
@@ -78,6 +89,7 @@ async def route(*, persona_name: str, goal: str,
     convo = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:200]}" for m in recent)
     user = (
         f"Persona: {persona_name or 'TARA'} | Call goal: {goal or 'assist the caller and advance the persona goal'}\n"
+        + f"Current phase: {phase} | Current confidence: {confidence}\n"
         + (f"Goal state so far: {goal_state}\n" if goal_state else "")
         + (f"Known facts: {'; '.join(facts)}\n" if facts else "")
         + (f"Previous directive: {prev_directive}\n" if prev_directive else "")
@@ -111,11 +123,17 @@ async def route(*, persona_name: str, goal: str,
         directive = str(out.get("directive") or "")[:300]
         new_goal = str(out.get("goal_state") or goal_state or "")[:300]
         new_facts = [str(f)[:160] for f in (out.get("new_facts") or []) if f][:3]
+        phase = out.get("phase") if out.get("phase") in ("discover", "qualify", "propose", "close", "wrapup") else "discover"
+        try:
+            confidence = min(max(int(out.get("confidence", 50) or 50), 0), 100)
+        except (TypeError, ValueError):
+            confidence = 50
         ms = round((time.monotonic() - t0) * 1000)
-        log.info("router action=%s turns=%d facts+%d ms=%d goal=%s",
-                 action, turns, len(new_facts), ms, new_goal[:60])
+        log.info("router action=%s turns=%d facts+%d ms=%d phase=%s conf=%d goal=%s",
+                 action, turns, len(new_facts), ms, phase, confidence, new_goal[:60])
         return {"action": action, "history_turns": turns, "directive": directive,
-                "goal_state": new_goal, "new_facts": new_facts, "router_ms": ms}
+                "goal_state": new_goal, "new_facts": new_facts,
+                "phase": phase, "confidence": confidence, "router_ms": ms}
     except Exception as e:  # noqa: BLE001
         log.warning("router failed (%s) — fallback to recall", e)
         return fallback
@@ -188,7 +206,10 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
         + (f"\n[GOAL] {goal_state}" if goal_state else "")
         + (f"\n[STRATEGY] {directive}" if directive else "")
         + "\n[NEVER] Never ask for anything already in [REMEMBER] or [GOAL] — "
-          "acknowledge it instead. Never re-ask a question visible in the conversation."
+          "acknowledge it instead. Never re-ask a question visible in the conversation. "
+          "Ask at most ONE question — and only if [STRATEGY] calls for one; otherwise "
+          "make a statement. If [STRATEGY] says wrap up or close: summarize in one "
+          "sentence, state the next step, and say goodbye — do not ask anything."
     )
     payload = {
         "model": config.DIRECT_MODEL,

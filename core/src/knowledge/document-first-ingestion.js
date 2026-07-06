@@ -816,6 +816,7 @@ Output the JSON object and nothing else.`;
     }
     if (!byEntity.size) return 0;
     const MAX_EDGES_PER_FACT = Number(process.env.KB_ALGO_LINK_MAX_EDGES || 3);
+    const poolById = new Map((pool || []).map((m) => [m.id, m]));
     let created = 0;
     for (const f of facts) {
       const shared = new Map(); // peerId -> shared-entity count
@@ -823,8 +824,9 @@ Output the JSON object and nothing else.`;
         if (!t.startsWith('entity:')) continue;
         for (const peerId of (byEntity.get(t) || [])) shared.set(peerId, (shared.get(peerId) || 0) + 1);
       }
-      const top = [...shared.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_EDGES_PER_FACT);
-      for (const [peerId, n] of top) {
+      const ranked = [...shared.entries()].sort((a, b) => b[1] - a[1]);
+      // (a) Mentions edges — co-mention topology (cap per fact).
+      for (const [peerId, n] of ranked.slice(0, MAX_EDGES_PER_FACT)) {
         try {
           await store.createRelationship({
             id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
@@ -833,6 +835,23 @@ Output the JSON object and nothing else.`;
           });
           created++;
         } catch { /* best-effort; dup/FK tolerated */ }
+      }
+      // (b) EVOLUTION edges — Updates / Extends / Contradicts + is_latest supersession. The
+      // co-mention LLM used to emit these; the unified path never had the enrich pass, so `algo`
+      // mode would have dropped them. detectAndLinkContradictionsFor is ALGORITHMIC (token-sim +
+      // negation/change/value-divergence regex, entity-overlap-gated, strict thresholds) — ZERO
+      // LLM. Feed it the SAME entity-overlapping candidates (content already in the pool). This
+      // is what keeps the graph EVOLVING (belief change, supersession, contradiction) without the
+      // per-fact LLM. `Derives` (multi-source synthesis) is NOT produced here — it's a
+      // cognition/dreaming-layer product, unaffected by this path.
+      if (typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
+        const cands = ranked.slice(0, Number(process.env.KB_ALGO_REL_MAX_CANDS || 8))
+          .map(([pid]) => poolById.get(pid)).filter((m) => m && m.content);
+        if (cands.length) {
+          try {
+            await this.memoryGraphEngine.detectAndLinkContradictionsFor(f, cands, { store, strictMode: true, maxResults: 5 });
+          } catch (e) { this.logger.warn?.(`[kb-algo-rel] ${f.id?.slice?.(0, 8)}: ${e.message}`); }
+        }
       }
     }
     return created;

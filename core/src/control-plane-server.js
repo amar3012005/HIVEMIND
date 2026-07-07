@@ -6675,7 +6675,17 @@ Write the persona now.`;
             JSON.stringify({ _company: company }), row.id,
           );
         } catch { /* state best-effort */ }
-        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task }, 201);
+        // Optimized kickoff query — the FE posts this as the room's first turn
+        // so the swarm starts working the task immediately (Polsia: a clicked
+        // task begins executing, it doesn't sit idle).
+        const kickoff = [
+          `You are the ${company.company} team. Execute this task now.`,
+          `TASK [${task.tag}]: ${task.title}`,
+          task.detail ? `SCOPE: ${task.detail}` : '',
+          company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
+          'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
+        ].filter(Boolean).join('\n');
+        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

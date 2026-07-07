@@ -193,6 +193,10 @@ if (prisma) {
 }
 
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
+
+// HyperAgents onboarding jobs — one Polsia-style company-genesis pipeline per
+// org, in-memory (FE polls /v1/hyper/onboarding/status; refresh re-attaches).
+const _hyperOnboardJobs = new Map();
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
 
@@ -6267,6 +6271,234 @@ Write the persona now.`;
         console.warn('[hyper-rooms] create failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
+    }
+
+    // ── HyperAgents onboarding (Polsia-style company genesis) ──────────────
+    // POST /v1/hyper/onboarding/start { website_url, goal? } → kicks an async
+    // pipeline that reads the company website, drafts a grounded profile +
+    // mission (persisted to HIVEMIND memory), assembles a starting team, plans
+    // first tasks and provisions an HQ room. The FE polls /status and renders
+    // the log lines as a live terminal. One job per org at a time; jobs are
+    // in-memory (a refresh mid-run re-attaches via /status).
+    if (pathname === '/v1/hyper/onboarding/status' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const job = _hyperOnboardJobs.get(current.session.orgId);
+      if (!job) return jsonResponse(res, { running: false, lines: [], done: false });
+      return jsonResponse(res, {
+        running: !job.done,
+        done: job.done,
+        error: job.error || null,
+        lines: job.lines,
+        result: job.done && !job.error ? job.result : null,
+      });
+    }
+
+    if (pathname === '/v1/hyper/onboarding/start' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const orgId = current.session.orgId;
+      const userId = current.session.userId;
+      if (!orgId) return jsonResponse(res, { error: 'no active organization' }, 400);
+      const existing = _hyperOnboardJobs.get(orgId);
+      if (existing && !existing.done) {
+        return jsonResponse(res, { ok: true, already_running: true });
+      }
+      const body = await parseBody(req);
+      let siteUrl = typeof body.website_url === 'string' ? body.website_url.trim() : '';
+      if (siteUrl && !/^https?:\/\//i.test(siteUrl)) siteUrl = `https://${siteUrl}`;
+      let host = '';
+      try { host = new URL(siteUrl).hostname.replace(/^www\./, ''); } catch { /* validated below */ }
+      if (!host) return jsonResponse(res, { error: 'valid website_url is required' }, 400);
+      const userGoal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 500) : '';
+
+      const job = { lines: [], done: false, error: null, startedAt: Date.now(), result: null };
+      _hyperOnboardJobs.set(orgId, job);
+      const say = (text) => { job.lines.push({ ts: Date.now(), text }); };
+
+      // LLM helper — Groq primary with the file-wide OpenRouter failover.
+      const llm = async (sys, user, { json = false, maxTokens = 900 } = {}) => {
+        const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile',
+            messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+            temperature: 0.5,
+            max_tokens: maxTokens,
+            ...(json ? { response_format: { type: 'json_object' } } : {}),
+          }),
+        });
+        if (!r.ok) throw new Error(`llm ${r.status}`);
+        const d = await r.json();
+        return (d.choices?.[0]?.message?.content || '').trim();
+      };
+      // Persist a memory through the canonical ingest front door on core.
+      const saveMemory = async ({ title, content, tags }) => {
+        try {
+          const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/ingest/source`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'x-hm-user-id': userId,
+              'x-hm-org-id': orgId,
+            },
+            body: JSON.stringify({
+              title, content, tags,
+              source: { type: 'system', platform: 'hyperagents-onboarding', url: siteUrl, title },
+            }),
+          });
+          return r.ok;
+        } catch { return false; }
+      };
+      const stripHtml = (html) => html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&[a-z#0-9]+;/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      // Fire the pipeline — never blocks the HTTP response.
+      (async () => {
+        try {
+          say('Getting started');
+          say('Creating your company');
+          const companyGuess = host.split('.')[0].replace(/[-_]/g, ' ').toUpperCase();
+
+          say('Reading your website');
+          let siteText = '';
+          for (const path of ['', '/about', '/product']) {
+            try {
+              const ac = new AbortController();
+              const t = setTimeout(() => ac.abort(), 8000);
+              const r = await fetch(`https://${host}${path}`, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
+              clearTimeout(t);
+              if (r.ok) siteText += ` ${stripHtml(await r.text())}`;
+            } catch { /* page optional */ }
+            if (siteText.length > 6000) break;
+          }
+          siteText = siteText.slice(0, 9000);
+          if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
+
+          say('Saving your brief');
+          say('Researching your market');
+          say('Drafting your company profile');
+          let profile;
+          try {
+            profile = JSON.parse(await llm(
+              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content — do not invent facts. Keep fields concise (1-2 sentences each).',
+              `Company website: ${siteUrl}\nDomain: ${host}\nUser goal: ${userGoal || '(none stated)'}\n\nWEBSITE CONTENT:\n${siteText || '(no content — infer cautiously from the domain only)'}`,
+              { json: true, maxTokens: 900 },
+            ));
+          } catch {
+            profile = { name: companyGuess, tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [] };
+          }
+          const companyName = (profile.name || companyGuess).slice(0, 80);
+
+          say('Saving your profile');
+          await saveMemory({
+            title: `Company profile — ${companyName}`,
+            content: `COMPANY PROFILE (auto-generated from ${siteUrl} during HyperAgents onboarding)\nName: ${profile.name}\nTagline: ${profile.tagline}\nWhat it does: ${profile.what_it_does}\nICP: ${profile.icp}\nOffer: ${profile.offer}\nPositioning: ${profile.positioning}\nCompetitors: ${(profile.competitors || []).join(', ')}\nTone: ${profile.tone}\nOpportunities: ${(profile.opportunities || []).join(' | ')}\nRisks: ${(profile.risks || []).join(' | ')}${userGoal ? `\nStated goal: ${userGoal}` : ''}`,
+            tags: ['company-profile', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
+          });
+
+          say('Writing your mission');
+          let mission = '';
+          try {
+            mission = await llm(
+              'Write a crisp 2-3 sentence company mission statement grounded in the profile. Output only the mission text.',
+              JSON.stringify(profile), { maxTokens: 200 },
+            );
+          } catch { mission = `Build ${companyName} into the category leader.`; }
+          say('Filing your documents');
+          say('Locking in your vision');
+          await saveMemory({
+            title: `Mission — ${companyName}`,
+            content: `MISSION (locked at onboarding): ${mission}`,
+            tags: ['mission', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
+          });
+
+          say('Assembling your team');
+          const store = await _getEmployeeStore();
+          let team = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true, name: true }, take: 10 }).catch(() => []);
+          if (store && team.length < 3) {
+            const ROLES = [
+              { name: 'Nova', role: 'Chief Strategist', focus: 'strategy, positioning, prioritisation' },
+              { name: 'Atlas', role: 'Growth Lead', focus: 'marketing, distribution, customer acquisition' },
+              { name: 'Vega', role: 'Research Analyst', focus: 'market research, competitors, synthesis' },
+            ];
+            for (const r of ROLES.slice(0, 3 - team.length)) {
+              say(`Hiring ${r.name} — ${r.role}`);
+              let persona = '';
+              try {
+                persona = await llm(
+                  'You write concise system prompts for AI digital employees. Output ONLY the persona as plain text, 3-5 sentences, second person ("You are ..."). Ground it in the company context provided — this is a specialist for THIS company.',
+                  `Role: ${r.role} (${r.focus})\nCompany: ${companyName}\nProfile: ${JSON.stringify(profile)}`,
+                  { maxTokens: 250 },
+                );
+              } catch { /* fallback below */ }
+              if (!persona) persona = `You are ${r.name}, ${r.role} at ${companyName}. You focus on ${r.focus}. You are direct, grounded in the company's real context, and always propose the next concrete action.`;
+              try {
+                const emp = await store.create({
+                  orgId, name: r.name, persona,
+                  roleArchetype: r.role, createdBy: userId,
+                });
+                team.push({ id: emp.id, name: emp.name });
+              } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); }
+            }
+            _notifyEmployeesReload();
+          }
+
+          say('Planning your first tasks');
+          let tasks = [];
+          try {
+            const tj = JSON.parse(await llm(
+              'Output ONLY JSON: {"tasks":["","",""]}. Write 3-4 concrete, scoped first tasks for an AI team operating this company (research, positioning, outreach prep — things doable with web research + writing). Each task one sentence.',
+              `Company profile: ${JSON.stringify(profile)}\nMission: ${mission}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
+              { json: true, maxTokens: 400 },
+            ));
+            tasks = Array.isArray(tj.tasks) ? tj.tasks.filter((t) => typeof t === 'string' && t.trim()).slice(0, 4) : [];
+          } catch { /* tasks optional */ }
+          say('Saving your tasks');
+
+          say('Provisioning your workspace');
+          const participantIds = team.map((t) => t.id).slice(0, 5);
+          const room = await prisma.hyperRoom.create({
+            data: {
+              userId, orgId,
+              name: `${companyName} — HQ`,
+              participantIds,
+              template: 'auto',
+              permanentLeadId: participantIds.slice().sort()[0] || null,
+            },
+          });
+          const roomGoal = `Operate ${companyName}. Mission: ${mission}\nFirst tasks:\n${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}`.slice(0, 2000);
+          try {
+            await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', roomGoal, room.id);
+          } catch (e) { console.warn('[hyper-onboarding] room goal failed:', e.message); }
+
+          say('Almost done');
+          say('Completed · onboarding');
+          job.result = {
+            company: companyName,
+            website: siteUrl,
+            profile, mission, tasks,
+            team: team.map((t) => ({ id: t.id, name: t.name })),
+            room_id: room.id,
+            room_name: room.name,
+          };
+          job.done = true;
+        } catch (err) {
+          console.warn('[hyper-onboarding] failed:', err.message);
+          say(`Onboarding hit an error: ${err.message}`);
+          job.error = err.message;
+          job.done = true;
+        }
+      })();
+
+      return jsonResponse(res, { ok: true, started: true });
     }
 
     // GET/PATCH /v1/hyper-rooms/:id/connectors — room-level connector toggles.

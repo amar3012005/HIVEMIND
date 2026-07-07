@@ -233,7 +233,7 @@ if (prisma && HYPER_CYCLE_ENABLED) {
         const spentRows = await prisma.$queryRawUnsafe(
           `SELECT COALESCE(SUM(t.cost_tokens), 0)::int AS spent
              FROM "hivemind"."hyper_turns" t JOIN "hivemind"."hyper_rooms" r ON r.id = t.room_id
-            WHERE r.org_id = $1::uuid AND t.created_at >= date_trunc('day', now())`,
+            WHERE r.org_id = $1::uuid AND t.started_at >= date_trunc('day', now())`,
           hq.org_id,
         ).catch(() => [{ spent: 0 }]);
         const spent = Number(spentRows?.[0]?.spent || 0);

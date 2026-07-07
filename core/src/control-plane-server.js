@@ -6674,7 +6674,10 @@ Write the persona now.`;
               permanentLeadId: participantIds.slice().sort()[0] || null,
             },
           });
-          const roomGoal = `Operate ${companyName}. Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2000);
+          // "You are the team running <name>" — NOT "Operate <name>", which a
+          // model can misread as a proper noun ("Operate B&B" evaluated as a
+          // third-party partner company in a live run).
+          const roomGoal = `You are the team running ${companyName} — this is YOUR company. Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2000);
           try {
             await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', roomGoal, room.id);
           } catch (e) { console.warn('[hyper-onboarding] room goal failed:', e.message); }

@@ -204,6 +204,128 @@ const _hyperOnboardJobs = new Map();
 const HYPER_SHOT_DIR = path.join(process.env.HIVEMIND_DATA_DIR || '/app/data', 'hyper-screenshots');
 try { fs.mkdirSync(HYPER_SHOT_DIR, { recursive: true }); } catch { /* best-effort */ }
 
+// ── HyperAgents nightly operating cycle (Polsia's "works while you sleep") ──
+// Once a day (HYPER_CYCLE_HOUR_UTC) every onboarded org gets ONE todo task
+// picked up and executed in its workroom, then the owner gets a morning
+// summary email. HARD-GUARDED: flag default-OFF + per-org daily token cap —
+// autonomous spend without a cap is Polsia's admitted, margin-killing mistake.
+const HYPER_CYCLE_ENABLED = String(process.env.HYPER_CYCLE_ENABLED || 'false').toLowerCase() === 'true';
+const HYPER_CYCLE_HOUR_UTC = parseInt(process.env.HYPER_CYCLE_HOUR_UTC || '5', 10); // 05 UTC ≈ 07:00 DE
+const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200000', 10);
+if (prisma && HYPER_CYCLE_ENABLED) {
+  const runNightlyCycle = async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT DISTINCT ON (org_id) id, org_id, user_id, "agent_connectors"->'_company' AS company
+         FROM "hivemind"."hyper_rooms"
+        WHERE "agent_connectors" ? '_company' AND archived_at IS NULL
+        ORDER BY org_id, created_at DESC`,
+    ).catch(() => []);
+    for (const hq of rows || []) {
+      try {
+        const state = typeof hq.company === 'string' ? JSON.parse(hq.company) : hq.company;
+        if (!state || state.last_cycle_date === today) continue;
+        const persist = async () => prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+          JSON.stringify({ _company: state }), hq.id,
+        );
+        // Budget governor: org's token spend across ALL hyper turns today.
+        const spentRows = await prisma.$queryRawUnsafe(
+          `SELECT COALESCE(SUM(t.cost_tokens), 0)::int AS spent
+             FROM "hivemind"."hyper_turns" t JOIN "hivemind"."hyper_rooms" r ON r.id = t.room_id
+            WHERE r.org_id = $1::uuid AND t.created_at >= date_trunc('day', now())`,
+          hq.org_id,
+        ).catch(() => [{ spent: 0 }]);
+        const spent = Number(spentRows?.[0]?.spent || 0);
+        if (spent >= HYPER_DAILY_TOKEN_CAP) {
+          console.warn(`[hyper-cycle] org ${hq.org_id} over daily token cap (${spent}/${HYPER_DAILY_TOKEN_CAP}) — skipped`);
+          state.last_cycle_date = today; await persist(); continue;
+        }
+        const task = (state.tasks || []).find((x) => x.status === 'todo');
+        state.last_cycle_date = today;
+        if (!task) { await persist(); continue; }
+        // Room: reuse the task's room or provision one (same shape as tasks/open).
+        let roomId = task.room_id;
+        if (!roomId) {
+          const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
+          const taskRoom = await prisma.hyperRoom.create({
+            data: {
+              userId: hq.user_id, orgId: hq.org_id,
+              name: task.title.slice(0, 120), participantIds,
+              template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
+            },
+          });
+          roomId = taskRoom.id;
+          const goal = `${task.title}\n${task.detail || ''}\nCompany: ${state.company} — ${state.mission || ''}`.slice(0, 2000);
+          await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, roomId).catch(() => {});
+        }
+        const kickoff = [
+          `You are the ${state.company} team. Execute this task now.`,
+          `TASK [${task.tag}]: ${task.title}`,
+          task.detail ? `SCOPE: ${task.detail}` : '',
+          state.mission ? `COMPANY CONTEXT: ${state.company} — ${state.mission}` : '',
+          'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
+        ].filter(Boolean).join('\n');
+        // Turn row (idempotent per day+task) + fire-and-forget sidecar kick —
+        // the same contract as POST /turns; the sweeper is the recovery net.
+        const turn = await prisma.$transaction(async (tx) => {
+          const key = `cycle-${today}-${task.id}`.slice(0, 64);
+          const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey: key } });
+          if (existing) return existing;
+          const last = await tx.hyperTurn.findFirst({ where: { roomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
+          return tx.hyperTurn.create({
+            data: { roomId, seq: (last?.seq ?? 0) + 1, userMessage: kickoff, status: 'live', idempotencyKey: key, lines: [] },
+          });
+        });
+        const roomRow = await prisma.hyperRoom.findUnique({ where: { id: roomId }, select: { participantIds: true, goal: true, projectId: true } });
+        fetch(`${process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060'}/internal/hyper/room-turn`, {
+          method: 'POST',
+          headers: { 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
+            user_message: kickoff, participant_ids: roomRow?.participantIds || [],
+            project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
+            callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+          }),
+        }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
+        task.status = 'active'; task.room_id = roomId;
+        await persist();
+        console.log(`[hyper-cycle] org ${hq.org_id}: kicked "${task.title}" (spent today ${spent} tok)`);
+        // Morning summary email to the owner (best-effort).
+        try {
+          const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true, displayName: true } });
+          if (owner?.email && !owner.email.endsWith('@local.hivemind.dev')) {
+            const doneCount = (state.tasks || []).filter((x) => x.status === 'done').length;
+            const todoCount = (state.tasks || []).filter((x) => x.status === 'todo').length;
+            const { sendSystemEmail } = await import('./email/email-service.js');
+            sendSystemEmail({
+              templateId: 'announcement',
+              to: owner.email,
+              vars: {
+                name: (owner.displayName || owner.email).split(' ')[0],
+                subject: `${state.company}: your AI team started "${task.title}"`,
+                heading: 'Your AI team is on it',
+                preheader: `Overnight cycle for ${state.company}`,
+                body: `While you were away, your HyperAgents team picked up the next task for ${state.company}:\n\n"${task.title}" — ${task.detail || ''}\n\nProgress: ${doneCount} done · ${todoCount} still queued.\nOpen the room to review the deliverable and steer the next step.`,
+                cta: 'Open your workspace',
+                appUrl: 'https://singulancelabs.com/hivemind/app/employees',
+                year: String(new Date().getFullYear()),
+              },
+            }).catch((e) => console.warn('[hyper-cycle] summary email failed:', e.message));
+          }
+        } catch { /* email best-effort */ }
+      } catch (e) {
+        console.warn('[hyper-cycle] org tick failed:', e.message);
+      }
+    }
+  };
+  setInterval(() => {
+    if (new Date().getUTCHours() !== HYPER_CYCLE_HOUR_UTC) return;
+    runNightlyCycle().catch((e) => console.warn('[hyper-cycle] run failed:', e.message));
+  }, 55 * 60 * 1000);
+  console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day)`);
+}
+
 // Chromium is heavy; cap concurrent captures so parallel onboardings can't
 // thrash the single hm-playwright browser. A tiny FIFO semaphore.
 const HYPER_SHOT_MAX = parseInt(process.env.HYPER_SHOT_CONCURRENCY || '2', 10);
@@ -6556,7 +6678,11 @@ Write the persona now.`;
           } catch {
             profile = { name: companyGuess, tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [] };
           }
-          const companyName = (profile.name || companyGuess).slice(0, 80);
+          // Clamp: the LLM sometimes copies the site <title> verbatim
+          // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
+          // the segment before any "|"/"–" separator, cap length hard.
+          const companyName = String(profile.name || companyGuess)
+            .split(/\s*[|–—]\s*/)[0].trim().slice(0, 48) || companyGuess;
 
           // ── Deep competitive search grounded in the drafted profile ──
           const q3 = `${(profile.what_it_does || companyName).slice(0, 90)} competitors ${new Date().getFullYear()}`;
@@ -7836,6 +7962,42 @@ Write the persona now.`;
               if (_r?.orgId) { const { UsageTracker } = await import('./billing/usage-tracker.js'); await new UsageTracker(prisma).recordTokens(_r.orgId, _ct); }
             }
           } catch { /* never break the seal on a metering error */ }
+          // ── Task lifecycle: a sealed COMPLETE turn in a task room marks the
+          // dashboard task done + files its deliverable into the company state
+          // (documents list). Best-effort — never breaks the seal path.
+          try {
+            if ((body.event.status || 'complete') === 'complete') {
+              const _t2 = await prisma.hyperTurn.findUnique({ where: { id: body.turn_id }, select: { roomId: true } });
+              if (_t2?.roomId) {
+                const hqRows = await prisma.$queryRawUnsafe(
+                  `SELECT hq.id, hq."agent_connectors"->'_company' AS company
+                     FROM "hivemind"."hyper_rooms" hq
+                    WHERE hq."agent_connectors" ? '_company' AND hq.archived_at IS NULL
+                      AND hq.org_id = (SELECT org_id FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid)
+                    ORDER BY hq.created_at DESC LIMIT 1`,
+                  _t2.roomId,
+                );
+                const hq = hqRows?.[0];
+                const companyState = hq?.company ? (typeof hq.company === 'string' ? JSON.parse(hq.company) : hq.company) : null;
+                const doneTask = companyState?.tasks?.find((x) => x.room_id === _t2.roomId);
+                if (hq && doneTask && doneTask.status !== 'done') {
+                  doneTask.status = 'done';
+                  doneTask.done_at = new Date().toISOString();
+                  companyState.deliverables = Array.isArray(companyState.deliverables) ? companyState.deliverables : [];
+                  if (!companyState.deliverables.some((d) => d.room_id === _t2.roomId)) {
+                    companyState.deliverables.push({
+                      title: doneTask.title, room_id: _t2.roomId,
+                      sealed_at: doneTask.done_at, tokens: Number(body.event.cost_tokens || 0),
+                    });
+                  }
+                  await prisma.$executeRawUnsafe(
+                    'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+                    JSON.stringify({ _company: companyState }), hq.id,
+                  );
+                }
+              }
+            }
+          } catch (e) { console.warn('[hyper-task-done] hook failed:', e.message); }
         } else {
           await appendTurnEvent(prisma, body.turn_id, {
             ...body.event,

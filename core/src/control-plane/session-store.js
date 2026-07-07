@@ -97,7 +97,10 @@ export function verifySessionCookie(secret, cookieValue) {
   }
 
   const expected = signSessionId(secret, sessionId);
-  const matches = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length) return null;
+  const matches = crypto.timingSafeEqual(sigBuf, expBuf);
   return matches ? sessionId : null;
 }
 

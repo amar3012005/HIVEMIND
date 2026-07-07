@@ -76,6 +76,7 @@ from .db import (
 from .hivemind_client import (
     connector_exec_emulated,
     google_exec_emulated,
+    list_canon_emulated,
     org_members_emulated,
     recall_emulated,
 )
@@ -1793,8 +1794,28 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
             return []
 
     # Probes are orthogonal — fan out concurrently so the brief adds one
-    # recall-latency to the pre-round phase, not five.
-    probe_results = await asyncio.gather(*[_probe(p) for p in probes])
+    # recall-latency to the pre-round phase, not five. The org-canon lane rides
+    # the same gather: tag-filtered PINNED company canon (identity/mission/
+    # positioning/ICP/team filed by onboarding) that is GUARANTEED into the
+    # brief regardless of vector scores — a dense KB corpus can't bury it.
+    probe_results_and_canon = await asyncio.gather(
+        list_canon_emulated(user_id=user_id, org_id=org_id, api_key=api_key, limit=8),
+        *[_probe(p) for p in probes],
+    )
+    canon_rows = probe_results_and_canon[0] or []
+    probe_results = probe_results_and_canon[1:]
+    canon_lines: List[str] = []
+    for r in canon_rows:
+        mid = str(r.get("id") or r.get("memory_id") or "")
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            continue
+        if mid:
+            seen_ids.add(mid)
+        if title:
+            seen_titles.add(title.lower())
+        canon_lines.append(f"- {content[:260]}{'…' if len(content) > 260 else ''}")
     # Preserve probe order (query first) when deduping so the query-specific
     # hits win ties over the generic company probes.
     for rows in probe_results:
@@ -1811,7 +1832,7 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
             if key_title:
                 seen_titles.add(key_title)
             collected.append(r)
-    if not collected:
+    if not collected and not canon_lines:
         return ""
     # Highest-scored first so the budget keeps the strongest signal.
     collected.sort(key=lambda r: float(r.get("score", 0)), reverse=True)
@@ -1824,11 +1845,17 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
         snippet = content[:220] + ("…" if len(content) > 220 else "")
         prefix = f'"{title}" — ' if title else ""
         lines_out.append(f"- {prefix}{snippet}")
-    if not lines_out:
+    if not lines_out and not canon_lines:
         return ""
-    log.info("[brief] built company context: %d memories from %d probes",
-             len(lines_out), len(probes))
+    log.info("[brief] built company context: %d memories from %d probes + %d canon",
+             len(lines_out), len(probes), len(canon_lines))
+    _canon_block = (
+        "COMPANY CANON — the authoritative identity of this organisation "
+        "(mission, positioning, ICP, team), filed at onboarding. This overrides "
+        "any conflicting stray fact below:\n" + "\n".join(canon_lines) + "\n\n"
+    ) if canon_lines else ""
     _brief = (
+        _canon_block +
         "COMPANY CONTEXT — standing facts about this business, its people, "
         "products, customers and goals. Ground every claim in these; this is "
         "WHO and WHAT you are reasoning about:\n"

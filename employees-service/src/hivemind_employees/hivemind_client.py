@@ -101,6 +101,31 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         return r.json()
 
 
+async def list_canon_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                              api_key: str = "", limit: int = 8) -> list:
+    """Fetch the org's PINNED canon memories (tag `org-canon` — company identity,
+    mission, positioning, ICP, team; filed by HyperAgents onboarding) via the core
+    list endpoint. This is the GUARANTEED company-context lane: tag-filtered, not
+    score-ranked, so the canon surfaces even when vector recall would bury it under
+    a dense KB corpus. Best-effort: [] on any failure."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(12.0, connect=4.0),
+            headers=headers,
+        ) as c:
+            r = await c.get("/api/memories", params={
+                "tags": "org-canon", "is_latest": "true", "limit": max(1, min(int(limit or 8), 12)),
+            })
+            r.raise_for_status()
+            j = r.json()
+            return j.get("memories") or j.get("results") or []
+    except Exception:
+        return []
+
+
 async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                               api_key: str = "", limit: int = 6, timeout_s: float = 45.0) -> Dict[str, Any]:
     """Live web search via HIVEMIND core's Tavily-backed web-intel — the SAME engine

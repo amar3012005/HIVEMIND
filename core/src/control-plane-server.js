@@ -6374,7 +6374,7 @@ Write the persona now.`;
             body: JSON.stringify({
               title, content, tags,
               mode: 'atomic',
-              source: { type: 'system', platform: 'hyperagents-onboarding', url: siteUrl, title },
+              source: { type: 'api', platform: 'hyperagents-onboarding', url: siteUrl, title },
               metadata: { memory_type: memoryType, priority: 'high', authority_level: 'claimed' },
             }),
           });

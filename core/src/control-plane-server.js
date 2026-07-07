@@ -6376,8 +6376,9 @@ Write the persona now.`;
             body: JSON.stringify({ query, limit }),
           });
           if (!start.ok) return [];
-          const { job } = await start.json().catch(() => ({}));
-          const jobId = job?.id;
+          const sd = await start.json().catch(() => ({}));
+          // Core replies {job_id, status:'queued'} (202); tolerate {job:{id}} too.
+          const jobId = sd.job_id || sd.job?.id || sd.id;
           if (!jobId) return [];
           for (let i = 0; i < 14; i++) {
             await new Promise((r) => setTimeout(r, 1500));

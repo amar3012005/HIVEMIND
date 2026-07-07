@@ -25,6 +25,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
@@ -97,7 +98,9 @@ _OR_PROVIDER_PIN = {
     # throttles OpenRouter's Groq capacity. Our DIRECT Groq key is delinquent — this is
     # OpenRouter's Groq host; paying the Groq bill + HYPER_OPENROUTER_PRIMARY=0 = direct (no margin).
     "openai/gpt-oss-120b": ["Groq", "Cerebras", "Together"],
-    "openai/gpt-oss-20b": ["Groq", "Fireworks", "Together"],
+    # Fireworks dropped from the 20b pin — measured 13.5s and 39.3s per call live
+    # (2026-07-07) vs Groq ~1.6-2.5s on the same calls; it was the plan-phase spike.
+    "openai/gpt-oss-20b": ["Groq", "Together", "Cerebras"],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],
@@ -165,7 +168,9 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     _pin = _or_provider_pin(or_model)
     # ignore: measured-slow hosts that keep winning price-ranked fallbacks (DekaLLM
     # served 20-60 tok/s twice). Env-overridable; empty string disables the blacklist.
-    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Novita,Mancer").split(",") if s.strip()]
+    # SiliconFlow/Phala added 2026-07-07: fallback-pool leaks measured 9-36s per
+    # 20b debate call (the room's remaining latency gap after the pin fix).
+    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Novita,Mancer,SiliconFlow,Phala").split(",") if s.strip()]
     or_body["provider"] = {**({"order": _pin} if _pin else {}),
                            **({"ignore": _ignore} if _ignore else {}),
                            "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}
@@ -414,6 +419,20 @@ _LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish",
                "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "ru": "Russian",
                "ja": "Japanese", "zh": "Chinese", "ar": "Arabic", "hi": "Hindi", "ko": "Korean",
                "sv": "Swedish", "da": "Danish", "no": "Norwegian", "fi": "Finnish", "cs": "Czech"}
+
+
+def _now_block() -> str:
+    """TIME CONTEXT prepended to every prompt site (plan, director/synth system,
+    debate consults). Without it the model defaults to its training-era timeline —
+    a live run produced a 'Q1 2025' calendar in July 2026 because a memory-only
+    gather had no date anchor and recalled facts mentioned 2025. Recalled memory
+    CONTENT may reference past dates; agents must reason from TODAY."""
+    now = datetime.now(timezone.utc)
+    q = (now.month - 1) // 3 + 1
+    nq, ny = (q % 4 + 1, now.year + (1 if q == 4 else 0))
+    return (f"TIME CONTEXT: today is {now.strftime('%A, %d %B %Y')} (UTC). The current quarter is "
+            f"Q{q} {now.year}; the NEXT quarter is Q{nq} {ny}. Anchor ALL dates, timelines, quarters "
+            f"and schedules to this — dates found in recalled memories may be historical.\n\n")
 
 
 def _resolve_language(lang: str) -> str:
@@ -979,8 +998,15 @@ class Director:
         # goes DIRECT to OpenRouter (provider-pinned) — skip the Groq round-trip.
         # gpt-oss/llama stay Groq-primary below + the OpenRouter failover. Non-
         # regressing: the default gpt-oss director path is unchanged.
+        # Debate consults are short persona takes (3-5 sentences): cap generation
+        # so a slow provider can't stretch a round (each round = slowest member),
+        # and cut the call at 25s — a timed-out voice degrades to "(no reply)"
+        # instead of holding the whole debate hostage (measured 26-36s stragglers).
+        if bucket == "debate" and "max_tokens" not in body:
+            body["max_tokens"] = 420
+        _to = 25.0 if bucket == "debate" else 60.0
         if _route_direct_openrouter(body.get("model")):
-            j = await _openrouter_chat(body, timeout=httpx.Timeout(60.0, connect=5.0))
+            j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if j is not None:
                 u = j.get("usage") or {}
                 t = int(u.get("total_tokens", 0) or 0)
@@ -1352,6 +1378,7 @@ class Director:
                              + "\n".join(f"- {l}" for l in lessons))
         msg = await self._groq([
             {"role": "system", "content": (
+                _now_block() +
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
@@ -1419,6 +1446,7 @@ class Director:
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
         return (
+            _now_block() +
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
             "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
             "FORMAT THE DELIVERABLE FOR QUALITY:\n"
@@ -1497,6 +1525,7 @@ class Director:
             "additionalProperties": False,
         }
         sysp = (
+            _now_block() +
             "You plan the GATHER step for a HIVEMIND room turn. " + conn_line + " " + web_line + " "
             "Output a JSON gather plan:\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "

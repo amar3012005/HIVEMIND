@@ -6369,6 +6369,54 @@ Write the persona now.`;
         'x-hm-user-id': userId,
         'x-hm-org-id': orgId,
       };
+      // Homepage screenshot via the hm-playwright MCP server (@playwright/mcp,
+      // streamable HTTP :8931). Minimal JSON-RPC client: initialize → navigate →
+      // take_screenshot; responses may arrive SSE-framed. Best-effort with a hard
+      // time budget — no screenshot never blocks onboarding.
+      const screenshotSite = async (targetUrl) => {
+        const base = process.env.HYPER_PLAYWRIGHT_URL || 'http://hm-playwright:8931/mcp';
+        const parseMcp = async (r) => {
+          const txt = await r.text();
+          const m = txt.match(/data:\s*(\{[\s\S]*?\})\s*(?:\n\n|$)/);
+          try { return JSON.parse(m ? m[1] : txt); } catch { return null; }
+        };
+        const call = async (sessionId, payload, timeoutMs) => {
+          const ac = new AbortController();
+          const t = setTimeout(() => ac.abort(), timeoutMs);
+          try {
+            const r = await fetch(base, {
+              method: 'POST', signal: ac.signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+              },
+              body: JSON.stringify(payload),
+            });
+            clearTimeout(t);
+            return { sid: r.headers.get('mcp-session-id') || sessionId, json: await parseMcp(r) };
+          } catch { clearTimeout(t); return { sid: sessionId, json: null }; }
+        };
+        try {
+          const init = await call(null, {
+            jsonrpc: '2.0', id: 1, method: 'initialize',
+            params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'hivemind-onboarding', version: '1.0' } },
+          }, 8000);
+          if (!init.sid) return null;
+          await call(init.sid, { jsonrpc: '2.0', method: 'notifications/initialized' }, 4000);
+          await call(init.sid, {
+            jsonrpc: '2.0', id: 2, method: 'tools/call',
+            params: { name: 'browser_navigate', arguments: { url: targetUrl } },
+          }, 25000);
+          const shot = await call(init.sid, {
+            jsonrpc: '2.0', id: 3, method: 'tools/call',
+            params: { name: 'browser_take_screenshot', arguments: { type: 'jpeg' } },
+          }, 20000);
+          const content = shot.json?.result?.content || [];
+          const img = content.find((c) => c.type === 'image' && c.data);
+          return img ? `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` : null;
+        } catch { return null; }
+      };
       const webSearch = async (query, { limit = 5 } = {}) => {
         try {
           const start = await fetch(`${CONFIG.coreApiBaseUrl}/api/web/search/jobs`, {
@@ -6420,6 +6468,10 @@ Write the persona now.`;
           }
           siteText = siteText.slice(0, 12000);
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
+
+          say(`Capturing homepage: https://${host}/...`);
+          const screenshot = await screenshotSite(`https://${host}`);
+          if (!screenshot) say('Screenshot skipped — browser service unavailable');
 
           // ── Market research: real web searches, each its own log line ──
           say('Researching your market');
@@ -6556,6 +6608,7 @@ Write the persona now.`;
           const resultPayload = {
             company: companyName,
             website: siteUrl,
+            screenshot: screenshot || null,
             profile, mission, tasks,
             research: research.slice(0, 10),
             documents: [

@@ -7,4 +7,4 @@ WORKDIR /app
 RUN npm init -y >/dev/null 2>&1 && npm i @playwright/mcp@latest && npx playwright install chromium
 EXPOSE 8931
 # Headless, all-interfaces, isolated context per session. /mcp endpoint.
-CMD ["npx","@playwright/mcp@latest","--headless","--host","0.0.0.0","--port","8931","--isolated","--allowed-hosts","*"]
+CMD ["npx","@playwright/mcp@latest","--headless","--browser","chromium","--host","0.0.0.0","--port","8931","--isolated","--allowed-hosts","*"]

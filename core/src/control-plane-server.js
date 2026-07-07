@@ -6684,6 +6684,28 @@ Write the persona now.`;
       return jsonResponse(res, { ok: true, started: true });
     }
 
+    // POST /v1/hyper/onboarding/reset — clear the onboarding artifacts so the
+    // user can start fresh: strips the persisted _company state from every HQ
+    // room and deletes the homepage screenshot. ROOMS ARE LEFT INTACT (the user
+    // deletes those manually) — this only resets the company profile/mission/
+    // tasks/research shown on the hero.
+    if (pathname === '/v1/hyper/onboarding/reset' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" - '_company'
+             WHERE org_id = $1::uuid AND "agent_connectors" ? '_company'`,
+          current.session.orgId,
+        );
+        try { fs.rmSync(path.join(HYPER_SHOT_DIR, `${current.session.orgId}.jpg`), { force: true }); } catch { /* best-effort */ }
+        _hyperOnboardJobs.delete(current.session.orgId);
+        return jsonResponse(res, { ok: true });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // GET /v1/hyper/company/screenshot — stream the session org's homepage
     // capture from the data volume (cookie-auth; served lazily so the ~130KB
     // never rides in the /company JSON). 404 when none captured yet.

@@ -6359,6 +6359,42 @@ Write the persona now.`;
         .replace(/&[a-z#0-9]+;/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+      // Real web research via the core web-intel (Tavily) job API — submit a
+      // search job with the master key, poll it to completion (≤20s), return
+      // compact findings. Best-effort: a failed/slow search returns [] and the
+      // pipeline continues (onboarding must never wedge on one search).
+      const coreHeaders = {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+        'x-hm-user-id': userId,
+        'x-hm-org-id': orgId,
+      };
+      const webSearch = async (query, { limit = 5 } = {}) => {
+        try {
+          const start = await fetch(`${CONFIG.coreApiBaseUrl}/api/web/search/jobs`, {
+            method: 'POST', headers: coreHeaders,
+            body: JSON.stringify({ query, limit }),
+          });
+          if (!start.ok) return [];
+          const { job } = await start.json().catch(() => ({}));
+          const jobId = job?.id;
+          if (!jobId) return [];
+          for (let i = 0; i < 14; i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const jr = await fetch(`${CONFIG.coreApiBaseUrl}/api/web/jobs/${jobId}`, { headers: coreHeaders });
+            if (!jr.ok) return [];
+            const jd = await jr.json().catch(() => ({}));
+            const j = jd.job || jd;
+            if (j.status === 'succeeded') {
+              return (j.results || []).slice(0, limit).map((r) => ({
+                title: r.title || '', url: r.url || '', snippet: (r.snippet || r.content || '').slice(0, 400),
+              }));
+            }
+            if (j.status === 'failed') return [];
+          }
+          return [];
+        } catch { return []; }
+      };
 
       // Fire the pipeline — never blocks the HTTP response.
       (async () => {
@@ -6366,10 +6402,12 @@ Write the persona now.`;
           say('Getting started');
           say('Creating your company');
           const companyGuess = host.split('.')[0].replace(/[-_]/g, ' ').toUpperCase();
+          say('Saving your brief');
 
-          say('Reading your website');
+          // ── Read the website, page by page (each fetch is its own log line) ──
           let siteText = '';
-          for (const path of ['', '/about', '/product']) {
+          for (const path of ['', '/about', '/product', '/pricing']) {
+            say(`Fetching: https://${host}${path || '/'}...`);
             try {
               const ac = new AbortController();
               const t = setTimeout(() => ac.abort(), 8000);
@@ -6377,19 +6415,28 @@ Write the persona now.`;
               clearTimeout(t);
               if (r.ok) siteText += ` ${stripHtml(await r.text())}`;
             } catch { /* page optional */ }
-            if (siteText.length > 6000) break;
+            if (siteText.length > 9000) break;
           }
-          siteText = siteText.slice(0, 9000);
+          siteText = siteText.slice(0, 12000);
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
-          say('Saving your brief');
+          // ── Market research: real web searches, each its own log line ──
           say('Researching your market');
+          const research = [];
+          const q1 = `${host} company what do they do`;
+          say(`Searching web for: ${q1}...`);
+          research.push(...await webSearch(q1, { limit: 5 }));
+          const q2 = `${companyGuess} ${host} founder team`;
+          say(`Searching web for: ${q2}...`);
+          research.push(...await webSearch(q2, { limit: 4 }));
+
           say('Drafting your company profile');
           let profile;
+          const researchDigest = research.map((r) => `- ${r.title}: ${r.snippet}`).join('\n').slice(0, 4000);
           try {
             profile = JSON.parse(await llm(
-              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content — do not invent facts. Keep fields concise (1-2 sentences each).',
-              `Company website: ${siteUrl}\nDomain: ${host}\nUser goal: ${userGoal || '(none stated)'}\n\nWEBSITE CONTENT:\n${siteText || '(no content — infer cautiously from the domain only)'}`,
+              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content and web research — do not invent facts. Keep fields concise (1-2 sentences each).',
+              `Company website: ${siteUrl}\nDomain: ${host}\nUser goal: ${userGoal || '(none stated)'}\n\nWEBSITE CONTENT:\n${siteText || '(no content — infer cautiously)'}\n\nWEB RESEARCH:\n${researchDigest || '(none)'}`,
               { json: true, maxTokens: 900 },
             ));
           } catch {
@@ -6397,12 +6444,27 @@ Write the persona now.`;
           }
           const companyName = (profile.name || companyGuess).slice(0, 80);
 
+          // ── Deep competitive search grounded in the drafted profile ──
+          const q3 = `${(profile.what_it_does || companyName).slice(0, 90)} competitors ${new Date().getFullYear()}`;
+          say(`Deep searching web for: ${q3}...`);
+          const deep = await webSearch(q3, { limit: 6 });
+          research.push(...deep);
+
           say('Saving your profile');
           await saveMemory({
             title: `Company profile — ${companyName}`,
             content: `COMPANY PROFILE (auto-generated from ${siteUrl} during HyperAgents onboarding)\nName: ${profile.name}\nTagline: ${profile.tagline}\nWhat it does: ${profile.what_it_does}\nICP: ${profile.icp}\nOffer: ${profile.offer}\nPositioning: ${profile.positioning}\nCompetitors: ${(profile.competitors || []).join(', ')}\nTone: ${profile.tone}\nOpportunities: ${(profile.opportunities || []).join(' | ')}\nRisks: ${(profile.risks || []).join(' | ')}${userGoal ? `\nStated goal: ${userGoal}` : ''}`,
             tags: ['company-profile', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
           });
+
+          say('Saving your research');
+          if (research.length) {
+            await saveMemory({
+              title: `Market research — ${companyName}`,
+              content: `MARKET RESEARCH (auto-gathered at HyperAgents onboarding from live web search)\n${research.map((r) => `• ${r.title} (${r.url})\n  ${r.snippet}`).join('\n')}`.slice(0, 8000),
+              tags: ['market-research', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
+            });
+          }
 
           say('Writing your mission');
           let mission = '';
@@ -6455,11 +6517,21 @@ Write the persona now.`;
           let tasks = [];
           try {
             const tj = JSON.parse(await llm(
-              'Output ONLY JSON: {"tasks":["","",""]}. Write 3-4 concrete, scoped first tasks for an AI team operating this company (research, positioning, outreach prep — things doable with web research + writing). Each task one sentence.',
+              'Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH"}]}. Write 4-5 concrete, scoped first tasks for an AI team operating this company (market research, positioning, content, outreach prep — things doable with web research + writing). title = short imperative (<=10 words); detail = 1-2 sentences of scope; tag = one of RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY.',
               `Company profile: ${JSON.stringify(profile)}\nMission: ${mission}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
-              { json: true, maxTokens: 400 },
+              { json: true, maxTokens: 700 },
             ));
-            tasks = Array.isArray(tj.tasks) ? tj.tasks.filter((t) => typeof t === 'string' && t.trim()).slice(0, 4) : [];
+            tasks = (Array.isArray(tj.tasks) ? tj.tasks : [])
+              .filter((x) => x && typeof x.title === 'string' && x.title.trim())
+              .slice(0, 5)
+              .map((x, i) => ({
+                id: `t${i + 1}`,
+                title: x.title.trim().slice(0, 120),
+                detail: (typeof x.detail === 'string' ? x.detail.trim() : '').slice(0, 400),
+                tag: ['RESEARCH', 'FEATURE', 'MARKETING', 'OUTREACH', 'STRATEGY'].includes(x.tag) ? x.tag : 'RESEARCH',
+                status: 'todo',
+                room_id: null,
+              }));
           } catch { /* tasks optional */ }
           say('Saving your tasks');
 
@@ -6474,21 +6546,40 @@ Write the persona now.`;
               permanentLeadId: participantIds.slice().sort()[0] || null,
             },
           });
-          const roomGoal = `Operate ${companyName}. Mission: ${mission}\nFirst tasks:\n${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}`.slice(0, 2000);
+          const roomGoal = `Operate ${companyName}. Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2000);
           try {
             await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', roomGoal, room.id);
           } catch (e) { console.warn('[hyper-onboarding] room goal failed:', e.message); }
 
           say('Almost done');
-          say('Completed · onboarding');
-          job.result = {
+          const resultPayload = {
             company: companyName,
             website: siteUrl,
             profile, mission, tasks,
-            team: team.map((t) => ({ id: t.id, name: t.name })),
+            research: research.slice(0, 10),
+            documents: [
+              `${companyName} — Company profile`,
+              ...(research.length ? [`${companyName} — Market research`] : []),
+              `${companyName} — Mission`,
+            ],
+            team: team.map((x) => ({ id: x.id, name: x.name })),
             room_id: room.id,
             room_name: room.name,
+            onboarded_at: new Date().toISOString(),
           };
+          // Persist the company state on the HQ room (agent_connectors is a
+          // legacy jsonb — we namespace under _company). Central for ALL org
+          // types (rooms never live on the self-host agent), zero-migration,
+          // and it survives control-plane restarts — the dashboard reads it
+          // via GET /v1/hyper/company.
+          try {
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+              JSON.stringify({ _company: resultPayload }), room.id,
+            );
+          } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          say('Completed · onboarding');
+          job.result = resultPayload;
           job.done = true;
         } catch (err) {
           console.warn('[hyper-onboarding] failed:', err.message);
@@ -6499,6 +6590,94 @@ Write the persona now.`;
       })();
 
       return jsonResponse(res, { ok: true, started: true });
+    }
+
+    // GET /v1/hyper/company — the HyperAgents hero dashboard state. Reads the
+    // company payload persisted on the newest HQ room (agent_connectors._company)
+    // and overlays live team + rooms. 404 when the org never onboarded.
+    if (pathname === '/v1/hyper/company' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, name, "agent_connectors"->'_company' AS company
+             FROM "hivemind"."hyper_rooms"
+            WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
+            ORDER BY created_at DESC LIMIT 1`,
+          current.session.orgId,
+        );
+        const row = rows?.[0];
+        if (!row?.company) return jsonResponse(res, { onboarded: false }, 404);
+        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+        const employees = await prisma.digitalEmployee.findMany({
+          where: { orgId: current.session.orgId },
+          select: { id: true, name: true, roleArchetype: true, status: true },
+          take: 12,
+        }).catch(() => []);
+        return jsonResponse(res, { onboarded: true, hq_room_id: row.id, company, employees });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper/tasks/open { task_id } — open (or create) the room for a
+    // dashboard task. First click provisions a room named after the task with
+    // the task detail as its goal and marks the task in the persisted state;
+    // later clicks return the same room. Polsia: click a task → its workroom.
+    if (pathname === '/v1/hyper/tasks/open' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const taskId = typeof body.task_id === 'string' ? body.task_id : '';
+      if (!taskId) return jsonResponse(res, { error: 'task_id is required' }, 400);
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, "agent_connectors"->'_company' AS company
+             FROM "hivemind"."hyper_rooms"
+            WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
+            ORDER BY created_at DESC LIMIT 1`,
+          current.session.orgId,
+        );
+        const row = rows?.[0];
+        if (!row?.company) return jsonResponse(res, { error: 'not onboarded' }, 404);
+        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+        const task = (company.tasks || []).find((x) => x.id === taskId);
+        if (!task) return jsonResponse(res, { error: 'task not found' }, 404);
+        if (task.room_id) {
+          const existing = await prisma.hyperRoom.findFirst({
+            where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
+            select: { id: true, name: true },
+          }).catch(() => null);
+          if (existing) return jsonResponse(res, { room: existing, task });
+        }
+        const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
+        const taskRoom = await prisma.hyperRoom.create({
+          data: {
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            name: task.title.slice(0, 120),
+            participantIds,
+            template: 'auto',
+            permanentLeadId: participantIds.slice().sort()[0] || null,
+          },
+        });
+        const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company} — ${company.mission || ''}`.slice(0, 2000);
+        try {
+          await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, taskRoom.id);
+        } catch { /* goal best-effort */ }
+        // Mark the task with its room in the persisted state.
+        task.room_id = taskRoom.id;
+        task.status = 'active';
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+            JSON.stringify({ _company: company }), row.id,
+          );
+        } catch { /* state best-effort */ }
+        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
     }
 
     // GET/PATCH /v1/hyper-rooms/:id/connectors — room-level connector toggles.

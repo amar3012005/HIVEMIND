@@ -336,6 +336,23 @@ export class PrismaGraphStore {
   }
 
   async createMemory(memory) {
+    // Auto-resolve legacy `project` string → project_id + project_ids when callers
+    // (TARA, MCP, chat) pass only the string slug.  Without this the memory_projects
+    // join table stays empty and project-scoped views show 0 memories.
+    if (memory.project && !memory.project_id && (!Array.isArray(memory.project_ids) || memory.project_ids.length === 0) && memory.org_id) {
+      try {
+        const slug = memory.project.replace(/^.*\//, ''); // strip prefix like "tara/"
+        const proj = await this.client.project.findFirst({
+          where: { orgId: memory.org_id, OR: [{ slug }, { name: { equals: slug, mode: 'insensitive' } }, { slug: memory.project }, { name: { equals: memory.project, mode: 'insensitive' } }] },
+          select: { id: true },
+        });
+        if (proj) {
+          memory.project_id = proj.id;
+          memory.project_ids = [proj.id];
+          if (!memory.scope || memory.scope === 'personal') memory.scope = 'project';
+        }
+      } catch { /* best-effort — don't block ingest */ }
+    }
     // RESIDENCY: agent-org rows are NOT written centrally. Push the row to the org's agent NOW (vector
     // is added later by storeMemory → same-id upsert) so mid-ingest reads (getMemory in extends/versions)
     // find it on the agent. Central keeps identity only. Managed/personal (orgIsRemote=false) → unchanged.

@@ -2057,7 +2057,7 @@ const server = http.createServer(async (req, res) => {
     }
     const user = await prisma?.user.findUnique({ where: { id: current.session.userId } });
     if (!user) {
-      return jsonResponse(res, { error: 'User not found' }, 404);
+      return jsonResponse(res, await buildAnonymousBootstrapPayload());
     }
     return jsonResponse(res, await buildBootstrapPayload(user));
   }
@@ -2993,10 +2993,15 @@ const server = http.createServer(async (req, res) => {
             orgId,
             isLatest: true,
             deletedAt: null,
-            memoryProjects: { some: { projectId: p.id } },
             OR: [
-              { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
-              { NOT: { tags: { hasSome: HIDDEN_TAGS } } },
+              { projectId: p.id },
+              { memoryProjects: { some: { projectId: p.id } } },
+            ],
+            AND: [
+              { OR: [
+                { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
+                { NOT: { tags: { hasSome: HIDDEN_TAGS } } },
+              ] },
             ],
           },
         }).catch(() => null)))

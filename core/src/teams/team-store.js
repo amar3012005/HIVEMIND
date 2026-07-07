@@ -330,9 +330,9 @@ export class TeamStore {
       `SELECT p.id, p.org_id, p.team_id, p.name, p.slug, p.description, p.status,
               p.policy, p.created_by, p.created_at, p.updated_at,
               (SELECT count(*)::int FROM hivemind.project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
-              (SELECT count(*)::int FROM hivemind.memory_projects mp
-                 JOIN hivemind.memories m ON m.id = mp.memory_id AND m.deleted_at IS NULL
-                WHERE mp.project_id = p.id) AS memory_count
+              (SELECT count(*)::int FROM hivemind.memories m
+                WHERE m.deleted_at IS NULL
+                  AND (m.project_id = p.id OR EXISTS (SELECT 1 FROM hivemind.memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id = p.id))) AS memory_count
          FROM hivemind.projects p
         WHERE p.org_id = $1::uuid AND p.status = 'active' AND ${visibility} ${teamNarrow}
         ORDER BY p.updated_at DESC`,

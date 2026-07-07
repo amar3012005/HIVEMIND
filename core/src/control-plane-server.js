@@ -6356,7 +6356,12 @@ Write the persona now.`;
         return (d.choices?.[0]?.message?.content || '').trim();
       };
       // Persist a memory through the canonical ingest front door on core.
-      const saveMemory = async ({ title, content, tags }) => {
+      // Save one onboarding memory through the canonical ingest front door.
+      // memoryType drives base salience (importance_score): canonical_summary/
+      // decision=0.85, relationship=0.70, fact=0.55 — so identity+mission+
+      // positioning outrank plain facts. tags carry the entity-boost lever
+      // (entity:<name> stacks +0.14/match at recall) + the org-canon pin.
+      const saveMemory = async ({ title, content, tags, memoryType = 'fact' }) => {
         try {
           const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/ingest/source`, {
             method: 'POST',
@@ -6368,11 +6373,29 @@ Write the persona now.`;
             },
             body: JSON.stringify({
               title, content, tags,
+              mode: 'atomic',
               source: { type: 'system', platform: 'hyperagents-onboarding', url: siteUrl, title },
+              metadata: { memory_type: memoryType, priority: 'high', authority_level: 'claimed' },
             }),
           });
           return r.ok;
         } catch { return false; }
+      };
+      // Wipe any prior onboarding memories so a re-run supersedes cleanly (no
+      // duplicate profiles piling up). Scoped to this org's onboarding source tag.
+      const clearPriorOnboarding = async () => {
+        try {
+          await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/bulk-delete-by-tag`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'x-hm-user-id': userId,
+              'x-hm-org-id': orgId,
+            },
+            body: JSON.stringify({ tags: ['source:hyperagents-onboarding'], dry_run: false }),
+          });
+        } catch { /* best-effort */ }
       };
       const stripHtml = (html) => html
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -6541,22 +6564,6 @@ Write the persona now.`;
           const deep = await webSearch(q3, { limit: 6 });
           research.push(...deep);
 
-          say('Saving your profile');
-          await saveMemory({
-            title: `Company profile — ${companyName}`,
-            content: `COMPANY PROFILE (auto-generated from ${siteUrl} during HyperAgents onboarding)\nName: ${profile.name}\nTagline: ${profile.tagline}\nWhat it does: ${profile.what_it_does}\nICP: ${profile.icp}\nOffer: ${profile.offer}\nPositioning: ${profile.positioning}\nCompetitors: ${(profile.competitors || []).join(', ')}\nTone: ${profile.tone}\nOpportunities: ${(profile.opportunities || []).join(' | ')}\nRisks: ${(profile.risks || []).join(' | ')}${userGoal ? `\nStated goal: ${userGoal}` : ''}`,
-            tags: ['company-profile', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
-          });
-
-          say('Saving your research');
-          if (research.length) {
-            await saveMemory({
-              title: `Market research — ${companyName}`,
-              content: `MARKET RESEARCH (auto-gathered at HyperAgents onboarding from live web search)\n${research.map((r) => `• ${r.title} (${r.url})\n  ${r.snippet}`).join('\n')}`.slice(0, 8000),
-              tags: ['market-research', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
-            });
-          }
-
           say('Writing your mission');
           let mission = '';
           try {
@@ -6565,13 +6572,6 @@ Write the persona now.`;
               JSON.stringify(profile), { maxTokens: 200 },
             );
           } catch { mission = `Build ${companyName} into the category leader.`; }
-          say('Filing your documents');
-          say('Locking in your vision');
-          await saveMemory({
-            title: `Mission — ${companyName}`,
-            content: `MISSION (locked at onboarding): ${mission}`,
-            tags: ['mission', 'hyperagents-onboarding', `entity:${companyName.toLowerCase()}`],
-          });
 
           say('Assembling your team');
           const store = await _getEmployeeStore();
@@ -6602,6 +6602,43 @@ Write the persona now.`;
               } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); }
             }
             _notifyEmployeesReload();
+          }
+
+          // ── File the company knowledge as a HIGH-SALIENCE, entity-rich
+          // sectioned cluster so it always tops recall and grounds every agent.
+          // Generic for any org: entities derived from name/aliases/domain/team.
+          say('Filing your documents');
+          say('Locking in your vision');
+          await clearPriorOnboarding();  // supersede prior run — no dupes
+          const lc = (s) => String(s || '').toLowerCase();
+          const entityTags = Array.from(new Set([
+            `entity:${lc(companyName)}`,
+            `entity:${lc(companyName.split(/[\s.,]/)[0])}`,   // first token alias (e.g. "B&B")
+            `entity:${lc(host)}`,                             // domain
+            `entity:${lc(host.split('.')[0])}`,               // domain root
+            ...team.map((tm) => `entity:${lc(tm.name)}`),     // each teammate (+0.14/match)
+          ].filter((t) => t.length > 8)));
+          // org-canon = the pinned "always company context" marker; company-profile
+          // = the stable canon lane; pinned = never-decay; source tag = provenance.
+          const canonTags = ['org-canon', 'company-profile', 'pinned', 'onboarding', 'source:hyperagents-onboarding', ...entityTags];
+          const sections = [
+            { title: `${companyName} — Company profile`, memoryType: 'canonical_summary',
+              content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.` },
+            { title: `${companyName} — Mission`, memoryType: 'canonical_summary',
+              content: `MISSION of ${companyName}: ${mission}` },
+            { title: `${companyName} — Positioning`, memoryType: 'decision',
+              content: `POSITIONING of ${companyName}: ${profile.positioning || '(n/a)'}${profile.tone ? ` Tone: ${profile.tone}.` : ''}` },
+            { title: `${companyName} — ICP / target segments`, memoryType: 'decision',
+              content: `ICP / TARGET SEGMENTS for ${companyName}: ${profile.icp || '(n/a)'}.${profile.offer ? ` Offer: ${profile.offer}.` : ''}` },
+            { title: `${companyName} — Competitors & market`, memoryType: 'fact',
+              content: `COMPETITORS of ${companyName}: ${(profile.competitors || []).join(', ') || '(none identified)'}.\nMARKET RESEARCH:\n${research.map((r) => `• ${r.title}: ${r.snippet}`).join('\n')}`.slice(0, 6000) },
+          ];
+          for (const tm of team.slice(0, 6)) {
+            sections.push({ title: `${companyName} — Team: ${tm.name}`, memoryType: 'relationship',
+              content: `${tm.name} is a team member (AI agent) at ${companyName}.` });
+          }
+          for (const sec of sections) {
+            await saveMemory({ ...sec, tags: canonTags });
           }
 
           say('Planning your first tasks');
@@ -6699,6 +6736,20 @@ Write the persona now.`;
           current.session.orgId,
         );
         try { fs.rmSync(path.join(HYPER_SHOT_DIR, `${current.session.orgId}.jpg`), { force: true }); } catch { /* best-effort */ }
+        // Also delete the filed onboarding memories (company profile/mission/
+        // positioning/etc.) so "start fresh" truly clears them. Rooms untouched.
+        try {
+          await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/bulk-delete-by-tag`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'x-hm-user-id': current.session.userId,
+              'x-hm-org-id': current.session.orgId,
+            },
+            body: JSON.stringify({ tags: ['source:hyperagents-onboarding'], dry_run: false }),
+          });
+        } catch { /* best-effort */ }
         _hyperOnboardJobs.delete(current.session.orgId);
         return jsonResponse(res, { ok: true });
       } catch (err) {

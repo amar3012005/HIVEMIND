@@ -1479,12 +1479,17 @@ const server = http.createServer(async (req, res) => {
     } else {
       const current = await requireSession(req, res);
       if (!current) return; // requireSession already responded
-      const m = await prisma.userOrganization.findFirst({
-        where: { userId: current.session.userId, role: 'owner' },
-        select: { orgId: true },
-      }).catch(() => null);
-      if (!m?.orgId) return jsonResponse(res, { registered: false, reachable: false });
-      statusOrgId = m.orgId;
+      // Prefer the session's ACTIVE org — findFirst(owner) returns an
+      // arbitrary org for multi-org owners and reports the wrong agent.
+      statusOrgId = current.session.orgId || null;
+      if (!statusOrgId) {
+        const m = await prisma.userOrganization.findFirst({
+          where: { userId: current.session.userId, role: 'owner' },
+          select: { orgId: true },
+        }).catch(() => null);
+        statusOrgId = m?.orgId || null;
+      }
+      if (!statusOrgId) return jsonResponse(res, { registered: false, reachable: false });
     }
     const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     let entry = null;

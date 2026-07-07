@@ -135,11 +135,12 @@ test('normalizeTagsArray deduplicates entity tags and preserves non-entity tag o
 
   const output = normalizeTagsArray(input);
 
-  // Expected: first-occurrence order, dupes removed
+  // Dupes removed; canonicalizeEntityAliases groups non-entity tags first
+  // (preserving their order) then the deduped entity tags.
   assert.deepEqual(output, [
-    'entity:solvis',
     'topic:heating',
     'filename:manual.pdf',
+    'entity:solvis',
     'entity:solviscontrol-3',
   ]);
 });
@@ -158,11 +159,11 @@ test('normalizeTagsArray passes through non-array input unchanged', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Class 6 — entity: tag with empty payload stays unchanged (regression guard)
-// normalizeEntityTag('entity:') must not throw and must return original tag
+// Class 6 — entity: tag with empty payload must not throw; returns null so the
+// array normalizer drops the unnormalizable tag (intentional current behavior).
 // ---------------------------------------------------------------------------
-test('normalizeEntityTag with empty entity payload returns original tag unchanged', () => {
-  assert.equal(normalizeEntityTag('entity:'), 'entity:');
+test('normalizeEntityTag with empty entity payload returns null (dropped)', () => {
+  assert.equal(normalizeEntityTag('entity:'), null);
 });
 
 // ---------------------------------------------------------------------------

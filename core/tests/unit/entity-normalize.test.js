@@ -12,7 +12,9 @@ test('legal suffix stripped → company variants merge', () => {
   assert.equal(normalizeEntity('SOLVIS_GmbH'), 'solvis');
   assert.equal(normalizeEntity('Solvis GmbH'), 'solvis');
   assert.equal(normalizeEntity('Acme Inc.'), 'acme');
-  assert.equal(normalizeEntity('Foo Holding'), 'foo');
+  // NB: 'foo' is a reserved test/smoke sentinel (TEST_NOISE_RE) → use a real
+  // name to exercise the "Holding" suffix strip.
+  assert.equal(normalizeEntity('Zeta Holding'), 'zeta');
 });
 
 test('unicode hyphen + underscore variants of a product all converge', () => {
@@ -61,9 +63,29 @@ test('normalizeTagsArray collapses dup entity tags, preserves others + order', (
   assert.deepEqual(out, ['entity:solvis', 'topic:company', 'filename:a.pdf']);
 });
 
+test('function/emphasis/status words + HTTP verbs drop as junk entities', () => {
+  // ALL-CAPS emphasis and prose noise that used to leak into the entity graph
+  // and pollute recall relationship chains (linking memories by "NOT"/"LIVE").
+  for (const w of ['NOT', 'NOW', 'LIVE', 'FOLLOW', 'DONE', 'STATUS', 'PENDING',
+                   'POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'yes', 'no', 'tbd']) {
+    assert.equal(normalizeEntity(w), null, `expected "${w}" to drop`);
+  }
+});
+
+test('real multi-word names containing a stopword SURVIVE', () => {
+  // The junk filter only drops the BARE single token — a real proper noun that
+  // merely contains one of these words keeps its full slug.
+  assert.equal(normalizeEntity('Washington Post'), 'washington-post');
+  assert.equal(normalizeEntity('Post Malone'), 'post-malone');
+  assert.equal(normalizeEntity('Live Nation'), 'live-nation');
+  assert.equal(normalizeEntity('New York'), 'new-york');
+});
+
 test('garbage / empty input', () => {
   assert.equal(normalizeEntity(''), null);
   assert.equal(normalizeEntity('   '), null);
   assert.equal(normalizeEntity(null), null);
-  assert.equal(normalizeEntityTag('entity:'), 'entity:'); // unchanged when nothing to normalize
+  // An unnormalizable entity tag now returns null so the array normalizer
+  // drops it (see normalizeEntityTag — intentional: was previously kept).
+  assert.equal(normalizeEntityTag('entity:'), null);
 });

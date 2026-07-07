@@ -127,7 +127,8 @@ if (prisma) {
   const _sweepKicked = new Set(); // turnId -> already re-kicked once
   const SWEEP_MS = 15_000;
   const _hyperSidecar = () => process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
-  setInterval(async () => {
+  let _sweepTimer = null;
+  _sweepTimer = setInterval(async () => {
     try {
       const live = await prisma.hyperTurn.findMany({
         where: { status: 'live' },
@@ -175,7 +176,17 @@ if (prisma) {
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
       }
     } catch (err) {
-      console.warn('[hyper-sweeper] tick failed:', err.message);
+      // On a deployment where the HyperAgents tables were never migrated
+      // (e.g. a self-host/managed box that doesn't run rooms), the query
+      // throws "table ... does not exist" every 15s and floods the logs.
+      // Self-disable instead of spamming — there is nothing to sweep.
+      const msg = err?.message || '';
+      if (/does not exist|Unknown (arg|field)|column .* does not exist/i.test(msg)) {
+        if (_sweepTimer) clearInterval(_sweepTimer);
+        console.warn('[hyper-sweeper] disabled — HyperAgents schema absent on this DB:', msg.split('\n')[0]);
+        return;
+      }
+      console.warn('[hyper-sweeper] tick failed:', msg);
     }
   }, SWEEP_MS);
   console.log('[hyper-sweeper] stuck-turn re-kick sweeper active (15s)');

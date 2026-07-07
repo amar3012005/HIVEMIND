@@ -197,6 +197,28 @@ const sessionStore = new ControlPlaneSessionStore(CONFIG);
 // HyperAgents onboarding jobs — one Polsia-style company-genesis pipeline per
 // org, in-memory (FE polls /v1/hyper/onboarding/status; refresh re-attaches).
 const _hyperOnboardJobs = new Map();
+
+// Homepage screenshots live on the shared data volume (out of Postgres — the
+// base64 was bloating the room jsonb + every dashboard read). Served lazily by
+// GET /v1/hyper/company/screenshot.
+const HYPER_SHOT_DIR = path.join(process.env.HIVEMIND_DATA_DIR || '/app/data', 'hyper-screenshots');
+try { fs.mkdirSync(HYPER_SHOT_DIR, { recursive: true }); } catch { /* best-effort */ }
+
+// Chromium is heavy; cap concurrent captures so parallel onboardings can't
+// thrash the single hm-playwright browser. A tiny FIFO semaphore.
+const HYPER_SHOT_MAX = parseInt(process.env.HYPER_SHOT_CONCURRENCY || '2', 10);
+let _hyperShotActive = 0;
+const _hyperShotQueue = [];
+async function _acquireShotSlot() {
+  if (_hyperShotActive < HYPER_SHOT_MAX) { _hyperShotActive++; return; }
+  await new Promise((resolve) => _hyperShotQueue.push(resolve));
+  _hyperShotActive++;
+}
+function _releaseShotSlot() {
+  _hyperShotActive = Math.max(0, _hyperShotActive - 1);
+  const next = _hyperShotQueue.shift();
+  if (next) next();
+}
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
 
@@ -6373,6 +6395,9 @@ Write the persona now.`;
       // streamable HTTP :8931). Minimal JSON-RPC client: initialize → navigate →
       // take_screenshot; responses may arrive SSE-framed. Best-effort with a hard
       // time budget — no screenshot never blocks onboarding.
+      // Capture the homepage and WRITE IT TO DISK (out of PG). Returns the
+      // served URL path or null. Concurrency-capped, with a post-load settle so
+      // JS-heavy sites paint before the shot. Best-effort — never blocks onboarding.
       const screenshotSite = async (targetUrl) => {
         const base = process.env.HYPER_PLAYWRIGHT_URL || 'http://hm-playwright:8931/mcp';
         const parseMcp = async (r) => {
@@ -6397,6 +6422,7 @@ Write the persona now.`;
             return { sid: r.headers.get('mcp-session-id') || sessionId, json: await parseMcp(r) };
           } catch { clearTimeout(t); return { sid: sessionId, json: null }; }
         };
+        await _acquireShotSlot();
         try {
           const init = await call(null, {
             jsonrpc: '2.0', id: 1, method: 'initialize',
@@ -6408,14 +6434,26 @@ Write the persona now.`;
             jsonrpc: '2.0', id: 2, method: 'tools/call',
             params: { name: 'browser_navigate', arguments: { url: targetUrl } },
           }, 25000);
-          const shot = await call(init.sid, {
+          // Settle: let lazy-loaded/hero JS paint before the capture (best-effort;
+          // browser_wait_for {time} just sleeps browser-side).
+          await call(init.sid, {
             jsonrpc: '2.0', id: 3, method: 'tools/call',
+            params: { name: 'browser_wait_for', arguments: { time: 2.5 } },
+          }, 6000);
+          const shot = await call(init.sid, {
+            jsonrpc: '2.0', id: 4, method: 'tools/call',
             params: { name: 'browser_take_screenshot', arguments: { type: 'jpeg' } },
           }, 20000);
           const content = shot.json?.result?.content || [];
           const img = content.find((c) => c.type === 'image' && c.data);
-          return img ? `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` : null;
+          if (!img?.data) return null;
+          try {
+            fs.writeFileSync(path.join(HYPER_SHOT_DIR, `${orgId}.jpg`), Buffer.from(img.data, 'base64'));
+          } catch (e) { console.warn('[hyper-onboarding] screenshot write failed:', e.message); return null; }
+          // Cache-bust so a re-onboard's new capture isn't served stale.
+          return `/v1/hyper/company/screenshot?v=${Date.now()}`;
         } catch { return null; }
+        finally { _releaseShotSlot(); }
       };
       const webSearch = async (query, { limit = 5 } = {}) => {
         try {
@@ -6644,6 +6682,27 @@ Write the persona now.`;
       })();
 
       return jsonResponse(res, { ok: true, started: true });
+    }
+
+    // GET /v1/hyper/company/screenshot — stream the session org's homepage
+    // capture from the data volume (cookie-auth; served lazily so the ~130KB
+    // never rides in the /company JSON). 404 when none captured yet.
+    if (pathname === '/v1/hyper/company/screenshot' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const fp = path.join(HYPER_SHOT_DIR, `${current.session.orgId}.jpg`);
+        if (!fs.existsSync(fp)) return jsonResponse(res, { error: 'no screenshot' }, 404);
+        const buf = fs.readFileSync(fp);
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': buf.length,
+          'Cache-Control': 'private, max-age=300',
+        });
+        return res.end(buf);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
     }
 
     // GET /v1/hyper/company — the HyperAgents hero dashboard state. Reads the

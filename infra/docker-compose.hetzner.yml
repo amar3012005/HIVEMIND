@@ -221,13 +221,14 @@ services:
     depends_on: [core]
     profiles: ["full"]
 
-  # ── Playwright (browser automation for connectors/scrape) — buildable from services/hm-playwright ──
+  # ── Playwright (browser automation: connector scrape + HyperAgents onboarding
+  #    homepage screenshots) — part of the default managed stack so a plain
+  #    `compose up -d` keeps it running (no --profile gate). ──
   playwright:
     build: { context: ../services/hm-playwright }
     image: hivemind/hm-playwright:${VERSION:-latest}
     container_name: hm-playwright
     restart: unless-stopped
-    profiles: ["full"]
 
   # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
   #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.

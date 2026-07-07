@@ -140,11 +140,16 @@ async def route(*, persona_name: str, goal: str,
 
 
 _PLAN_SYS = """You are the call planner for TARA, a spoken voice agent. Given the
-agent's PERSONA (skill) and the CALL GOAL, produce a short strategic opening.
+agent's PERSONA (skill) and the CALL GOAL, plan the strategic opening.
 Reply ONLY minified JSON:
-{"opening":"the exact first thing TARA says after the AI disclosure — warm, in persona, 1-2 spoken sentences, ending with the single best FIRST question that starts moving toward the goal","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress"}
-Rules: sound human, not scripted. The opening must state why you're calling and
-ask ONE clear question. Never invent facts. Speak the company name naturally."""
+{"opening":"...","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress"}
+
+CRITICAL — the AI disclosure has ALREADY been spoken immediately before this
+("Hi, this is TARA, an AI assistant calling on behalf of <company>..."). So the
+"opening" must NOT reintroduce TARA, NOT repeat the company name, NOT say "hi"
+or "hello" again. It is the NEXT sentence: state in one short line why you're
+calling and ask the single best FIRST question toward the goal. 1 sentence, at
+most 2. Human, not scripted. Never invent facts."""
 
 
 async def plan_opening(*, persona_prompt: str, goal: str, company: str,

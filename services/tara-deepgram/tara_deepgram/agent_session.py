@@ -290,16 +290,15 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
             pass
         try:
             duration_sec = int(time.monotonic() - call_start)
-            tok = {"p": 0, "c": 0}
+            # Tokens are posted per-turn by the shim (/calls/token-usage) — send
+            # only duration here to avoid double-counting. Free per-call state.
             try:
                 from . import think_shim as _ts
-                tok = (_ts._session_state.get(session_id) or {}).get("tok", tok)
-                _ts._session_state.pop(session_id, None)  # free per-call state
+                _ts._session_state.pop(session_id, None)
             except Exception:  # noqa: BLE001
                 pass
             await core_post("/api/tara/calls/end", {
                 "session_id": session_id, "duration_sec": duration_sec,
-                "prompt_tokens": tok.get("p", 0), "completion_tokens": tok.get("c", 0),
             }, user_id, org_id)
         except Exception:  # noqa: BLE001
             pass

@@ -30,7 +30,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config
-from .core_client import get_persona
+from .core_client import core_post, get_persona
 from .tara_stream import stream_tara
 from .turn_router import answer_direct, route
 
@@ -159,6 +159,7 @@ async def think(request: Request):
             state = _session_state.setdefault(
                 session_id, {"directive": "", "goal_state": "", "facts": [], "tok": {"p": 0, "c": 0}})
             state.setdefault("tok", {"p": 0, "c": 0})
+            turn_tok0 = (state["tok"]["p"], state["tok"]["c"])  # baseline for this turn's delta
             # Seed goal_state from the dial-time goal so the strategist is oriented
             # from turn 1 (it evolves it thereafter).
             if call_goal and not state.get("goal_state"):
@@ -204,7 +205,7 @@ async def think(request: Request):
             forced_recall = False
             if use_router and _likely_recall(query):
                 forced_recall = True
-                filler = _next_filler(state, language)
+                filler = _next_filler(state, language) if config.FILLER_ENABLED else None
                 if filler:
                     first_ms = round((time.monotonic() - t0) * 1000)
                     produced = True
@@ -272,7 +273,7 @@ async def think(request: Request):
 
                 # Fallback filler: heuristic missed but recall is slow anyway —
                 # emit a filler if the answer hasn't begun within the threshold.
-                if use_router and not filler_emitted:
+                if use_router and not filler_emitted and config.FILLER_ENABLED:
                     await asyncio.wait({core_first}, timeout=config.FILLER_AFTER_MS / 1000.0)
                     if not core_first.done():
                         filler = _next_filler(state, language)
@@ -310,9 +311,19 @@ async def think(request: Request):
         if not produced:
             yield _chunk(chunk_id, model, {"content": "I'm sorry, I couldn't reach my knowledge base just now."})
         total_ms = round((time.monotonic() - t0) * 1000)
-        log.info("turn session=%s path=%s router_ms=%s first_token_ms=%s total_ms=%s",
+        # Per-turn token usage → core (decoupled from the bridge; keeps Usage live).
+        try:
+            dp = state["tok"]["p"] - turn_tok0[0]
+            dc = state["tok"]["c"] - turn_tok0[1]
+            if (dp or dc) and session_id and not session_id.startswith(("tok-", "dg-", "warm-")):
+                asyncio.create_task(core_post("/api/tara/calls/token-usage", {
+                    "session_id": session_id, "prompt_tokens": dp, "completion_tokens": dc,
+                }, user_id, org_id))
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("turn session=%s path=%s router_ms=%s first_token_ms=%s total_ms=%s tok=%s/%s",
                  session_id, path, decision.get("router_ms", "-") if use_router else "-",
-                 first_ms, total_ms)
+                 first_ms, total_ms, state["tok"]["p"], state["tok"]["c"])
         yield _chunk(chunk_id, model, {}, finish="stop")
         yield "data: [DONE]\n\n"
 

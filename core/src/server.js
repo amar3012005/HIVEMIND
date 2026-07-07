@@ -6942,6 +6942,24 @@ exit \$RC
           } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
         }
 
+        // Token usage from the voice shim (per turn) — increments call token
+        // counters WITHOUT creating a turn row (the bridge owns turn rows). Keeps
+        // the Usage/Tokens dashboard live regardless of cross-process state.
+        if (pathname === '/api/tara/calls/token-usage' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+          try { planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
+          if (orgIsRemote(tOrg)) {
+            try { await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), prompt_tokens_inc: pt, completion_tokens_inc: ct }); } catch { /* best-effort */ }
+            return jsonResponse(res, { ok: true });
+          }
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            if (call && call.orgId === tOrg) await prisma.taraCall.update({ where: { id: call.id }, data: { promptTokens: { increment: pt }, completionTokens: { increment: ct } } });
+          } catch { /* best-effort */ }
+          return jsonResponse(res, { ok: true });
+        }
+
         if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
           // Remote (self-host) orgs: counters + full turn text on agent (Call History parity).

@@ -79,6 +79,9 @@ DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "low")
 RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
 # Speak a filler if the grounded recall answer hasn't started within this many ms.
 FILLER_AFTER_MS = int(os.getenv("TARA_DG_FILLER_AFTER_MS", "400"))
+# Fillers off by default now — Cerebras + warm recall make them unnecessary and
+# they read as repetitive. Set TARA_DG_FILLER_ENABLED=true to re-enable.
+FILLER_ENABLED = os.getenv("TARA_DG_FILLER_ENABLED", "false").lower() == "true"
 
 # ── Campaign engine ──────────────────────────────────────────────────────────
 # Deepgram PAYG cap = 15 concurrent agent sessions; stay well under.

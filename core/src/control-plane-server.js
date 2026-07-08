@@ -6429,6 +6429,20 @@ Write the persona now.`;
       if (!current) return;
       const job = _hyperOnboardJobs.get(current.session.orgId);
       if (!job) return jsonResponse(res, { running: false, lines: [], done: false });
+      // A completed job whose HQ room was since DELETED is stale — serving it
+      // trapped the FE in a done-screen loop (Enter → /company 404 → fallback
+      // re-attaches to this same job). Invalidate it so the user gets a fresh
+      // onboarding input instead.
+      if (job.done && !job.error && job.result?.room_id) {
+        const hqAlive = await prisma.hyperRoom.findFirst({
+          where: { id: job.result.room_id, orgId: current.session.orgId, archivedAt: null },
+          select: { id: true },
+        }).catch(() => null);
+        if (!hqAlive) {
+          _hyperOnboardJobs.delete(current.session.orgId);
+          return jsonResponse(res, { running: false, lines: [], done: false });
+        }
+      }
       return jsonResponse(res, {
         running: !job.done,
         done: job.done,
@@ -7076,8 +7090,27 @@ Write the persona now.`;
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const hard = url.searchParams.get('hard') === 'true';
+      const force = url.searchParams.get('force') === 'true';
       try {
-        if (hard) {
+        // HQ protection: this room carries the persisted company state
+        // (_company — profile/mission/tasks/deliverables shown on the hero).
+        // Deleting it wipes the dashboard. Require an explicit force so the
+        // FE can show a real "this clears your company" confirm first; a
+        // forced delete drops the org back to the onboarding page.
+        const hqRows = await prisma.$queryRawUnsafe(
+          `SELECT 1 FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid AND "agent_connectors" ? '_company'`,
+          roomId,
+        ).catch(() => []);
+        if (hqRows?.length && !force) {
+          return jsonResponse(res, {
+            error: 'This is your company HQ — it holds your company profile, mission, tasks and deliverables. Deleting it clears the dashboard and you will need to onboard again.',
+            code: 'HQ_ROOM',
+          }, 409);
+        }
+        if (hqRows?.length && force) {
+          _hyperOnboardJobs.delete(current.session.orgId); // stale done-job must not resurrect the old dashboard
+        }
+        if (hard || (hqRows?.length && force)) {
           await prisma.hyperRoom.delete({ where: { id: roomId } });
           return jsonResponse(res, { ok: true, deleted: true, mode: 'hard' });
         }

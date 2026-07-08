@@ -798,7 +798,17 @@ export class RecallRouter {
     let projectFallbackFired = false;
     const _projectFallbackEnabled = process.env.RECALL_PROJECT_FALLBACK !== 'false';
     if (_projectFallbackEnabled && memories.length === 0 && ctx.projectId) {
-      const ctxBroad = { ...ctx, projectId: null };
+      // ISOLATION: the broad retry may escape to personal/org/team knowledge,
+      // but must NEVER surface ANOTHER project's scoped memories — asking about
+      // "Solvis" inside the Singulance project must not answer from the SOLVIS
+      // project. projectIds:[] makes every scope='project' memory fail the
+      // access check in the retrieval scope filter while personal/org/team
+      // memories still pass.
+      const ctxBroad = {
+        ...ctx,
+        projectId: null,
+        accessContext: { ...(ctx.accessContext || {}), projectIds: [] },
+      };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
         HOP1_TIMEOUT_MS,

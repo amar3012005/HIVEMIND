@@ -192,6 +192,38 @@ async function ensureSchema() {
   console.log('[hm-agent] postgres schema ready');
 }
 
+async function countDerivedMemoriesByDocumentIds(docIds = []) {
+  const ids = Array.from(new Set((docIds || []).filter(Boolean)));
+  if (!ids.length) return {};
+  const tagIds = ids.map((id) => `doc-id:${id}`);
+  const { rows } = await pg.query(
+    `SELECT doc_id::text AS document_id, count(DISTINCT memory_id)::int AS c
+       FROM (
+         SELECT m.metadata->'source_metadata'->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->'source_metadata'->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT m.metadata->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT regexp_replace(t.tag, '^doc-id:', '') AS doc_id, m.id AS memory_id
+           FROM memories m
+           CROSS JOIN LATERAL unnest(m.tags) AS t(tag)
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND t.tag = ANY($3::text[])
+       ) derived
+      GROUP BY doc_id`,
+    [ORG, ids, tagIds],
+  );
+  return Object.fromEntries((rows || []).map((row) => [row.document_id, Number(row.c) || 0]));
+}
+
 // ── Qdrant (vectors) ────────────────────────────────────────────────────────────────────────────
 const qFetch = (path, opts = {}, ms = 4000) => {
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
@@ -226,6 +258,8 @@ function payloadOf(rec) {
   return {
     memory_id: rec.id, org_id: ORG, user_id: rec.userId || null,
     content: rec.content || '', title: rec.title || null, tags: rec.tags || [],
+    project: rec.project || null, project_ids: rec.projectIds || [], scope: rec.scope || null,
+    primary_team_id: rec.primaryTeamId || null,
     memory_type: rec.memoryType || null, layer: rec.layer || 'memory',
     cognitive_layer_role: rec.cognitiveLayerRole || null,
     is_latest: rec.isLatest ?? true, created_at: rec.createdAt || null,
@@ -328,10 +362,13 @@ const routes = {
     args.push(b.limit || 10);
     const { rows } = await pg.query(
       `SELECT id, content, title, tags, memory_type, layer, cognitive_layer_role, is_latest, created_at, user_id,
+              project, project_ids, scope, primary_team_id,
               ts_rank(content_tsv, plainto_tsquery('english',$2)) AS score
        FROM memories WHERE ${conds.join(' AND ')} ORDER BY score DESC LIMIT $${args.length}`, args);
     return { results: rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
       memory_id: m.id, org_id: ORG, user_id: m.user_id, content: m.content, title: m.title, tags: m.tags,
+      project: m.project || null, project_ids: m.project_ids || [], scope: m.scope || null,
+      primary_team_id: m.primary_team_id || null,
       memory_type: m.memory_type, layer: m.layer, cognitive_layer_role: m.cognitive_layer_role,
       is_latest: m.is_latest, created_at: m.created_at } })) };
   },
@@ -667,7 +704,7 @@ const routes = {
 
   // ── KB doc LIST (self-host READ) ─────────────────────────────────────────
   // Returns the org's knowledge_documents with per-doc segment_count and promoted_count.
-  // promoted_count = memories whose tags array contains 'filename:<filename>'.
+  // promoted_count = memories derived from the document by provenance or legacy doc-id tags.
   // Response: { documents: [...], pagination: { total, limit, offset, hasMore } }
   '/v1/kb-docs': async (b) => {
     const limit = Math.min(Number(b.limit) || 20, 200);
@@ -686,7 +723,6 @@ const routes = {
     const total = totRow[0]?.c || 0;
     // Batch segment counts and promoted counts in two queries rather than N+1.
     const ids = docs.map((d) => d.id);
-    const filenames = docs.map((d) => d.filename).filter(Boolean);
     let segMap = {};
     let proMap = {};
     if (ids.length) {
@@ -695,23 +731,7 @@ const routes = {
         [ORG, ids]
       );
       for (const r of segs) segMap[r.document_id] = r.c;
-    }
-    if (filenames.length) {
-      // promoted = memories tagged 'filename:<filename>'
-      const tagPatterns = filenames.map((f) => `filename:${f}`);
-      const { rows: prows } = await pg.query(
-        `SELECT unnest(tags) AS tag, count(*)::int AS c
-         FROM memories
-         WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
-         GROUP BY tag`,
-        [ORG, tagPatterns]
-      );
-      for (const r of prows) {
-        if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
-          const fn = r.tag.slice('filename:'.length);
-          proMap[fn] = (proMap[fn] || 0) + r.c;
-        }
-      }
+      proMap = await countDerivedMemoriesByDocumentIds(ids);
     }
     const documents = docs.map((d) => ({
       id: d.id,
@@ -735,7 +755,7 @@ const routes = {
       metadata: d.metadata || {},
       // Counts:
       segmentCount: segMap[d.id] || 0,
-      promotedCount: d.filename ? (proMap[d.filename] || 0) : 0,
+      promotedCount: proMap[d.id] || 0,
     }));
     return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };
   },
@@ -766,15 +786,15 @@ const routes = {
       metadata: s.metadata || {},
       createdAt: s.created_at,
     }));
-    // Promoted memories: tagged filename:<filename>.
+    // Promoted memories: prefer document-id provenance, with filename tag as legacy fallback.
     let promotedMemories = [];
-    if (d.filename) {
-      const tag = `filename:${d.filename}`;
+    {
+      const tags = [`doc-id:${d.id}`, ...(d.filename ? [`filename:${d.filename}`] : [])];
       const { rows: mems } = await pg.query(
         `SELECT id, title, content, memory_type, confidence, tags, created_at
-         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
+         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
          ORDER BY created_at DESC LIMIT 100`,
-        [ORG, tag]
+        [ORG, tags]
       );
       promotedMemories = mems.map((m) => ({
         id: m.id,
@@ -808,7 +828,8 @@ const routes = {
       status: d.status,
       metadata: d.metadata || {},
     };
-    return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
+    const derivedCounts = await countDerivedMemoriesByDocumentIds([d.id]);
+    return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
   },
 
   // ── Per-memory edge counts (self-host READ) ───────────────────────────────

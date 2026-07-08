@@ -1752,7 +1752,11 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
 
     // Scope mapping shared by both modes (matches the upload-route / save shape).
     const scope = envelope.scope || null;
-    const projectId = envelope.projectId || null;
+    const metadataProjectIds = Array.isArray(envelope.metadata?.project_ids)
+      ? envelope.metadata.project_ids.filter(id => typeof id === 'string' && id.trim())
+      : [];
+    const projectId = envelope.projectId || envelope.metadata?.project_id || metadataProjectIds[0] || null;
+    const projectIds = projectId ? [projectId] : metadataProjectIds;
     const primaryTeamId = envelope.primaryTeamId || null;
 
     if (mode === 'document') {
@@ -1772,7 +1776,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         // engine THROWS on scope:'project' with an empty project_ids[]. When the
         // caller passed project_ids in metadata (KB upload routes) it is already
         // spread above; envelope.projectId (meeting/MCP) is normalized to [id].
-        ...(projectId ? { project_id: projectId, project_ids: [projectId] } : {}),
+        ...(projectIds.length ? { project_id: projectIds[0], project_ids: projectIds } : {}),
         ...(primaryTeamId ? { primary_team_id: primaryTeamId } : {}),
       };
 
@@ -1823,7 +1827,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         source_metadata: prov.sourceMetadata,
         document_date: prov.documentDate || undefined,
         scope: scope || undefined,
-        project_ids: projectId ? [projectId] : [],
+        project_ids: projectIds,
         primary_team_id: primaryTeamId || undefined,
         visibility: envelope.metadata?.visibility || undefined,
         tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags, 'evidence']),
@@ -1860,7 +1864,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       // forward, never reimplement it here ("memory engine left untouched").
       relationship: envelope.relationship || undefined,
       related_to: envelope.relatedTo || undefined,
-      project_ids: projectId ? [projectId] : (Array.isArray(envelope.metadata?.project_ids) ? envelope.metadata.project_ids : []),
+      project_ids: projectIds,
       project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
     });

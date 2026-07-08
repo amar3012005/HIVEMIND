@@ -856,6 +856,7 @@ export class PrismaGraphStore {
         if (!vec) return [];
         const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
         if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
+        const scopedProjectIds = Array.isArray(access_context?.projectIds) ? access_context.projectIds : [];
         // HYBRID: vector (semantic) + lexical (exact-term FTS over the agent's Postgres). The lexical
         // leg surfaces buried exact terms that cosine rank misses — without it self-host recall was
         // vector-only. Union by id; keep the higher score (lexical hits ride at their ts_rank).
@@ -874,13 +875,22 @@ export class PrismaGraphStore {
           if (existing && existing.score >= score) continue;
           byId.set(id, {
             id, content: p.content || '', title: p.title || null, tags: p.tags || [],
-            memory_type: p.memory_type || 'fact', project: null,
+            memory_type: p.memory_type || 'fact', project: p.project || null,
+            project_id: Array.isArray(p.project_ids) && p.project_ids.length === 1 ? p.project_ids[0] : null,
+            project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
+            scope: p.scope || null,
             importance_score: score, is_latest: p.is_latest ?? true,
             created_at: p.created_at || null, updated_at: p.created_at || null,
             score, cognitive_layer_role: p.cognitive_layer_role || null,
           });
         }
-        return Array.from(byId.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
+        return Array.from(byId.values())
+          .filter((m) => {
+            if (m.scope !== 'project' || scopedProjectIds.length === 0) return true;
+            const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
+            return pids.some(id => scopedProjectIds.includes(id));
+          })
+          .sort((a, b) => (b.score || 0) - (a.score || 0));
       } catch (e) {
         console.warn('[recall] remote agent search failed:', e.message);
         return [];

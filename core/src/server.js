@@ -2252,6 +2252,52 @@ export function normalizeScopeIds(values = []) {
   ));
 }
 
+function isUuidLike(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function countDerivedMemoriesByDocumentIds(documentIds = [], orgId = null) {
+  const ids = normalizeScopeIds(documentIds).filter(isUuidLike);
+  if (!ids.length || !prisma?.$queryRawUnsafe) return {};
+  const placeholders = ids.map((_, idx) => `$${idx + 2}::uuid`).join(',');
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT doc_id::text AS document_id, count(DISTINCT memory_id)::int AS c
+         FROM (
+           SELECT mel.document_id::text AS doc_id, mel.memory_id
+             FROM hivemind.memory_evidence_links mel
+             JOIN hivemind.memories m ON m.id = mel.memory_id
+            WHERE mel.document_id IN (${placeholders})
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+           UNION
+           SELECT sm.metadata->>'document_id' AS doc_id, sm.memory_id
+             FROM hivemind.source_metadata sm
+             JOIN hivemind.memories m ON m.id = sm.memory_id
+            WHERE sm.metadata->>'document_id' = ANY($${ids.length + 2}::text[])
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+           UNION
+           SELECT regexp_replace(t.tag, '^doc-id:', '') AS doc_id, m.id AS memory_id
+             FROM hivemind.memories m
+             CROSS JOIN LATERAL unnest(m.tags) AS t(tag)
+            WHERE t.tag = ANY($${ids.length + 3}::text[])
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+         ) derived
+        GROUP BY doc_id`,
+      orgId,
+      ...ids,
+      ids,
+      ids.map(id => `doc-id:${id}`),
+    );
+    return Object.fromEntries((rows || []).map(row => [row.document_id, Number(row.c) || 0]));
+  } catch (err) {
+    console.warn('[documents] derived memory count failed:', err.message);
+    return {};
+  }
+}
+
 function countTopValues(values = [], limit = 5) {
   const counts = new Map();
   for (const value of values) {
@@ -10230,13 +10276,14 @@ exit \$RC
             confidence: link.confidence,
             excerpt: link.excerpt
           }));
+          const derivedCountMap = await countDerivedMemoriesByDocumentIds([documentId], orgId);
 
           return jsonResponse(res, {
             document,
             segments,
             promotedMemories,
             segmentCount: segments.length,
-            promotedCount: promotedMemories.length
+            promotedCount: derivedCountMap[documentId] ?? promotedMemories.length
           });
         } catch (err) {
           console.error('[documents/:id] Failed:', err.message);
@@ -15139,8 +15186,30 @@ exit \$RC
             const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
             const projectIdRaw = parts.find(p => p.name === 'projectId')?.value || null;
             const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
-            const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization' ? 'organization' : 'personal';
+            const targetScopeRaw = parts.find(p => p.name === 'targetScope')?.value || '';
+            const targetScope = targetScopeRaw === 'organization'
+              ? 'organization'
+              : targetScopeRaw === 'project'
+                ? 'project'
+                : 'personal';
             const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
+            const bulkProjectIds = normalizeScopeIds([projectIdRaw]);
+            if (bulkProjectIds.length === 0 && containerTag && targetScope === 'project') {
+              try {
+                const proj = await prisma.project.findFirst({
+                  where: {
+                    orgId,
+                    OR: [
+                      ...(isUuidLike(containerTag) ? [{ id: containerTag }] : []),
+                      { slug: containerTag.toLowerCase() },
+                      { name: { equals: containerTag, mode: 'insensitive' } },
+                    ],
+                  },
+                  select: { id: true },
+                }).catch(() => null);
+                if (proj) bulkProjectIds.push(proj.id);
+              } catch (e) { console.warn('[knowledge-bulk] containerTag project resolve failed:', e.message); }
+            }
 
             // 3-tier enforcement (mirrors /api/knowledge/upload): org-wide
             // (organization scope with NO project + NO team) is admin-only.
@@ -15155,6 +15224,17 @@ exit \$RC
                   error: 'org_scope_admin_only',
                   message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
                   role: bulkRole,
+                }, 403);
+              }
+            }
+
+            if (projectIdRaw || targetScope === 'project') {
+              const accessCtx = await buildAccessContext(userId, orgId);
+              const allowed = Array.isArray(accessCtx?.projectIds) ? accessCtx.projectIds : [];
+              if (!bulkProjectIds.length || bulkProjectIds.some(id => !allowed.includes(id))) {
+                return jsonResponse(res, {
+                  error: 'project_scope_required',
+                  message: 'Project-scoped uploads require an accessible projectId.',
                 }, 403);
               }
             }
@@ -15183,10 +15263,11 @@ exit \$RC
                     metadata: {
                       tags: userTags,
                       project: containerTag,
-                      project_id: projectIdRaw,
-                      project_ids: projectIdRaw ? [projectIdRaw] : [],
+                      project_id: bulkProjectIds[0] || null,
+                      project_ids: bulkProjectIds,
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      scope: bulkProjectIds.length ? 'project' : (targetScope === 'organization' ? 'organization' : undefined),
                       smart: smartFlag,
                     },
                   });
@@ -15268,9 +15349,12 @@ exit \$RC
               // KB uploads default to ORGANIZATION visibility (team knowledge is
               // shared by default; users opt OUT to 'personal'). Was default
               // 'personal', which siloed every upload to the uploader.
-              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'personal'
+              const targetScopeRaw = parts.find(p => p.name === 'targetScope')?.value || '';
+              const targetScope = targetScopeRaw === 'personal'
                 ? 'personal'
-                : 'organization';
+                : targetScopeRaw === 'project'
+                  ? 'project'
+                  : 'organization';
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
               const projectId = parts.find(p => p.name === 'projectId')?.value || null;
@@ -15300,6 +15384,17 @@ exit \$RC
                   });
                   if (proj) projectIds.push(proj.id);
                 } catch (e) { console.warn('[knowledge] containerTag project resolve failed:', e.message); }
+              }
+
+              if (projectId || projectIdsRaw.trim() || targetScope === 'project') {
+                const accessCtx = await buildAccessContext(userId, orgId);
+                const allowed = Array.isArray(accessCtx?.projectIds) ? accessCtx.projectIds : [];
+                if (!projectIds.length || projectIds.some(id => !allowed.includes(id))) {
+                  return jsonResponse(res, {
+                    error: 'project_scope_required',
+                    message: 'Project-scoped uploads require an accessible projectId.',
+                  }, 403);
+                }
               }
 
               // ── 3-tier scope enforcement ──
@@ -15445,7 +15540,7 @@ exit \$RC
                   // Explicit org scope when org-targeted with no project/team — so
                   // recall's organization tier (visible to ALL org members) matches.
                   // project/team scopes are derived downstream from the ids.
-                  scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
+                  scope: projectIds.length ? 'project' : ((targetScope === 'organization' && !primaryTeamId) ? 'organization' : undefined),
                   smart: smartFlag,
                   picture_descriptions: pictureDescFlag,
                 };
@@ -15527,7 +15622,7 @@ exit \$RC
                       project_ids: projectIds,
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
-                      scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
+                      scope: projectIds.length ? 'project' : ((targetScope === 'organization' && !primaryTeamId) ? 'organization' : undefined),
                       smart: smartFlag,
                       picture_descriptions: pictureDescFlag,
                     }
@@ -19006,23 +19101,44 @@ exit \$RC
               const recallProject = body.project || effectiveContainerTag || null;
 
               let recallAccessCtx = await buildAccessContext(userId, orgId);
+              let recallProjectId = (typeof body.project_id === 'string' && body.project_id.trim())
+                ? body.project_id.trim()
+                : (Array.isArray(body.project_ids) && body.project_ids.find(id => typeof id === 'string' && id.trim())?.trim())
+                || null;
+              if (!recallProjectId && recallProject && prisma) {
+                try {
+                  const term = String(recallProject).trim();
+                  const proj = await prisma.project.findFirst({
+                    where: {
+                      orgId,
+                      OR: [
+                        ...(isUuidLike(term) ? [{ id: term }] : []),
+                        { slug: term.toLowerCase() },
+                        { name: { equals: term, mode: 'insensitive' } },
+                      ],
+                    },
+                    select: { id: true },
+                  }).catch(() => null);
+                  recallProjectId = proj?.id || null;
+                } catch { /* best-effort; access check below still governs */ }
+              }
               // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
               // room) passes project_id, FORCE the access context to that project. The
               // store's tier OR clause + the vector filter then return the project's
               // memories + org-wide + the caller's personal, and EXCLUDE other projects
               // — regardless of the caller's project membership (the room/caller
               // explicitly chose this project). Without project_id, behavior is unchanged.
-              if (body.project_id) {
+              if (recallProjectId) {
                 // SECURITY: only honor a caller-supplied project_id if the caller
                 // can actually access it (member, or owner/admin via buildAccessContext
                 // expansion). Otherwise a guest could recall any project by id.
                 const _baseCtx = recallAccessCtx || {};
                 const _canAccessProject = Array.isArray(_baseCtx.projectIds)
-                  && _baseCtx.projectIds.includes(body.project_id);
+                  && _baseCtx.projectIds.includes(recallProjectId);
                 if (_canAccessProject) {
-                  recallAccessCtx = { ..._baseCtx, projectIds: [body.project_id], teamIds: _baseCtx.teamIds || [] };
+                  recallAccessCtx = { ..._baseCtx, projectIds: [recallProjectId], teamIds: _baseCtx.teamIds || [] };
                 } else {
-                  recallAccessCtx = _baseCtx;
+                  return jsonResponse(res, { error: 'Project not found or access denied', project_id: recallProjectId }, 403);
                 }
               }
 
@@ -19075,6 +19191,7 @@ exit \$RC
                 preference_boost: body.preference_boost,      // boolean — boost preference/opinion memories
                 include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
                 access_context: recallAccessCtx,
+                ...(recallProjectId ? { project_id: recallProjectId, project_ids: [recallProjectId] } : {}),
                 scope_filter: body.scope_filter || null,
                 entity_filter_mode: body.entity_filter_mode || null, // A/B override for the entity lane
                 tiered_view: body.tiered_view ?? null,                // A/B override for the term-overlap reranker
@@ -19120,9 +19237,13 @@ exit \$RC
                   if (ids.length) {
                     const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
                     const rows = await prisma.$queryRawUnsafe(
-                      `SELECT m.id, m.user_id, m.scope, m.project_id, u.display_name AS dn, u.email AS em
+                      `SELECT m.id, m.user_id, m.scope, m.project_id,
+                              COALESCE(array_agg(mp.project_id::text) FILTER (WHERE mp.project_id IS NOT NULL), '{}') AS project_ids,
+                              u.display_name AS dn, u.email AS em
                        FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
-                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})`,
+                       LEFT JOIN hivemind.memory_projects mp ON mp.memory_id = m.id
+                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})
+                       GROUP BY m.id, m.user_id, m.scope, m.project_id, u.display_name, u.email`,
                       orgId, ...ids,
                     );
                     const byId = Object.fromEntries((rows || []).map(r => [r.id, r]));
@@ -19132,6 +19253,7 @@ exit \$RC
                       if (!m.user_id) m.user_id = r.user_id;
                       if (!m.scope) m.scope = r.scope;
                       if (m.project_id == null) m.project_id = r.project_id || null;
+                      if (!Array.isArray(m.project_ids)) m.project_ids = Array.isArray(r.project_ids) ? r.project_ids : [];
                       const nm = r.dn || r.em || null;
                       if (!m.owner_name) m.owner_name = nm;
                       if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
@@ -19144,12 +19266,15 @@ exit \$RC
               // memories that are org-wide/personal/legacy (no project_id) OR belong to
               // THIS project; drop memories that belong to a DIFFERENT project. Uses the
               // reliably-present scalar project_id, independent of scope hydration.
-              if (body.project_id && Array.isArray(result?.memories)) {
+              if (recallProjectId && Array.isArray(result?.memories)) {
                 const before = result.memories.length;
                 result.memories = result.memories.filter(
-                  m => !m.project_id || m.project_id === body.project_id,
+                  m => {
+                    const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
+                    return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
+                  },
                 );
-                result.project_scope_applied = { project_id: body.project_id, kept: result.memories.length, dropped: before - result.memories.length };
+                result.project_scope_applied = { project_id: recallProjectId, kept: result.memories.length, dropped: before - result.memories.length };
               }
 
               // Author/person post-filter: keep only memories owned by the resolved person.
@@ -22960,10 +23085,11 @@ ${injectionText}`;
                 prisma.knowledgeDocument.count({ where })
               ]);
 
+              const derivedCountMap = await countDerivedMemoriesByDocumentIds(documents.map(doc => doc.id), orgId);
               const enriched = documents.map(doc => ({
                 ...doc,
                 segmentCount: doc._count.segments,
-                promotedCount: doc._count.memoryLinks,
+                promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
                 _count: undefined
               }));
 

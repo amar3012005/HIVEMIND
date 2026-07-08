@@ -188,6 +188,38 @@ async function ensureSchema() {
   console.log(`[embedded-agent] ready (schema hm, dataRoot ${DATA_ROOT}, dim ${DIM})`);
 }
 
+async function countDerivedMemories(db, org, docIds = []) {
+  const ids = Array.from(new Set((docIds || []).filter(Boolean)));
+  if (!ids.length) return {};
+  const tagIds = ids.map((id) => `doc-id:${id}`);
+  const { rows } = await db.query(
+    `SELECT doc_id::text AS document_id, count(DISTINCT memory_id)::int AS c
+       FROM (
+         SELECT m.metadata->'source_metadata'->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->'source_metadata'->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT m.metadata->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT regexp_replace(t.tag, '^doc-id:', '') AS doc_id, m.id AS memory_id
+           FROM memories m
+           CROSS JOIN LATERAL unnest(m.tags) AS t(tag)
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND t.tag = ANY($3::text[])
+       ) derived
+      GROUP BY doc_id`,
+    [org, ids, tagIds],
+  );
+  return Object.fromEntries((rows || []).map((row) => [row.document_id, Number(row.c) || 0]));
+}
+
 // ── Qdrant (vectors) — per-org collection. Central Qdrant is API-key-protected (a self-host box's
 // Qdrant is keyless — the byod agent never sent a key); send api-key when QDRANT_API_KEY is set,
 // else the embedded agent's KB-segment vector ops 401 on central.
@@ -433,7 +465,6 @@ function routesFor(ctx) {
         [org]);
       const total = totRow[0]?.c || 0;
       const ids = docs.map((d) => d.id);
-      const filenames = docs.map((d) => d.filename).filter(Boolean);
       let segMap = {};
       let proMap = {};
       if (ids.length) {
@@ -441,11 +472,7 @@ function routesFor(ctx) {
           'SELECT document_id, count(*)::int AS c FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
           [org, ids]);
         for (const r of segs) segMap[r.document_id] = r.c;
-      }
-      if (filenames.length) {
-        const wanted = new Set(filenames.map((f) => `filename:${f}`));
-        const tagCounts = amr.countByTags(wanted);
-        for (const [t, c] of Object.entries(tagCounts)) proMap[t.slice('filename:'.length)] = c;
+        proMap = await countDerivedMemories(db(), org, ids);
       }
       const documents = docs.map((d) => ({
         id: d.id,
@@ -466,7 +493,7 @@ function routesFor(ctx) {
         status: d.status,
         metadata: d.metadata || {},
         segmentCount: segMap[d.id] || 0,
-        promotedCount: d.filename ? (proMap[d.filename] || 0) : 0,
+        promotedCount: proMap[d.id] || 0,
       }));
       return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };
     },
@@ -487,9 +514,9 @@ function routesFor(ctx) {
         segmentType: s.segment_type, segmentIndex: s.segment_index, metadata: s.metadata || {}, createdAt: s.created_at,
       }));
       let promotedMemories = [];
-      if (d.filename) {
-        const tag = `filename:${d.filename}`;
-        const mems = amr.findByTags([tag], 5000)
+      {
+        const tags = [`doc-id:${d.id}`, ...(d.filename ? [`filename:${d.filename}`] : [])];
+        const mems = amr.findByTags(tags, 5000)
           .sort((a, b2) => new Date(b2.created_at) - new Date(a.created_at))
           .slice(0, 100);
         promotedMemories = mems.map((m) => ({
@@ -516,7 +543,8 @@ function routesFor(ctx) {
         status: d.status,
         metadata: d.metadata || {},
       };
-      return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
+      const derivedCounts = await countDerivedMemories(db(), org, [d.id]);
+      return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
     },
 
     // KB doc DELETE + cascade — amr branch only (findByTags/remove path).

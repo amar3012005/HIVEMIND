@@ -332,7 +332,7 @@ _MCP_TOOLS_PER_CONNECTOR = max(1, int(os.environ.get("HYPER_MCP_TOOLS_PER_CONNEC
 # HYPER_CONNECTOR_TOOL_CAP. Flag-gated, default OFF. Full routes stay reachable if named.
 _CONNECTION_SEARCH = os.environ.get("HYPER_CONNECTION_SEARCH", "0").strip().lower() not in ("0", "false", "no", "off")
 _CONN_SEARCH_KEEP = max(2, int(os.environ.get("HYPER_CONN_SEARCH_KEEP", "6") or "6"))
-_READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "lookup", "describe", "recent", "view")
+_READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "lookup", "describe", "recent", "view", "history")
 
 # ── Population-Sim (ADDITIONAL, opt-in) — a cheap many-voice social simulation that runs
 # AFTER gather and feeds its report into the synthesis. Modeled on MiroFish CSI. Bursts on

@@ -122,11 +122,24 @@ export async function execSlackReadTool(tool, args, { connectorStore, userId }) 
     }
     case 'slack_list_channels': {
       const token = await bridge._token(userId);
-      const data = await bridge._call('conversations.list', {
-        types: 'public_channel,private_channel',
-        exclude_archived: true,
-        limit: 100,
-      }, token, 'GET');
+      // private_channel needs groups:read, which the installed bot may not
+      // have (BOT_SCOPES must exactly match the Slack app config). Fall back
+      // to public-only instead of failing the whole listing on missing_scope.
+      let data;
+      try {
+        data = await bridge._call('conversations.list', {
+          types: 'public_channel,private_channel',
+          exclude_archived: true,
+          limit: 100,
+        }, token, 'GET');
+      } catch (err) {
+        if (!/missing_scope/i.test(err?.message || '')) throw err;
+        data = await bridge._call('conversations.list', {
+          types: 'public_channel',
+          exclude_archived: true,
+          limit: 100,
+        }, token, 'GET');
+      }
       const chans = (data.channels || []).map((c) => `#${c.name} (${c.id})${c.is_member ? ' [bot is member]' : ''}`);
       return { text: chans.length ? chans.join('\n') : 'No channels visible to the bot.' };
     }

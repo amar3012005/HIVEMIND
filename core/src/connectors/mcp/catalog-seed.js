@@ -56,13 +56,22 @@ export const MCP_CATALOG = [
     category: 'crm',
   },
   {
+    // Slack is served IN-PROCESS by the native toolkit (SlackBridge + the
+    // SLACK_TOOL_SPECS in agent/connector-toolkits/slack-tools.js) — not an
+    // external MCP server. The old stdio/npx slack-mcp-server entry never
+    // worked in the container (npx EACCES, no Nango slack integration) and
+    // shadowed the internal executor by exact-name match in getEndpoint().
     name: 'slack',
     label: 'Slack',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', 'slack-mcp-server@latest', '--transport', 'stdio'],
-    nango_provider: 'slack',
-    token_inject: { kind: 'env', var: 'SLACK_MCP_XOXP_TOKEN', format: 'raw' },
+    mode: 'live',
+    transport: 'internal',
+    auth_strategy: 'native',
+    adapter_type: 'slack',
+    native_provider: 'slack',
+    supports_ingestion: false,
+    supports_live_tools: true,
+    default_project: 'connector-slack',
+    default_tags: ['slack', 'live'],
     category: 'comms',
   },
   {

@@ -120,6 +120,45 @@ _JUDGMENT_RE = re.compile(
 
 _BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
 
+# Leading meta-planning cues that mark reasoning-model chain-of-thought
+# ("We need to respond as Theo...", "The user asks:", "We must answer...").
+_COT_PREAMBLE_RE = re.compile(
+    r"^\s*(we (?:need|must|should|have|will|are asked)\b|"
+    r"the user (?:asks|wants|is asking)\b|"
+    r"let(?:'|’)?s\b|let me\b|first,? (?:i|we)\b|"
+    r"okay,? (?:so|let)|i (?:need|should|must|will) (?:to )?)",
+    re.IGNORECASE,
+)
+
+
+def _strip_cot(text: str) -> str:
+    """Sanitise leaked reasoning so only a final humanised answer remains.
+
+    Handles: Harmony channel markers (prefer the `final` channel), <think> tags,
+    and marker-less analysis text that opens with planning cues. Last-resort
+    guard behind reasoning.exclude — should rarely fire."""
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    # Prefer an explicit Harmony final channel if present.
+    m = re.search(r"<\|channel\|>final<\|message\|>([\s\S]*?)(?:<\|end\|>|<\|return\|>|$)", t)
+    if m:
+        return m.group(1).strip()
+    t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"<\|channel\|>analysis<\|message\|>[\s\S]*?(?=<\||$)", "", t)
+    t = re.sub(r"<\|[^>]*\|>", "", t).strip()
+    # Marker-less CoT: drop leading planning sentences. If a blank-line break
+    # exists, the final answer is usually the last block.
+    if _COT_PREAMBLE_RE.match(t):
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", t) if b.strip()]
+        if len(blocks) > 1 and not _COT_PREAMBLE_RE.match(blocks[-1]):
+            return blocks[-1]
+        # No clean break — drop the leading planning sentence run.
+        sents = re.split(r"(?<=[.!?])\s+", t)
+        kept = [s for i, s in enumerate(sents) if not (i < 3 and _COT_PREAMBLE_RE.match(s))]
+        return " ".join(kept).strip() or t
+    return t
+
 
 def _route_direct_openrouter(model: str) -> bool:
     """A vendor-namespaced, non-Groq-native model → route DIRECT to OpenRouter.
@@ -163,6 +202,13 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
         return None
     or_body = dict(body)
     or_body["model"] = or_model
+    # Exclude reasoning from the response. gpt-oss (Harmony) returns its private
+    # analysis channel in `reasoning`; with a thin/empty `content` the coalesce
+    # below would otherwise dump that raw chain-of-thought ("We need to respond
+    # as Theo, concise, 3-5 sentences...") straight into the room bubble. This
+    # OpenRouter-layer flag makes the model reason internally but return ONLY the
+    # final answer in `content`. Merges with any caller-supplied reasoning opts.
+    or_body["reasoning"] = {**(or_body.get("reasoning") or {}), "exclude": True}
     # Fastest provider that supports the request's params (tools / response_format),
     # with OpenRouter's own cross-provider fallback enabled.
     _pin = _or_provider_pin(or_model)
@@ -194,8 +240,12 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
         msg = (j.get("choices") or [{}])[0].get("message") or {}
         if msg.get("reasoning") and not msg.get("reasoning_content"):
             msg["reasoning_content"] = msg["reasoning"]
+        # Last-resort ONLY: if reasoning.exclude was honoured, `content` is the
+        # final answer and this never fires. If a provider ignored exclude and
+        # left content empty, fall back to reasoning — but sanitise it so raw
+        # chain-of-thought planning never surfaces verbatim in the bubble.
         if not msg.get("content") and (msg.get("reasoning_content") or msg.get("reasoning")):
-            msg["content"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            msg["content"] = _strip_cot(msg.get("reasoning_content") or msg.get("reasoning") or "")
         # NOTE: this fires for the INTENDED OpenRouter-primary direct route too, not just
         # Groq failover — info-level + neutral wording (the old "Groq unavailable" text
         # spammed WARNs and misread as an outage on every healthy direct-routed call).

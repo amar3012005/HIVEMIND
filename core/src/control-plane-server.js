@@ -6715,8 +6715,16 @@ Write the persona now.`;
 
           say('Assembling your team');
           const store = await _getEmployeeStore();
-          let team = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true, name: true }, take: 10 }).catch(() => []);
-          if (store && team.length < 3) {
+          let team = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true, name: true, roleArchetype: true }, take: 20 }).catch(() => []);
+          // Legacy auto-hired generics (bare archetypes / the old Nova-Atlas-Vega
+          // trio) don't count as specialists — the team must hold 3 REAL
+          // marketplace professions. Generics are kept (never delete a user's
+          // agents) but new specialist hires take their seats in the rooms.
+          const _PLACEHOLDER_ROLES = new Set(['strategist', 'generalist', 'investigator', 'coordinator', 'skeptic',
+            'chief strategist', 'growth lead', 'research analyst', '']);
+          const _isSpecialist = (e) => !_PLACEHOLDER_ROLES.has(String(e.roleArchetype || '').trim().toLowerCase());
+          const specialistCount = team.filter(_isSpecialist).length;
+          if (store && specialistCount < 3) {
             // Marketplace catalog — MIRROR of FE shared/field-catalog.js (5 fields ×
             // 5 professions; a=role_archetype driving debate lanes). Keep in sync.
             const MARKETPLACE = {
@@ -6778,7 +6786,7 @@ Write the persona now.`;
                 .filter((x) => x && x.name)
                 .slice(0, 3);
             } catch { /* fallback below */ }
-            if (picks.length < 3 - team.length) {
+            if (picks.length < 3 - specialistCount) {
               // Deterministic fallback: a sane cross-functional trio.
               picks = [
                 { name: 'Lena', title: 'Brand Strategist', archetype: 'strategist', blurb: 'positioning, narrative, brand architecture', focus: 'positioning and narrative', field: 'Marketing' },
@@ -6786,7 +6794,7 @@ Write the persona now.`;
                 { name: 'Priya', title: 'Operations Lead (COO-style)', archetype: 'coordinator', blurb: 'process, throughput, accountability', focus: 'execution cadence', field: 'Operations' },
               ];
             }
-            for (const r of picks.slice(0, 3 - team.length)) {
+            for (const r of picks.slice(0, 3 - specialistCount)) {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';
               try {
@@ -6802,7 +6810,7 @@ Write the persona now.`;
                   orgId, name: r.name, persona,
                   roleArchetype: r.title, createdBy: userId,
                 });
-                team.push({ id: emp.id, name: emp.name });
+                team.push({ id: emp.id, name: emp.name, roleArchetype: r.title });
               } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); }
             }
             _notifyEmployeesReload();
@@ -6868,7 +6876,9 @@ Write the persona now.`;
           say('Saving your tasks');
 
           say('Provisioning your workspace');
-          const participantIds = team.map((t) => t.id).slice(0, 5);
+          // Marketplace specialists take the room seats ahead of legacy generics.
+          const rankedTeam = [...team].sort((a, b) => Number(_isSpecialist(b)) - Number(_isSpecialist(a)));
+          const participantIds = rankedTeam.map((t) => t.id).slice(0, 5);
           const room = await prisma.hyperRoom.create({
             data: {
               userId, orgId,
@@ -6898,7 +6908,7 @@ Write the persona now.`;
               ...(research.length ? [`${companyName} — Market research`] : []),
               `${companyName} — Mission`,
             ],
-            team: team.map((x) => ({ id: x.id, name: x.name })),
+            team: rankedTeam.slice(0, 6).map((x) => ({ id: x.id, name: x.name, role: x.roleArchetype || null })),
             room_id: room.id,
             room_name: room.name,
             onboarded_at: new Date().toISOString(),

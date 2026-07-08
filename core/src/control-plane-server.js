@@ -6717,26 +6717,90 @@ Write the persona now.`;
           const store = await _getEmployeeStore();
           let team = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true, name: true }, take: 10 }).catch(() => []);
           if (store && team.length < 3) {
-            const ROLES = [
-              { name: 'Nova', role: 'Chief Strategist', focus: 'strategy, positioning, prioritisation' },
-              { name: 'Atlas', role: 'Growth Lead', focus: 'marketing, distribution, customer acquisition' },
-              { name: 'Vega', role: 'Research Analyst', focus: 'market research, competitors, synthesis' },
-            ];
-            for (const r of ROLES.slice(0, 3 - team.length)) {
-              say(`Hiring ${r.name} — ${r.role}`);
+            // Marketplace catalog — MIRROR of FE shared/field-catalog.js (5 fields ×
+            // 5 professions; a=role_archetype driving debate lanes). Keep in sync.
+            const MARKETPLACE = {
+              Marketing: [
+                { t: 'Brand Strategist', a: 'strategist', b: 'positioning, narrative, brand architecture' },
+                { t: 'Performance Marketer', a: 'investigator', b: 'paid acquisition, CAC, funnels, ROAS' },
+                { t: 'Content Lead', a: 'generalist', b: 'editorial, SEO content, narrative at scale' },
+                { t: 'SEO / Organic Growth', a: 'investigator', b: 'search, technical + content SEO, GEO' },
+                { t: 'Lifecycle / CRM Manager', a: 'coordinator', b: 'retention, email/lifecycle, segmentation' },
+              ],
+              Fintech: [
+                { t: 'Risk Analyst', a: 'skeptic', b: 'credit/fraud risk, exposure, models' },
+                { t: 'Compliance Officer', a: 'skeptic', b: 'KYC/AML, licensing, regulatory' },
+                { t: 'Payments PM', a: 'generalist', b: 'rails, processors, settlement, fees' },
+                { t: 'Quantitative Analyst', a: 'investigator', b: 'pricing, modeling, unit economics' },
+                { t: 'Treasury / Finance Lead', a: 'strategist', b: 'runway, capital, margin, forecasting' },
+              ],
+              Legal: [
+                { t: 'Corporate Counsel', a: 'skeptic', b: 'entity, governance, commercial' },
+                { t: 'Contracts Specialist', a: 'investigator', b: 'drafting, redlines, terms, risk' },
+                { t: 'IP Attorney', a: 'strategist', b: 'patents, trademarks, IP strategy' },
+                { t: 'Regulatory / Compliance Counsel', a: 'skeptic', b: 'sector regulation, filings, audits' },
+                { t: 'Privacy / Data Counsel', a: 'skeptic', b: 'GDPR/data, consent, processing' },
+              ],
+              Product: [
+                { t: 'Product Manager', a: 'coordinator', b: 'roadmap, priorities, outcomes' },
+                { t: 'UX Researcher', a: 'investigator', b: 'user insight, evidence, jobs-to-be-done' },
+                { t: 'Systems / Platform PM', a: 'generalist', b: 'architecture, dependencies, scale' },
+                { t: 'Data / Analytics PM', a: 'investigator', b: 'metrics, experiments, instrumentation' },
+                { t: 'Design Lead', a: 'strategist', b: 'craft, flows, coherence, brand fit' },
+              ],
+              Operations: [
+                { t: 'Operations Lead (COO-style)', a: 'coordinator', b: 'process, throughput, accountability' },
+                { t: 'Supply Chain Analyst', a: 'investigator', b: 'inventory, demand, logistics' },
+                { t: 'RevOps Manager', a: 'generalist', b: 'pipeline, CRM, forecasting, handoffs' },
+                { t: 'Customer Success Lead', a: 'coordinator', b: 'onboarding, retention, expansion' },
+                { t: 'Program / Delivery Manager', a: 'coordinator', b: 'plans, risk, cross-team delivery' },
+              ],
+            };
+            const catalogText = Object.entries(MARKETPLACE)
+              .map(([f, ps]) => `${f}: ${ps.map((p) => p.t).join(' | ')}`).join('\n');
+            say('Choosing your specialists from the marketplace');
+            // LLM picks the top 3 professions for THIS company + a human first
+            // name each — no generic Nova/Atlas defaults, no bare archetypes.
+            let picks = [];
+            try {
+              const pj = JSON.parse(await llm(
+                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim, chosen for what this company most needs first. No duplicates.',
+                `CATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
+                { json: true, maxTokens: 500 },
+              ));
+              picks = (Array.isArray(pj.hires) ? pj.hires : [])
+                .map((h) => {
+                  const prof = (MARKETPLACE[h.field] || Object.values(MARKETPLACE).flat())
+                    .find?.((p) => p.t === h.title)
+                    || Object.values(MARKETPLACE).flat().find((p) => p.t === h.title);
+                  return prof ? { name: String(h.name || '').trim().slice(0, 40), title: prof.t, archetype: prof.a, blurb: prof.b, focus: String(h.focus || '').slice(0, 120), field: h.field } : null;
+                })
+                .filter((x) => x && x.name)
+                .slice(0, 3);
+            } catch { /* fallback below */ }
+            if (picks.length < 3 - team.length) {
+              // Deterministic fallback: a sane cross-functional trio.
+              picks = [
+                { name: 'Lena', title: 'Brand Strategist', archetype: 'strategist', blurb: 'positioning, narrative, brand architecture', focus: 'positioning and narrative', field: 'Marketing' },
+                { name: 'Omar', title: 'Content Lead', archetype: 'generalist', blurb: 'editorial, SEO content, narrative at scale', focus: 'content engine', field: 'Marketing' },
+                { name: 'Priya', title: 'Operations Lead (COO-style)', archetype: 'coordinator', blurb: 'process, throughput, accountability', focus: 'execution cadence', field: 'Operations' },
+              ];
+            }
+            for (const r of picks.slice(0, 3 - team.length)) {
+              say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';
               try {
                 persona = await llm(
-                  'You write concise system prompts for AI digital employees. Output ONLY the persona as plain text, 3-5 sentences, second person ("You are ..."). Ground it in the company context provided — this is a specialist for THIS company.',
-                  `Role: ${r.role} (${r.focus})\nCompany: ${companyName}\nProfile: ${JSON.stringify(profile)}`,
-                  { maxTokens: 250 },
+                  `You write concise system prompts for AI digital employees. Output ONLY the persona as plain text, 3-5 sentences, second person ("You are ..."). The employee is a ${r.title} (${r.blurb}) — an ${r.archetype}-minded specialist. Ground it in the company context provided: this is a ${r.title} for THIS company, not a generic role.`,
+                  `Name: ${r.name}\nProfession: ${r.title} — ${r.blurb}\nCompany focus: ${r.focus}\nCompany: ${companyName}\nProfile: ${JSON.stringify(profile)}\nMission: ${mission}`,
+                  { maxTokens: 260 },
                 );
               } catch { /* fallback below */ }
-              if (!persona) persona = `You are ${r.name}, ${r.role} at ${companyName}. You focus on ${r.focus}. You are direct, grounded in the company's real context, and always propose the next concrete action.`;
+              if (!persona) persona = `You are ${r.name}, ${r.title} at ${companyName} (${r.blurb}). You are an ${r.archetype}-minded specialist focused on ${r.focus}. You are direct, grounded in the company's real context, and always propose the next concrete action.`;
               try {
                 const emp = await store.create({
                   orgId, name: r.name, persona,
-                  roleArchetype: r.role, createdBy: userId,
+                  roleArchetype: r.title, createdBy: userId,
                 });
                 team.push({ id: emp.id, name: emp.name });
               } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); }

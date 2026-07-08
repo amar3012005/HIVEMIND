@@ -311,6 +311,18 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     # send it for gpt-oss.
     if "gpt-oss" in (routed_model or "").lower():
         _kwargs["reasoning_effort"] = "low"
+        # reasoning_format="hidden": gpt-oss uses the Harmony format, whose
+        # `analysis` channel (the model's private chain-of-thought, e.g.
+        # "We need to respond as Theo, concise, 3-5 sentences...") otherwise
+        # bleeds into `message.content` and surfaces verbatim in the room
+        # bubble. "hidden" makes Groq drop the analysis channel entirely and
+        # return ONLY the final answer in content — the humanised persona
+        # response users should see. (generate_kwargs forwards it to the
+        # chat.completions call.)
+        _kwargs["generate_kwargs"] = {
+            **(_kwargs.get("generate_kwargs") or {}),
+            "reasoning_format": "hidden",
+        }
     return OpenAIChatModel(**_kwargs)
 
 

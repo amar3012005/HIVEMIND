@@ -918,6 +918,25 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
         text = re.sub(r"<function=[\s\S]*?</function>", "", text).strip()
         # Also nuke residual single-line variants
         text = re.sub(r"<function=[^\n>]+>", "", text).strip()
+    # Strip leaked reasoning-model chain-of-thought so the bubble shows only
+    # the final humanised persona answer — never the model's private planning
+    # ("We need to respond as Theo, concise, 3-5 sentences..."). Two shapes:
+    #   • <think>…</think>  — deepseek-r1 / qwen (OpenRouter path)
+    #   • Harmony channel markers — gpt-oss analysis channel if reasoning_format
+    #     didn't fully suppress it. Keep only the `final` channel payload.
+    if "<think" in text.lower():
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+        # Unclosed <think> (truncated stream) → drop everything up to it.
+        text = re.sub(r"^[\s\S]*?<think>[\s\S]*$", "", text, flags=re.IGNORECASE).strip()
+    if "<|channel|>" in text or "<|message|>" in text:
+        # Prefer the explicit final-channel payload if present.
+        m = re.search(r"<\|channel\|>final<\|message\|>([\s\S]*?)(?:<\|end\|>|<\|return\|>|$)", text)
+        if m:
+            text = m.group(1).strip()
+        else:
+            # No final marker — strip the analysis block and any residual markers.
+            text = re.sub(r"<\|channel\|>analysis<\|message\|>[\s\S]*?(?=<\||$)", "", text)
+            text = re.sub(r"<\|[^>]*\|>", "", text).strip()
     return text
 
 

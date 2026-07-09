@@ -1616,9 +1616,25 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {
     if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    const logs = getControlPlaneLogBuffer('hm-control').slice(-200)
+    const controlPlane = getControlPlaneLogBuffer('hm-control').slice(-200)
       .map((entry) => `[${entry.timestamp}] [${entry.type.toUpperCase()}] ${entry.line}`);
-    return jsonResponse(res, { observed_at: new Date().toISOString(), logs });
+    let core = [];
+    try {
+      const response = await fetch(`${CONFIG.coreApiBaseUrl}/admin/api/observability`, {
+        headers: { 'X-Admin-Secret': ADMIN_SECRET },
+      });
+      if (!response.ok) throw new Error(`Core observability returned ${response.status}`);
+      const snapshot = await response.json();
+      core = (snapshot.core?.logs || []).map((entry) =>
+        `[${entry.timestamp}] [${String(entry.level || 'info').toUpperCase()}] ${entry.message || entry.line || ''}`);
+    } catch (error) {
+      core = [`[${new Date().toISOString()}] [WARN] Core logs unavailable: ${error.message}`];
+    }
+    const mixed = [...core.map((line) => ({ line, source: 'core' })), ...controlPlane.map((line) => ({ line, source: 'control' }))]
+      .sort((a, b) => b.line.localeCompare(a.line))
+      .slice(0, 250)
+      .map(({ line }) => line);
+    return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane } });
   }
 
   if (pathname === '/admin/api/logs' && req.method === 'GET') {

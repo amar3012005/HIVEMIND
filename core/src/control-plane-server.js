@@ -15,6 +15,7 @@ import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
+import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -657,6 +658,54 @@ function classifyPlatformUser(user) {
   return { tier: b2b ? 'b2b' : 'b2c', active: Boolean(active), plans: [...new Set(plans)] };
 }
 
+const platformAmrCountCache = new Map();
+const PLATFORM_AMR_COUNT_TTL_MS = 15_000;
+
+async function platformAmrMemoryCount(orgId, userId) {
+  const key = `${orgId}:${userId}`;
+  const cached = platformAmrCountCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.count;
+  const { amrStats } = await import('./vector/mneme/driver.js');
+  const stats = await amrStats(orgId, { user_id: userId });
+  const count = Number(stats?.memories);
+  if (!Number.isFinite(count)) throw new Error('AMR stats unavailable');
+  platformAmrCountCache.set(key, { count, expiresAt: Date.now() + PLATFORM_AMR_COUNT_TTL_MS });
+  return count;
+}
+
+async function enrichPlatformUsers(records) {
+  const userIds = records.map((user) => user.id);
+  const centralCounts = await prisma.memory.groupBy({
+    by: ['userId'],
+    where: {
+      userId: { in: userIds }, deletedAt: null, isLatest: true,
+      org: { memoryStorageMode: { in: ['hybrid', 'hybrid_amr_index', 'byod_hybrid'] } },
+    },
+    _count: { _all: true },
+  });
+  const centralByUser = new Map(centralCounts.map((row) => [row.userId, row._count._all]));
+  return Promise.all(records.map(async (user) => {
+    const memberships = user.organizations.filter((membership) => membership.isActive && membership.org);
+    const amrMemberships = memberships.filter((membership) => ['amr_embedded', 'byod_amr'].includes(membership.org.memoryStorageMode));
+    let amrCount = 0;
+    let countAvailable = true;
+    for (const membership of amrMemberships) {
+      try { amrCount += await platformAmrMemoryCount(membership.org.id, user.id); }
+      catch { countAvailable = false; }
+    }
+    const storageModes = [...new Set(memberships.map((membership) => membership.org.memoryStorageMode || memoryStorageModeFor(membership.org.plan, membership.org.hostingMode)))];
+    return {
+      ...user,
+      ...classifyPlatformUser(user),
+      organization_count: memberships.length,
+      user_type: memberships.some((membership) => ['enterprise', 'managed', 'scale'].includes(String(membership.org.plan).toLowerCase())) ? 'enterprise' : 'personal',
+      memory_storage_modes: storageModes,
+      filesystem: storageModes.some((mode) => mode === 'amr_embedded' || mode === 'byod_amr') ? '.amr' : 'hybrid',
+      memory_count: countAvailable ? (centralByUser.get(user.id) || 0) + amrCount : null,
+    };
+  }));
+}
+
 function buildAdminServiceSnapshot() {
   return {
     service: 'control-plane',
@@ -1048,7 +1097,9 @@ async function buildBootstrapPayload(user, req) {
       name: org.name,
       slug: org.slug,
       plan: org.plan || 'free',
-      hosting_mode: org.hostingMode || 'managed'
+      hosting_mode: org.hostingMode || 'managed',
+      memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode),
+      memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode)),
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -1601,11 +1652,11 @@ const server = http.createServer(async (req, res) => {
         take: limit,
         select: {
           id: true, email: true, displayName: true, createdAt: true, lastActiveAt: true,
-          organizations: { select: { isActive: true, org: { select: { id: true, name: true, plan: true } } } },
+          organizations: { select: { isActive: true, org: { select: { id: true, name: true, plan: true, hostingMode: true, memoryStorageMode: true } } } },
         },
       }),
     ]);
-    const users = records.map((user) => ({ ...user, ...classifyPlatformUser(user), organization_count: user.organizations.length }));
+    const users = await enrichPlatformUsers(records);
     const summary = users.reduce((acc, user) => {
       acc[user.tier] += 1;
       if (user.active) acc.active += 1; else acc.sleeping += 1;
@@ -2465,6 +2516,7 @@ const server = http.createServer(async (req, res) => {
         slug,
         plan: requestedPlan,
         hostingMode,
+        memoryStorageMode: memoryStorageModeFor(requestedPlan, hostingMode),
       }
     });
 
@@ -2473,8 +2525,7 @@ const server = http.createServer(async (req, res) => {
     // routes to the EMBEDDED agent (the same hardened v2 .amr engine self-host runs, in-process
     // on central; hm.* schema + org_<id> collection for its KB). New orgs only — existing orgs
     // keep their current backend until an explicit migration. Never blocks signup.
-    if (String(process.env.MNEME_PERSONAL_DEFAULT || '') === '1'
-        && hostingMode === 'managed' && requestedPlan !== 'enterprise' && requestedPlan !== 'managed') {
+    if (hostingMode === 'managed' && memoryStorageModeFor(requestedPlan, hostingMode) === 'amr_embedded') {
       try {
         const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
         const fsm = await import('node:fs');
@@ -2540,7 +2591,9 @@ const server = http.createServer(async (req, res) => {
         name: org.name,
         slug: org.slug,
         plan: org.plan || requestedPlan,
-        hosting_mode: org.hostingMode || hostingMode
+        hosting_mode: org.hostingMode || hostingMode,
+        memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(requestedPlan, hostingMode),
+        memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(requestedPlan, hostingMode)),
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)

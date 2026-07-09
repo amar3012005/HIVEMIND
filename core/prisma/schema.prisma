@@ -62,6 +62,9 @@ model Organization {
   // Captured at onboarding so the dashboard can gate self-host orgs into the connect-your-agent flow
   // before showing the workspace — independent of whether the agent has registered yet.
   hostingMode                  String?            @default("managed") @map("hosting_mode") @db.VarChar(20)
+  // Memory plane is independent from billing plan: personal managed workspaces use embedded .amr,
+  // enterprise stays on the relational/vector hybrid unless explicitly migrated.
+  memoryStorageMode            String             @default("hybrid") @map("memory_storage_mode") @db.VarChar(32)
   // Stripe billing state — populated on first checkout, sync'd via webhook.
   stripeCustomerId             String?            @unique @map("stripe_customer_id") @db.VarChar(64)
   stripeSubscriptionId         String?            @map("stripe_subscription_id") @db.VarChar(64)

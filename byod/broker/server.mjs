@@ -7,7 +7,7 @@
 // Env: DATABASE_URL, MNEME_AGENT_REGISTRY_FILE, BROKER_PORT (default 8790).
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import Pg from 'pg';
 
 const PORT = Number(process.env.BROKER_PORT || 8790);
@@ -16,10 +16,29 @@ const pool = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DA
 
 function die(m) { console.error(`[hm-broker] ${m}`); process.exit(1); }
 const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const readBody = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
+const MAX_BODY_BYTES = 32 * 1024;
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch { resolve({}); } });
+  req.on('error', reject);
+});
 
 function loadReg() { try { return existsSync(REG) ? JSON.parse(readFileSync(REG, 'utf8')) : {}; } catch { return {}; } }
-function saveReg(o) { writeFileSync(REG, JSON.stringify(o), 'utf8'); }
+function saveReg(o) {
+  const temp = `${REG}.tmp-${process.pid}`;
+  writeFileSync(temp, JSON.stringify(o), 'utf8');
+  renameSync(temp, REG);
+}
 
 // Validate an org API key → { orgId } or null. Matches sha256(key) against api_keys.key_hash.
 async function resolveOrg(apiKey) {
@@ -32,8 +51,8 @@ async function resolveOrg(apiKey) {
 http.createServer(async (req, res) => {
   if (req.url === '/health') return send(res, 200, { ok: true });
   if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
-  const body = await readBody(req);
   try {
+    const body = await readBody(req);
     if (req.url === '/v1/byod/enroll') {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });
@@ -78,6 +97,6 @@ http.createServer(async (req, res) => {
     return send(res, 404, { error: 'not found' });
   } catch (e) {
     console.error('[hm-broker]', e.message);
-    return send(res, 500, { error: e.message });
+    return send(res, e.statusCode || 500, { error: e.message });
   }
 }).listen(PORT, () => console.log(`[hm-broker] listening :${PORT} → registry ${REG}`));

@@ -1,9 +1,9 @@
 # HIVEMIND BYOD — keep your memory on your own server
 
-Run HIVEMIND with your memory data hosted on **your** hardware. The engine, dashboard, and all
-features stay on HIVEMIND's side; only your `.amr` memory file (and, optionally, your Postgres) live
-on this box. The connection is **outbound-only** (no inbound ports) and your data never leaves the
-box — only ranked recall results / requested rows traverse the encrypted link.
+Run HIVEMIND with your memory data hosted on **your** hardware. The engine and dashboard stay on
+HIVEMIND's side; this bundle stores memory rows in local PostgreSQL and vectors in local Qdrant.
+The central engine reaches the authenticated agent over HTTPS or a private network. Raw memory data
+stays on the customer box; only ranked recall results and explicitly requested rows traverse the link.
 
 ## Setup (one command)
 ```bash
@@ -17,22 +17,25 @@ an outbound tunnel, and connects it to HIVEMIND. Then just use the dashboard nor
 ## What runs here
 | container | what |
 |-----------|------|
-| `hm-agent` | serves your local `.amr` (recall/write/edge/hydrate), Bearer-authed |
-| `hm-agent-tunnel` | cloudflared — dials OUT, gives the agent a public https URL, no inbound port |
-| `postgres` *(optional)* | your own Postgres for content hydrate — `docker compose --profile pg up -d` |
+| `hm-agent` | serves the local PostgreSQL + Qdrant data plane (recall/write/edge/hydrate), Bearer-authenticated |
+| `postgres` | authoritative local memory rows and relational graph |
+| `qdrant` | authoritative local vector index |
 
-Your `.amr` lives in `./data/mneme/`. **Back it up** — it is the sole copy of your memory.
+Your data lives in `./data/pg/` and `./data/qdrant/`. **Back up both** — they are the authoritative copies.
 
 ## How it connects
 ```
-HIVEMIND core (their box) ──► broker ──► [outbound tunnel] ──► hm-agent (your box) ──► ./data/*.amr
-        recall/ingest/dashboard                                     your memory, never leaves
+HIVEMIND core (their box) ──► authenticated HTTPS/private link ──► hm-agent (your box) ──► PostgreSQL + Qdrant
+        recall/write/dashboard                                     customer-owned memory store
 ```
 The API key authenticates the agent and binds it to your org. From then on, HIVEMIND routes only
-your org's memory traffic to this box (per-org — other tenants are unaffected).
+your org's memory traffic to this box (per-org — other tenants are unaffected). Memory rows and
+vectors persist on the customer box. The current agent protocol still receives finished memory
+envelopes from the central engine; use a fully self-hosted processing stack when source-content
+processing must also remain entirely on the customer network.
 
 ## Security
-- Outbound-only; no inbound firewall changes.
+- Use HTTPS or a private network reachable by the central engine; public cleartext HTTP is rejected.
 - Per-agent Bearer token (generated locally, never shared).
 - The agent serves ONLY its own org; the broker pins the tunnel to your tenant.
 - Rotate: delete `.env` + re-run `./setup.sh`. Disconnect: `curl -X POST $BROKER_URL/v1/byod/disenroll -d '{"apiKey":"…"}'`.

@@ -267,7 +267,22 @@ function payloadOf(rec) {
 }
 
 const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
+const MAX_BODY_BYTES = 1024 * 1024; // vectors fit comfortably; unbounded bodies are a remote DoS risk.
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch { resolve({}); } });
+  req.on('error', reject);
+});
 
 const routes = {
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
@@ -1021,7 +1036,8 @@ console.log(`[hm-agent] org=${ORG} store=pg-qdrant dim=${DIM}`);
 http.createServer(async (req, res) => {
   if (req.url === '/health') {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
-    return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
+    const qdrantOk = await qdrantHealthy();
+    return send(res, pgOk && qdrantOk ? 200 : 503, { ok: pgOk && qdrantOk, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: qdrantOk, dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
@@ -1037,5 +1053,5 @@ http.createServer(async (req, res) => {
   // agent also hard-scopes every query to ORG server-side regardless).
   if (req.headers['x-org-id'] && req.headers['x-org-id'] !== ORG) return send(res, 403, { error: 'org mismatch' });
   try { send(res, 200, await routes[req.url](await readBody(req))); }
-  catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, 500, { error: e.message }); }
+  catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, e.statusCode || 500, { error: e.message }); }
 }).listen(PORT, () => console.log(`[hm-agent] listening :${PORT} (org ${ORG})`));

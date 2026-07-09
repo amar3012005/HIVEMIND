@@ -17,7 +17,6 @@ import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
-import { getOrgCounts } from './memory/org-counts.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -675,7 +674,7 @@ async function enrichPlatformUsers(records) {
       let memoryCount = 0;
       let countAvailable = true;
       for (const membership of memberships) {
-        try { memoryCount += (await getOrgCounts(prisma, membership.org.id, user.id)).memories; }
+        try { memoryCount += await platformCoreMemoryCount(membership.org.id, user.id); }
         catch { countAvailable = false; }
       }
       const storageModes = [...new Set(memberships.map((membership) => membership.org.memoryStorageMode || memoryStorageModeFor(membership.org.plan, membership.org.hostingMode)))];
@@ -692,6 +691,22 @@ async function enrichPlatformUsers(records) {
   });
   await Promise.all(workers);
   return enriched;
+}
+
+async function platformCoreMemoryCount(orgId, userId) {
+  const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/profile`, {
+    headers: {
+      Authorization: `Bearer ${process.env.HIVEMIND_MASTER_API_KEY || ''}`,
+      'X-HM-User-Id': userId,
+      'X-HM-Org-Id': orgId,
+    },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error(`core profile returned ${response.status}`);
+  const payload = await response.json();
+  const count = Number(payload?.profile?.memory_count);
+  if (!Number.isFinite(count)) throw new Error('core profile count unavailable');
+  return count;
 }
 
 function buildAdminServiceSnapshot() {

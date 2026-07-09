@@ -50,6 +50,8 @@ services:
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2.0
     environment:
       <<: *common-env
       HOSTNAME: hm-core
@@ -78,6 +80,8 @@ services:
     container_name: hm-control
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 768m
+    cpus: 0.75
     environment:
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
@@ -95,6 +99,8 @@ services:
     container_name: hm-employees
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 1g
+    cpus: 0.75
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -114,6 +120,8 @@ services:
     image: hivemind/postgres-age:15-age-custom
     container_name: hm-postgres
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.5
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hivemind_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -130,6 +138,8 @@ services:
     image: qdrant/qdrant:v1.12.4
     container_name: hm-qdrant
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.25
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     # Per-tenant collections each open many RocksDB segment files; default nofile=1024 → "Too many open
@@ -145,6 +155,8 @@ services:
     image: redis:7-alpine
     container_name: hm-redis
     restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.25
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -153,6 +165,8 @@ services:
     image: nangohq/nango-server:hosted
     container_name: hm-nango
     restart: unless-stopped
+    mem_limit: 768m
+    cpus: 0.5
     environment:
       NANGO_DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=nango
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
@@ -166,6 +180,8 @@ services:
     image: ghcr.io/docling-project/docling-serve:latest
     container_name: hm-docling
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.0
     volumes:
       - docling-models:/opt/app-root/src/.cache
 
@@ -177,6 +193,8 @@ services:
     image: hivemind/byod-broker:${VERSION:-latest}
     container_name: hm-byod-broker
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.25
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       MNEME_AGENT_REGISTRY_FILE: /app/data/byod-agents.json
@@ -229,6 +247,8 @@ services:
     image: hivemind/hm-playwright:${VERSION:-latest}
     container_name: hm-playwright
     restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 0.75
 
   # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
   #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.

@@ -367,6 +367,9 @@ const ADMIN_SECRET = requireAdminSecret();
 const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
 const PLATFORM_ADMIN_TTL_SECONDS = 15 * 60;
 const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const PLATFORM_UNLOCK_MAX_ATTEMPTS = 5;
+const PLATFORM_UNLOCK_WINDOW_MS = 15 * 60 * 1000;
+const platformUnlockAttempts = new Map();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -625,6 +628,25 @@ function hasPlatformAdminCookie(req) {
   if (!expiresAt || !signature || Number(expiresAt) <= Math.floor(Date.now() / 1000)) return false;
   const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}`).digest('base64url');
   return secretsMatch(signature, expected);
+}
+
+function platformUnlockClient(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  return typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket?.remoteAddress || 'unknown';
+}
+
+function platformUnlockLimited(req) {
+  const attempt = platformUnlockAttempts.get(platformUnlockClient(req));
+  return attempt && attempt.startedAt + PLATFORM_UNLOCK_WINDOW_MS > Date.now() && attempt.count >= PLATFORM_UNLOCK_MAX_ATTEMPTS;
+}
+
+function recordPlatformUnlockFailure(req) {
+  const client = platformUnlockClient(req);
+  const now = Date.now();
+  const attempt = platformUnlockAttempts.get(client);
+  platformUnlockAttempts.set(client, attempt && attempt.startedAt + PLATFORM_UNLOCK_WINDOW_MS > now
+    ? { ...attempt, count: attempt.count + 1 }
+    : { startedAt: now, count: 1 });
 }
 
 function classifyPlatformUser(user) {
@@ -1549,16 +1571,14 @@ const server = http.createServer(async (req, res) => {
   // Attach SSO context early (subdomain-based org routing; no-op on non-subdomain hosts)
   if (prisma) await attachSsoContext(req, prisma);
 
-  // API endpoint for log streaming
-  if (pathname === '/api/logs' && req.method === 'GET') {
-    const container = url.searchParams.get('container') || 'hm-control';
-    const logs = getControlPlaneLogBuffer(container).map(e => `[${e.timestamp}] [${e.type.toUpperCase()}] ${e.line}`);
-    return jsonResponse(res, { container, logs });
-  }
-
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
+    if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
     const body = await parseBody(req).catch(() => ({}));
-    if (!secretsMatch(body?.passkey, ADMIN_SECRET)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!secretsMatch(body?.passkey, ADMIN_SECRET)) {
+      recordPlatformUnlockFailure(req);
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+    platformUnlockAttempts.delete(platformUnlockClient(req));
     return jsonResponse(res, { ok: true, expires_in_seconds: PLATFORM_ADMIN_TTL_SECONDS }, 200, {
       'Set-Cookie': makePlatformAdminCookie(),
     });
@@ -1592,6 +1612,13 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, { b2b: 0, b2c: 0, active: 0, sleeping: 0 });
     return jsonResponse(res, { total, returned: users.length, summary, users });
+  }
+
+  if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {
+    if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const logs = getControlPlaneLogBuffer('hm-control').slice(-200)
+      .map((entry) => `[${entry.timestamp}] [${entry.type.toUpperCase()}] ${entry.line}`);
+    return jsonResponse(res, { observed_at: new Date().toISOString(), logs });
   }
 
   if (pathname === '/admin/api/logs' && req.method === 'GET') {

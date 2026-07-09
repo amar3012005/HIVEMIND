@@ -26,6 +26,16 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
+import { internalFetch } from './internal/internal-fetch.js';
+import {
+  shouldRunRecurringMaintenanceJobs,
+  shouldStartHttpServer,
+} from './runtime/runtime-role.js';
+import {
+  handleHyperTurnStreamRoute,
+  handleInternalHyperTurnEventRoute,
+} from './routes/hyper-rooms.js';
+import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -98,7 +108,7 @@ const CONFIG = {
     || process.env.HIVEMIND_CORE_PUBLIC_URL
     || 'https://core.hivemind.davinciai.eu:8050',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
-  sessionSecret: process.env.HIVEMIND_CONTROL_PLANE_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me',
+  sessionSecret: requireSessionSecret('HIVEMIND_CONTROL_PLANE_SESSION_SECRET', ['SESSION_SECRET']),
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
   authStateTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_AUTH_STATE_TTL_SECONDS || 600),
   redisUrl: process.env.HIVEMIND_CONTROL_PLANE_REDIS_URL || process.env.REDIS_URL || null,
@@ -122,7 +132,7 @@ const prisma = getPrismaClient();
 // (~30s), at most ONCE, so a dropped kick self-heals instead of leaving the FE
 // spinning forever. Real in-flight turns emit a line within seconds, so they
 // drop out of the watch set before the re-kick threshold.
-if (prisma) {
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
   const _sweepSeen = new Map();   // turnId -> consecutive empty-tick count
   const _sweepKicked = new Set(); // turnId -> already re-kicked once
   const SWEEP_MS = 15_000;
@@ -161,18 +171,16 @@ if (prisma) {
         } catch { /* org-wide re-kick is acceptable for recovery */ }
         _sweepKicked.add(t.id);
         console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
-        fetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
+        internalFetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
+          service: 'hm-employees',
           method: 'POST',
-          headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
+          headers: { 'Content-Type': 'application/json' },
+          body: {
             room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
             user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: _sweepProjectId,
             room_goal: _sweepGoal,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-          }),
+          },
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
       }
     } catch (err) {
@@ -212,7 +220,7 @@ try { fs.mkdirSync(HYPER_SHOT_DIR, { recursive: true }); } catch { /* best-effor
 const HYPER_CYCLE_ENABLED = String(process.env.HYPER_CYCLE_ENABLED || 'false').toLowerCase() === 'true';
 const HYPER_CYCLE_HOUR_UTC = parseInt(process.env.HYPER_CYCLE_HOUR_UTC || '5', 10); // 05 UTC ≈ 07:00 DE
 const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200000', 10);
-if (prisma && HYPER_CYCLE_ENABLED) {
+if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   const runNightlyCycle = async () => {
     const today = new Date().toISOString().slice(0, 10);
     const rows = await prisma.$queryRawUnsafe(
@@ -278,15 +286,11 @@ if (prisma && HYPER_CYCLE_ENABLED) {
           });
         });
         const roomRow = await prisma.hyperRoom.findUnique({ where: { id: roomId }, select: { participantIds: true, goal: true, projectId: true } });
-        fetch(`${process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060'}/internal/hyper/room-turn`, {
-          method: 'POST',
-          headers: { 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811', 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
-            user_message: kickoff, participant_ids: roomRow?.participantIds || [],
-            project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
-            callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-          }),
+        dispatchHyperRoomTurn({
+          room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
+          user_message: kickoff, participant_ids: roomRow?.participantIds || [],
+          project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
+          callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
         task.status = 'active'; task.room_id = roomId;
         await persist();
@@ -331,6 +335,17 @@ if (prisma && HYPER_CYCLE_ENABLED) {
 const HYPER_SHOT_MAX = parseInt(process.env.HYPER_SHOT_CONCURRENCY || '2', 10);
 let _hyperShotActive = 0;
 const _hyperShotQueue = [];
+const HYPER_SIDECAR_BASE_URL = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+
+function dispatchHyperRoomTurn(body) {
+  return internalFetch(`${HYPER_SIDECAR_BASE_URL}/internal/hyper/room-turn`, {
+    service: 'hm-employees',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+}
+
 async function _acquireShotSlot() {
   if (_hyperShotActive < HYPER_SHOT_MAX) { _hyperShotActive++; return; }
   await new Promise((resolve) => _hyperShotQueue.push(resolve));
@@ -342,21 +357,18 @@ function _releaseShotSlot() {
   if (next) next();
 }
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
-const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
+const ADMIN_SECRET = requireAdminSecret();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
 async function callCoreChatAsUser({ userId, orgId, message, history = [] }) {
-  const apiKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
-  const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/chat`, {
+  const response = await internalFetch(`${CONFIG.coreApiBaseUrl}/api/chat`, {
+    service: 'hm-core',
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': apiKey,
-      'X-HM-User-Id': userId || '',
-      'X-HM-Org-Id': orgId || '',
-    },
-    body: JSON.stringify({ message, history }),
+    headers: { 'Content-Type': 'application/json' },
+    body: { message, history },
+    userId: userId || '',
+    orgId: orgId || '',
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -1411,28 +1423,11 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     const coreUrl = new URL(path, CONFIG.coreApiBaseUrl);
     if (query) coreUrl.search = query;
 
-    const headers = {
-      'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-      'X-HM-User-Id': session.userId || '',
-      'X-HM-Org-Id': session.orgId || '',
-    };
+    const headers = {};
 
     // Forward content-type for POST/multipart
     if (req.headers['content-type']) {
       headers['Content-Type'] = req.headers['content-type'];
-    }
-
-    const fetchOpts = { method, headers };
-
-    if (method !== 'GET' && method !== 'HEAD') {
-      if (rawBody) {
-        fetchOpts.body = rawBody; // multipart — forward as-is
-      } else if (body && Object.keys(body).length > 0) {
-        fetchOpts.body = JSON.stringify(body);
-        if (!headers['Content-Type']) {
-          headers['Content-Type'] = 'application/json';
-        }
-      }
     }
 
     // Timeout: knowledge upload/ingest runs the full synchronous Phase1
@@ -1443,23 +1438,16 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     // tracked separately.) Upload is POST so it is never retried below, and the
     // pipeline is checksum-idempotent regardless.
     const isSlowIngest = /\/knowledge\/(upload|document|ingest)/i.test(path) || /\/ingest(\/|$)/i.test(path);
-    fetchOpts.signal = AbortSignal.timeout(isSlowIngest ? 300_000 : 90_000);
-
-    // Retry once on transient network failure (ECONNREFUSED / aborted) —
-    // most common cause of 502 during hm-core restart windows.
-    let coreResp;
-    try {
-      coreResp = await fetch(coreUrl.toString(), fetchOpts);
-    } catch (netErr) {
-      if (method === 'GET') {
-        await new Promise(r => setTimeout(r, 500));
-        // Renew AbortSignal — original is consumed
-        const retryOpts = { ...fetchOpts, signal: AbortSignal.timeout(90_000) };
-        coreResp = await fetch(coreUrl.toString(), retryOpts);
-      } else {
-        throw netErr;
-      }
-    }
+    const coreResp = await internalFetch(coreUrl.toString(), {
+      service: 'hm-core',
+      method,
+      headers,
+      body: rawBody ? rawBody : body,
+      rawBody: Boolean(rawBody),
+      userId: session.userId || '',
+      orgId: session.orgId || '',
+      timeoutMs: isSlowIngest ? 300_000 : 90_000,
+    });
     const contentType = coreResp.headers.get('content-type') || 'application/json';
 
     // SSE streaming: pipe through without buffering
@@ -5392,7 +5380,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': getInternalApiKey() },
           body: JSON.stringify({ query_context: 'company business, industry, products, market, brand, strategy', org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
         });
         if (rr.ok) {
@@ -5453,7 +5441,7 @@ Write the persona now.`;
     try {
       const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': getInternalApiKey() },
         body: JSON.stringify({ query_context: `company business, industry, ${field} needs, products, market`, org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
       });
       if (rr.ok) {
@@ -6503,7 +6491,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': getInternalApiKey(),
               'x-hm-user-id': userId,
               'x-hm-org-id': orgId,
             },
@@ -6525,7 +6513,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': getInternalApiKey(),
               'x-hm-user-id': userId,
               'x-hm-org-id': orgId,
             },
@@ -6546,7 +6534,7 @@ Write the persona now.`;
       // pipeline continues (onboarding must never wedge on one search).
       const coreHeaders = {
         'Content-Type': 'application/json',
-        'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+        'X-API-Key': getInternalApiKey(),
         'x-hm-user-id': userId,
         'x-hm-org-id': orgId,
       };
@@ -6960,7 +6948,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': getInternalApiKey(),
               'x-hm-user-id': current.session.userId,
               'x-hm-org-id': current.session.orgId,
             },
@@ -7262,7 +7250,7 @@ Write the persona now.`;
         fetch(`${process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060'}/internal/hyper/prewarm`, {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': getInternalApiKey(),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -7472,7 +7460,7 @@ Write the persona now.`;
         const resp = await fetch(url.toString(), {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': getInternalApiKey(),
             'X-HM-User-Id': current.session.userId,
             'X-HM-Org-Id': current.session.orgId,
             'Content-Type': 'application/json',
@@ -7545,25 +7533,18 @@ Write the persona now.`;
           ts: Date.now(),
         });
 
-        const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
-        fetch(`${sidecarBase}/internal/hyper/room-turn`, {
-          method: 'POST',
-          headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            room_id: roomId,
-            turn_id: turnId,
-            user_id: current.session.userId,
-            org_id: current.session.orgId,
-            user_message: turn.userMessage,
-            participant_ids: room.participantIds || [], project_id: room.projectId || null,
-            room_goal: room.goal || '',
-            flyby_decision: decision,
-            flyby_spec: flybySpec,
-            callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
-          }),
+        dispatchHyperRoomTurn({
+          room_id: roomId,
+          turn_id: turnId,
+          user_id: current.session.userId,
+          org_id: current.session.orgId,
+          user_message: turn.userMessage,
+          participant_ids: room.participantIds || [],
+          project_id: room.projectId || null,
+          room_goal: room.goal || '',
+          flyby_decision: decision,
+          flyby_spec: flybySpec,
+          callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
         }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
 
         return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
@@ -7586,7 +7567,7 @@ Write the persona now.`;
       if (!approvalId || !['approve', 'deny'].includes(decision)) {
         return jsonResponse(res, { error: 'approval_id and decision (approve|deny) required' }, 400);
       }
-      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      const MASTER = getInternalApiKey();
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7681,7 +7662,7 @@ Write the persona now.`;
           mime: String(a.mime).slice(0, 60),
           data_b64: String(a.data_b64).slice(0, 2_000_000),
         }));
-      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      const MASTER = getInternalApiKey();
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7782,25 +7763,18 @@ Write the persona now.`;
             ts: Date.now(),
           });
 
-          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
-          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
-            method: 'POST',
-            headers: {
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              room_id: roomId,
-              turn_id: turnId,
-              user_id: current.session.userId,
-              org_id: current.session.orgId,
-              user_message: turn.userMessage,
-              participant_ids: room.participantIds || [], project_id: room.projectId || null,
-              room_goal: room.goal || '',
-              flyby_decision: decision,
-              flyby_spec: flybySpec,
-              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
-            }),
+          dispatchHyperRoomTurn({
+            room_id: roomId,
+            turn_id: turnId,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            user_message: turn.userMessage,
+            participant_ids: room.participantIds || [],
+            project_id: room.projectId || null,
+            room_goal: room.goal || '',
+            flyby_decision: decision,
+            flyby_spec: flybySpec,
+            callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
 
           return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
@@ -7905,23 +7879,16 @@ Write the persona now.`;
         // any sidecar connection/setup latency.
         const dispatchSidecar = () => {
           try {
-          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
-          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
-            method: 'POST',
-            headers: {
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              room_id: roomId,
-              turn_id: turn.id,
-              user_id: current.session.userId,
-              org_id: current.session.orgId,
-              user_message: userMessage,
-              participant_ids: room.participantIds || [], project_id: room.projectId || null,
-              room_goal: room.goal || '',
-              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
-            }),
+          dispatchHyperRoomTurn({
+            room_id: roomId,
+            turn_id: turn.id,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            user_message: userMessage,
+            participant_ids: room.participantIds || [],
+            project_id: room.projectId || null,
+            room_goal: room.goal || '',
+            callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
           } catch (err) {
             console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
@@ -7955,81 +7922,15 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       const [_, roomId, turnId] = roomTurnMatch;
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId },
+      return handleHyperTurnStreamRoute({
+        req,
+        res,
+        prisma,
+        roomId,
+        turnId,
+        orgId: current.session.orgId,
+        jsonResponse,
       });
-      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-
-      const lastEventId = req.headers['last-event-id']
-        ? parseInt(req.headers['last-event-id'], 10) || 0
-        : 0;
-
-      let cursor = 0;
-      let alive = true;
-      let missingTicks = 0;
-      // Poll frequently so the first router/typing event reaches the FE
-      // quickly even though the stream is DB-backed, not a raw push pipe.
-      const POLL_MS = 250;
-      const HEARTBEAT_MS = 15_000;
-      const MAX_MISSING_TICKS = 120;
-
-      const flush = (lines) => {
-        for (let i = cursor; i < lines.length; i++) {
-          const evt = lines[i];
-          if (i < lastEventId) continue;
-          res.write(`id: ${i}\n`);
-          res.write(`event: ${evt.t || 'line'}\n`);
-          res.write(`data: ${JSON.stringify(evt)}\n\n`);
-        }
-        cursor = lines.length;
-      };
-
-      const heartbeat = setInterval(() => {
-        if (!alive) return;
-        try { res.write(`event: heartbeat\ndata: {"ts":${Date.now()}}\n\n`); }
-        catch { alive = false; }
-      }, HEARTBEAT_MS);
-
-      const poll = async () => {
-        if (!alive) return;
-        try {
-          const turn = await prisma.hyperTurn.findFirst({
-            where: { id: turnId, roomId },
-            select: { lines: true, status: true, sealedAt: true },
-          });
-          if (!turn) {
-            missingTicks += 1;
-            if (missingTicks >= MAX_MISSING_TICKS) {
-              res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
-              alive = false;
-            }
-          } else {
-            missingTicks = 0;
-            flush(Array.isArray(turn.lines) ? turn.lines : []);
-            if (turn.sealedAt || ['complete', 'failed', 'cost_capped'].includes(turn.status)) {
-              alive = false;
-            }
-          }
-        } catch (err) {
-          console.warn('[hyper-rooms] sse poll error:', err.message);
-        }
-        if (alive) setTimeout(poll, POLL_MS);
-        else {
-          clearInterval(heartbeat);
-          try { res.end(); } catch { /* ignore */ }
-        }
-      };
-
-      req.on('close', () => { alive = false; });
-      poll();
-      return;
     }
 
     // POST /v1/hyper-rooms/:id/promote-prompt — human-gated promotion
@@ -8044,19 +7945,21 @@ Write the persona now.`;
     // Sidecar POSTs each JSONL event during execution; we append it to
     // the row and let any open SSE subscriber pick it up on next poll.
     if (pathname === '/internal/hyper/turn-event' && req.method === 'POST') {
-      const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
-      const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
-      if (apiKey !== masterKey) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-      const body = await parseBody(req).catch(() => null);
-      if (!body?.turn_id || !body?.event) return jsonResponse(res, { error: 'turn_id and event are required' }, 400);
+      const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
+      const routeResult = await handleInternalHyperTurnEventRoute({
+        req,
+        res,
+        prisma,
+        jsonResponse,
+        parseBody,
+        hasInternalApiKey,
+        appendTurnEvent,
+        sealTurn,
+      });
+      if (routeResult?.statusCode) return routeResult;
+      const { body } = routeResult || {};
       try {
-        const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
         if (body.event.t === 'seal') {
-          await sealTurn(prisma, body.turn_id, {
-            status: body.event.status || 'complete',
-            costTokens: body.event.cost_tokens || 0,
-            event: body.event,
-          });
           // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
           // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.
           try {
@@ -8105,11 +8008,6 @@ Write the persona now.`;
               }
             }
           } catch (e) { console.warn('[hyper-task-done] hook failed:', e.message); }
-        } else {
-          await appendTurnEvent(prisma, body.turn_id, {
-            ...body.event,
-            received_ts: Date.now(),
-          });
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──
@@ -9013,6 +8911,10 @@ Write the persona now.`;
   return jsonResponse(res, { error: 'Not found' }, 404);
 });
 
-server.listen(CONFIG.port, '0.0.0.0', () => {
-  console.log(`[control-plane] listening on ${CONFIG.port}`);
-});
+if (shouldStartHttpServer()) {
+  server.listen(CONFIG.port, '0.0.0.0', () => {
+    console.log(`[control-plane] listening on ${CONFIG.port}`);
+  });
+} else {
+  console.log(`[control-plane] HTTP disabled for runtime role ${process.env.HIVEMIND_RUNTIME_ROLE || 'all'}`);
+}

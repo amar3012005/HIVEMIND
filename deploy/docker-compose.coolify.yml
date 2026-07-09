@@ -9,6 +9,8 @@ services:
     image: hivemind/core:20260519-002114
     environment:
       - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=app
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - VERSION=20260519-002114
       - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
       - QDRANT_URL=https://your-cluster.qdrant.io:6333
@@ -27,3 +29,39 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+  maintenance:
+    image: hivemind/core:20260519-002114
+    command: ["node", "src/workers/memory-maintenance-worker.js"]
+    environment:
+      - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=maintenance
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
+      - VERSION=20260519-002114
+      - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
+      - QDRANT_URL=https://your-cluster.qdrant.io:6333
+      - QDRANT_API_KEY=your-qdrant-api-key
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY=your-groq-api-key
+      - MISTRAL_API_KEY=your-mistral-api-key
+      - API_MASTER_KEY=your-secure-random-key-min-32-chars
+      - SESSION_SECRET=your-session-secret-min-32-chars
+      - HIVEMIND_MASTER_API_KEY=your-master-api-key
+      - HIVEMIND_ADMIN_SECRET=your-admin-secret
+  sidecar:
+    image: hivemind/core:20260519-002114
+    command: ["node", "src/workers/app-sidecar-worker.js"]
+    environment:
+      - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=sidecar
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
+      - VERSION=20260519-002114
+      - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
+      - QDRANT_URL=https://your-cluster.qdrant.io:6333
+      - QDRANT_API_KEY=your-qdrant-api-key
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY=your-groq-api-key
+      - MISTRAL_API_KEY=your-mistral-api-key
+      - API_MASTER_KEY=your-secure-random-key-min-32-chars
+      - SESSION_SECRET=your-session-secret-min-32-chars
+      - HIVEMIND_MASTER_API_KEY=your-master-api-key
+      - HIVEMIND_ADMIN_SECRET=your-admin-secret

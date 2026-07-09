@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import Redis from 'ioredis';
 
 const sessions = new Map();
 const states = new Map();
@@ -29,7 +28,12 @@ function buildRedisConfig(config) {
   }];
 }
 
-async function getRedisClient(config) {
+async function loadRedis() {
+  const mod = await import('ioredis');
+  return mod.default;
+}
+
+export async function getRedisClient(config) {
   if (redisConnectionAttempted && !redisClientPromise) {
     return null;
   }
@@ -42,6 +46,7 @@ async function getRedisClient(config) {
   if (!redisClientPromise) {
     redisConnectionAttempted = true;
     redisClientPromise = (async () => {
+      const Redis = await loadRedis();
       // ioredis auto-connects on construction. Calling .connect() again
       // throws "Redis is already connecting/connected" → catch below
       // would null the promise and every subsequent getSession() would

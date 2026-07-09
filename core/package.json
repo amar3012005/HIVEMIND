@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "node src/index.js",
     "server": "node src/server.js",
+    "worker:maintenance": "node src/workers/memory-maintenance-worker.js",
+    "worker:sidecar": "node src/workers/app-sidecar-worker.js",
     "control-plane": "node src/control-plane-server.js",
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",

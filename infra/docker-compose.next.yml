@@ -1,0 +1,199 @@
+name: hivemind-next
+
+# Parallel vNext canary stack. This is intentionally a separate state plane:
+# never point NEXT_* variables at the production hivemind schema, volumes, or ports.
+x-runtime-env: &runtime-env
+  NODE_ENV: production
+  HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS: "true"
+  DATABASE_URL: ${NEXT_DATABASE_URL:?set NEXT_DATABASE_URL to the isolated vNext database}
+  QDRANT_URL: http://qdrant-next:6333
+  QDRANT_API_KEY: ${NEXT_QDRANT_API_KEY:?set NEXT_QDRANT_API_KEY}
+  REDIS_URL: redis://:${NEXT_REDIS_PASSWORD:?set NEXT_REDIS_PASSWORD}@redis-next:6379/0
+  HIVEMIND_MASTER_API_KEY: ${NEXT_HIVEMIND_MASTER_API_KEY:?set NEXT_HIVEMIND_MASTER_API_KEY}
+  SESSION_SECRET: ${NEXT_SESSION_SECRET:?set NEXT_SESSION_SECRET}
+  HIVEMIND_ADMIN_SECRET: ${NEXT_ADMIN_SECRET:?set NEXT_ADMIN_SECRET}
+  HIVEMIND_ALLOWED_ORIGINS: ${NEXT_ALLOWED_ORIGINS:?set NEXT_ALLOWED_ORIGINS}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+  NANGO_SECRET_KEY: ${NEXT_NANGO_SECRET_KEY:-}
+  NANGO_PUBLIC_URL: ${NEXT_NANGO_PUBLIC_URL:-}
+  DOCLING_URL: ${NEXT_DOCLING_URL:-}
+
+x-core-service: &core-service
+  image: hivemind/core-api:${NEXT_VERSION:?build and set NEXT_VERSION}
+  restart: unless-stopped
+  environment:
+    <<: *runtime-env
+  networks: [next]
+  healthcheck:
+    test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 40s
+
+x-control-service: &control-service
+  image: hivemind/control-plane:${NEXT_VERSION:?build and set NEXT_VERSION}
+  restart: unless-stopped
+  environment:
+    <<: *runtime-env
+  networks: [next]
+
+services:
+  postgres-next:
+    image: hivemind/postgres-age:15-age-custom
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${NEXT_POSTGRES_USER:?set NEXT_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${NEXT_POSTGRES_PASSWORD:?set NEXT_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${NEXT_POSTGRES_DB:-hivemind_next}
+    volumes: [postgres-next-data:/var/lib/postgresql/data]
+    networks: [next]
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  qdrant-next:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${NEXT_QDRANT_API_KEY:?set NEXT_QDRANT_API_KEY}
+    volumes: [qdrant-next-data:/qdrant/storage]
+    networks: [next]
+    mem_limit: 1536m
+    cpus: 1.0
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+
+  redis-next:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${NEXT_REDIS_PASSWORD:?set NEXT_REDIS_PASSWORD}", "--appendonly", "yes", "--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redis-next-data:/data]
+    networks: [next]
+    mem_limit: 256m
+    cpus: 0.25
+
+  core-b2b:
+    <<: *core-service
+    profiles: [b2b]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_RUNTIME_ROLE: app
+      HOSTNAME: hm-next-core-b2b
+    ports: ["127.0.0.1:${NEXT_B2B_CORE_PORT:-2126}:3000"]
+    depends_on:
+      postgres-next: { condition: service_healthy }
+      qdrant-next: { condition: service_started }
+      redis-next: { condition: service_started }
+    mem_limit: 1g
+    cpus: 1.5
+
+  control-b2b:
+    <<: *control-service
+    profiles: [b2b]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_CORE_API_BASE_URL: http://core-b2b:3000
+      EMPLOYEES_SIDECAR_URL: http://employees-b2b:8060
+    ports: ["127.0.0.1:${NEXT_B2B_CONTROL_PORT:-2127}:3000"]
+    depends_on: [core-b2b]
+    mem_limit: 512m
+    cpus: 0.75
+
+  maintenance-b2b:
+    <<: *core-service
+    profiles: [b2b]
+    command: ["node", "src/workers/memory-maintenance-worker.js"]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_RUNTIME_ROLE: maintenance
+    depends_on: [core-b2b]
+    mem_limit: 512m
+    cpus: 0.5
+
+  employees-b2b:
+    image: hivemind/employees:${NEXT_VERSION:?build and set NEXT_VERSION}
+    profiles: [b2b]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${NEXT_DATABASE_URL:?set NEXT_DATABASE_URL to the isolated vNext database}
+      REDIS_URL: redis://:${NEXT_REDIS_PASSWORD:?set NEXT_REDIS_PASSWORD}@redis-next:6379/0
+      HIVEMIND_CORE_API_BASE_URL: http://core-b2b:3000
+      HIVEMIND_MASTER_API_KEY: ${NEXT_HIVEMIND_MASTER_API_KEY:?set NEXT_HIVEMIND_MASTER_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      PORT: "8060"
+    networks: [next]
+    depends_on: [core-b2b]
+    mem_limit: 768m
+    cpus: 1.0
+
+  core-b2c:
+    <<: *core-service
+    profiles: [b2c]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_RUNTIME_ROLE: app
+      HOSTNAME: hm-next-core-b2c
+    ports: ["127.0.0.1:${NEXT_B2C_CORE_PORT:-2226}:3000"]
+    depends_on:
+      postgres-next: { condition: service_healthy }
+      qdrant-next: { condition: service_started }
+      redis-next: { condition: service_started }
+    mem_limit: 768m
+    cpus: 1.0
+
+  control-b2c:
+    <<: *control-service
+    profiles: [b2c]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_CORE_API_BASE_URL: http://core-b2c:3000
+      EMPLOYEES_SIDECAR_URL: http://employees-b2c:8060
+    ports: ["127.0.0.1:${NEXT_B2C_CONTROL_PORT:-2227}:3000"]
+    depends_on: [core-b2c]
+    mem_limit: 384m
+    cpus: 0.5
+
+  maintenance-b2c:
+    <<: *core-service
+    profiles: [b2c]
+    command: ["node", "src/workers/memory-maintenance-worker.js"]
+    environment:
+      <<: *runtime-env
+      HIVEMIND_RUNTIME_ROLE: maintenance
+    depends_on: [core-b2c]
+    mem_limit: 384m
+    cpus: 0.25
+
+  employees-b2c:
+    image: hivemind/employees:${NEXT_VERSION:?build and set NEXT_VERSION}
+    profiles: [b2c]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${NEXT_DATABASE_URL:?set NEXT_DATABASE_URL to the isolated vNext database}
+      REDIS_URL: redis://:${NEXT_REDIS_PASSWORD:?set NEXT_REDIS_PASSWORD}@redis-next:6379/0
+      HIVEMIND_CORE_API_BASE_URL: http://core-b2c:3000
+      HIVEMIND_MASTER_API_KEY: ${NEXT_HIVEMIND_MASTER_API_KEY:?set NEXT_HIVEMIND_MASTER_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      PORT: "8060"
+    networks: [next]
+    depends_on: [core-b2c]
+    mem_limit: 512m
+    cpus: 0.5
+
+networks:
+  next:
+    name: hivemind-next
+    driver: bridge
+
+volumes:
+  postgres-next-data:
+  qdrant-next-data:
+  redis-next-data:

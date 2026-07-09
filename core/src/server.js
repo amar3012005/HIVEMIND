@@ -19,6 +19,19 @@ import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
+import { OAuthStateStore } from './oauth/oauth-state-store.js';
+import { buildChatRecallContext } from './routes/chat.js';
+import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
+import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
+import {
+  getRuntimeRole,
+  shouldRunConnectorBackground,
+  shouldRunRecurringMaintenanceJobs,
+  shouldRunWarmupsAndSidecars,
+  shouldStartHttpServer,
+} from './runtime/runtime-role.js';
+import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
+import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -308,7 +321,6 @@ const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
 const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
 const OAUTH_CLIENTS_FILE_PATH = path.join(DATA_DIR, 'oauth-clients.json');
-const OAUTH_REFRESH_TOKENS_FILE_PATH = path.join(DATA_DIR, 'oauth-refresh-tokens.json');
 
 // Web Intelligence
 const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
@@ -316,6 +328,7 @@ const webJobStore = new WebJobStore(WEB_JOBS_FILE);
 const browserRuntime = new BrowserRuntime();
 const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 50);
 const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 100);
+const RUNTIME_ROLE = getRuntimeRole();
 
 installConsoleCapture('core');
 
@@ -329,10 +342,16 @@ const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(pr
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run
 // after 10min warm-up, then hourly. Best-effort; no-ops when PQC keys absent.
-if (auditLogger) {
+if (auditLogger && shouldRunRecurringMaintenanceJobs()) {
   const AUDIT_CHECKPOINT_INTERVAL_MS = parseInt(process.env.AUDIT_CHECKPOINT_INTERVAL_MS || String(60 * 60 * 1000), 10);
-  setTimeout(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, 10 * 60 * 1000);
-  setInterval(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, AUDIT_CHECKPOINT_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'audit-checkpoint',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: AUDIT_CHECKPOINT_INTERVAL_MS,
+    run: async () => { await auditLogger.checkpointAllOrgs().catch(() => {}); },
+  });
 }
 const webhookManager = prisma ? new WebhookManager(prisma) : null;
 const ingestTracker = new IngestTracker();
@@ -526,7 +545,7 @@ const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
 
 let connectorStore = null;
 let schedulerSyncEngine = null;
-if (persistentMemoryEngine && persistentMemoryStore && prisma) {
+if (persistentMemoryEngine && persistentMemoryStore && prisma && shouldRunConnectorBackground()) {
   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
   const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
   const schedulerConnStore = new ConnectorStore(prisma);
@@ -554,7 +573,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 }
 
 // ─── WebhookProcessor boot ───────────────────────────────────────────────────
-{
+if (shouldRunConnectorBackground()) {
   const { WebhookProcessor } = await import('./connectors/framework/webhook-processor.js');
   const adapterRegistryModule = await import('./connectors/framework/adapter-registry.js');
   const adapterRegistry = adapterRegistryModule.default;
@@ -589,7 +608,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 // (was opt-in; legacy ENABLE_COGNITION_LOOP=true still works).
 const COGNITION_LOOP_ENABLED = process.env.ENABLE_COGNITION_LOOP !== 'false';
 let cognitionLoop = null;
-if (prisma) {
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
   setImmediate(async () => {
     try {
       const { CognitionLoop } = await import('./memory/cognition-loop.js');
@@ -619,7 +638,7 @@ if (prisma) {
 // ─── Memory Promotion Jobs cron (Wave 5 / P1 #5) ────────────────────────────
 // Late-resolution: documentFirstIngestion is initialized later (line ~1028).
 // Use setImmediate so this block runs after module-init completes.
-if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
+if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const PROMOTION_INTERVAL_MS = Number(process.env.PROMOTION_INTERVAL_MS || 6 * 60 * 60 * 1000); // 6h
   const PROMOTION_BATCH = Number(process.env.PROMOTION_BATCH || 50);
   const STALE_AFTER_DAYS = Number(process.env.MEMORY_STALE_AFTER_DAYS || 90);
@@ -667,13 +686,19 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
       console.error('[promotion-cron] tick failed:', err.message);
     }
   };
-  setTimeout(runPromotion, 10 * 60 * 1000); // first run +10min
-  setInterval(runPromotion, PROMOTION_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'promotion-cron',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: PROMOTION_INTERVAL_MS,
+    run: runPromotion,
+  });
   console.log(`[promotion-cron] scheduled — every ${PROMOTION_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Memory Synthesizer cron (P3 #21) ────────────────────────────────────────
-if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
+if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const SYNTH_INTERVAL_MS = Number(process.env.SYNTHESIS_INTERVAL_MS || 24 * 60 * 60 * 1000);
   let synthesizer = null;
   const runSynth = async () => {
@@ -707,13 +732,19 @@ if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
       console.error('[memory-synth] tick failed:', err.message);
     }
   };
-  setTimeout(runSynth, 20 * 60 * 1000);
-  setInterval(runSynth, SYNTH_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'memory-synth',
+    initialDelayMs: 20 * 60 * 1000,
+    intervalMs: SYNTH_INTERVAL_MS,
+    run: runSynth,
+  });
   console.log(`[memory-synth] scheduled — every ${SYNTH_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Contradiction Scanner cron (Wave 5 / P1 5.2) ───────────────────────────
-if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
+if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const CONTRADICTION_INTERVAL_MS = Number(process.env.CONTRADICTION_INTERVAL_MS || 24 * 60 * 60 * 1000);
   let contradictionScanner = null;
   const runContradictions = async () => {
@@ -752,15 +783,21 @@ if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
       console.error('[contradiction-cron] tick failed:', err.message);
     }
   };
-  setTimeout(runContradictions, 15 * 60 * 1000);
-  setInterval(runContradictions, CONTRADICTION_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'contradiction-cron',
+    initialDelayMs: 15 * 60 * 1000,
+    intervalMs: CONTRADICTION_INTERVAL_MS,
+    run: runContradictions,
+  });
   console.log(`[contradiction-cron] scheduled — every ${CONTRADICTION_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Hygiene Scanner cron (P1 #7) ────────────────────────────────────────────
 // Runs nightly across recently active tenants. Generates proposals only —
 // nothing auto-executes (executeProposals still requires admin approval).
-if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
+if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma && shouldRunRecurringMaintenanceJobs()) {
   const HYGIENE_INTERVAL_MS = Number(process.env.HYGIENE_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
   const HYGIENE_USER_LIMIT = Number(process.env.HYGIENE_USER_LIMIT || 25);
   const runHygieneCron = async () => {
@@ -807,8 +844,14 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
     }
   };
   // First run after 5min (post-boot warm-up), then every interval
-  setTimeout(runHygieneCron, 5 * 60 * 1000);
-  setInterval(runHygieneCron, HYGIENE_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'hygiene-cron',
+    initialDelayMs: 5 * 60 * 1000,
+    intervalMs: HYGIENE_INTERVAL_MS,
+    run: runHygieneCron,
+  });
   console.log(`[hygiene-cron] scheduled — every ${HYGIENE_INTERVAL_MS / 3600000}h, top ${HYGIENE_USER_LIMIT} tenants`);
 }
 
@@ -817,7 +860,7 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
 // own DIRTY-GATE skips any user with no new memories since their last dream, so a
 // run only spends LLM calls on users with fresh evidence — bounded cost at scale.
 // Requires PROFILE_DREAM_ENABLED + PROFILE_DREAM_APPLY (the dreamer's own gates).
-if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma) {
+if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma && shouldRunRecurringMaintenanceJobs()) {
   const PROFILE_DREAM_INTERVAL_MS = Number(process.env.PROFILE_DREAM_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
   const PROFILE_DREAM_ORG_LIMIT = Number(process.env.PROFILE_DREAM_ORG_LIMIT || 25);
   const runProfileDreamCron = async () => {
@@ -856,8 +899,14 @@ if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma
     }
   };
   // First run after 10min (post-boot warm-up), then every interval.
-  setTimeout(runProfileDreamCron, 10 * 60 * 1000);
-  setInterval(runProfileDreamCron, PROFILE_DREAM_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'profile-dream-cron',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: PROFILE_DREAM_INTERVAL_MS,
+    run: runProfileDreamCron,
+  });
   console.log(`[profile-dream-cron] scheduled — every ${PROFILE_DREAM_INTERVAL_MS / 3600000}h, top ${PROFILE_DREAM_ORG_LIMIT} orgs`);
 }
 
@@ -1756,15 +1805,7 @@ const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8
 // SECURITY: HIVEMIND_ADMIN_SECRET MUST be set in production. We refuse to boot
 // with the legacy fallback so an unset env cannot leave admin endpoints open.
 // Local/dev still allowed: set HIVEMIND_ADMIN_SECRET=local-… explicitly.
-const ADMIN_SECRET = (() => {
-  const v = process.env.HIVEMIND_ADMIN_SECRET;
-  if (v && v !== 'local-admin-secret-change-me') return v;
-  if (process.env.NODE_ENV === 'production') {
-    console.error('[FATAL] HIVEMIND_ADMIN_SECRET must be set in production (and not the legacy default). Refusing to boot.');
-    process.exit(1);
-  }
-  return v || 'local-admin-secret-change-me';
-})();
+const ADMIN_SECRET = requireAdminSecret();
 
 // SECURITY: HMAC-signed state for OAuth callbacks. Without this the state
 // blob (which carries userId/orgId) is trivially mintable, letting an attacker
@@ -1841,11 +1882,9 @@ const OAUTH_SCOPE_ALIASES = {
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
 const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
-const OAUTH_SESSION_SECRET = process.env.HIVEMIND_OAUTH_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me';
+const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', ['SESSION_SECRET']);
 const OAUTH_AUTH_STATE_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_AUTH_STATE_TTL_SECONDS || 10 * 60);
 const OAUTH_RESOURCE_DEFAULT = process.env.HIVEMIND_OAUTH_RESOURCE_DEFAULT || OAUTH_BASE_URL;
-const oauthCodeStore = new Map(); // code -> { clientId, redirectUri, scopes, codeChallenge, codeChallengeMethod, userId, orgId, workspaceId, resource, expiresAt, state }
-const oauthRefreshStore = new Map(); // refreshHash -> { ...metadata, expiresAt, revokedAt, rotatedFrom, accessTokenHash }
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const oauthSessionStore = new ControlPlaneSessionStore({
   sessionTtlSeconds: Number(process.env.HIVEMIND_OAUTH_SESSION_TTL_SECONDS || 60 * 60 * 8),
@@ -1854,6 +1893,14 @@ const oauthSessionStore = new ControlPlaneSessionStore({
   redisHost: process.env.REDIS_HOST || null,
   redisPort: Number(process.env.REDIS_PORT || 6379),
   redisPassword: process.env.REDIS_PASSWORD || null
+});
+const oauthStateStore = new OAuthStateStore({
+  codeTtlSeconds: Math.ceil(OAUTH_CODE_TTL_MS / 1000),
+  refreshTtlSeconds: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+  redisUrl: process.env.HIVEMIND_OAUTH_REDIS_URL || process.env.REDIS_URL || null,
+  redisHost: process.env.REDIS_HOST || null,
+  redisPort: Number(process.env.REDIS_PORT || 6379),
+  redisPassword: process.env.REDIS_PASSWORD || null,
 });
 const oauthZitadelClient = (
   process.env.ZITADEL_ISSUER_URL
@@ -1884,17 +1931,6 @@ let oauthClientRegistryCache = {
   clients: LOCAL_DEFAULT_OAUTH_CLIENTS
 };
 
-function cleanExpiredOAuthCodes() {
-  const now = Date.now();
-  for (const [code, entry] of oauthCodeStore) {
-    if (now > entry.expiresAt) oauthCodeStore.delete(code);
-  }
-  for (const [refreshHash, entry] of oauthRefreshStore) {
-    if (entry.revokedAt || now > entry.expiresAt) oauthRefreshStore.delete(refreshHash);
-  }
-}
-setInterval(cleanExpiredOAuthCodes, 60_000);
-
 // Audit retention purge — daily at midnight UTC. Uses session GUC to unblock
 // the delete trigger that protects audit_logs from ad-hoc DELETE.
 const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -1913,8 +1949,16 @@ async function runAuditRetentionPurge() {
     console.warn('[audit-retention] Purge failed:', err.message);
   }
 }
-setInterval(runAuditRetentionPurge, AUDIT_PURGE_INTERVAL_MS);
-setTimeout(runAuditRetentionPurge, 60_000); // first run 60s after boot
+if (shouldRunRecurringMaintenanceJobs()) {
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'audit-retention',
+    initialDelayMs: 60_000,
+    intervalMs: AUDIT_PURGE_INTERVAL_MS,
+    run: runAuditRetentionPurge,
+  });
+}
 
 const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu,https://claude.ai,https://www.claude.ai,https://anthropic.com,https://chatgpt.com,https://chat.openai.com')
   .split(',')
@@ -2926,26 +2970,6 @@ async function createOAuthSession(res, payload) {
   );
 }
 
-function ensureOAuthRefreshTokenStore() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(OAUTH_REFRESH_TOKENS_FILE_PATH)) {
-    fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify({ tokens: [] }, null, 2), 'utf-8');
-  }
-}
-
-function loadOAuthRefreshTokenStore() {
-  ensureOAuthRefreshTokenStore();
-  const raw = fs.readFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, 'utf-8');
-  return JSON.parse(raw || '{"tokens":[]}');
-}
-
-function saveOAuthRefreshTokenStore(store) {
-  ensureOAuthRefreshTokenStore();
-  fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify(store, null, 2), 'utf-8');
-}
-
 function generateRawRefreshToken() {
   return `hmr_live_${crypto.randomBytes(32).toString('hex')}`;
 }
@@ -2999,47 +3023,28 @@ async function createOAuthAccessToken({
   return { accessToken: rawKey, accessTokenId: record.id, expiresAt };
 }
 
-function persistRefreshTokenRecord(rawToken, record) {
-  oauthRefreshStore.set(record.refreshHash, record);
-  const store = loadOAuthRefreshTokenStore();
-  store.tokens = (Array.isArray(store.tokens) ? store.tokens : []).filter(t => t.refreshHash !== record.refreshHash);
-  store.tokens.push({
+async function persistRefreshTokenRecord(rawToken, record) {
+  const encryptedRecord = {
     ...record,
-    refreshTokenEncrypted: encryptToken(rawToken)
-  });
-  saveOAuthRefreshTokenStore(store);
+    refreshTokenEncrypted: encryptToken(rawToken),
+  };
+  await oauthStateStore.storeRefreshTokenRecord(encryptedRecord);
 }
 
-function loadRefreshTokenRecord(rawToken) {
+async function loadRefreshTokenRecord(rawToken) {
   if (!rawToken) return null;
   const refreshHash = hashRefreshToken(rawToken);
-  const inMemory = oauthRefreshStore.get(refreshHash);
-  if (inMemory) return inMemory;
-
-  const store = loadOAuthRefreshTokenStore();
-  const found = (store.tokens || []).find(t => t.refreshHash === refreshHash);
+  const found = await oauthStateStore.loadRefreshTokenRecord(refreshHash);
   if (!found) return null;
   if (found.refreshTokenEncrypted && decryptToken(found.refreshTokenEncrypted) !== rawToken) {
     return null;
   }
-  oauthRefreshStore.set(refreshHash, found);
   return found;
 }
 
-function markRefreshTokenRevoked(refreshHash) {
+async function markRefreshTokenRevoked(refreshHash) {
   const now = new Date().toISOString();
-  const inMemory = oauthRefreshStore.get(refreshHash);
-  if (inMemory) {
-    inMemory.revokedAt = now;
-    oauthRefreshStore.set(refreshHash, inMemory);
-  }
-  const store = loadOAuthRefreshTokenStore();
-  store.tokens = (store.tokens || []).map(entry => (
-    entry.refreshHash === refreshHash
-      ? { ...entry, revokedAt: now }
-      : entry
-  ));
-  saveOAuthRefreshTokenStore(store);
+  await oauthStateStore.revokeRefreshToken(refreshHash, now);
 }
 
 async function revokeAccessTokenByHash(keyHash, reason = 'oauth_revoke') {
@@ -5024,9 +5029,8 @@ exit \$RC
       state,
       expiresAt: Date.now() + OAUTH_CODE_TTL_MS
     };
-    const code = await oauthSessionStore.createAuthState({ kind: 'oauth_code', payload: codeEntry });
-    // Keep an in-memory mirror as a same-replica fast path / Redis-down safety net.
-    oauthCodeStore.set(code, codeEntry);
+    const code = crypto.randomUUID();
+    await oauthStateStore.storeAuthorizationCode(code, codeEntry);
 
     const callbackUrl = new URL(redirectUri);
     callbackUrl.searchParams.set('code', code);
@@ -5091,18 +5095,7 @@ exit \$RC
       const redirectUri = tokenParams.redirect_uri || '';
       const codeVerifier = tokenParams.code_verifier || '';
 
-      // Read from the Redis-shared store first so any replica can redeem a
-      // code issued by any other replica. Fall back to the in-memory mirror
-      // (same-replica fast path / Redis-down). consumeAuthState deletes on
-      // read (single-use); also clear the local mirror.
-      let entry = null;
-      const sharedCode = await oauthSessionStore.consumeAuthState(code);
-      if (sharedCode && sharedCode.kind === 'oauth_code' && sharedCode.payload) {
-        entry = sharedCode.payload;
-      } else {
-        entry = oauthCodeStore.get(code) || null;
-      }
-      oauthCodeStore.delete(code);
+      const entry = await oauthStateStore.consumeAuthorizationCode(code);
       if (!entry) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
       }
@@ -5167,7 +5160,7 @@ exit \$RC
         revokedAt: null,
         rotatedFrom: null
       };
-      persistRefreshTokenRecord(refreshToken, refreshRecord);
+      await persistRefreshTokenRecord(refreshToken, refreshRecord);
 
       return jsonResponse(res, {
         access_token: accessToken,
@@ -5192,7 +5185,7 @@ exit \$RC
       if (!refreshToken) {
         return jsonResponse(res, { error: 'invalid_request', error_description: 'refresh_token is required.' }, 400);
       }
-      const record = loadRefreshTokenRecord(refreshToken);
+      const record = await loadRefreshTokenRecord(refreshToken);
       if (!record) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token is invalid.' }, 400);
       }
@@ -5203,7 +5196,7 @@ exit \$RC
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token expired or revoked.' }, 400);
       }
 
-      markRefreshTokenRevoked(record.refreshHash);
+      await markRefreshTokenRevoked(record.refreshHash);
       await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_refresh_rotation');
 
       const { accessToken, accessTokenId, expiresAt } = await createOAuthAccessToken({
@@ -5227,7 +5220,7 @@ exit \$RC
         revokedAt: null,
         rotatedFrom: record.refreshHash
       };
-      persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
+      await persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
 
       const oauthScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
       return jsonResponse(res, {
@@ -5263,9 +5256,9 @@ exit \$RC
       return jsonResponse(res, { error: 'invalid_request', error_description: 'token is required' }, 400);
     }
 
-    const refreshRecord = loadRefreshTokenRecord(token);
+    const refreshRecord = await loadRefreshTokenRecord(token);
     if (refreshRecord && !refreshRecord.revokedAt) {
-      markRefreshTokenRevoked(refreshRecord.refreshHash);
+      await markRefreshTokenRevoked(refreshRecord.refreshHash);
       await revokeAccessTokenByHash(refreshRecord.accessTokenHash, 'oauth_revoke');
       return jsonResponse(res, { revoked: true, token_type: 'refresh_token' });
     }
@@ -15300,563 +15293,32 @@ exit \$RC
 
         case '/api/knowledge/upload':
           if (req.method === 'POST') {
-            if (!persistentMemoryEngine) {
-              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
-            }
-            // Plan limit — monthly KB uploads (free: 10/mo). Enforce BEFORE accepting the file (the
-            // 'uploads' cap was recorded but never checked → free-tier limit was a no-op).
-            if (planEnforcer && orgId) {
-              const upCheck = await planEnforcer.checkLimit(orgId, 'uploads', 1);
-              if (!upCheck.allowed) {
-                return jsonResponse(res, planLimitBody(upCheck, 'uploads'), 402);
-              }
-            }
-            try { planEnforcer?.recordUsage(orgId, 'uploads', 1); } catch { /* meter */ }
-
-            try {
-              // Parse multipart form data manually (no external dep)
-              const contentType = req.headers['content-type'] || '';
-              if (!contentType.includes('multipart/form-data')) {
-                return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
-              }
-
-              const boundaryMatch = contentType.match(/boundary=(.+)/);
-              if (!boundaryMatch) {
-                return jsonResponse(res, { error: 'Missing boundary in Content-Type' }, 400);
-              }
-
-              let rawBody;
-              try {
-                rawBody = await readBoundedBuffer(req);
-              } catch (sizeErr) {
-                if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
-                  return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
-                }
-                return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
-              }
-
-              // Simple multipart parser
-              const boundary = boundaryMatch[1].trim();
-              const parts = parseMultipart(rawBody, boundary);
-
-              const filePart = parts.find(p => p.filename);
-              if (!filePart) {
-                return jsonResponse(res, { error: 'No file uploaded. Send a file field in multipart form data.' }, 400);
-              }
-
-              // Extract optional form fields
-              const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
-              // KB uploads default to ORGANIZATION visibility (team knowledge is
-              // shared by default; users opt OUT to 'personal'). Was default
-              // 'personal', which siloed every upload to the uploader.
-              const targetScopeRaw = parts.find(p => p.name === 'targetScope')?.value || '';
-              const targetScope = targetScopeRaw === 'personal'
-                ? 'personal'
-                : targetScopeRaw === 'project'
-                  ? 'project'
-                  : 'organization';
-              const customTags = parts.find(p => p.name === 'tags')?.value || '';
-              const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
-              const projectId = parts.find(p => p.name === 'projectId')?.value || null;
-              const projectIdsRaw = parts.find(p => p.name === 'projectIds')?.value || '';
-              const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
-              const projectIds = normalizeScopeIds([
-                projectId,
-                ...projectIdsRaw.split(',').map(value => value.trim()).filter(Boolean),
-              ]);
-
-              // The upload-scope modal sends the project SLUG via containerTag
-              // (not a UUID). Without an explicit projectId, resolve the
-              // container slug/name/id → a real project id so derived memories
-              // get scoped (projectId). Otherwise they land org-wide and vanish
-              // from project-filtered Memories / Graph views.
-              const containerTagVal = parts.find(p => p.name === 'containerTag')?.value || null;
-              if (projectIds.length === 0 && containerTagVal) {
-                try {
-                  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(containerTagVal);
-                  const proj = await prisma.project.findFirst({
-                    where: { orgId, OR: [
-                      ...(isUuid ? [{ id: containerTagVal }] : []),
-                      { slug: containerTagVal.toLowerCase() },
-                      { name: { equals: containerTagVal, mode: 'insensitive' } },
-                    ] },
-                    select: { id: true },
-                  });
-                  if (proj) projectIds.push(proj.id);
-                } catch (e) { console.warn('[knowledge] containerTag project resolve failed:', e.message); }
-              }
-
-              if (projectId || projectIdsRaw.trim() || targetScope === 'project') {
-                const accessCtx = await buildAccessContext(userId, orgId);
-                const allowed = Array.isArray(accessCtx?.projectIds) ? accessCtx.projectIds : [];
-                if (!projectIds.length || projectIds.some(id => !allowed.includes(id))) {
-                  return jsonResponse(res, {
-                    error: 'project_scope_required',
-                    message: 'Project-scoped uploads require an accessible projectId.',
-                  }, 403);
-                }
-              }
-
-              // ── 3-tier scope enforcement ──
-              // personal → anyone (private). project → anyone with access to
-              // that project (project list is already role-scoped in the FE +
-              // membership-checked at recall). organization-wide (org scope,
-              // NO project, NO team) → OWNER/ADMIN ONLY: one admin uploads
-              // once and every member sees it; members must file uploads
-              // under a project or their personal space instead.
-              if (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId && prisma && orgId) {
-                const uploaderMembership = await prisma.userOrganization.findUnique({
-                  where: { userId_orgId: { userId, orgId } },
-                  select: { role: true },
-                }).catch(() => null);
-                const uploaderRole = uploaderMembership?.role || null;
-                if (uploaderRole !== 'owner' && uploaderRole !== 'admin') {
-                  return jsonResponse(res, {
-                    error: 'org_scope_admin_only',
-                    message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
-                    role: uploaderRole,
-                  }, 403);
-                }
-              }
-
-              // Validate file size (max 100MB)
-              if (filePart.data.length > 100 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
-              }
-
-              // Validate file type
-              const allowedTypes = [
-                'application/pdf',
-                'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
-                'application/vnd.openxmlformats-officedocument.presentationml.presentation', // pptx
-                'application/vnd.ms-excel', // xls
-                'application/vnd.ms-powerpoint', // ppt
-                'text/plain', 'text/markdown', 'text/csv', 'text/html',
-                'image/png', 'image/jpeg', 'image/tiff', 'image/webp',
-                'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a',
-              ];
-              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = [
-                'pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt',
-                'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm',
-                'png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp',
-                'mp3', 'wav', 'm4a', 'flac', 'ogg',
-              ];
-              if (!allowedTypes.includes(filePart.contentType) && !allowedExts.includes(ext)) {
-                return jsonResponse(res, {
-                  error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, HTML, PNG, JPG, TIFF, MP3, WAV.`
-                }, 415);
-              }
-
-              // Read smart flag — when true, force Docling smart-mode parse
-              // (full enrichment: tables, charts, picture descriptions via
-              // Groq VLM, code/formula extraction). Default false = fast tiers.
-              const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
-              const pictureDescFlag = (parts.find(p => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
-              // enterprise = 'auto' | 'true' | 'false'  (default 'auto')
-              //   auto  → detect type; if confidence≥0.7 run schema extract
-              //   true  → force schema extract even on low confidence
-              //   false → skip enterprise pipeline entirely (legacy behavior)
-              const enterpriseFlag = (parts.find(p => p.name === 'enterprise')?.value || 'auto').toLowerCase();
-              const confirmedType = parts.find(p => p.name === 'confirmed_type')?.value || null;
-
-              // Pre-flight pages quota: rough estimate by file size (1 page ≈ 50KB
-              // PDF / 5KB text). Real page count comes after parse; we record
-              // exact then. This pre-check is a cheap "blow up obvious overages".
-              if (planEnforcer && orgId) {
-                const estPages = Math.max(1, Math.ceil(filePart.data.length / 50_000));
-                const check = await planEnforcer.checkLimit(orgId, 'kbPages', estPages);
-                if (!check.allowed) {
-                  return jsonResponse(res, { ...planLimitBody(check, 'kbPages'), estimated_pages: estPages }, 402);
-                }
-              }
-
-              // SCOPE-AWARE duplicate rejection: identical bytes only collide
-              // WITHIN the same scope (personal / project / team / org-wide).
-              // Same file in different scopes is intentional — e.g. an owner
-              // shares a brochure org-wide AND an employee files their own
-              // copy under a project. Old global gate rejected those.
-              //
-              //   scopeKey =
-              //     team:<id>      when primaryTeamId set
-              //     project:<id>   when projectIds[0] set (no team)
-              //     org:<orgId>    when targetScope=organization, no project/team
-              //     personal:<uid> otherwise
-              //
-              // The gate looks for an existing knowledge_document in the same
-              // org that points to the same content (same checksum via the
-              // shared sourceArtifact) AND carries the matching scope-key tag.
-              // Force re-ingest with form field force=true.
-              const uploadChecksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
-              const forceDuplicate = (parts.find(p => p.name === 'force')?.value || '').toLowerCase() === 'true';
-              const uploadScopeKey = primaryTeamId
-                ? `team:${primaryTeamId}`
-                : projectIds[0]
-                  ? `project:${projectIds[0]}`
-                  : (targetScope === 'organization' ? `org:${orgId}` : `personal:${userId}`);
-              if (!forceDuplicate && prisma) {
-                // Per-scope dup: same content already filed in THIS scope.
-                const dupDoc = await prisma.knowledgeDocument.findFirst({
-                  where: {
-                    orgId,
-                    sourcePlatform: 'knowledge_upload',
-                    sourceArtifact: { is: { checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
-                    tags: { has: `scope-key:${uploadScopeKey}` },
-                  },
-                  select: { id: true, title: true, createdAt: true },
-                }).catch(() => null);
-                if (dupDoc) {
-                  return jsonResponse(res, {
-                    duplicate: true,
-                    error: 'duplicate_document',
-                    message: `Identical content already in this scope${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}. Same file in a different scope is allowed — pick another scope to upload again.`,
-                    existing_document_id: dupDoc?.id || null,
-                    existing_title: dupDoc?.title || null,
-                    uploaded_at: dupDoc?.createdAt || null,
-                    scope_key: uploadScopeKey,
-                    filename: filePart.filename,
-                  }, 409);
-                }
-              }
-
-              // Async opt-in: return a job id immediately + process in the
-              // background, so large multi-MB PDFs (150s+ sync pipeline) never
-              // hit the proxy timeout / 502. Default stays sync for FE compat.
-              const asyncMode = (parts.find(p => p.name === 'async')?.value || '').toLowerCase() === 'true'
-                || url.searchParams.get('async') === 'true';
-
-              // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
-              if (documentFirstIngestion) {
-                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}${asyncMode ? ' (async)' : ''}`);
-
-                const phase1Metadata = {
-                  tags: userTags,
-                  project: containerTag,
-                  project_id: projectIds[0] || null,
-                  project_ids: projectIds,
-                  primary_team_id: primaryTeamId,
-                  visibility: targetScope === 'organization' ? 'organization' : 'private',
-                  // Explicit org scope when org-targeted with no project/team — so
-                  // recall's organization tier (visible to ALL org members) matches.
-                  // project/team scopes are derived downstream from the ids.
-                  scope: projectIds.length ? 'project' : ((targetScope === 'organization' && !primaryTeamId) ? 'organization' : undefined),
-                  smart: smartFlag,
-                  picture_descriptions: pictureDescFlag,
-                };
-
-                // Durable-queue path (flag-gated by org): accept → persist raw
-                // bytes → enqueue → return job_id. The request does NO heavy
-                // work; a bounded worker pool ingests via the same pipeline.
-                if (kbIngestQueue?.isEnabledFor(orgId)) {
-                  try {
-                    const checksum = uploadChecksum;
-                    const storedPath = kbIngestQueue.persistFile({ orgId, checksum, filename: filePart.filename, fileBuffer: filePart.data });
-                    const q = await kbIngestQueue.enqueue({
-                      userId, orgId,
-                      filename: filePart.filename,
-                      contentType: filePart.contentType || `text/${ext}`,
-                      checksum, filePath: storedPath,
-                      metadata: phase1Metadata,
-                    });
-                    if (q.backpressure) {
-                      res.setHeader('Retry-After', '30');
-                      return jsonResponse(res, { error: 'Ingestion queue saturated — retry shortly', queued_depth: q.depth }, 429);
-                    }
-                    res.setHeader('X-Job-Id', q.job_id);
-                    return jsonResponse(res, { success: true, job_id: q.job_id, status: 'queued', filename: filePart.filename, mode: 'queued' }, 202);
-                  } catch (qErr) {
-                    // Queue trouble must never block uploads — fall through to
-                    // the inline (async/sync) path below.
-                    console.warn('[kb-queue] enqueue failed, falling back inline:', qErr.message);
-                  }
-                }
-
-                if (asyncMode) {
-                  const jobId = crypto.randomUUID();
-                  ingestTracker.createJob(jobId, { userId, orgId, filename: filePart.filename, kind: 'knowledge_upload' });
-                  res.setHeader('X-Job-Id', jobId);
-                  jsonResponse(res, { success: true, job_id: jobId, status: 'queued', filename: filePart.filename }, 202);
-                  // Background ingest — per-stage progress streamed into the tracker.
-                  (async () => {
-                    const tBg = Date.now();
-                    try {
-                      const result = await documentFirstIngestion.ingestSource({
-                        userId, orgId,
-                        source: { type: 'kb', filename: filePart.filename },
-                        file: { buffer: filePart.data, contentType: filePart.contentType || `text/${ext}`, filename: filePart.filename },
-                        metadata: phase1Metadata,
-                        onProgress: (p) => {
-                          const prev = ingestTracker.getJob(jobId)?.metadata || {};
-                          ingestTracker.updateJob(jobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
-                        },
-                      });
-                      const prev = ingestTracker.getJob(jobId)?.metadata || {};
-                      ingestTracker.updateJob(jobId, {
-                        status: 'indexed', progress: 100, memoryId: result.documentId,
-                        metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, candidateCount: result.candidateCount, promotedCount: result.promotedCount },
-                      });
-                      if (planEnforcer && orgId) {
-                        planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
-                        planEnforcer.recordUsage(orgId, 'uploads', 1);
-                      }
-                      console.log(`[knowledge:async] ✓ ${filePart.filename} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tBg}`);
-                    } catch (bgErr) {
-                      console.error(`[knowledge:async] ✗ ${filePart.filename}:`, bgErr.message);
-                      ingestTracker.updateJob(jobId, { status: 'failed', error: bgErr.message });
-                    }
-                  })();
-                  return;
-                }
-
-                const tPhase1 = Date.now();
-                try {
-                  const result = await documentFirstIngestion.ingestSource({
-                    userId, orgId,
-                    source: { type: 'kb', filename: filePart.filename },
-                    file: { buffer: filePart.data, contentType: filePart.contentType || `text/${ext}`, filename: filePart.filename },
-                    metadata: {
-                      tags: userTags,
-                      project: containerTag,
-                      project_id: projectIds[0] || null,
-                      project_ids: projectIds,
-                      primary_team_id: primaryTeamId,
-                      visibility: targetScope === 'organization' ? 'organization' : 'private',
-                      scope: projectIds.length ? 'project' : ((targetScope === 'organization' && !primaryTeamId) ? 'organization' : undefined),
-                      smart: smartFlag,
-                      picture_descriptions: pictureDescFlag,
-                    }
-                  });
-                  console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);
-                  // Record actual page usage. Use segmentCount as a page-proxy
-                  // when real pages unknown (txt/csv/etc).
-                  if (planEnforcer && orgId) {
-                    const realPages = result.pages || result.segmentCount || 1;
-                    planEnforcer.recordUsage(orgId, 'kbPages', realPages);
-                    planEnforcer.recordUsage(orgId, 'uploads', 1);
-                  }
-                  // ─── Enterprise schema extraction (auto|true) ───
-                  let enterprise = null;
-                  if (enterpriseFlag !== 'false') {
-                    try {
-                      const [{ detectDocumentType }, { extractSchema }] = await Promise.all([
-                        import('./knowledge/enterprise/detector.js'),
-                        import('./knowledge/enterprise/extractor.js'),
-                      ]);
-                      // Pull representative text from segments
-                      const segText = (await prisma.knowledgeSegment.findMany({
-                        where: { documentId: result.documentId },
-                        orderBy: { segmentIndex: 'asc' },
-                        take: 4,
-                        select: { content: true },
-                      })).map(s => s.content).join('\n\n');
-                      const detection = confirmedType
-                        ? { type: confirmedType, confidence: 1.0, reasoning: 'caller-confirmed' }
-                        : await detectDocumentType(segText, { filename: filePart.filename });
-                      const shouldExtract = enterpriseFlag === 'true'
-                        || (enterpriseFlag === 'auto' && detection.type !== 'general' && (detection.confidence ?? 0) >= 0.7);
-                      if (shouldExtract) {
-                        const extracted = await extractSchema(segText, detection.type, {
-                          filename: filePart.filename,
-                        });
-                        enterprise = {
-                          detected_type: detection.type,
-                          confidence: detection.confidence,
-                          reasoning: detection.reasoning,
-                          schema_fields: extracted,
-                        };
-                        console.log(`[knowledge] enterprise extract type=${detection.type} conf=${detection.confidence.toFixed(2)} fields=${Object.keys(extracted || {}).length}`);
-                      } else {
-                        enterprise = {
-                          detected_type: detection.type,
-                          confidence: detection.confidence,
-                          extracted: false,
-                          reason: 'confidence below 0.7 — pass enterprise=true to force',
-                        };
-                      }
-                    } catch (entErr) {
-                      console.warn(`[knowledge] enterprise extract failed (non-fatal): ${entErr.message}`);
-                    }
-                  }
-                  return jsonResponse(res, {
-                    upload_id: crypto.randomUUID(),
-                    filename: filePart.filename,
-                    mode: 'document_first',
-                    documentId: result.documentId,
-                    segmentCount: result.segmentCount,
-                    candidateCount: result.candidateCount,
-                    promotedCount: result.promotedCount,
-                    promotedMemoryIds: result.promotedMemoryIds,
-                    ...(enterprise ? { enterprise } : {}),
-                  });
-                } catch (phase1Err) {
-                  console.error('[knowledge] ✗ Phase1 failed, falling back to legacy:', phase1Err.message, phase1Err.stack);
-                  // Fall through to legacy path
-                }
-              } else {
-                console.log(`[knowledge] Phase 1 disabled (ENABLE_DOCUMENT_FIRST_INGEST=${process.env.ENABLE_DOCUMENT_FIRST_INGEST}), using legacy path`);
-              }
-
-              const { processDocument } = await import('./knowledge/document-chunker.js');
-              const { summary, chunks } = await processDocument(
-                filePart.data,
-                filePart.contentType || `text/${ext}`,
-                filePart.filename,
-                {
-                  user_id: userId,
-                  org_id: orgId,
-                  project: containerTag,
-                  tags: userTags,
-                  visibility: targetScope === 'organization' ? 'organization' : 'private',
-                }
-              );
-
-              // Ingest summary + chunks in background, return immediately
-              const uploadId = crypto.randomUUID();
-
-              // ── Optimization 1: Document-level fingerprint dedup ──
-              // Compute SHA256 of file bytes. If any existing memory for this user
-              // carries this doc-hash tag, skip ingestion entirely. Avoids running
-              // smart ingest for re-uploaded identical files.
-              const docHash = crypto.createHash('sha256').update(filePart.data).digest('hex').slice(0, 16);
-              const docHashTag = `doc-hash:${docHash}`;
-              try {
-                const existing = await prisma.memory.findFirst({
-                  where: {
-                    userId,
-                    deletedAt: null,
-                    tags: { has: docHashTag },
-                  },
-                  select: { id: true, title: true, createdAt: true },
-                });
-                if (existing) {
-                  console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} DEDUPED via ${docHashTag} → existing ${existing.id}`);
-                  return jsonResponse(res, {
-                    upload_id: uploadId,
-                    filename: filePart.filename,
-                    chunks: 0,
-                    deduped: true,
-                    existing_memory_id: existing.id,
-                    message: 'Identical document already ingested. Skipping re-processing.',
-                  });
-                }
-              } catch (dedupErr) {
-                console.warn(`[knowledge] doc-hash dedup check failed (non-fatal):`, dedupErr.message);
-              }
-
-              // Tag every memory we create with the doc-hash so future re-uploads dedupe.
-              const taggedSummary = { ...summary, tags: [...(summary.tags || []), docHashTag] };
-              const taggedChunks = chunks.map(c => ({ ...c, tags: [...(c.tags || []), docHashTag] }));
-
-              console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} chunks=${chunks.length} docHash=${docHash}`);
-
-              // Start background ingestion — smart ingest preserved + optimized.
-              (async () => {
-                let ingested = 0;
-                let failed = 0;
-                const collectionName = 'HIVEMIND_PERSONAL';
-
-                // ── Optimization 2: Pre-embed all chunks IN PARALLEL before
-                //   acquiring per-user advisory lock. Embedding is the slow part
-                //   (200ms/chunk via Mistral). Doing it in parallel before
-                //   smart-ingest critical section means the lock holds for
-                //   conflict-detect + relationship work only — not embedding.
-                const preEmbed = async (text) => {
-                  if (!qdrantClient || !text) return null;
-                  try {
-                    return await qdrantClient.generateEmbedding(String(text).slice(0, 8000));
-                  } catch (embedErr) {
-                    console.warn(`[knowledge] Pre-embed failed (non-fatal):`, embedErr.message);
-                    return null;
-                  }
-                };
-
-                const allPayloads = [
-                  { ...taggedSummary, skip_fact_extraction: true },
-                  ...taggedChunks,
-                ];
-
-                console.log(`[knowledge] Upload ${uploadId} pre-embedding ${allPayloads.length} chunks in parallel...`);
-                const t0 = Date.now();
-                const vectors = await Promise.all(
-                  allPayloads.map(p => preEmbed(p.content))
-                );
-                console.log(`[knowledge] Upload ${uploadId} pre-embed done in ${Date.now() - t0}ms`);
-
-                // ── Optimization 3: Batch Qdrant upserts. Collect every memory
-                //   created during smart ingest, then upsert in one bulk call
-                //   instead of N round-trips.
-                const qdrantBatch = [];
-
-                const ingestOne = async (payload, precomputedVector) => {
-                  // Pass cached vector via `precomputedQueryVector` so graph-engine
-                  // can use it for Qdrant dedup search inside the lock without
-                  // re-embedding. Falls back to live embedding if missing.
-                  const basePayload = precomputedVector
-                    ? { ...payload, precomputedQueryVector: precomputedVector }
-                    : payload;
-                  const [enriched] = await buildRoutedIngestPayloads(basePayload, { smartIngestRouter });
-                  const result = await persistentMemoryEngine.ingestMemory(enriched);
-
-                  // Collect memories for batch Qdrant upsert (not per-chunk write)
-                  if (result?.memoryId && qdrantClient) {
-                    const memory = await persistentMemoryStore.getMemory(result.memoryId);
-                    if (memory) {
-                      qdrantBatch.push({ memory, vector: precomputedVector || null });
-                    }
-                  }
-                  if (result?.factMemoryIds?.length > 0 && qdrantClient) {
-                    for (const factId of result.factMemoryIds) {
-                      const factMem = await persistentMemoryStore.getMemory(factId);
-                      if (factMem) qdrantBatch.push({ memory: factMem, vector: null });
-                    }
-                  }
-                };
-
-                try {
-                  // Summary first (no-process), then chunks in order.
-                  for (let i = 0; i < allPayloads.length; i++) {
-                    try {
-                      await ingestOne(allPayloads[i], vectors[i]);
-                      ingested++;
-                    } catch (chunkErr) {
-                      console.warn(`[knowledge] Chunk ${i} failed:`, chunkErr.message);
-                      failed++;
-                    }
-                  }
-
-                  // Bulk Qdrant upsert — single network roundtrip per batch
-                  if (qdrantBatch.length > 0 && qdrantClient) {
-                    try {
-                      const batchT0 = Date.now();
-                      await Promise.all(qdrantBatch.map(({ memory, vector }) =>
-                        qdrantClient.storeMemory(memory, { collectionName, vector })
-                          .catch(err => console.warn(`[knowledge] Qdrant store ${memory.id} failed:`, err.message))
-                      ));
-                      console.log(`[knowledge] Upload ${uploadId} Qdrant batch (${qdrantBatch.length}) in ${Date.now() - batchT0}ms`);
-                    } catch (batchErr) {
-                      console.warn(`[knowledge] Qdrant batch failed:`, batchErr.message);
-                    }
-                  }
-
-                  console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}, qdrant=${collectionName}`);
-                } catch (err) {
-                  console.error(`[knowledge] Upload ${uploadId} failed:`, err.message);
-                }
-              })();
-
-              return jsonResponse(res, {
-                upload_id: uploadId,
-                filename: filePart.filename,
-                size_bytes: filePart.data.length,
-                chunks: chunks.length + 1, // +1 for summary
-                status: 'processing',
-                message: `Document "${filePart.filename}" uploaded. ${chunks.length} chunks + 1 summary being ingested.`,
-              });
-            } catch (err) {
-              console.error('[knowledge] Upload failed:', err.message);
-              return jsonResponse(res, { error: err.message }, 500);
-            }
+            return handleKnowledgeUploadRoute({
+              req,
+              res,
+              url,
+              userId,
+              orgId,
+              prisma,
+              persistentMemoryEngine,
+              documentFirstIngestion,
+              planEnforcer,
+              planLimitBody,
+              readBoundedBuffer,
+              MULTIPART_MAX_BYTES,
+              parseMultipart,
+              normalizeScopeIds,
+              buildAccessContext,
+              jsonResponse,
+              kbIngestQueue,
+              ingestTracker,
+              buildRoutedIngestPayloads,
+              smartIngestRouter,
+              persistentMemoryStore,
+              qdrantClient,
+              getQdrantClient,
+              recallPersistedMemories,
+            });
           }
           break;
 
@@ -19074,500 +18536,36 @@ exit \$RC
 
         case '/api/recall':
           if (req.method === 'POST') {
-            const _recallT0 = Date.now(); // DX: server-side recall latency surfaced in the response
-            if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
-              return;
-            }
-            // Per-org rate limit. Default 120 rpm with 2× burst.
-            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
-              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
-            }
-            try {
-              // Apply dynamic weights from Operator Layer if available
-              let recallWeights = body.weights;
-              if (cognitiveOperator && !recallWeights) {
-                const intent = detectQueryIntent(body.query_context || body.context || '');
-                recallWeights = computeDynamicWeights(intent);
-              }
-
-              const temporalExpansion = expandTemporalQuery(body.query_context || body.context || '');
-
-              // Rewrite query for better semantic coverage
-              const rewritten = rewriteQuery(body.query_context || body.context || '');
-              const effectiveRecallQuery = rewritten.expanded || body.query_context || body.context;
-
-
-              // containerTag → project mapping for recall
-              const recallProject = body.project || effectiveContainerTag || null;
-
-              let recallAccessCtx = await buildAccessContext(userId, orgId);
-              let recallProjectId = (typeof body.project_id === 'string' && body.project_id.trim())
-                ? body.project_id.trim()
-                : (Array.isArray(body.project_ids) && body.project_ids.find(id => typeof id === 'string' && id.trim())?.trim())
-                || null;
-              if (!recallProjectId && recallProject && prisma) {
-                try {
-                  const term = String(recallProject).trim();
-                  const proj = await prisma.project.findFirst({
-                    where: {
-                      orgId,
-                      OR: [
-                        ...(isUuidLike(term) ? [{ id: term }] : []),
-                        { slug: term.toLowerCase() },
-                        { name: { equals: term, mode: 'insensitive' } },
-                      ],
-                    },
-                    select: { id: true },
-                  }).catch(() => null);
-                  recallProjectId = proj?.id || null;
-                } catch { /* best-effort; access check below still governs */ }
-              }
-              // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
-              // room) passes project_id, FORCE the access context to that project. The
-              // store's tier OR clause + the vector filter then return the project's
-              // memories + org-wide + the caller's personal, and EXCLUDE other projects
-              // — regardless of the caller's project membership (the room/caller
-              // explicitly chose this project). Without project_id, behavior is unchanged.
-              if (recallProjectId) {
-                // SECURITY: only honor a caller-supplied project_id if the caller
-                // can actually access it (member, or owner/admin via buildAccessContext
-                // expansion). Otherwise a guest could recall any project by id.
-                const _baseCtx = recallAccessCtx || {};
-                const _canAccessProject = Array.isArray(_baseCtx.projectIds)
-                  && _baseCtx.projectIds.includes(recallProjectId);
-                if (_canAccessProject) {
-                  recallAccessCtx = { ..._baseCtx, projectIds: [recallProjectId], teamIds: _baseCtx.teamIds || [] };
-                } else {
-                  return jsonResponse(res, { error: 'Project not found or access denied', project_id: recallProjectId }, 403);
-                }
-              }
-
-              // Person-filtered recall ("what did person X update today"): resolve an
-              // author by id, email, or display name (within this org) → userId, then
-              // post-filter results to that author. Combine with date_range for time.
-              let recallAuthorId = null;
-              if (body.author_id && typeof body.author_id === 'string') {
-                recallAuthorId = body.author_id;
-              } else if (body.author && typeof body.author === 'string' && prisma) {
-                const term = body.author.trim();
-                const a = await prisma.user.findFirst({
-                  where: {
-                    organizations: { some: { orgId } },
-                    OR: [{ email: term }, { displayName: { equals: term, mode: 'insensitive' } }],
-                  },
-                  select: { id: true },
-                }).catch(() => null);
-                recallAuthorId = a?.id || null;
-              }
-
-              // Bi-temporal filter: when valid_at is set, return only memories
-              // that were valid at that timestamp (valid_from <= valid_at AND
-              // (valid_to IS NULL OR valid_to > valid_at)). Caller can also
-              // pass transaction_at to filter by when the system learned them.
-              const validAt = body.valid_at ? new Date(body.valid_at) : null;
-              const transactionAt = body.transaction_at ? new Date(body.transaction_at) : null;
-              const bitemporalFilter = (validAt || transactionAt)
-                ? { valid_at: validAt, transaction_at: transactionAt }
-                : null;
-
-              const result = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: effectiveRecallQuery,
-                raw_query: body.query_context || body.context || '', // pre-rewrite phrasing for time-travel intent
-                user_id: userId,
-                org_id: orgId,
-                project: recallProject,
-                source_platforms: body.source_platforms || [],
-                tags: body.tags || [],
-                preferred_project: body.preferred_project || recallProject,
-                preferred_source_platforms: body.preferred_source_platforms || [],
-                preferred_tags: body.preferred_tags || [],
-                date_range: body.date_range || temporalExpansion.dateRange || null,
-                max_memories: body.max_memories || 5,
-                weights: recallWeights,
-                // Type-specific filters (exposed for retrieval routing)
-                is_latest: body.is_latest,              // boolean — filter to latest versions only
-                include_expired: body.include_expired,  // boolean — include expired memories
-                sort: body.sort,                        // 'score' | 'date_asc' | 'date_desc'
-                preference_boost: body.preference_boost,      // boolean — boost preference/opinion memories
-                include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
-                access_context: recallAccessCtx,
-                ...(recallProjectId ? { project_id: recallProjectId, project_ids: [recallProjectId] } : {}),
-                scope_filter: body.scope_filter || null,
-                entity_filter_mode: body.entity_filter_mode || null, // A/B override for the entity lane
-                tiered_view: body.tiered_view ?? null,                // A/B override for the term-overlap reranker
-                cross_rerank: body.cross_rerank ?? null,              // A/B override for the multilingual cross-encoder
-                query_expansion: body.query_expansion ?? null,        // A/B override for cross-lingual query expansion
-                bitemporal: bitemporalFilter,
-              });
-
-              // Post-filter for bi-temporal when retriever doesn't honor it
-              // natively. Drops memories whose creation post-dates transaction_at
-              // OR whose valid_from is after valid_at.
-              if (bitemporalFilter && Array.isArray(result?.memories)) {
-                const filtered = result.memories.filter(m => {
-                  const created = m.created_at ? new Date(m.created_at) : null;
-                  // Read the REAL bi-temporal columns. memories has NO json
-                  // `metadata` column — the old m.metadata?.valid_from path was
-                  // always undefined, silently collapsing valid_from to created_at
-                  // so the validity lower bound never actually applied.
-                  const validFrom = m.valid_from ? new Date(m.valid_from)
-                    : (m.document_date ? new Date(m.document_date) : created);
-                  const validTo = m.valid_to ? new Date(m.valid_to) : null;
-                  if (bitemporalFilter.transaction_at && created && created > bitemporalFilter.transaction_at) return false;
-                  if (bitemporalFilter.valid_at) {
-                    if (validFrom && validFrom > bitemporalFilter.valid_at) return false;
-                    if (validTo && validTo <= bitemporalFilter.valid_at) return false;
-                  }
-                  return true;
-                });
-                result.memories = filtered;
-                result.bitemporal_filter_applied = {
-                  valid_at: bitemporalFilter.valid_at?.toISOString() || null,
-                  transaction_at: bitemporalFilter.transaction_at?.toISOString() || null,
-                  kept: filtered.length,
-                };
-              }
-
-              // Hydrate owner/scope/project_id for the delivered memories (recall paths
-              // can strip these) so attribution display + project/author post-filters are
-              // reliable. One batch query for the ≤N delivered ids.
-              if (Array.isArray(result?.memories) && result.memories.length && prisma) {
-                try {
-                  const ids = result.memories.map(m => m.id).filter(Boolean);
-                  if (ids.length) {
-                    const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
-                    const rows = await prisma.$queryRawUnsafe(
-                      `SELECT m.id, m.user_id, m.scope, m.project_id,
-                              COALESCE(array_agg(mp.project_id::text) FILTER (WHERE mp.project_id IS NOT NULL), '{}') AS project_ids,
-                              u.display_name AS dn, u.email AS em
-                       FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
-                       LEFT JOIN hivemind.memory_projects mp ON mp.memory_id = m.id
-                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})
-                       GROUP BY m.id, m.user_id, m.scope, m.project_id, u.display_name, u.email`,
-                      orgId, ...ids,
-                    );
-                    const byId = Object.fromEntries((rows || []).map(r => [r.id, r]));
-                    for (const m of result.memories) {
-                      const r = byId[m.id];
-                      if (!r) continue;
-                      if (!m.user_id) m.user_id = r.user_id;
-                      if (!m.scope) m.scope = r.scope;
-                      if (m.project_id == null) m.project_id = r.project_id || null;
-                      if (!Array.isArray(m.project_ids)) m.project_ids = Array.isArray(r.project_ids) ? r.project_ids : [];
-                      const nm = r.dn || r.em || null;
-                      if (!m.owner_name) m.owner_name = nm;
-                      if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
-                    }
-                  }
-                } catch (e) { /* attribution best-effort */ }
-              }
-
-              // Project-scope post-filter (guarantee): when project_id is set, keep
-              // memories that are org-wide/personal/legacy (no project_id) OR belong to
-              // THIS project; drop memories that belong to a DIFFERENT project. Uses the
-              // reliably-present scalar project_id, independent of scope hydration.
-              if (recallProjectId && Array.isArray(result?.memories)) {
-                const before = result.memories.length;
-                result.memories = result.memories.filter(
-                  m => {
-                    const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
-                    return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
-                  },
-                );
-                result.project_scope_applied = { project_id: recallProjectId, kept: result.memories.length, dropped: before - result.memories.length };
-              }
-
-              // Author/person post-filter: keep only memories owned by the resolved person.
-              if (recallAuthorId && Array.isArray(result?.memories)) {
-                const before = result.memories.length;
-                result.memories = result.memories.filter(m => m.user_id === recallAuthorId);
-                result.author_filter_applied = { author_id: recallAuthorId, kept: result.memories.length, dropped: before - result.memories.length };
-              }
-
-              // Apply memory type boosts from Operator Layer
-              if (cognitiveOperator && result.memories) {
-                const intent = detectQueryIntent(body.query_context || body.context || '');
-                for (const m of result.memories) {
-                  const boost = getMemoryTypeBoost(intent, m.memory_type || 'fact');
-                  if (boost !== 1.0) {
-                    m.score = (m.score || 0) * boost;
-                    m.operator_boost = boost;
-                  }
-                }
-                // Re-sort after boosts (only if no explicit sort mode requested)
-                if (!body.sort || body.sort === 'score') {
-                  result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
-                }
-                result.intent = intent;
-              }
-
-              // Phase 3: cross-cluster entity-overlap boost for synthesis memories
-              if (result.memories && result.memories.length > 1) {
-                try {
-                  const clusterIndex = new ClusterIndex({ prisma });
-                  result.memories = await crossClusterEntityBoost(result.memories, {
-                    clusterIndex, organizationId: orgId,
-                  });
-                } catch (boostErr) {
-                  console.warn('[api/recall] cross-cluster boost failed:', boostErr.message);
-                }
-              }
-
-              // Inject parent chunks for fact-memories
-              const injectParentChunks = body.inject_parent_chunks !== false;
-              if (injectParentChunks && result.memories && result.memories.length > 0) {
-                for (const mem of result.memories) {
-                  if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
-                    try {
-                      const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
-                      if (parent) {
-                        mem.parent_chunk = parent.content;
-                        mem.parent_document_date = parent.document_date;
-                      }
-                    } catch {}
-                  }
-                }
-              }
-
-              // Deduplicate semantically similar memories
-              if (result.memories && result.memories.length > 1) {
-                const before = result.memories.length;
-                result.memories = deduplicateResults(result.memories);
-                result.dedup = { before, after: result.memories.length, collapsed: before - result.memories.length };
-              }
-
-              // Annotate memories that have known contradictions
-              if (persistentMemoryStore && result.memories) {
-                for (const mem of result.memories) {
-                  try {
-                    const contradictions = await persistentMemoryStore.getRelationships(mem.id, 'Contradicts');
-                    if (contradictions && contradictions.length > 0) {
-                      mem._contradictions = contradictions.map(c => ({
-                        contradicts_memory_id: c.from_id === mem.id ? c.to_id : c.from_id,
-                        confidence: c.confidence,
-                        type: c.metadata?.contradiction_type || 'unknown',
-                      }));
-                    }
-                  } catch {}
-                }
-              }
-
-              // Inject user profile context into recall result
-              if (profileStore) {
-                try {
-                  result.user_profile = await profileStore.buildProfileContext(userId, orgId);
-                } catch (profileErr) {
-                  console.warn('[recall] Profile injection failed:', profileErr.message);
-                }
-              }
-
-              // Attach query rewrite metadata for debugging/transparency
-              result.query_rewrite = {
-                expanded: rewritten.expanded,
-                entities: rewritten.entities,
-                stripped: rewritten.stripped,
-              };
-
-              // ─── Recall v3.1: memory-first event-driven fan-out via RecallRouter ───
-              // Keeps /api/recall's enrichment pipeline (bi-temporal, operator
-              // boost, parent-chunk inject, contradictions, profile, dedupe)
-              // and only delegates the evidence/live fan-out to the unified
-              // router so HTTP callers get the same memory-first behavior as
-              // the agent tool (no regex classifier, anchors come from tags).
-              const mode = body.mode || 'auto';
-              const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
-              const memoryHits = Array.isArray(result.memories) ? result.memories : [];
-              result.mode_used = mode;
-
-              if (wantEvidence && mode !== 'memory') {
-                // 1. Inline evidence_links per memory (SQL join — independent
-                //    of vector search; required for citation UI).
-                try {
-                  const memIds = memoryHits.map(m => m.id).filter(Boolean);
-                  if (memIds.length) {
-                    const links = await prisma.memoryEvidenceLink.findMany({
-                      where: { memoryId: { in: memIds } },
-                      select: {
-                        memoryId: true,
-                        segmentId: true,
-                        documentId: true,
-                        linkType: true,
-                        confidence: true,
-                        excerpt: true,
-                        document: { select: { id: true, title: true, sourcePlatform: true } },
-                      },
-                    });
-                    const byMemory = new Map();
-                    for (const l of links) {
-                      if (!byMemory.has(l.memoryId)) byMemory.set(l.memoryId, []);
-                      byMemory.get(l.memoryId).push({
-                        segment_id: l.segmentId,
-                        document_id: l.documentId,
-                        document_title: l.document?.title || null,
-                        source_platform: l.document?.sourcePlatform || null,
-                        link_type: l.linkType,
-                        confidence: l.confidence,
-                        excerpt: l.excerpt,
-                      });
-                    }
-                    for (const mem of memoryHits) {
-                      mem.evidence = byMemory.get(mem.id) || [];
-                    }
-                  }
-                } catch (evErr) {
-                  console.warn(`[recall] evidence attach failed: ${evErr.message}`);
-                }
-
-                // 2. Memory-first fan-out via RecallRouter (event-driven).
-                //    Replaces the old "sparseMemories || citationIntent" regex
-                //    heuristic with the tag-driven inspection logic.
-                try {
-                  const { recallEnhance } = await import('./memory/recall-router.js');
-                  const enhanced = await recallEnhance({
-                    memories: memoryHits,
-                    query: body.query_context || body.context || '',
-                    ctx: { userId, orgId },
-                    evidenceService: evidenceRetrieval,
-                    prisma,
-                    includeLive: body.include_live !== false,
-                  });
-                  // Dedup evidence against inline-attached links (same segment
-                  // can't show up twice in the result).
-                  const attachedSegIds = new Set(
-                    memoryHits.flatMap(m => (m.evidence || []).map(e => e.segment_id))
-                  );
-                  result.evidence = (enhanced.evidence || [])
-                    .filter(e => !attachedSegIds.has(e.segmentId));
-                  result.evidence_count = result.evidence.length;
-                  result.live = enhanced.live || [];
-                  result.live_count = result.live.length;
-                  result.recall_trace = enhanced.trace;
-                } catch (enhErr) {
-                  console.warn(`[recall] router enhance failed: ${enhErr.message}`);
-                  result.evidence = [];
-                  result.live = [];
-                }
-              }
-
-              // Record search usage after successful recall
-              if (planEnforcer && orgId) {
-                planEnforcer.recordUsage(orgId, 'searches', 1);
-              }
-
-              // ── Promote synthesized[]/raw[] to top-level response ────────────
-              // recallPersistedMemories now returns both synthesized[] + raw[]
-              // alongside the backwards-compat flat memories[].
-              // Expose them at the top level so callers can use rich rendering.
-              if (Array.isArray(result.synthesized)) {
-                // Already set by persisted-retrieval; just ensure it's present
-              } else {
-                result.synthesized = [];
-              }
-              if (!Array.isArray(result.raw)) {
-                result.raw = [];
-              }
-
-              // Slim response — default ON for mode=auto/memory/hybrid/evidence
-              // Caller can opt back into full payload via body.verbose=true
-              if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','project_id','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
-                const slimMem = (m) => {
-                  const out = {};
-                  for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];
-                  return out;
-                };
-                result.memories = (result.memories || []).map(slimMem);
-                // Slim synthesized[] — keep claim/type/confidence/evidence/revision
-                result.synthesized = (result.synthesized || []).map(s => ({
-                  id:         s.id,
-                  type:       s.type,
-                  claim:      s.claim,
-                  title:      s.title,
-                  confidence: s.confidence,
-                  revision:   s.revision,
-                  evidence:   (s.evidence || []).map(e => ({
-                    id:      e.id,
-                    title:   e.title,
-                    snippet: (e.snippet || '').slice(0, 200),
-                  })),
-                  score:      s.score,
-                  created_at: s.created_at,
-                }));
-                // Slim raw[] same as memories slim
-                result.raw = (result.raw || []).map(slimMem);
-                // Drop heavy top-level noise
-                delete result.injectionText;
-                delete result.user_profile;
-                delete result.expansion_stats;
-                delete result.dedup;
-                delete result.query_rewrite;
-                delete result.intent;
-                // Trim evidence snippet payloads
-                if (Array.isArray(result.evidence)) {
-                  result.evidence = result.evidence.map(e => ({
-                    segment_id: e.segmentId || e.segment_id,
-                    document_id: e.documentId || e.document_id,
-                    document_title: e.document?.title || e.document_title || null,
-                    score: e.score,
-                    snippet: (e.snippet || e.content || '').slice(0, 200),
-                  }));
-                }
-              }
-
-              // Phase B tiered cache: fire-and-forget hydration + access stamp.
-              //   - Tier 1 row with score ≥ threshold → fetch full body via live tool
-              //   - Every returned memory → bump lastAccessedAt for tier-promotion heuristics
-              try {
-                const hits = Array.isArray(result.memories) ? result.memories : [];
-                if (hits.length > 0 && prisma) {
-                  const ids = hits.map((m) => m.id).filter(Boolean);
-                  if (ids.length > 0) {
-                    // P2 salience feedback: every recall hit reinforces the
-                    // memory — bump lastAccessedAt (tier heuristics), increment
-                    // recall_count (consumed by synthesis-boost + future
-                    // ranking), and nudge strength (consumed by
-                    // applyClusterBoost). strength is read-clamped to [0.1,1.0]
-                    // and decayed by strength-updater.js, so an uncapped small
-                    // increment here is safe.
-                    prisma.memory.updateMany({
-                      where: { id: { in: ids } },
-                      data: {
-                        lastAccessedAt: new Date(),
-                        recallCount: { increment: 1 },
-                        strength: { increment: 0.05 },
-                      },
-                    }).catch(() => {});
-                    // Self-host: the central updateMany above no-ops (rows live on
-                    // the agent). Mirror the reinforcement to the agent so recall
-                    // scoring's recall_count/strength boost works on self-host too.
-                    try { amrBumpRecall(orgId, ids); } catch { /* best-effort */ }
-                  }
-                  const HYDRATE_THRESHOLD = 0.6;
-                  const tier1Hits = hits.filter((m) => m.tier === 1 && (m.score || 0) >= HYDRATE_THRESHOLD);
-                  if (tier1Hits.length > 0) {
-                    import('./memory/tier-hydrate.js').then(({ hydrateMemory }) => {
-                      for (const hit of tier1Hits) {
-                        hydrateMemory(
-                          { prisma, qdrantClient },
-                          { memoryId: hit.id, userId, orgId },
-                        ).catch(() => {});
-                      }
-                    }).catch(() => {});
-                  }
-                }
-              } catch (hydrateErr) {
-                console.warn('[recall] tier hydration tap failed:', hydrateErr.message);
-              }
-
-              try { if (result && typeof result === 'object' && !Array.isArray(result)) result.timing_ms = Date.now() - _recallT0; } catch { /* additive only */ }
-              jsonResponse(res, result);
-            } catch (error) {
-              console.error('Auto recall failed:', error);
-              return jsonResponse(res, {
-                error: 'Recall failed',
-                message: error.message
-              }, 500);
-            }
+            return handleRecallRoute({
+              req,
+              res,
+              body,
+              userId,
+              orgId,
+              prisma,
+              jsonResponse,
+              ensurePersistedMemoryOrFail,
+              rateLimitAllowOrgRequest,
+              planEnforcer,
+              cognitiveOperator,
+              detectQueryIntent,
+              computeDynamicWeights,
+              expandTemporalQuery,
+              rewriteQuery,
+              effectiveContainerTag,
+              buildAccessContext,
+              isUuidLike,
+              recallPersistedMemories,
+              persistentMemoryStore,
+              ClusterIndex,
+              crossClusterEntityBoost,
+              deduplicateResults,
+              profileStore,
+              evidenceRetrieval,
+              amrBumpRecall,
+              qdrantClient,
+              getMemoryTypeBoost,
+            });
           }
           break;
 
@@ -20870,57 +19868,19 @@ exit \$RC
 
         case '/api/search/quick':
           if (req.method === 'POST') {
-            if (!ensurePersistedMemoryOrFail(res, '/api/search/quick')) {
-              return;
-            }
-            try {
-              const { query, memory_type, tags, source_platform, limit, score_threshold, project } = body;
-
-              if (!query || typeof query !== 'string') {
-                return jsonResponse(res, {
-                  error: 'Validation failed',
-                  message: 'query is required and must be a string'
-                }, 400);
-              }
-
-              // containerTag → project mapping for search
-              const searchProject = project || effectiveContainerTag || null;
-
-              // UNIFIED RECALL: route quick-search through the SAME improved core
-              // (recallPersistedMemories) every other surface uses — pool floor
-              // 150, wide-window tiered reranker, cross-lingual expansion, quant
-              // rescore. Previously this used ThreeTierRetrieval/PageIndex, a
-              // divergent path that did NOT reflect recall accuracy upgrades.
-              const sAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
-              const sRecall = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: query,
-                user_id: userId,
-                org_id: orgId,
-                ...(searchProject ? { project_id: searchProject } : {}),
-                tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map((t) => t.trim()).filter(Boolean) : []),
-                source_platforms: source_platform ? [source_platform] : [],
-                memory_type: memory_type || undefined,
-                max_memories: limit || 10,
-                access_context: sAccessCtx,
-              }).catch((e) => { console.warn('[search/quick] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
-
-              if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
-
-              jsonResponse(res, {
-                results: sRecall.memories || [],
-                memories: sRecall.memories || [],
-                evidence: sRecall.evidence || [],
-                count: (sRecall.memories || []).length,
-                source: 'unified-recall',
-              });
-            } catch (error) {
-              console.error('QuickSearch failed:', error);
-              return jsonResponse(res, {
-                error: 'QuickSearch failed',
-                message: error.message,
-                requestId: error.requestId || crypto.randomUUID()
-              }, 500);
-            }
+            return handleQuickSearchRoute({
+              res,
+              body,
+              userId,
+              orgId,
+              jsonResponse,
+              ensurePersistedMemoryOrFail,
+              effectiveContainerTag,
+              buildAccessContext,
+              recallPersistedMemories,
+              persistentMemoryStore,
+              planEnforcer,
+            });
           }
           break;
 
@@ -22323,13 +21283,13 @@ exit \$RC
               // Keep them in the full message for LLM context, but don't extract as facts
               msgTrimmed = msgTrimmed.replace(/<METADATA:[^>]*>[\s\S]*?<\/METADATA:[^>]*>/gi, '').trim();
               
-              const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
-              const isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
-              const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
+              let isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
+              let isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
+              let isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
               const isDeclarative = !isQuestion && msgTrimmed.length > 5 && !/^(hi|hey|hello|yo|thanks|ok|okay|yes|no|sure)\b/i.test(msgTrimmed);
               const isUpdateStatement = /\b(no longer|not anymore|changed|updated|now (is|uses|works)|switched to|replaced|resigned|quit|left|moved to|new |instead of)\b/i.test(msgTrimmed);
               const hasMemoryKeywords = /\b(remember|save|don't forget|note that|update|my new|i just|i got|i moved|i changed|i bought|i sold|i started|i stopped|i am|i'm)\b/i.test(msgTrimmed);
-              const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
+              let isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
               const toneGuidance = inferChatToneGuidance(message);
 
               // Step 1: Recall memories for context
@@ -22337,233 +21297,27 @@ exit \$RC
               let injectionText = '';
 
               if (persistentMemoryStore) {
-                try {
-                  const chatIntent = detectQueryIntent(message);
-                  const chatWeights = computeDynamicWeights(chatIntent);
-
-                  // Bi-temporal detection — if user references a date or
-                  // says "as of X" / "back in", flip recall into time-travel
-                  // mode via valid_at. Matches hivemind_at MCP semantics.
-                  let chatValidAt = null;
-                  try {
-                    const m = message.match(/\b(?:as of|back in|on|before|by)\s+([A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?|\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|Q[1-4]\s+\d{4})/i);
-                    if (m && m[1]) {
-                      const parsed = new Date(m[1]);
-                      if (!Number.isNaN(parsed.getTime())) chatValidAt = parsed;
-                    }
-                  } catch { /* no temporal hint */ }
-
-                  // Auto-infer tags from the query phrasing (decision/bug/refactor/
-                  // file:<path>/fn:<name>/...). These are passed as preferred_tags
-                  // to the recall layer — soft +0.08 score boost per overlap, never
-                  // a hard filter — so the right memories rise to the top without
-                  // hiding paraphrased matches.
-                  let inferredTags = [];
-                  let inferredType = null;
-                  try {
-                    const { inferQueryTags, inferMemoryType } = await import('./services/query-tag-inference.js');
-                    inferredTags = inferQueryTags(message);
-                    inferredType = inferMemoryType(message);
-                    if (inferredTags.length > 0) {
-                      console.log('[chat] inferred preferred_tags:', inferredTags, 'memory_type:', inferredType || '(any)');
-                    }
-                  } catch (tagErr) {
-                    console.warn('[chat] tag inference failed:', tagErr.message);
-                  }
-
-                  // For meta-queries ("what do you know about me"), broaden the search
-                  const recallQueries = isMetaQuery
-                    ? [message, 'personal facts about user', 'user preferences decisions']
-                    : isAggregateQuery
-                    ? [message, message.replace(/\b(what|list|all|everything)\b/gi, '').trim()]
-                    : [message];
-
-                  let allRecalled = [];
-                  const chatAccessCtx = await buildAccessContext(userId, orgId);
-                  for (const q of recallQueries) {
-                    if (!q || q.length < 3) continue;
-                    try {
-                      const recallResult = await recallPersistedMemories(persistentMemoryStore, {
-                        query_context: q,
-                        user_id: userId,
-                        org_id: orgId,
-                        max_memories: isMetaQuery ? 20 : isAggregateQuery ? 15 : isRecencyQuery ? 15 : 10,
-                        inject_parent_chunks: true,
-                        weights: chatWeights,
-                        preference_boost: chatIntent.type === 'preference',
-                        // Boost cognition-loop canonicals (synthesis + drift-compacted
-                        // summaries) — they're the highest-density truth in the graph.
-                        preferred_tags: [
-                          ...inferredTags,
-                          'canonical-summary',
-                          'synthesized',
-                          'cognition-loop',
-                        ],
-                        access_context: chatAccessCtx,
-                        // Bi-temporal time-travel for date-shaped questions
-                        ...(chatValidAt ? { bitemporal: { valid_at: chatValidAt } } : {}),
-                      });
-                      const recalled = recallResult.memories || [];
-                      injectionText = injectionText || recallResult.injectionText || '';
-                      // Merge, dedup by id
-                      const existingIds = new Set(allRecalled.map(m => m.id));
-                      for (const m of recalled) {
-                        if (!existingIds.has(m.id)) {
-                          existingIds.add(m.id);
-                          allRecalled.push(m);
-                        }
-                      }
-                    } catch {}
-                  }
-
-                  let recalledMemories = allRecalled;
-
-                  // Inject parent chunks for fact-memories (richer context)
-                  for (const mem of recalledMemories) {
-                    if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
-                      try {
-                        const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
-                        if (parent) mem.parent_chunk = parent.content;
-                      } catch {}
-                    }
-                  }
-
-                  // For meta-queries, prioritize facts and personal content
-                  if (isMetaQuery) {
-                    recalledMemories.sort((a, b) => {
-                      const aIsFact = (a.memory_type === 'fact' || (a.tags || []).includes('extracted-fact')) ? 1 : 0;
-                      const bIsFact = (b.memory_type === 'fact' || (b.tags || []).includes('extracted-fact')) ? 1 : 0;
-                      const aIsPersonal = (a.tags || []).includes('sent-by-user') ? 1 : 0;
-                      const bIsPersonal = (b.tags || []).includes('sent-by-user') ? 1 : 0;
-                      return (bIsFact + bIsPersonal) - (aIsFact + aIsPersonal) || (b.score || 0) - (a.score || 0);
-                    });
-                  }
-
-                  // For recency queries, re-sort by created_at descending
-                  if (isRecencyQuery && recalledMemories.length > 0) {
-                    recalledMemories.sort((a, b) => {
-                      const dateA = new Date(a.created_at || a.document_date || 0);
-                      const dateB = new Date(b.created_at || b.document_date || 0);
-                      return dateB - dateA;
-                    });
-                    try {
-                      const newest = await persistentMemoryStore.listLatestMemories({
-                        user_id: userId, org_id: orgId,
-                      });
-                      const recentReal = newest
-                        .filter(m => !(m.tags || []).includes('observation') && !(m.tags || []).includes('longmemeval'))
-                        .slice(0, 5);
-                      const existingIds = new Set(recalledMemories.map(m => m.id));
-                      for (const m of recentReal) {
-                        if (!existingIds.has(m.id)) {
-                          m._recencyInjected = true;
-                          recalledMemories.unshift(m);
-                        }
-                      }
-                    } catch {}
-                  }
-
-                  // Filter out irrelevant results - lower threshold for better recall
-                  const CHAT_MIN_SCORE = 0.05; // Lowered from 0.12 to allow more relevant memories
-                  // Identity / voice-profile config memories must NEVER pollute the
-                  // user-knowledge recall context. They're consumed elsewhere
-                  // (assistant-identity loader + voice-profile loader) and
-                  // including them here causes the LLM to confuse "the user
-                  // named the assistant Sage" with "the user IS named Sage".
-                  const CONFIG_TAGS = new Set(['assistant-name', 'voice-profile', 'org-voice', 'user-voice']);
-                  const relevantMemories = recalledMemories.filter(m => {
-                    const tags = m.tags || [];
-                    if (tags.some(t => CONFIG_TAGS.has(t))) return false;
-                    if (m._recencyInjected) return true;
-                    // Always include high confidence memories, lower threshold for others
-                    return (m.score || 0) >= CHAT_MIN_SCORE || (m.vectorScore || 0) >= 0.3;
-                  });
-
-                  // Debug logging for chat recall
-                  console.log('[chat] Recall stats: %d total, %d relevant, scores:', recalledMemories.length, relevantMemories.length, relevantMemories.slice(0, 3).map(m => ({ score: m.score, vectorScore: m.vectorScore, content: (m.content||'').slice(0,50) })));
-
-                  // Decision-first sort when the user asks about choices.
-                  const isDecisionQuery = /\b(decide|decision|chose|chosen|picked|selected|why did (we|i|you)|why use|why prefer|trade-off)\b/i.test(message);
-                  if (isDecisionQuery) {
-                    relevantMemories.sort((a, b) => {
-                      const aDec = (a.memory_type === 'decision' || (a.tags || []).includes('decision')) ? 1 : 0;
-                      const bDec = (b.memory_type === 'decision' || (b.tags || []).includes('decision')) ? 1 : 0;
-                      return bDec - aDec || (b.score || 0) - (a.score || 0);
-                    });
-                  }
-
-                  // Variable per-memory content limit: top 3 get full reasoning,
-                  // rest get a tighter slice. This prevents "I couldn't find
-                  // info" caused by truncating the most relevant decision/code
-                  // block mid-sentence.
-                  memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
-                    const isFact = (m.tags || []).includes('extracted-fact');
-                    const cap = idx < 3 ? 2400 : isFact ? 400 : 700;
-                    return {
-                      id: m.id,
-                      title: m.title || (m.content || '').slice(0, 60),
-                      content: (m.content || '').slice(0, cap),
-                      parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, idx < 3 ? 1200 : 500) : undefined,
-                      score: m.score || 0,
-                      tags: m.tags || [],
-                      memory_type: m.memory_type,
-                      created_at: m.created_at,
-                      document_date: m.document_date,
-                    };
-                  });
-
-                  // Graph-expand the top match: pull memories linked via
-                  // Updates / Extends / Derives one hop away. This surfaces
-                  // related decisions / refactors / bug fixes the recall
-                  // didn't score high but are structurally connected.
-                  if (memories.length > 0 && prisma) {
-                    try {
-                      const topId = memories[0].id;
-                      const links = await prisma.relationship.findMany({
-                        where: {
-                          OR: [{ fromId: topId }, { toId: topId }],
-                          type: { in: ['Updates', 'Extends', 'Derives'] },
-                          fromMemory: { userId, orgId, deletedAt: null },
-                          toMemory: { userId, orgId, deletedAt: null },
-                        },
-                        select: { fromId: true, toId: true, type: true },
-                        take: 5,
-                      });
-                      const seen = new Set(memories.map(m => m.id));
-                      const connectedIds = [];
-                      for (const r of links) {
-                        const nbr = r.fromId === topId ? r.toId : r.fromId;
-                        if (!seen.has(nbr)) { seen.add(nbr); connectedIds.push(nbr); }
-                      }
-                      if (connectedIds.length > 0) {
-                        const connectedMems = await prisma.memory.findMany({
-                          where: { id: { in: connectedIds }, userId, orgId, deletedAt: null },
-                          select: {
-                            id: true, title: true, content: true, tags: true,
-                            memoryType: true, createdAt: true, documentDate: true
-                          },
-                        });
-                        for (const cm of connectedMems) {
-                          memories.push({
-                            id: cm.id,
-                            title: cm.title || (cm.content || '').slice(0, 60),
-                            content: (cm.content || '').slice(0, 1200),
-                            score: 0.5, // synthetic — graph-expanded
-                            tags: cm.tags || [],
-                            memory_type: cm.memoryType,
-                            created_at: cm.createdAt,
-                            document_date: cm.documentDate,
-                            _graphExpanded: true,
-                          });
-                        }
-                      }
-                    } catch (gErr) {
-                      console.warn('[chat] graph expand failed:', gErr.message);
-                    }
-                  }
-                } catch (recallErr) {
-                  console.warn('[chat] Recall failed:', recallErr.message);
-                }
+                const chatRecall = await buildChatRecallContext({
+                  message,
+                  userId,
+                  orgId,
+                  prisma,
+                  persistentMemoryStore,
+                  persistentMemoryEngine,
+                  smartIngestRouter,
+                  buildRoutedIngestPayloads,
+                  recallPersistedMemories,
+                  buildAccessContext,
+                  detectQueryIntent,
+                  computeDynamicWeights,
+                });
+                memories = chatRecall.memories;
+                injectionText = chatRecall.injectionText;
+                isQuestion = chatRecall.isQuestion;
+                isMetaQuery = chatRecall.isMetaQuery;
+                isAggregateQuery = chatRecall.isAggregateQuery;
+                isRecencyQuery = chatRecall.isRecencyQuery;
+                msgTrimmed = chatRecall.msgTrimmed;
               }
 
               // Inject persistent user profile (sanitized — drop any user-profile
@@ -23442,7 +22196,37 @@ async function warmUpRecall() {
 
 const PORT = process.env.PORT || 3000;
 
-server.listen(PORT, () => {
+let appSidecarsStarted = false;
+function startAppSidecars() {
+  if (!shouldRunWarmupsAndSidecars() || appSidecarsStarted) return;
+  appSidecarsStarted = true;
+  warmUpRecall(); // fire-and-forget: warms the embedding service so recall isn't empty during cold-start
+  (async () => {
+    try {
+      const { startDRServer } = await import('./deep-research/dr-server.js');
+      const drPort = parseInt(process.env.DR_PORT || '8055', 10);
+      await startDRServer({
+        memoryStore: persistentMemoryStore,
+        prisma,
+        recallFn: recallPersistedMemories,
+        browserRuntime,
+        authenticateFn: async (apiKey) => {
+          try {
+            const record = await authenticatePersistedApiKey(prisma, apiKey);
+            if (!record) return null;
+            return { userId: record.userId, orgId: record.orgId };
+          } catch { return null; }
+        },
+        port: drPort,
+      });
+    } catch (err) {
+      console.error('[DR Server] Failed to start:', err.message);
+    }
+  })();
+}
+
+if (shouldStartHttpServer()) {
+  server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
@@ -23477,29 +22261,9 @@ server.listen(PORT, () => {
 `);
 
   ensureQdrantSearchIndexes();
-  warmUpRecall(); // fire-and-forget: warms the embedding service so recall isn't empty during cold-start
+  });
+} else {
+  console.log(`[runtime] HTTP server disabled for role=${RUNTIME_ROLE}`);
+}
 
-  // Start DR server in same process — shared memoryStore, prisma, recallFn
-  (async () => {
-    try {
-      const { startDRServer } = await import('./deep-research/dr-server.js');
-      const drPort = parseInt(process.env.DR_PORT || '8055', 10);
-      await startDRServer({
-        memoryStore: persistentMemoryStore,
-        prisma,
-        recallFn: recallPersistedMemories,
-        browserRuntime,
-        authenticateFn: async (apiKey) => {
-          try {
-            const record = await authenticatePersistedApiKey(prisma, apiKey);
-            if (!record) return null;
-            return { userId: record.userId, orgId: record.orgId };
-          } catch { return null; }
-        },
-        port: drPort,
-      });
-    } catch (err) {
-      console.error('[DR Server] Failed to start:', err.message);
-    }
-  })();
-});
+startAppSidecars();

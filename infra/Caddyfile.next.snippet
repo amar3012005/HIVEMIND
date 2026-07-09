@@ -1,0 +1,18 @@
+# Append only after both loopback health checks pass. Restart hm-caddy afterwards.
+# Production core/api routes remain untouched on ports 2026/2027.
+
+b2b-next-core.singulancelabs.com {
+	reverse_proxy localhost:2126
+}
+
+b2b-next-api.singulancelabs.com {
+	reverse_proxy localhost:2127
+}
+
+b2c-next-core.singulancelabs.com {
+	reverse_proxy localhost:2226
+}
+
+b2c-next-api.singulancelabs.com {
+	reverse_proxy localhost:2227
+}

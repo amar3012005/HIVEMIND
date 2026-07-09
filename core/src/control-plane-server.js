@@ -17,6 +17,7 @@ import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
+import { getOrgCounts } from './memory/org-counts.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -659,52 +660,38 @@ function classifyPlatformUser(user) {
   return { tier: b2b ? 'b2b' : 'b2c', active: Boolean(active), plans: [...new Set(plans)] };
 }
 
-const platformAmrCountCache = new Map();
-const PLATFORM_AMR_COUNT_TTL_MS = 15_000;
-
-async function platformAmrMemoryCount(orgId, userId) {
-  const key = `${orgId}:${userId}`;
-  const cached = platformAmrCountCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.count;
-  const { amrStats } = await import('./vector/mneme/driver.js');
-  const stats = await amrStats(orgId, { user_id: userId });
-  const count = Number(stats?.memories);
-  if (!Number.isFinite(count)) throw new Error('AMR stats unavailable');
-  platformAmrCountCache.set(key, { count, expiresAt: Date.now() + PLATFORM_AMR_COUNT_TTL_MS });
-  return count;
-}
-
 async function enrichPlatformUsers(records) {
-  const userIds = records.map((user) => user.id);
-  const centralCounts = await prisma.memory.groupBy({
-    by: ['userId'],
-    where: {
-      userId: { in: userIds }, deletedAt: null, isLatest: true,
-      organization: { memoryStorageMode: { in: ['hybrid', 'hybrid_amr_index', 'byod_hybrid'] } },
-    },
-    _count: { _all: true },
-  });
-  const centralByUser = new Map(centralCounts.map((row) => [row.userId, row._count._all]));
-  return Promise.all(records.map(async (user) => {
-    const memberships = user.organizations.filter((membership) => membership.isActive && membership.org);
-    const amrMemberships = memberships.filter((membership) => ['amr_embedded', 'byod_amr'].includes(membership.org.memoryStorageMode));
-    let amrCount = 0;
-    let countAvailable = true;
-    for (const membership of amrMemberships) {
-      try { amrCount += await platformAmrMemoryCount(membership.org.id, user.id); }
-      catch { countAvailable = false; }
+  const enriched = new Array(records.length);
+  let next = 0;
+  // Platform counts are an admin convenience, not a hot path. Bound the
+  // per-organization queries so opening this page cannot saturate Postgres or
+  // an AMR agent for a large tenant list.
+  const workers = Array.from({ length: Math.min(8, records.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= records.length) return;
+      const user = records[index];
+      const memberships = user.organizations.filter((membership) => membership.isActive && membership.org);
+      let memoryCount = 0;
+      let countAvailable = true;
+      for (const membership of memberships) {
+        try { memoryCount += (await getOrgCounts(prisma, membership.org.id, user.id)).memories; }
+        catch { countAvailable = false; }
+      }
+      const storageModes = [...new Set(memberships.map((membership) => membership.org.memoryStorageMode || memoryStorageModeFor(membership.org.plan, membership.org.hostingMode)))];
+      enriched[index] = {
+        ...user,
+        ...classifyPlatformUser(user),
+        organization_count: memberships.length,
+        user_type: memberships.some((membership) => ['enterprise', 'managed', 'scale'].includes(String(membership.org.plan).toLowerCase())) ? 'enterprise' : 'personal',
+        memory_storage_modes: storageModes,
+        filesystem: storageModes.some((mode) => mode === 'amr_embedded' || mode === 'byod_amr') ? '.amr' : 'hybrid',
+        memory_count: countAvailable ? memoryCount : null,
+      };
     }
-    const storageModes = [...new Set(memberships.map((membership) => membership.org.memoryStorageMode || memoryStorageModeFor(membership.org.plan, membership.org.hostingMode)))];
-    return {
-      ...user,
-      ...classifyPlatformUser(user),
-      organization_count: memberships.length,
-      user_type: memberships.some((membership) => ['enterprise', 'managed', 'scale'].includes(String(membership.org.plan).toLowerCase())) ? 'enterprise' : 'personal',
-      memory_storage_modes: storageModes,
-      filesystem: storageModes.some((mode) => mode === 'amr_embedded' || mode === 'byod_amr') ? '.amr' : 'hybrid',
-      memory_count: countAvailable ? (centralByUser.get(user.id) || 0) + amrCount : null,
-    };
-  }));
+  });
+  await Promise.all(workers);
+  return enriched;
 }
 
 function buildAdminServiceSnapshot() {

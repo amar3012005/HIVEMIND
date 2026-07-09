@@ -35,14 +35,22 @@ _ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent on a
 You run a CONFIDENCE-DRIVEN plan: hold a hypothesis about the caller, update
 your confidence every turn, and CONVERGE — calls must move forward and END,
 never loop. Reply ONLY minified JSON:
-{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100}
+{"action":"direct|recall|schedule","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100,"schedule_when":""}
 
-action:
-- "recall": message needs facts about the company, products, prices, docs,
-  or org history — anything you could get wrong without the knowledge base.
-  WHEN IN DOUBT → "recall".
-- "direct": conversation mechanics — greetings, thanks, confirmations,
-  repeats, or things fully answerable from the visible conversation.
+action — GROUNDING IS SAFETY. Default to "recall".
+- "schedule": the caller has AGREED to a meeting/demo and given (or just
+  confirmed) a concrete day/time — e.g. "Tuesday afternoon works",
+  "let's do 2pm Friday", "yes, book it". Set schedule_when to their exact
+  wording of the time (verbatim). Only when a real booking should happen NOW.
+- "recall": ANY reply that states or implies a fact about the company, its
+  product, what it does, how it works, pricing, capabilities, a comparison to
+  a competitor, deployment, compliance, or a pilot — MUST be recall so the
+  answer is grounded, never invented. "What is this about?", "how are you
+  different?", "what would a pilot look like?" are ALL recall. Slightest doubt → recall.
+- "direct": ONLY pure conversation mechanics that assert NO company/product
+  fact — greetings, thanks, acknowledgements, asking them to repeat, scheduling
+ logistics (confirming a day/time). If a reply would describe the product or
+ make any claim, it is NOT direct.
 
 history_turns: previous turns the answer needs (2-8).
 
@@ -118,7 +126,7 @@ async def route(*, persona_name: str, goal: str,
         text = r.json()["choices"][0]["message"]["content"] or ""
         m = _JSON_RE.search(text)
         out = json.loads(m.group(0)) if m else {}
-        action = out.get("action") if out.get("action") in ("direct", "recall") else "recall"
+        action = out.get("action") if out.get("action") in ("direct", "recall", "schedule") else "recall"
         turns = min(max(int(out.get("history_turns", 3) or 3), 2), 8)
         directive = str(out.get("directive") or "")[:300]
         new_goal = str(out.get("goal_state") or goal_state or "")[:300]
@@ -133,10 +141,45 @@ async def route(*, persona_name: str, goal: str,
                  action, turns, len(new_facts), ms, phase, confidence, new_goal[:60])
         return {"action": action, "history_turns": turns, "directive": directive,
                 "goal_state": new_goal, "new_facts": new_facts,
-                "phase": phase, "confidence": confidence, "router_ms": ms}
+                "phase": phase, "confidence": confidence, "router_ms": ms,
+                "schedule_when": str(out.get("schedule_when") or "")[:120]}
     except Exception as e:  # noqa: BLE001
         log.warning("router failed (%s) — fallback to recall", e)
         return fallback
+
+
+async def parse_when(when_text: str, now_iso: str, tz: str = "Europe/Berlin") -> dict:
+    """Natural-language time → concrete slot. ONE tiny fast-model call (~40-token
+    prompt — no history, no persona: the cheapest possible token load).
+    Returns {start, end (ISO with offset), label} or {error}."""
+    if not config.OPENROUTER_API_KEY:
+        return {"error": "no llm"}
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.post(
+                f"{config.OPENROUTER_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": config.ROUTER_MODEL,
+                    "max_tokens": 150, "temperature": 0,
+                    "messages": [
+                        {"role": "system", "content":
+                            'Convert a spoken meeting time to JSON {"start":"ISO8601 with offset","end":"ISO8601","label":"human label"}. '
+                            "Meetings default 30 min. If only a day/part-of-day is given, pick a sensible business hour (afternoon→14:00). "
+                            "Reply ONLY the JSON."},
+                        {"role": "user", "content": f"now={now_iso} tz={tz}\nspoken time: {when_text[:100]}"},
+                    ],
+                },
+            )
+        text = r.json()["choices"][0]["message"]["content"] or ""
+        m = _JSON_RE.search(text)
+        out = json.loads(m.group(0)) if m else {}
+        if out.get("start") and out.get("end"):
+            return {"start": out["start"], "end": out["end"], "label": str(out.get("label") or when_text)[:80]}
+        return {"error": "unparsed"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:120]}
 
 
 _PLAN_SYS = """You are the call planner for TARA, a spoken voice agent. Given the

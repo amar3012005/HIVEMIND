@@ -32,6 +32,23 @@ async def core_post(path: str, payload: dict, user_id: Optional[str], org_id: Op
         log.debug("core post failed (%s): %s", path, e)
 
 
+async def google_exec(tool: str, arguments: dict, user_id: Optional[str], org_id: Optional[str]) -> dict:
+    """Run a native Google connector tool (calendar_*/gmail_*) via the core
+    bridge with the tenant's Nango token. Returns {'error': ...} on failure —
+    never raises (a failed booking must not kill the call)."""
+    try:
+        async with httpx.AsyncClient(timeout=20, verify=config.VERIFY_TLS) as c:
+            r = await c.post(f"{config.HIVEMIND_CORE_URL}/api/connectors/google/exec",
+                             json={"tool": tool, "arguments": arguments},
+                             headers=_headers(user_id, org_id))
+            j = r.json() if r.content else {}
+            if r.status_code >= 400:
+                return {"error": str(j.get("error") or r.text)[:300]}
+            return j.get("result") if isinstance(j.get("result"), dict) else (j or {})
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
+
 # Persona config cache: (user_id, org_id) → {config, fetched_at}. Skills change
 # rarely mid-call; 120s TTL keeps the router prompt fresh without per-turn fetches.
 _cfg_cache: dict[tuple, dict] = {}

@@ -72,18 +72,19 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/ap
 # Router = the strategist JSON call. Keep it a fast structured-output model
 # (gemini-flash-lite ~0.5s); mercury's diffusion fills the token budget and is
 # slower for tight JSON. DIRECT + RECALL answers = mercury (fastest spoken text).
+# Router = strategist JSON — fast structured-output model.
 ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "google/gemini-2.5-flash-lite")
+# DIRECT (pure mechanics) = mercury-2, called NON-STREAMED (mercury's diffusion
+# streams unreliably — empty/glitch chunks — but is fast + clean one-shot).
 DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "inception/mercury-2")
-# Comma-sep OpenRouter provider order for the direct model (empty = latency sort).
-# Mercury only serves via Inception → leave empty (single provider).
 DIRECT_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_DIRECT_PROVIDER", "").split(",") if p.strip()]
-# Reasoning effort only applies to gpt-oss; empty for mercury (no reasoning tax).
 DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "")
-# Model core uses for spoken recall answers (voice_model override).
-RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "inception/mercury-2")
-# Hard cap on spoken-answer length (core recall). Short = fast + voice-natural;
-# mercury needs >=~200 to emit content at all.
-VOICE_MAX_TOKENS = int(os.getenv("TARA_DG_VOICE_MAX_TOKENS", "240"))
+# RECALL (grounded, accuracy-critical) = Cerebras gpt-oss-120b: 0.85s, reliable
+# streaming, never empty. This is the answer the caller hears on any factual turn.
+RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
+RECALL_PROVIDER = os.getenv("TARA_DG_RECALL_PROVIDER", "Cerebras")
+RECALL_REASONING_EFFORT = os.getenv("TARA_DG_RECALL_REASONING", "low")
+VOICE_MAX_TOKENS = int(os.getenv("TARA_DG_VOICE_MAX_TOKENS", "512"))
 # Speak a filler if the grounded recall answer hasn't started within this many ms.
 FILLER_AFTER_MS = int(os.getenv("TARA_DG_FILLER_AFTER_MS", "400"))
 # Fillers off by default now — Cerebras + warm recall make them unnecessary and

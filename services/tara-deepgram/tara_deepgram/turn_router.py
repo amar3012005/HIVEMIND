@@ -37,12 +37,16 @@ your confidence every turn, and CONVERGE — calls must move forward and END,
 never loop. Reply ONLY minified JSON:
 {"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100}
 
-action:
-- "recall": message needs facts about the company, products, prices, docs,
-  or org history — anything you could get wrong without the knowledge base.
-  WHEN IN DOUBT → "recall".
-- "direct": conversation mechanics — greetings, thanks, confirmations,
-  repeats, or things fully answerable from the visible conversation.
+action — GROUNDING IS SAFETY. Default to "recall".
+- "recall": ANY reply that states or implies a fact about the company, its
+  product, what it does, how it works, pricing, capabilities, a comparison to
+  a competitor, deployment, compliance, or a pilot — MUST be recall so the
+  answer is grounded, never invented. "What is this about?", "how are you
+  different?", "what would a pilot look like?" are ALL recall. Slightest doubt → recall.
+- "direct": ONLY pure conversation mechanics that assert NO company/product
+  fact — greetings, thanks, acknowledgements, asking them to repeat, scheduling
+  logistics (confirming a day/time). If a reply would describe the product or
+  make any claim, it is NOT direct.
 
 history_turns: previous turns the answer needs (2-8).
 
@@ -216,21 +220,41 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
           "make a statement. If [STRATEGY] says wrap up or close: summarize in one "
           "sentence, state the next step, and say goodbye — do not ask anything."
     )
+    is_mercury = "mercury" in config.DIRECT_MODEL
     payload = {
         "model": config.DIRECT_MODEL,
         "messages": [{"role": "system", "content": sys},
                      *[{"role": m["role"], "content": str(m.get("content", ""))[:600]} for m in window]],
-        "max_tokens": 220,   # mercury: short = fast; voice wants 1-2 sentences
+        "max_tokens": 512 if is_mercury else 220,  # mercury needs headroom to form output
         "temperature": 0.6,
-        "stream": True,
-        "stream_options": {"include_usage": True},  # final chunk carries token usage
-        # Pin Cerebras when configured (fastest full completion); else latency sort.
-        "provider": ({"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
-                     if config.DIRECT_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
     }
-    # gpt-oss models accept reasoning effort — low cuts pre-answer reasoning tokens.
+    if config.DIRECT_PROVIDER:
+        payload["provider"] = {"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
     if "gpt-oss" in config.DIRECT_MODEL and config.DIRECT_REASONING_EFFORT:
         payload["reasoning"] = {"effort": config.DIRECT_REASONING_EFFORT}
+
+    # Mercury streams unreliably (empty/glitch chunks) → call it NON-STREAMED and
+    # emit the whole reply at once (Deepgram TTS still starts on the first sentence).
+    # gpt-oss / others stream fine.
+    if is_mercury:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(f"{config.OPENROUTER_BASE_URL}/chat/completions",
+                             headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                                      "Content-Type": "application/json"}, json=payload)
+            if r.status_code != 200:
+                raise RuntimeError(f"direct answer http {r.status_code}: {r.text[:200]}")
+            j = r.json()
+            if usage_out is not None:
+                u = j.get("usage") or {}
+                usage_out["prompt_tokens"] = u.get("prompt_tokens", 0)
+                usage_out["completion_tokens"] = u.get("completion_tokens", 0)
+            content = (j.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            if content.strip():
+                yield content
+            return
+
+    payload["stream"] = True
+    payload["stream_options"] = {"include_usage": True}
     async with httpx.AsyncClient(timeout=30) as c:
         async with c.stream(
             "POST", f"{config.OPENROUTER_BASE_URL}/chat/completions",

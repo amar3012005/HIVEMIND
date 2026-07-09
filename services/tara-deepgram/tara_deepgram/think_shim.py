@@ -184,14 +184,14 @@ async def think(request: Request):
                 vd = " ".join(x for x in (prev_directive, brief) if x)
                 if vd:
                     extra["voice_directive"] = vd[:300]
-                # Speed the spoken recall answer: force the fast model/provider.
+                # Grounded recall answer: reliable fast model+provider (Cerebras).
                 if config.RECALL_MODEL:
                     extra["voice_model"] = config.RECALL_MODEL
-                extra["voice_max_tokens"] = config.VOICE_MAX_TOKENS  # keep mercury short + fast
-                if config.DIRECT_PROVIDER:
-                    extra["voice_provider"] = ",".join(config.DIRECT_PROVIDER)
-                if config.DIRECT_REASONING_EFFORT:
-                    extra["voice_reasoning_effort"] = config.DIRECT_REASONING_EFFORT
+                extra["voice_max_tokens"] = config.VOICE_MAX_TOKENS
+                if config.RECALL_PROVIDER:
+                    extra["voice_provider"] = config.RECALL_PROVIDER
+                if config.RECALL_REASONING_EFFORT:
+                    extra["voice_reasoning_effort"] = config.RECALL_REASONING_EFFORT
             core_gen = stream_tara(
                 query=query, session_id=session_id, user_id=user_id,
                 org_id=org_id, language=language, mode=mode, extra=extra or None,

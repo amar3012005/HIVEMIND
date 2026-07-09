@@ -274,7 +274,7 @@ export class PlanEnforcer {
         // we count all active integrations belonging to users in the org.
         const count = await this.prisma.platformIntegration.count({
           where: {
-            user: { organizationMemberships: { some: { organizationId: orgId } } },
+            user: { organizations: { some: { orgId } } },
             isActive: true,
           },
         });
@@ -398,7 +398,7 @@ export class PlanEnforcer {
 
     // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
     let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
-    try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizationMemberships: { some: { organizationId: orgId } } }, isActive: true } }); } catch { /* skip */ }
+    try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizations: { some: { orgId } } }, isActive: true } }); } catch { /* skip */ }
     try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId } }); } catch { /* skip */ }
     try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId } }); } catch { /* skip */ }
 

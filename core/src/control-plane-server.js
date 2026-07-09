@@ -364,6 +364,9 @@ function _releaseShotSlot() {
 }
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = requireAdminSecret();
+const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
+const PLATFORM_ADMIN_TTL_SECONDS = 15 * 60;
+const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -602,6 +605,34 @@ function getConnectorCallbackUrl(provider) {
 
 function isAdminAuthorized(req, url) {
   return req.headers['x-admin-secret'] === ADMIN_SECRET || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+}
+
+function secretsMatch(left, right) {
+  const a = Buffer.from(String(left || ''));
+  const b = Buffer.from(String(right || ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function makePlatformAdminCookie() {
+  const expiresAt = Math.floor(Date.now() / 1000) + PLATFORM_ADMIN_TTL_SECONDS;
+  const signature = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}`).digest('base64url');
+  return `${PLATFORM_ADMIN_COOKIE}=${expiresAt}.${signature}; HttpOnly; Path=/; SameSite=Strict; Secure; Max-Age=${PLATFORM_ADMIN_TTL_SECONDS}`;
+}
+
+function hasPlatformAdminCookie(req) {
+  const raw = parseCookies(req)[PLATFORM_ADMIN_COOKIE] || '';
+  const [expiresAt, signature] = raw.split('.');
+  if (!expiresAt || !signature || Number(expiresAt) <= Math.floor(Date.now() / 1000)) return false;
+  const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}`).digest('base64url');
+  return secretsMatch(signature, expected);
+}
+
+function classifyPlatformUser(user) {
+  const plans = (user.organizations || []).map((membership) => membership.org?.plan || 'free');
+  const b2b = plans.some((plan) => ['scale', 'enterprise', 'managed'].includes(String(plan).toLowerCase()));
+  const lastActiveAt = user.lastActiveAt || null;
+  const active = lastActiveAt && Date.now() - new Date(lastActiveAt).getTime() <= PLATFORM_ACTIVE_WINDOW_MS;
+  return { tier: b2b ? 'b2b' : 'b2c', active: Boolean(active), plans: [...new Set(plans)] };
 }
 
 function buildAdminServiceSnapshot() {
@@ -1523,6 +1554,44 @@ const server = http.createServer(async (req, res) => {
     const container = url.searchParams.get('container') || 'hm-control';
     const logs = getControlPlaneLogBuffer(container).map(e => `[${e.timestamp}] [${e.type.toUpperCase()}] ${e.line}`);
     return jsonResponse(res, { container, logs });
+  }
+
+  if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
+    const body = await parseBody(req).catch(() => ({}));
+    if (!secretsMatch(body?.passkey, ADMIN_SECRET)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    return jsonResponse(res, { ok: true, expires_in_seconds: PLATFORM_ADMIN_TTL_SECONDS }, 200, {
+      'Set-Cookie': makePlatformAdminCookie(),
+    });
+  }
+
+  if (pathname === '/admin/api/platform/users' && req.method === 'GET') {
+    if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 100)));
+    const query = String(url.searchParams.get('q') || '').trim();
+    const where = {
+      deletedAt: null,
+      ...(query ? { OR: [{ email: { contains: query, mode: 'insensitive' } }, { displayName: { contains: query, mode: 'insensitive' } }] } : {}),
+    };
+    const [total, records] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        orderBy: [{ lastActiveAt: 'desc' }, { createdAt: 'desc' }],
+        take: limit,
+        select: {
+          id: true, email: true, displayName: true, createdAt: true, lastActiveAt: true,
+          organizations: { select: { isActive: true, org: { select: { id: true, name: true, plan: true } } } },
+        },
+      }),
+    ]);
+    const users = records.map((user) => ({ ...user, ...classifyPlatformUser(user), organization_count: user.organizations.length }));
+    const summary = users.reduce((acc, user) => {
+      acc[user.tier] += 1;
+      if (user.active) acc.active += 1; else acc.sleeping += 1;
+      return acc;
+    }, { b2b: 0, b2c: 0, active: 0, sleeping: 0 });
+    return jsonResponse(res, { total, returned: users.length, summary, users });
   }
 
   if (pathname === '/admin/api/logs' && req.method === 'GET') {

@@ -21833,6 +21833,7 @@ ${injectionText}`;
                     wordCount: true,
                     parseStatus: true,
                     parseEngine: true,
+                    parseMetadata: true,
                     structureExtracted: true,
                     tags: true,
                     createdAt: true,
@@ -21851,6 +21852,9 @@ ${injectionText}`;
               const derivedCountMap = await countDerivedMemoriesByDocumentIds(documents.map(doc => doc.id), orgId);
               const enriched = documents.map(doc => ({
                 ...doc,
+                // Parser metadata records PDF/DOCX pages and PPTX slides. Every
+                // standalone artifact (including an image) consumes one KB page.
+                pageCount: Math.max(1, Number(doc.parseMetadata?.pages || doc.parseMetadata?.page_count || 1)),
                 segmentCount: doc._count.segments,
                 promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
                 _count: undefined

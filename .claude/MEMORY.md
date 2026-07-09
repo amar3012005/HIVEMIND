@@ -114,3 +114,37 @@ entry after each meaningful task. Newest at top within a date. Pair with
 - Applied JSON-LD (Org sameAs, FAQPage), llms.txt, sitemap, robots AI-bot allows,
   react-helmet per-route meta. react-snap prerender FAILED (Chromium not downloaded) ->
   build green but no prerendered HTML. Decision pending: fix react-snap vs Vercel edge.
+
+## 2026-07-09 — TARA voice model stack (mercury-2 + Cerebras split)
+- **Direct (mechanics)** = `inception/mercury-2` called **NON-STREAMED** (mercury's diffusion
+  streams empty/glitch chunks through our SSE; one-shot is fast + clean). Config
+  `TARA_DG_DIRECT_MODEL`.
+- **Grounded recall (accuracy-critical)** = `openai/gpt-oss-120b` @ **Cerebras** (0.85s,
+  reliable streaming, never empty). Config `TARA_DG_RECALL_MODEL` / `TARA_DG_RECALL_PROVIDER=Cerebras`.
+  DO NOT put mercury here — it returns "Empty response" on the larger grounded prompt.
+- **Router (strategist JSON)** = `google/gemini-2.5-flash-lite` (~0.5s). Mercury is slower for
+  tight JSON. Router is **recall-biased**: any product/company/comparison claim → recall (grounded
+  via stream_tara), only pure mechanics → direct. Kills domain hallucination.
+- Hypothesis/clinical engine (phase discover→qualify→propose→close + confidence 0-100) verified
+  on a real-life 6-turn skeptical-banker call: conf 50→100, grounded EU-sovereignty answers,
+  drove to demo booking, zero empty replies.
+- tara-deepgram is the voice SIDECAR (port 8091, `docker run` on singulance /opt/tara-deepgram) —
+  NOT in the hetzner Compose file; the Compose-only rule governs hm-core/hm-control. Deploy =
+  rsync /opt/tara-deepgram + docker build + recreate. Core change (voice_max_tokens) baked via Compose.
+
+## 2026-07-09 — Google Calendar global toolkit + TARA mid-call booking (54c00805)
+- `core/src/connectors/google-native.js` GOOGLE_TOOLS gains `calendar_*`: list_calendars,
+  list_events, get_event, freebusy, create_event (sendUpdates=all), update_event, delete_event,
+  respond, current_time. Same registry HyperAgents uses via `POST /api/connectors/google/exec`
+  — one global toolkit for rooms AND TARA. Fallback chain google-calendar→gmail→google-docs.
+- TARA router action `schedule` (+schedule_when verbatim): shim branch does
+  calendar_current_time → parse_when (ONE ~40-token flash-lite call) → freebusy →
+  create_event → speaks TRUE outcome; success sets goal_state "BOOKED ✓" + phase wrapup.
+  Graceful fallbacks: calendar unavailable → "team will send invite"; conflict → propose alternative.
+  Verified e2e: "Tuesday 2pm works — book it" → action=schedule conf=100 → clean fallback speech
+  (org's Google token currently lacks calendar scope — user must connect Google Calendar in
+  Connectors; then the same path books for real; bridge+token resolution verified to Google 403).
+- DEPLOY (per runbook): merged feat/mneme-foundation into /root/hivemind-next
+  (codex/production-hardening-runtime; only conflict .claude/MEMORY.md, ours-kept), rollback tag
+  `hivemind/core-api:rollback-20260709-212142`, built from hivemind-next, recreated core via
+  production Compose `--no-deps --force-recreate`. Cold checks green; both work-streams preserved.

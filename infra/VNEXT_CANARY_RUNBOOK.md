@@ -21,6 +21,14 @@ cd /root/hivemind-next
 docker build -f Dockerfile.production -t hivemind/core-api:hivemind-next-<sha> .
 docker build -f Dockerfile.control-plane -t hivemind/control-plane:hivemind-next-<sha> .
 docker build -t hivemind/employees:hivemind-next-<sha> employees-service
+docker build \
+  --build-arg REACT_APP_CONTROL_PLANE_URL=https://b2b-next-api.singulancelabs.com \
+  --build-arg REACT_APP_CORE_API_URL=https://b2b-next-core.singulancelabs.com \
+  -t hivemind/fe:hivemind-next-<sha>-b2b frontend/Da-vinci
+docker build \
+  --build-arg REACT_APP_CONTROL_PLANE_URL=https://b2c-next-api.singulancelabs.com \
+  --build-arg REACT_APP_CORE_API_URL=https://b2c-next-core.singulancelabs.com \
+  -t hivemind/fe:hivemind-next-<sha>-b2c frontend/Da-vinci
 
 cp infra/.env.next.example infra/.env.next
 # Replace every placeholder in infra/.env.next with a unique random value.
@@ -45,6 +53,12 @@ Start B2C only after B2B remains healthy under synthetic load:
 docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml --profile b2c up -d
 ```
 
+The static frontend is endpoint-configured by the Docker build arguments above.
+Before browser login can work, configure the next control-plane's OIDC/Google
+credentials and register both public callback URLs with the identity provider.
+Cartesia requires `CARTESIA_API_KEY` and `CARTESIA_AGENT_ID` in the next
+control-plane environment. Do not copy browser access tokens into the frontend.
+
 ## Verification
 
 ```bash
@@ -52,6 +66,8 @@ curl -fsS http://127.0.0.1:2126/health
 curl -fsS http://127.0.0.1:2127/v1/bootstrap
 curl -fsS http://127.0.0.1:2226/health
 curl -fsS http://127.0.0.1:2227/v1/bootstrap
+curl -fsS -o /dev/null -w "%{http_code}\n" https://b2b-next.singulancelabs.com/hivemind/app
+curl -fsS -o /dev/null -w "%{http_code}\n" https://b2c-next.singulancelabs.com/hivemind/app
 docker stats --no-stream
 ```
 

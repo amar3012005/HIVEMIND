@@ -11,6 +11,7 @@ import {
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
@@ -107,6 +108,11 @@ const CONFIG = {
   corePublicBaseUrl: process.env.HIVEMIND_CORE_API_PUBLIC_URL
     || process.env.HIVEMIND_CORE_PUBLIC_URL
     || 'https://core.hivemind.davinciai.eu:8050',
+  tierRoutingOrigins: parseOrigins(process.env.HIVEMIND_TIER_ROUTING_ORIGINS),
+  b2bCoreApiBaseUrl: process.env.HIVEMIND_B2B_CORE_API_BASE_URL || '',
+  b2bCorePublicBaseUrl: process.env.HIVEMIND_B2B_CORE_API_PUBLIC_URL || '',
+  b2cCoreApiBaseUrl: process.env.HIVEMIND_B2C_CORE_API_BASE_URL || '',
+  b2cCorePublicBaseUrl: process.env.HIVEMIND_B2C_CORE_API_PUBLIC_URL || '',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: requireSessionSecret('HIVEMIND_CONTROL_PLANE_SESSION_SECRET', ['SESSION_SECRET']),
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
@@ -923,9 +929,23 @@ async function upsertUserFromZitadel(userInfo) {
   });
 }
 
-async function getCoreHealth() {
+function resolveCoreTarget(req, org = null) {
+  return resolveTierCore({
+    origin: req?.headers?.origin || '',
+    routingOrigins: CONFIG.tierRoutingOrigins,
+    plan: org?.plan,
+    defaultInternalUrl: CONFIG.coreApiBaseUrl,
+    defaultPublicUrl: CONFIG.corePublicBaseUrl,
+    b2bInternalUrl: CONFIG.b2bCoreApiBaseUrl,
+    b2bPublicUrl: CONFIG.b2bCorePublicBaseUrl,
+    b2cInternalUrl: CONFIG.b2cCoreApiBaseUrl,
+    b2cPublicUrl: CONFIG.b2cCorePublicBaseUrl,
+  });
+}
+
+async function getCoreHealth(coreApiBaseUrl = CONFIG.coreApiBaseUrl) {
   try {
-    const healthResponse = await fetch(`${CONFIG.coreApiBaseUrl}/health`);
+    const healthResponse = await fetch(`${coreApiBaseUrl}/health`);
     return {
       ok: healthResponse.ok,
       status: healthResponse.status
@@ -938,7 +958,8 @@ async function getCoreHealth() {
   }
 }
 
-async function buildAnonymousBootstrapPayload() {
+async function buildAnonymousBootstrapPayload(req) {
+  const core = resolveCoreTarget(req);
   return {
     authenticated: false,
     user: null,
@@ -946,18 +967,19 @@ async function buildAnonymousBootstrapPayload() {
     onboarding: null,
     connectivity: {
       // Browser-facing: must be publicly resolvable, not the docker hostname.
-      core_api_base_url: CONFIG.corePublicBaseUrl,
-      core_health: await getCoreHealth()
+      core_api_base_url: core.publicUrl,
+      core_health: await getCoreHealth(core.internalUrl)
     },
     client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],
     session_api_key: null,
   };
 }
 
-async function buildBootstrapPayload(user) {
+async function buildBootstrapPayload(user, req) {
   const { org, role } = await resolveCurrentOrg(user.id);
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
-  const coreHealth = await getCoreHealth();
+  const core = resolveCoreTarget(req, org);
+  const coreHealth = await getCoreHealth(core.internalUrl);
 
   return {
     authenticated: true,
@@ -982,7 +1004,7 @@ async function buildBootstrapPayload(user) {
     },
     connectivity: {
       // Browser-facing: must be publicly resolvable, not the docker hostname.
-      core_api_base_url: CONFIG.corePublicBaseUrl,
+      core_api_base_url: core.publicUrl,
       core_health: coreHealth
     },
     client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],
@@ -2205,13 +2227,13 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/v1/bootstrap' && req.method === 'GET') {
     const current = await getCurrentSession(req);
     if (!current) {
-      return jsonResponse(res, await buildAnonymousBootstrapPayload());
+      return jsonResponse(res, await buildAnonymousBootstrapPayload(req));
     }
     const user = await prisma?.user.findUnique({ where: { id: current.session.userId } });
     if (!user) {
-      return jsonResponse(res, await buildAnonymousBootstrapPayload());
+      return jsonResponse(res, await buildAnonymousBootstrapPayload(req));
     }
-    return jsonResponse(res, await buildBootstrapPayload(user));
+    return jsonResponse(res, await buildBootstrapPayload(user, req));
   }
 
   // Welcome email — fired by the frontend once the user lands on Overview after

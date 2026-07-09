@@ -30,6 +30,7 @@ const _safe = (p) => { try { p?.catch?.(() => {}); } catch { /* ignore */ } };
 export function meterTokens(orgId, n, apiKeyId = null, model = null, feature = null, parts = null) {
   if (!_tracker || !orgId || !(n > 0)) return;
   _safe(_tracker.recordTokens(orgId, n));
+  _safe(_tracker.recordDaily(orgId, 'tokens', n));
   _safe(_tracker.recordKeyUsage(orgId, n, apiKeyId, model, feature, parts));
 }
 export function meterQuery(orgId)      { if (_tracker && orgId) _safe(_tracker.recordQuery(orgId)); }
@@ -48,6 +49,27 @@ export class UsageTracker {
     this._cacheTTL = 60_000;
   }
 
+  // Commercial totals are intentionally monotonic. Active memory/storage
+  // counts are queried separately; a delete never rewrites historical usage.
+  async _recordCumulative(orgId, metric, amount = 1) {
+    const columns = {
+      tokens: 'tokens_processed', searches: 'search_queries', uploads: 'knowledge_base_uploads',
+      kbPages: 'knowledge_base_pages', memories: 'memories_ingested', deepResearch: 'deep_research_jobs',
+      webIntel: 'web_intel_jobs', graphQueries: 'graph_queries', tara: 'tara_usage',
+    };
+    const column = columns[metric];
+    if (!this.prisma || !orgId || !column || !(amount > 0)) return;
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.org_usage_cumulative (org_id, "${column}") VALUES ($1::uuid, $2)
+         ON CONFLICT (org_id) DO UPDATE SET "${column}" = hivemind.org_usage_cumulative."${column}" + $2, updated_at = NOW()`,
+        orgId, amount,
+      );
+    } catch (err) {
+      console.warn('[usage-tracker] Record cumulative usage failed:', err.message);
+    }
+  }
+
   /**
    * Record token usage for an org.
    * Called on every API request that processes tokens.
@@ -64,6 +86,7 @@ export class UsageTracker {
         orgId, month, tokenCount
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'tokens', tokenCount);
     } catch (err) {
       console.warn('[usage-tracker] Record tokens failed:', err.message);
     }
@@ -119,6 +142,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'searches');
     } catch (err) {
       console.warn('[usage-tracker] Record query failed:', err.message);
     }
@@ -139,6 +163,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'uploads');
     } catch (err) {
       console.warn('[usage-tracker] Record upload failed:', err.message);
     }
@@ -163,6 +188,7 @@ export class UsageTracker {
         orgId, month, pages
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'kbPages', pages);
     } catch (err) {
       console.warn('[usage-tracker] Record KB pages failed:', err.message);
     }
@@ -183,6 +209,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'memories');
     } catch (err) {
       console.warn('[usage-tracker] Record memory failed:', err.message);
     }
@@ -203,6 +230,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'deepResearch');
     } catch (err) {
       console.warn('[usage-tracker] Record deep research failed:', err.message);
     }
@@ -223,6 +251,7 @@ export class UsageTracker {
         orgId, this._currentMonth(), today
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'webIntel');
     } catch (err) {
       console.warn('[usage-tracker] Record web intel failed:', err.message);
     }
@@ -243,6 +272,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'graphQueries');
     } catch (err) {
       console.warn('[usage-tracker] Record graph query failed:', err.message);
     }
@@ -263,6 +293,7 @@ export class UsageTracker {
         orgId, month
       );
       this._invalidateCache(orgId);
+      await this._recordCumulative(orgId, 'tara');
     } catch (err) {
       console.warn('[usage-tracker] Record TARA failed:', err.message);
     }
@@ -387,6 +418,48 @@ export class UsageTracker {
     } catch (err) {
       console.warn('[usage-tracker] Get web intel today failed:', err.message);
       return 0;
+    }
+  }
+
+  async getDailyMetricToday(orgId, metric) {
+    const columns = { tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads', kbPages: 'knowledgeBasePages' };
+    const column = columns[metric];
+    if (!this.prisma || !orgId || !column) return 0;
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT "${column}" FROM "OrgUsageDaily" WHERE "orgId" = $1::uuid AND day = $2::date LIMIT 1`,
+        orgId, this._currentDay(),
+      );
+      return Number(rows[0]?.[column] || 0);
+    } catch (err) {
+      console.warn('[usage-tracker] Get daily metric failed:', err.message);
+      return 0;
+    }
+  }
+
+  async getCumulativeUsage(orgId) {
+    const empty = {
+      tokensProcessed: 0, searchQueries: 0, knowledgeBaseUploads: 0,
+      knowledgeBasePages: 0, memoriesIngested: 0, deepResearchJobs: 0,
+      webIntelJobs: 0, graphQueries: 0, taraUsage: 0,
+    };
+    if (!this.prisma || !orgId) return empty;
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        'SELECT * FROM hivemind.org_usage_cumulative WHERE org_id = $1::uuid LIMIT 1', orgId,
+      );
+      const row = rows[0] || {};
+      return {
+        tokensProcessed: Number(row.tokens_processed || 0), searchQueries: Number(row.search_queries || 0),
+        knowledgeBaseUploads: Number(row.knowledge_base_uploads || 0), knowledgeBasePages: Number(row.knowledge_base_pages || 0),
+        memoriesIngested: Number(row.memories_ingested || 0), deepResearchJobs: Number(row.deep_research_jobs || 0),
+        webIntelJobs: Number(row.web_intel_jobs || 0), graphQueries: Number(row.graph_queries || 0),
+        taraUsage: Number(row.tara_usage || 0),
+      };
+    } catch (err) {
+      // The migration may not yet exist during a rolling deployment.
+      if (!/org_usage_cumulative.*does not exist/i.test(err.message || '')) console.warn('[usage-tracker] Get cumulative usage failed:', err.message);
+      return empty;
     }
   }
 

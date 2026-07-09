@@ -18,6 +18,7 @@ import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { PLANS } from './billing/plans.js';
+import { getEffectivePlan, normalizeReferralCode, redeemReferral } from './billing/entitlements.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -2622,10 +2623,23 @@ const server = http.createServer(async (req, res) => {
     if (!body.name) {
       return jsonResponse(res, { error: 'name is required' }, 400);
     }
-    const requestedPlan = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
+    // Plans are commercial state. A browser cannot self-assign a paid plan;
+    // referrals and Stripe webhooks create time-bound entitlements server-side.
+    const requestedPlanInput = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
+    const requestedPlan = isAdminAuthorized(req, url) ? requestedPlanInput : 'free';
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
+    const referralCode = normalizeReferralCode(body.referralCode);
+    let referralCampaign = null;
+    if (referralCode) {
+      referralCampaign = await prisma.referralCampaign.findUnique({ where: { code: referralCode } }).catch(() => null);
+      const now = new Date();
+      if (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now) || (referralCampaign.endsAt && referralCampaign.endsAt <= now)) {
+        return jsonResponse(res, { error: 'invalid or inactive referral code' }, 400);
+      }
+    }
+    const provisionPlan = referralCampaign?.onboardingPlan || requestedPlan;
 
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
@@ -2640,7 +2654,7 @@ const server = http.createServer(async (req, res) => {
         slug,
         plan: requestedPlan,
         hostingMode,
-        memoryStorageMode: memoryStorageModeFor(requestedPlan, hostingMode),
+        memoryStorageMode: memoryStorageModeFor(provisionPlan, hostingMode),
       }
     });
 
@@ -2649,7 +2663,7 @@ const server = http.createServer(async (req, res) => {
     // routes to the EMBEDDED agent (the same hardened v2 .amr engine self-host runs, in-process
     // on central; hm.* schema + org_<id> collection for its KB). New orgs only — existing orgs
     // keep their current backend until an explicit migration. Never blocks signup.
-    if (hostingMode === 'managed' && memoryStorageModeFor(requestedPlan, hostingMode) === 'amr_embedded') {
+    if (hostingMode === 'managed' && memoryStorageModeFor(provisionPlan, hostingMode) === 'amr_embedded') {
       try {
         const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
         const fsm = await import('node:fs');
@@ -2670,7 +2684,7 @@ const server = http.createServer(async (req, res) => {
     // Persist the decision on the org row so the hot path resolves without a plan
     // lookup. Signup must never block/fail on the vector store.
     if (hostingMode !== 'self_host') {
-      provisionForPlan(org.id, requestedPlan)
+      provisionForPlan(org.id, provisionPlan)
         .then((vectorContainer) =>
           prisma.organization.update({ where: { id: org.id }, data: { vectorContainer } })
         )
@@ -2684,7 +2698,7 @@ const server = http.createServer(async (req, res) => {
     // (agent + Postgres + Qdrant) in our cloud and register it — so managed
     // enterprise uses the SAME data plane as self-host (Model B). Fire-and-forget;
     // the provisioner never throws and never blocks/fails org creation.
-    if (requestedPlan === 'enterprise' || requestedPlan === 'managed') {
+    if (provisionPlan === 'enterprise' || provisionPlan === 'managed') {
       import('./selfhost/managed-provisioner.js')
         .then((m) => m.provisionManagedAgent({ orgId: org.id }))
         .then((r) => console.log('[org-create] managed agent provision', { orgId: org.id, ...r }))
@@ -2702,6 +2716,17 @@ const server = http.createServer(async (req, res) => {
       }
     });
 
+    let referral = null;
+    if (referralCode) {
+      try {
+        referral = await redeemReferral({ prisma, orgId: org.id, userId: current.session.userId, code: referralCode });
+      } catch (error) {
+        // The pre-check above avoids normal failures; this covers a concurrent
+        // redemption cap and does not silently grant an unpaid entitlement.
+        return jsonResponse(res, { error: error.message, organization_id: org.id }, 409);
+      }
+    }
+
     await sessionStore.destroySession(current.sessionId);
     const sessionId = await sessionStore.createSession({
       ...current.session,
@@ -2714,10 +2739,11 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: org.plan || requestedPlan,
+        plan: referral?.terms?.onboarding_plan || org.plan || requestedPlan,
         hosting_mode: org.hostingMode || hostingMode,
-        memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(requestedPlan, hostingMode),
-        memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(requestedPlan, hostingMode)),
+        memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode),
+        memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
+        referral: referral ? { code: referral.terms.code, phase: 'onboarding', runway_starts_at: referral.runwayStartsAt.toISOString() } : null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -3494,8 +3520,11 @@ const server = http.createServer(async (req, res) => {
     const orgId = projectsMatch[1];
     const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!membership) return;
-    if (membership.org?.plan !== 'enterprise') {
-      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
+    const { plan: effectivePlan } = await getEffectivePlan(prisma, orgId);
+    const projectLimit = effectivePlan.limits?.maxProjects ?? -1;
+    const existingProjectCount = await prisma.project.count({ where: { orgId, archivedAt: null } });
+    if (projectLimit !== -1 && existingProjectCount >= projectLimit) {
+      return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'PLAN_LIMIT', limit: projectLimit, current: existingProjectCount }, 402);
     }
 
     const body = await parseBody(req);
@@ -4871,6 +4900,12 @@ const server = http.createServer(async (req, res) => {
     if (sub === 'projects' && req.method === 'POST') {
       try {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
+        const { plan: effectivePlan } = await getEffectivePlan(prisma, orgId);
+        const projectLimit = effectivePlan.limits?.maxProjects ?? -1;
+        const existingProjectCount = await prisma.project.count({ where: { orgId, archivedAt: null } });
+        if (projectLimit !== -1 && existingProjectCount >= projectLimit) {
+          return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'PLAN_LIMIT', limit: projectLimit, current: existingProjectCount }, 402);
+        }
         const body = await parseBody(req);
         if (!body.name) return jsonResponse(res, { error: 'name required' }, 400);
         if (!body.description || !String(body.description).trim()) {
@@ -8429,6 +8464,73 @@ Write the persona now.`;
   }
   // ─── End Hyper Agents Rooms ───────────────────────────────
 
+  // ─── Referral campaigns and redemption ────────────────────
+  // Preview is session-authenticated so campaigns are not an anonymous code
+  // oracle. Redemption is once per organization and snapshots its terms.
+  if (pathname === '/v1/referrals/preview' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const code = normalizeReferralCode(url.searchParams.get('code'));
+    const campaign = code ? await prisma?.referralCampaign.findUnique({ where: { code } }).catch(() => null) : null;
+    const now = new Date();
+    const valid = Boolean(campaign?.active && (!campaign.startsAt || campaign.startsAt <= now) && (!campaign.endsAt || campaign.endsAt > now)
+      && (campaign.maxRedemptions == null || campaign.redemptionCount < campaign.maxRedemptions));
+    if (!valid) return jsonResponse(res, { valid: false }, 404);
+    return jsonResponse(res, {
+      valid: true,
+      campaign: {
+        code: campaign.code, name: campaign.name, onboarding_days: campaign.onboardingDays,
+        onboarding_plan: campaign.onboardingPlan, onboarding_limits: campaign.onboardingLimits,
+        runway_plan: campaign.runwayPlan, runway_limits: campaign.runwayLimits,
+      },
+    });
+  }
+
+  if (pathname === '/v1/referrals/redeem' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!membership || !effectiveRoles(membership).includes('owner')) return jsonResponse(res, { error: 'organization owner required' }, 403);
+    const body = await parseBody(req).catch(() => ({}));
+    try {
+      const result = await redeemReferral({ prisma, orgId: current.session.orgId, userId: current.session.userId, code: body.code });
+      return jsonResponse(res, { ok: true, referral: { code: result.terms.code, phase: 'onboarding', runway_starts_at: result.runwayStartsAt.toISOString(), terms: result.terms } });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 409);
+    }
+  }
+
+  // Platform-admin-only campaign management. Campaign terms are server data;
+  // the browser can redeem a code but cannot create or alter an offer.
+  if (pathname === '/v1/admin/referrals' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!isAdminAuthorized(req, url)) return jsonResponse(res, { error: 'admin authorization required' }, 403);
+    if (req.method === 'GET') {
+      const campaigns = await prisma.referralCampaign.findMany({ orderBy: { createdAt: 'desc' } });
+      return jsonResponse(res, { campaigns });
+    }
+    const body = await parseBody(req).catch(() => ({}));
+    const code = normalizeReferralCode(body.code);
+    const onboardingPlan = String(body.onboarding_plan || 'enterprise').toLowerCase();
+    const runwayPlan = String(body.runway_plan || 'enterprise').toLowerCase();
+    if (!code || !body.name || !PLANS[onboardingPlan] || !PLANS[runwayPlan]) {
+      return jsonResponse(res, { error: 'code, name, and valid onboarding/runway plans are required' }, 400);
+    }
+    const onboardingDays = Number(body.onboarding_days || 14);
+    if (!Number.isInteger(onboardingDays) || onboardingDays < 1 || onboardingDays > 90) return jsonResponse(res, { error: 'onboarding_days must be 1..90' }, 400);
+    try {
+      const campaign = await prisma.referralCampaign.create({ data: {
+        code, name: String(body.name).slice(0, 160), active: body.active !== false,
+        maxRedemptions: body.max_redemptions == null ? null : Number(body.max_redemptions),
+        startsAt: body.starts_at ? new Date(body.starts_at) : null, endsAt: body.ends_at ? new Date(body.ends_at) : null,
+        onboardingDays, onboardingPlan, onboardingLimits: body.onboarding_limits || {},
+        runwayPlan, runwayLimits: body.runway_limits || {},
+      } });
+      return jsonResponse(res, { campaign }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 409);
+    }
+  }
+
   // ─── Billing (Stripe-backed) ──────────────────────────────
   // GET  /v1/billing/plan         — current plan + usage + limits
   // POST /v1/billing/checkout     — create Stripe Checkout session
@@ -8466,8 +8568,9 @@ Write the persona now.`;
 
     // GET /v1/billing/plan
     if (pathname === '/v1/billing/plan' && req.method === 'GET') {
-      const plan = plansMod.getPlan(org.plan || 'free');
+      const { plan, entitlement } = await getEffectivePlan(prisma, orgId);
       const usage = await usageTracker.getUsage(orgId);
+      const cumulative = await usageTracker.getCumulativeUsage(orgId);
       const limitCheck = await usageTracker.checkLimits(orgId, plan.id);
       return jsonResponse(res, {
         plan: {
@@ -8487,7 +8590,12 @@ Write the persona now.`;
           current_period_end: org.currentPeriodEnd?.toISOString() || null,
           trial_ends_at: org.trialEndsAt?.toISOString() || null,
         },
+        entitlement: entitlement ? {
+          source: entitlement.source, phase: entitlement.phase, effective_from: entitlement.effectiveFrom,
+          effective_until: entitlement.effectiveUntil,
+        } : null,
         usage,
+        cumulative_usage: cumulative,
         warnings: limitCheck.warnings || [],
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
@@ -8670,33 +8778,48 @@ Write the persona now.`;
           const sub = obj;
           const priceId = sub.items?.data?.[0]?.price?.id || null;
           const planId = plansMod.planIdForStripePrice(priceId) || org.plan || 'free';
-          await prisma.organization.update({
-            where: { id: org.id },
-            data: {
-              plan: planId,
-              stripeCustomerId: org.stripeCustomerId || sub.customer || null,
-              stripeSubscriptionId: sub.id || null,
-              subscriptionStatus: sub.status || null,
-              currentPeriodEnd: sub.current_period_end
-                ? new Date(sub.current_period_end * 1000)
-                : null,
-              trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
-            },
+          await prisma.$transaction(async (tx) => {
+            await tx.organization.update({
+              where: { id: org.id },
+              data: {
+                plan: planId,
+                stripeCustomerId: org.stripeCustomerId || sub.customer || null,
+                stripeSubscriptionId: sub.id || null,
+                subscriptionStatus: sub.status || null,
+                currentPeriodEnd: sub.current_period_end
+                  ? new Date(sub.current_period_end * 1000)
+                  : null,
+                trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
+              },
+            });
+            // A paid subscription supersedes a referral runway immediately.
+            await tx.organizationEntitlement.updateMany({
+              where: { orgId: org.id, effectiveFrom: { lte: new Date() }, effectiveUntil: null },
+              data: { effectiveUntil: new Date() },
+            });
+            await tx.organizationEntitlement.create({
+              data: { orgId: org.id, source: 'stripe', phase: 'subscription', planId, limits: {}, effectiveFrom: new Date() },
+            });
           });
           break;
         }
         case 'customer.subscription.deleted':
         case 'customer.subscription.paused': {
           if (!org) break;
-          await prisma.organization.update({
-            where: { id: org.id },
-            data: {
-              plan: 'free',
-              stripeSubscriptionId: null,
-              subscriptionStatus: event.type === 'customer.subscription.paused' ? 'paused' : 'canceled',
-              currentPeriodEnd: null,
-              trialEndsAt: null,
-            },
+          await prisma.$transaction(async (tx) => {
+            await tx.organization.update({
+              where: { id: org.id },
+              data: {
+                plan: 'free',
+                stripeSubscriptionId: null,
+                subscriptionStatus: event.type === 'customer.subscription.paused' ? 'paused' : 'canceled',
+                currentPeriodEnd: null,
+                trialEndsAt: null,
+              },
+            });
+            await tx.organizationEntitlement.updateMany({
+              where: { orgId: org.id, source: 'stripe', effectiveUntil: null }, data: { effectiveUntil: new Date() },
+            });
           });
           break;
         }

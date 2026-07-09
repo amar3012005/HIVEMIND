@@ -20336,6 +20336,15 @@ exit \$RC
 
         case '/api/billing/upgrade':
           if (req.method === 'POST') {
+            // Paid plans are commercial state. Stripe webhooks or a referral
+            // entitlement grant them; this legacy browser endpoint must never
+            // become a free upgrade button.
+            if (process.env.HIVEMIND_ALLOW_LEGACY_PLAN_UPGRADE !== 'true') {
+              return jsonResponse(res, {
+                error: 'Direct plan changes are disabled. Use checkout, a referral campaign, or an administrator-issued entitlement.',
+                code: 'BILLING_MANAGED_SERVER_SIDE',
+              }, 403);
+            }
             const { plan } = body;
             const validPlans = ['free', 'pro', 'scale', 'enterprise'];
             if (!plan || !validPlans.includes(plan)) {

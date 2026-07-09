@@ -135,6 +135,13 @@ export class PlanEnforcer {
     const counters = await this._getCounters(orgId);
 
     if (type === 'tokens') {
+      const dailyLimit = limits.llmTokensPerDay;
+      if (dailyLimit && dailyLimit !== -1) {
+        const today = await this.usageTracker?.getDailyMetricToday(orgId, 'tokens') || 0;
+        if (today + amount > dailyLimit) {
+          return { allowed: false, reason: `Daily token limit exceeded (${planDef.name} plan: ${dailyLimit.toLocaleString()} tokens/day)`, limit: dailyLimit, current: today, plan: planDef.id };
+        }
+      }
       const limit = limits.llmTokensPerMonth;
       if (!limit || limit === -1) return { allowed: true }; // unlimited
       if (counters.tokens + amount > limit) {
@@ -385,6 +392,9 @@ export class PlanEnforcer {
     const webIntelToday = this.usageTracker
       ? await this.usageTracker.getWebIntelToday(orgId).catch(() => 0)
       : 0;
+    const cumulative = this.usageTracker
+      ? await this.usageTracker.getCumulativeUsage(orgId).catch(() => ({}))
+      : {};
 
     // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
     let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
@@ -418,6 +428,8 @@ export class PlanEnforcer {
       connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
       hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
       users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
+      // Monotonic commercial/audit totals. These never decrease on deletion.
+      cumulative,
       // honest scope: tokens are metered at chat + TARA today (full coverage =
       // the granular gateway). FE surfaces this so the number isn't mistaken
       // for total platform spend.

@@ -1342,6 +1342,80 @@ model OrgUsageDaily {
   @@index([orgId, day], map: "idx_org_usage_daily_org_day")
 }
 
+/// Lifetime, monotonic usage counters. These are commercial/audit totals, not
+/// live storage counts: deleting a memory or document must never reduce them.
+model OrgUsageCumulative {
+  orgId                String   @id @map("org_id") @db.Uuid
+  tokensProcessed      BigInt   @default(0) @map("tokens_processed")
+  searchQueries        BigInt   @default(0) @map("search_queries")
+  knowledgeBaseUploads BigInt   @default(0) @map("knowledge_base_uploads")
+  knowledgeBasePages   BigInt   @default(0) @map("knowledge_base_pages")
+  memoriesIngested     BigInt   @default(0) @map("memories_ingested")
+  deepResearchJobs     BigInt   @default(0) @map("deep_research_jobs")
+  webIntelJobs         BigInt   @default(0) @map("web_intel_jobs")
+  graphQueries         BigInt   @default(0) @map("graph_queries")
+  taraUsage            BigInt   @default(0) @map("tara_usage")
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("org_usage_cumulative")
+}
+
+/// A server-managed referral campaign. Limits are stored as a snapshot-able
+/// JSON object so GTM terms can be changed for future redemptions only.
+model ReferralCampaign {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String    @unique @db.VarChar(64)
+  name             String    @db.VarChar(160)
+  active           Boolean   @default(true)
+  maxRedemptions   Int?      @map("max_redemptions")
+  redemptionCount  Int       @default(0) @map("redemption_count")
+  startsAt         DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt           DateTime? @map("ends_at") @db.Timestamptz(6)
+  onboardingDays   Int       @default(14) @map("onboarding_days")
+  onboardingPlan   String    @default("enterprise") @map("onboarding_plan") @db.VarChar(50)
+  onboardingLimits Json      @default("{}") @map("onboarding_limits")
+  runwayPlan       String    @default("enterprise") @map("runway_plan") @db.VarChar(50)
+  runwayLimits     Json      @default("{}") @map("runway_limits")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  redemptions      ReferralRedemption[]
+
+  @@map("referral_campaigns")
+}
+
+/// One campaign redemption per organization. The copied terms make past
+/// commercial commitments immutable even when the campaign is later edited.
+model ReferralRedemption {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId      String   @map("campaign_id") @db.Uuid
+  orgId           String   @unique @map("org_id") @db.Uuid
+  redeemedByUserId String  @map("redeemed_by_user_id") @db.Uuid
+  codeSnapshot    String   @map("code_snapshot") @db.VarChar(64)
+  termsSnapshot   Json     @map("terms_snapshot")
+  redeemedAt      DateTime @default(now()) @map("redeemed_at") @db.Timestamptz(6)
+  campaign        ReferralCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@index([campaignId])
+  @@map("referral_redemptions")
+}
+
+/// Time-bounded entitlement snapshots. The resolver selects the row effective
+/// now, allowing onboarding to change to runway without mutating history.
+model OrganizationEntitlement {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  source         String    @db.VarChar(32)
+  phase          String    @db.VarChar(32)
+  planId         String    @map("plan_id") @db.VarChar(50)
+  limits         Json      @default("{}")
+  effectiveFrom  DateTime  @map("effective_from") @db.Timestamptz(6)
+  effectiveUntil DateTime? @map("effective_until") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, effectiveFrom, effectiveUntil])
+  @@map("organization_entitlements")
+}
+
 /// Per-API-key LLM usage rollup. Records EVERY LLM call against the org's HIVEMIND
 /// API key — org_id + api_key_id + model + feature — so spend is attributable per key,
 /// not just per org. OrgUsage stays the org-wide monthly total (unchanged); this is the
@@ -1367,7 +1441,7 @@ model ApiKeyUsage {
   lastUsedAt       DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
   updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  @@unique([orgId, apiKeyId, month, model], map: "uq_api_key_usage_org_key_month_model")
+  @@unique([orgId, apiKeyId, month, model, feature], map: "uq_api_key_usage_org_key_month_model_feature")
   @@index([orgId, month], map: "idx_api_key_usage_org_month")
   @@index([apiKeyId, month], map: "idx_api_key_usage_key_month")
   @@map("api_key_usage")

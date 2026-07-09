@@ -39,6 +39,7 @@ export const PLANS = {
       webIntelPerDay: 5,
       searchQueriesPerMonth: 10_000,
       maxUsers: 1,
+      maxProjects: 3,
       maxConnectors: 3,
       knowledgeBaseUploadsPerMonth: 10,
       knowledgeBasePagesPerMonth: 100,
@@ -66,6 +67,7 @@ export const PLANS = {
       webIntelPerDay: 50,
       searchQueriesPerMonth: 100_000,
       maxUsers: 5,
+      maxProjects: 20,
       maxConnectors: 10,
       knowledgeBaseUploadsPerMonth: -1, // unlimited
       knowledgeBasePagesPerMonth: 1_000,
@@ -91,6 +93,7 @@ export const PLANS = {
       webIntelPerDay: 500,
       searchQueriesPerMonth: 2_000_000,
       maxUsers: 25,
+      maxProjects: 100,
       maxConnectors: -1, // unlimited
       knowledgeBaseUploadsPerMonth: -1,
       knowledgeBasePagesPerMonth: 10_000,
@@ -121,6 +124,7 @@ export const PLANS = {
       webIntelPerDay: -1,
       searchQueriesPerMonth: -1,
       maxUsers: -1,
+      maxProjects: -1,
       maxConnectors: -1,
       knowledgeBaseUploadsPerMonth: -1,
       knowledgeBasePagesPerMonth: -1,

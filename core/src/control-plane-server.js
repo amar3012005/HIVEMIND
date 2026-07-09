@@ -6985,23 +6985,22 @@ Write the persona now.`;
           say('Saving your brief');
 
           // ── Read the website, page by page (each fetch is its own log line) ──
-          let siteText = '';
-          for (const path of ['', '/about', '/product', '/pricing']) {
-            say(`Fetching: https://${host}${path || '/'}...`);
+          const pagePaths = ['', '/about', '/product', '/pricing'];
+          const screenshotPromise = screenshotSite(`https://${host}`);
+          const pages = await Promise.all(pagePaths.map(async (pagePath) => {
+            say(`Fetching: https://${host}${pagePath || '/'}...`);
+            const ac = new AbortController();
+            const t = setTimeout(() => ac.abort(), 8000);
             try {
-              const ac = new AbortController();
-              const t = setTimeout(() => ac.abort(), 8000);
-              const r = await fetch(`https://${host}${path}`, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
-              clearTimeout(t);
-              if (r.ok) siteText += ` ${stripHtml(await r.text())}`;
-            } catch { /* page optional */ }
-            if (siteText.length > 9000) break;
-          }
-          siteText = siteText.slice(0, 12000);
+              const r = await fetch(`https://${host}${pagePath}`, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
+              return r.ok ? stripHtml(await r.text()) : '';
+            } catch { return ''; } finally { clearTimeout(t); }
+          }));
+          const siteText = pages.join(' ').slice(0, 12000);
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
           say(`Capturing homepage: https://${host}/...`);
-          const screenshot = await screenshotSite(`https://${host}`);
+          const screenshot = await screenshotPromise;
           if (!screenshot) say('Screenshot skipped — browser service unavailable');
 
           // ── Market research: real web searches, each its own log line ──
@@ -7009,10 +7008,12 @@ Write the persona now.`;
           const research = [];
           const q1 = `${host} company what do they do`;
           say(`Searching web for: ${q1}...`);
-          research.push(...await webSearch(q1, { limit: 5 }));
           const q2 = `${companyGuess} ${host} founder team`;
           say(`Searching web for: ${q2}...`);
-          research.push(...await webSearch(q2, { limit: 4 }));
+          const [companyResearch, teamResearch] = await Promise.all([
+            webSearch(q1, { limit: 5 }), webSearch(q2, { limit: 4 }),
+          ]);
+          research.push(...companyResearch, ...teamResearch);
 
           say('Drafting your company profile');
           let profile;
@@ -7128,7 +7129,7 @@ Write the persona now.`;
                 { name: 'Priya', title: 'Operations Lead (COO-style)', archetype: 'coordinator', blurb: 'process, throughput, accountability', focus: 'execution cadence', field: 'Operations' },
               ];
             }
-            for (const r of picks.slice(0, 3 - specialistCount)) {
+            const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r) => {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';
               try {
@@ -7144,9 +7145,10 @@ Write the persona now.`;
                   orgId, name: r.name, persona,
                   roleArchetype: r.title, createdBy: userId,
                 });
-                team.push({ id: emp.id, name: emp.name, roleArchetype: r.title });
-              } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); }
-            }
+                return { id: emp.id, name: emp.name, roleArchetype: r.title };
+              } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); return null; }
+            }));
+            team.push(...hires.filter(Boolean));
             _notifyEmployeesReload();
           }
 
@@ -7183,9 +7185,14 @@ Write the persona now.`;
             sections.push({ title: `${companyName} — Team: ${tm.name}`, memoryType: 'relationship',
               content: `${tm.name} is a team member (AI agent) at ${companyName}.` });
           }
-          for (const sec of sections) {
-            await saveMemory({ ...sec, tags: canonTags });
-          }
+          // One ingest avoids eight independent extraction/embedding pipelines.
+          // The headings retain the same retrieval structure inside the canon.
+          await saveMemory({
+            title: `${companyName} — Company canon`,
+            memoryType: 'canonical_summary',
+            tags: canonTags,
+            content: sections.map((section) => `## ${section.title}\n${section.content}`).join('\n\n').slice(0, 12000),
+          });
 
           say('Planning your first tasks');
           let tasks = [];

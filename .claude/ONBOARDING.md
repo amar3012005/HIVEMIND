@@ -8,6 +8,11 @@ This `.claude/` is tuned to run Claude Code at high speed on HIVEMIND: **recon b
 3. **Review** — run the `review-changes` workflow on your diff (bugs / tenant-isolation / perf / db-migration / standards, each skeptic-verified) before you commit.
 4. **Ship** — the `ship` skill: commit (correct author) → push → pull on prod → migrate → restart hm-core → smoke + recall-eval. Then the `deploy-verify` workflow confirms the box is in sync + healthy + un-regressed.
 
+> **Current production exception (2026-07-09):** the active deployment is Singulance Compose,
+> not the legacy `myserver` flow above. Before any production operation read
+> `.claude/MEMORY.md` "Singulance production topology" and use its build, rollback, and
+> `--env-file /root/hivemind/.env` rules.
+
 ## Curated assets
 - **Skills** (`.claude/skills/`): `feature-recon`, `hivemind-dev`, `ship`, `hetzner-ops`, `qdrant-ops`, `mcp-integration`, `debug-issue`, `refactor-safely`, `review-changes`, `explore-codebase`. Global also: `hivemind-apex` (full repo manual + fix playbook), `hivemind-frontend`, `hermes-agents-builder`.
 - **Workflows** (`.claude/workflows/`, invoke via the Workflow tool by `name`): `feature-recon`, `review-changes`, `deploy-verify`.

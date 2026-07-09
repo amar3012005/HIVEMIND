@@ -14,12 +14,14 @@ not a generic CI checker.
 
 ## Hard rules (never violate)
 
-1. **You only run AFTER a production deploy** (git pull + `docker restart hm-core`
-   on `myserver`). If the deploy step didn't happen, refuse and report.
+1. **You only run AFTER a production deploy**. Current target is Singulance:
+   `root@singulancelabs.com`, with Compose from `/root/hivemind/infra` and explicit
+   `--env-file /root/hivemind/.env`. If the deploy step didn't happen, refuse and report.
 2. **Ordered gates. No skipping.** Run gates G0→G6 in order. Advance to gate N+1
    ONLY when gate N is fully green. A partial pass is a FAIL.
 3. **No patchwork.** You do NOT edit source to make a test pass. If a gate is RED,
-   you report the root cause and trigger rollback. Fixing is a separate session.
+   report the root cause and restore the retained Docker image rollback tag through Compose.
+   Fixing is a separate session.
 4. **Never destructive.** You never delete user data, drop tables, or purge shared
    vectors. Test writes go ONLY to the canonical test user/org, tagged `coldtest`.
 5. **Rewindable.** Before declaring success you confirm the last-known-good SHA is
@@ -28,9 +30,11 @@ not a generic CI checker.
 ## Invariants (from the apex playbook — do not change)
 
 ```
-PROD HOST     : myserver  (Hetzner 116.202.24.69)
-COMPOSE ROOT  : /opt/HIVEMIND  (bind-mounted → /app of hm-core)
-CORE          : hm-core (port 3000 internal)
+PROD HOST     : root@singulancelabs.com (46.224.4.164)
+BUILD ROOT    : /root/hivemind-next (clean clone only)
+COMPOSE ROOT  : /root/hivemind/infra (live checkout is dirty; do not pull/reset it)
+COMPOSE ENV   : /root/hivemind/.env (mandatory on every Compose command)
+CORE          : hm-core (public health via core.singulancelabs.com)
 TEST USER_ID  : 54f5568b-4d6a-4ae1-9a33-48cb2909d59b  (amarsai2005@gmail.com)
 TEST ORG_ID   : 67503d34-97e9-49a8-8c52-8ee30cc7603e
 MASTER_KEY    : read from container env (HIVEMIND_MASTER_API_KEY) — never hardcode
@@ -89,14 +93,20 @@ Capture the `COLD_TEST_REPORT_JSON` line. GREEN iff `green:true`.
 
 ## Rollback (the rewind)
 
-Use the wrapper if present, else inline:
+Use the retained timestamped image tag from the rollout, never a source checkout reset:
 ```bash
-ssh myserver "cd /opt/HIVEMIND && git reset --hard <LAST_KNOWN_GOOD_SHA> && docker restart hm-core"
+ssh root@singulancelabs.com '
+  docker tag hivemind/control-plane:rollback-<timestamp> hivemind/control-plane:latest
+  cd /root/hivemind/infra
+  docker compose --env-file /root/hivemind/.env -f docker-compose.hetzner.yml \
+    up -d --no-deps --force-recreate control-plane
+'
 ```
-After rollback: re-run G0→G2 to confirm the known-good is healthy again, then report
+Use the corresponding service/image tag for frontend or core rollbacks. After rollback,
+re-run the relevant public health gates to confirm the known-good image is healthy, then report
 `ROLLED BACK to <sha>, prod healthy` + the failing gate evidence for the next session.
 
-NEVER rollback by deleting data or migrations down — only by moving the code pointer.
+NEVER rollback by deleting data or migrations down — do not move the live code pointer.
 If a migration shipped with the bad deploy, FLAG it (do not auto-down-migrate) and
 report — a schema rollback is a human decision.
 

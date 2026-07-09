@@ -894,6 +894,12 @@ function parseCookies(req) {
   }, {});
 }
 
+function writeJsonAtomically(filename, value) {
+  const temporary = `${filename}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+  fs.renameSync(temporary, filename);
+}
+
 async function parseBody(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -1841,7 +1847,7 @@ const server = http.createServer(async (req, res) => {
         qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)
         kind: 'selfhost',
       };
-      fs.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
+      writeJsonAtomically(regFile, reg);
     } catch (e) {
       return jsonResponse(res, { error: `registry write failed: ${e.message}` }, 500);
     }
@@ -1870,6 +1876,36 @@ const server = http.createServer(async (req, res) => {
       }
     }
     return jsonResponse(res, { ok: true, orgId, migrated, ...(migrateError ? { migrateError } : {}) });
+  }
+
+  // Rotate a self-hosted agent bearer token without an immediate outage. Core
+  // tries the new token first and accepts the old token only during this short
+  // grace period, giving the customer time to update and restart their Box.
+  if (pathname === '/v1/selfhost/rotate-agent-token' && req.method === 'POST') {
+    const body = await parseBody(req).catch(() => null);
+    const apiKey = (body?.apiKey || '').toString();
+    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    try {
+      let reg = {};
+      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* no registry */ }
+      const entry = reg[rec.orgId];
+      if (!entry?.url || !entry?.token) return jsonResponse(res, { error: 'no agent registered for this organization' }, 409);
+      const graceExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      const previousTokens = (Array.isArray(entry.previousTokens) ? entry.previousTokens : [])
+        .filter((item) => item?.token && new Date(item.expiresAt).getTime() > Date.now())
+        .slice(-2);
+      previousTokens.push({ token: entry.token, expiresAt: graceExpiresAt });
+      const agentToken = crypto.randomBytes(32).toString('base64url');
+      reg[rec.orgId] = { ...entry, token: agentToken, previousTokens };
+      writeJsonAtomically(regFile, reg);
+      return jsonResponse(res, { ok: true, agentToken, grace_expires_at: graceExpiresAt });
+    } catch (error) {
+      return jsonResponse(res, { error: `agent token rotation failed: ${error.message}` }, 500);
+    }
   }
 
   // Self-host connection status — the FE polls this during onboarding to show "waiting → connected".

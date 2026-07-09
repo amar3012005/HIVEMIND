@@ -13,7 +13,7 @@ const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 //      (on a shared volume). Lazy-loaded on miss + re-read when stale, so the core picks up new
 //      enrollments without a restart and without the broker touching the core process.
 //   3. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
-import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from 'node:fs';
 
 const _registry = new Map();
 // Default to a path on the shared core↔control volume. Self-host activates simply by the file existing
@@ -43,12 +43,22 @@ function _loadFile() {
     if (m === _fileMtime) return; // unchanged
     _fileMtime = m;
     const obj = JSON.parse(readFileSync(REG_FILE, 'utf8'));
-    for (const [org, v] of Object.entries(obj)) if (v?.url || v?.pgUrl || v?.qdrantUrl) _registry.set(org, { url: v.url || '', token: v.token || '', pgUrl: v.pgUrl || '', qdrantUrl: v.qdrantUrl || '', kind: v.kind });
+    for (const [org, v] of Object.entries(obj)) {
+      if (!v?.url && !v?.pgUrl && !v?.qdrantUrl) continue;
+      const fallbackTokens = (Array.isArray(v.previousTokens) ? v.previousTokens : [])
+        .filter((entry) => entry?.token && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > Date.now()))
+        .map((entry) => entry.token);
+      _registry.set(org, { url: v.url || '', token: v.token || '', fallbackTokens, pgUrl: v.pgUrl || '', qdrantUrl: v.qdrantUrl || '', kind: v.kind });
+    }
   } catch { /* malformed file → keep what we have */ }
 }
 function _persist() {
   if (!REG_FILE) return;
-  try { writeFileSync(REG_FILE, JSON.stringify(Object.fromEntries(_registry)), 'utf8'); } catch { /* best-effort */ }
+  try {
+    const temporary = `${REG_FILE}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(temporary, JSON.stringify(Object.fromEntries(_registry)), { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporary, REG_FILE);
+  } catch { /* best-effort */ }
 }
 _loadEnv();
 _loadFile();
@@ -88,20 +98,27 @@ async function _call(orgId, path, body) {
     const { dispatch } = await import('./embedded-agent.mjs');
     return dispatch(orgId, path, body);
   }
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(`${a.url}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${a.token}`, 'x-org-id': orgId },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) throw new Error(`agent ${path} → ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
+  const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
+  let lastStatus = null;
+  for (const token of tokens) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(`${a.url}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-org-id': orgId },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (res.ok) return await res.json();
+      lastStatus = res.status;
+      // Only 401 can indicate a Box that has not switched to the rotated token.
+      if (res.status !== 401) break;
+    } finally {
+      clearTimeout(t);
+    }
   }
+  throw new Error(`agent ${path} → ${lastStatus || 'unreachable'}`);
 }
 
 // Returns Qdrant-shaped hits [{id, score, payload}] or null on failure (caller falls back).

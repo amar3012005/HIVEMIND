@@ -11,8 +11,8 @@ git clone --branch byod --single-branch <repo-url> hivemind-byod
 cd hivemind-byod
 ./setup.sh
 ```
-`setup.sh` asks for your **API key** (dashboard → Settings → BYOD), starts the local data plane +
-an outbound tunnel, and connects it to HIVEMIND. Then just use the dashboard normally.
+`setup.sh` asks for your **API key** (dashboard → Settings → BYOD), starts the local data plane,
+and registers a reachable HTTPS or private-network endpoint. Then use the dashboard normally.
 
 ## What runs here
 | container | what |
@@ -36,9 +36,9 @@ processing must also remain entirely on the customer network.
 
 ## Security
 - Use HTTPS or a private network reachable by the central engine; public cleartext HTTP is rejected.
-- Per-agent Bearer token (generated locally, never shared).
-- The agent serves ONLY its own org; the broker pins the tunnel to your tenant.
-- Rotate: delete `.env` + re-run `./setup.sh`. Disconnect: `curl -X POST $BROKER_URL/v1/byod/disenroll -d '{"apiKey":"…"}'`.
+- Per-agent Bearer token, generated locally and shared only with the Engine so it can authenticate to this Box.
+- The agent serves only its configured org; every request also requires its matching `x-org-id`.
+- Rotate the token from the dashboard/control API, replace `AGENT_TOKEN` in `.env` with the returned value, then run `docker compose -f docker-compose.byod.yml up -d agent` within 15 minutes. The Engine uses the previous token only during that grace period.
 
 ## Operate
 ```bash

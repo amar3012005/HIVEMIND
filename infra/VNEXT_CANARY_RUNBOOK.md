@@ -29,6 +29,10 @@ docker build \
   --build-arg REACT_APP_CONTROL_PLANE_URL=https://b2c-next-api.singulancelabs.com \
   --build-arg REACT_APP_CORE_API_URL=https://b2c-next-core.singulancelabs.com \
   -t hivemind/fe:hivemind-next-<sha>-b2c frontend/Da-vinci
+docker build \
+  --build-arg REACT_APP_CONTROL_PLANE_URL=https://api.singulancelabs.com \
+  --build-arg REACT_APP_CORE_API_URL=https://core.singulancelabs.com \
+  -t hivemind/fe:hivemind-next-<sha>-single frontend/Da-vinci
 
 cp infra/.env.next.example infra/.env.next
 # Replace every placeholder in infra/.env.next with a unique random value.
@@ -58,6 +62,11 @@ Before browser login can work, configure the next control-plane's OIDC/Google
 credentials and register both public callback URLs with the identity provider.
 Cartesia requires `CARTESIA_API_KEY` and `CARTESIA_AGENT_ID` in the next
 control-plane environment. Do not copy browser access tokens into the frontend.
+
+For the production-compatible single frontend, use the existing control plane
+and core URLs. Add `https://next.singulancelabs.com` to the production control
+plane CORS allowlist before starting the `single` profile; this keeps current
+OAuth and connector callback URLs unchanged.
 
 ## Verification
 

@@ -8,7 +8,7 @@ const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
 
 test('vNext deployment separates B2B and B2C app/control/worker pools', () => {
   const text = read('infra/docker-compose.next.yml');
-  for (const name of ['core-b2b', 'control-b2b', 'maintenance-b2b', 'employees-b2b', 'frontend-b2b', 'core-b2c', 'control-b2c', 'maintenance-b2c', 'employees-b2c', 'frontend-b2c']) {
+  for (const name of ['core-b2b', 'control-b2b', 'maintenance-b2b', 'employees-b2b', 'frontend-b2b', 'core-b2c', 'control-b2c', 'maintenance-b2c', 'employees-b2c', 'frontend-b2c', 'frontend']) {
     assert.match(text, new RegExp(`\\n  ${name}:`));
   }
   assert.match(text, /profiles: \[b2b\]/);
@@ -36,10 +36,10 @@ test('vNext deployment uses distinct state volumes, loopback ports, and mandator
 
 test('vNext Caddy hosts preserve production hosts and point only at vNext loopback ports', () => {
   const text = read('infra/Caddyfile.next.snippet');
-  for (const host of ['b2b-next', 'b2b-next-core', 'b2b-next-api', 'b2c-next', 'b2c-next-core', 'b2c-next-api']) {
+  for (const host of ['next', 'b2b-next', 'b2b-next-core', 'b2b-next-api', 'b2c-next', 'b2c-next-core', 'b2c-next-api']) {
     assert.match(text, new RegExp(`${host}\\.singulancelabs\\.com`));
   }
-  for (const port of ['2188', '2126', '2127', '2288', '2226', '2227']) assert.match(text, new RegExp(`localhost:${port}`));
+  for (const port of ['2388', '2188', '2126', '2127', '2288', '2226', '2227']) assert.match(text, new RegExp(`localhost:${port}`));
   assert.doesNotMatch(text, /reverse_proxy localhost:202[67]/);
 });
 

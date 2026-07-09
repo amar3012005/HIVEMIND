@@ -113,7 +113,7 @@ export class UsageTracker {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "api_key_usage" ("org_id", "api_key_id", "month", "model", "feature", "tokens_processed", "prompt_tokens", "completion_tokens", "requests", "last_used_at", "updated_at")
          VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 1, NOW(), NOW())
-         ON CONFLICT ("org_id", "api_key_id", "month", "model")
+         ON CONFLICT ("org_id", "api_key_id", "month", "model", "feature")
          DO UPDATE SET "tokens_processed" = "api_key_usage"."tokens_processed" + $6,
                        "prompt_tokens" = "api_key_usage"."prompt_tokens" + $7,
                        "completion_tokens" = "api_key_usage"."completion_tokens" + $8,

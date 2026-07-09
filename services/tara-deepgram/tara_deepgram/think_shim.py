@@ -239,7 +239,64 @@ async def think(request: Request):
                         state["facts"].append(f)
                 state["facts"] = state["facts"][-12:]  # cap the brief
 
-            if use_router and decision["action"] == "direct" and not forced_recall:
+            if use_router and decision["action"] == "schedule":
+                # REAL HANDS: the caller agreed a time → check free/busy, book on
+                # the operator's connected Google Calendar, speak the true result.
+                path = "schedule"
+                core_first.cancel()
+                try:
+                    await core_first
+                except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
+                    pass
+                try:
+                    await core_gen.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+                from datetime import datetime, timezone as _tz
+                from .core_client import google_exec
+                from .turn_router import parse_when
+                spoken = ""
+                when = decision.get("schedule_when") or query
+                now_info = await google_exec("calendar_current_time", {}, user_id, org_id)
+                tz = now_info.get("timeZone") or "Europe/Berlin"
+                slot = await parse_when(when, datetime.now(_tz.utc).isoformat(), tz)
+                if now_info.get("error"):
+                    spoken = ("I don't have direct access to the calendar right now, "
+                              "so I'll have the team send you an invite for that time by email.")
+                    state["facts"].append(f"promised manual invite for: {when}")
+                elif slot.get("error"):
+                    spoken = "Just to make sure I book it right — what exact day and time suits you?"
+                else:
+                    fb = await google_exec("calendar_freebusy",
+                                           {"timeMin": slot["start"], "timeMax": slot["end"]},
+                                           user_id, org_id)
+                    busy = (fb.get("busy") or {}).get("primary") or []
+                    if busy:
+                        spoken = (f"Ah, {slot['label']} is already taken on our side — "
+                                  "could you do an hour later, or another day?")
+                        state["facts"].append(f"conflict at {slot['label']}, awaiting alternative")
+                    else:
+                        booked = await google_exec("calendar_create_event", {
+                            "summary": f"Demo — {call_goal or 'HIVEMIND'}"[:120],
+                            "start": slot["start"], "end": slot["end"], "timeZone": tz,
+                            "description": f"Booked live by TARA on a call. Goal: {call_goal or 'demo'}. Session {session_id}.",
+                        }, user_id, org_id)
+                        if booked.get("error"):
+                            spoken = ("I couldn't finalize the booking this second, so I'll have "
+                                      "the team confirm your slot by email right after this call.")
+                            state["facts"].append(f"booking failed, manual follow-up for {slot['label']}")
+                        else:
+                            spoken = (f"Done — I've booked {slot['label']} and it's in the calendar. "
+                                      "You'll receive the invitation shortly. Anything else I can help with?")
+                            state["facts"].append(f"BOOKED ✓ {slot['label']} (event {booked.get('id','')[:12]})")
+                            state["goal_state"] = f"close: meeting BOOKED {slot['label']} ✓ → wrapup"
+                            state["phase"] = "wrapup"
+                            state["confidence"] = 100
+                first_ms = round((time.monotonic() - t0) * 1000)
+                produced = True
+                yield _chunk(chunk_id, model, {"content": spoken})
+
+            elif use_router and decision["action"] == "direct" and not forced_recall:
                 path = "direct"
                 state["last_was_filler"] = False  # direct turn = no filler spoken
                 core_first.cancel()

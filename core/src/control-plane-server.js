@@ -1,5 +1,6 @@
 import http from 'http';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
@@ -788,6 +789,86 @@ function jsonResponse(res, body, status = 200, headers = {}) {
     ...headers
   });
   res.end(JSON.stringify(body));
+}
+
+function bytesToMiB(value) {
+  return Math.round(Number(value || 0) / 1024 / 1024);
+}
+
+function capacityState(percent, warningAt = 70, criticalAt = 85) {
+  if (!Number.isFinite(percent)) return 'unknown';
+  if (percent >= criticalAt) return 'critical';
+  if (percent >= warningAt) return 'warning';
+  return 'healthy';
+}
+
+async function getPlatformCapacityMetrics() {
+  const observedAt = new Date().toISOString();
+  let filesystem = { state: 'unknown', source: 'control-plane runtime filesystem' };
+  try {
+    // Docker overlayfs reports the backing volume capacity. This deliberately
+    // avoids mounting the Docker socket or host root into an application pod.
+    const stat = fs.statfsSync(process.env.PLATFORM_METRICS_PATH || '/');
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+    const usedBytes = Math.max(0, totalBytes - freeBytes);
+    const usedPercent = totalBytes ? Math.round((usedBytes / totalBytes) * 1000) / 10 : null;
+    filesystem = {
+      source: 'control-plane runtime filesystem',
+      total_mib: bytesToMiB(totalBytes),
+      used_mib: bytesToMiB(usedBytes),
+      free_mib: bytesToMiB(freeBytes),
+      used_percent: usedPercent,
+      state: capacityState(usedPercent),
+    };
+  } catch (error) {
+    filesystem.error = 'Filesystem capacity unavailable';
+  }
+
+  let postgres = { state: 'unknown' };
+  if (prisma?.$queryRawUnsafe) {
+    try {
+      const rows = await prisma.$queryRawUnsafe('SELECT pg_database_size(current_database()) AS bytes');
+      const bytes = Number(rows?.[0]?.bytes || 0);
+      postgres = { database_mib: bytesToMiB(bytes), state: 'healthy' };
+    } catch {
+      postgres.error = 'Database capacity unavailable';
+    }
+  }
+
+  let core = { state: 'unknown' };
+  try {
+    const response = await fetch(`${CONFIG.coreApiBaseUrl}/admin/api/observability`, {
+      headers: { 'X-Admin-Secret': ADMIN_SECRET },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) throw new Error(`core returned ${response.status}`);
+    const snapshot = await response.json();
+    core = {
+      state: snapshot?.core?.health?.ok ? 'healthy' : 'warning',
+      rss_mib: Number(snapshot?.core?.runtime?.rss_mb) || 0,
+      heap_used_mib: Number(snapshot?.core?.runtime?.heap_used_mb) || 0,
+      uptime_seconds: Number(snapshot?.core?.runtime?.uptime_seconds) || 0,
+    };
+  } catch {
+    core = { state: 'unknown', error: 'Core runtime metrics unavailable' };
+  }
+
+  const load = os.loadavg();
+  const recommendations = [];
+  if (filesystem.state === 'critical') recommendations.push('Expand storage immediately: runtime disk usage is at or above 85%.');
+  else if (filesystem.state === 'warning') recommendations.push('Plan a storage expansion soon: runtime disk usage is at or above 70%.');
+  if (core.state !== 'healthy') recommendations.push('Investigate core availability before increasing traffic or running migrations.');
+  if (!recommendations.length) recommendations.push('Capacity is within the current operating thresholds. Review trends before scaling.');
+
+  return {
+    observed_at: observedAt,
+    filesystem,
+    postgres,
+    core,
+    load_average: { one_minute: load[0], five_minutes: load[1], fifteen_minutes: load[2] },
+    recommendations,
+  };
 }
 
 function redirect(res, location, cookies = []) {
@@ -1663,6 +1744,11 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, { b2b: 0, b2c: 0, active: 0, sleeping: 0 });
     return jsonResponse(res, { total, returned: users.length, summary, users });
+  }
+
+  if (pathname === '/admin/api/platform/metrics' && req.method === 'GET') {
+    if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    return jsonResponse(res, await getPlatformCapacityMetrics());
   }
 
   if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {

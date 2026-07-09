@@ -29,7 +29,7 @@ try {
   if (!org) throw new Error(`Organization not found: ${orgId}`);
   if (org.hostingMode === 'self_host') throw new Error('BYOD organizations are migrated on the customer data plane');
   const sourceMemories = await prisma.memory.count({ where: { orgId, deletedAt: null } });
-  const sourceRelationships = await prisma.relationship.count({ where: { orgId } });
+  const sourceRelationships = await prisma.relationship.count({ where: { fromMemory: { orgId } } });
   const collection = isEnterprisePlan(org.plan) ? orgContainerName(orgId) : PERSONAL_COLLECTION;
   const amr = new AmrMemoryStore({ dataRoot, org: orgId, dim });
 

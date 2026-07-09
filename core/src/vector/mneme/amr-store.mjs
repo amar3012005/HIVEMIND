@@ -536,7 +536,9 @@ export async function migrateFromPostgres(amr, pg, qFetch, qcoll, org) {
   let relCursor = null;
   for (;;) {
     const { rows: rels } = await pg.query(
-      `SELECT * FROM relationships WHERE org_id=$1 ${relCursor ? 'AND id > $2' : ''} ORDER BY id LIMIT ${BATCH}`,
+      `SELECT r.* FROM relationships r
+         JOIN memories m ON m.id = r.from_id
+        WHERE m.org_id=$1 ${relCursor ? 'AND r.id > $2' : ''} ORDER BY r.id LIMIT ${BATCH}`,
       relCursor ? [org, relCursor] : [org],
     );
     if (!rels.length) break;

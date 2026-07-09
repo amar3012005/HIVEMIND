@@ -8,6 +8,7 @@ import { PERSONAL_COLLECTION, orgContainerName } from '../src/vector/container-r
 
 const orgId = process.env.ORG_ID;
 const commit = process.argv.includes('--commit');
+const adoptExisting = process.argv.includes('--adopt-existing');
 if (!orgId) throw new Error('ORG_ID is required');
 
 const prisma = new PrismaClient();
@@ -33,10 +34,22 @@ try {
   const collection = isEnterprisePlan(org.plan) ? orgContainerName(orgId) : PERSONAL_COLLECTION;
   const amr = new AmrMemoryStore({ dataRoot, org: orgId, dim });
 
-  console.log(JSON.stringify({ orgId, commit, sourceMemories, sourceRelationships, sourceCollection: collection, targetLive: amr.liveCount() }));
+  const targetLive = amr.liveCount();
+  console.log(JSON.stringify({ orgId, commit, adoptExisting, sourceMemories, sourceRelationships, sourceCollection: collection, targetLive }));
   if (!commit) process.exit(0);
   if (org.memoryStorageMode === 'amr_embedded') throw new Error('Organization already uses embedded AMR');
-  if (amr.liveCount() !== 0) throw new Error('Target AMR shard is not empty; refusing to overwrite');
+  if (targetLive !== 0) {
+    if (!adoptExisting || sourceMemories !== 0 || sourceRelationships !== 0) {
+      throw new Error('Target AMR shard is not empty; use --commit --adopt-existing only when PostgreSQL source counts are both zero');
+    }
+    let registry = {};
+    try { registry = JSON.parse(fs.readFileSync(registryFile, 'utf8')); } catch { /* new registry */ }
+    registry[orgId] = { url: 'local:', token: '', kind: 'amr-central' };
+    fs.writeFileSync(registryFile, JSON.stringify(registry), 'utf8');
+    await prisma.organization.update({ where: { id: orgId }, data: { memoryStorageMode: 'amr_embedded', vectorContainer: null } });
+    console.log(JSON.stringify({ ok: true, orgId, adopted_existing_amr_records: targetLive }));
+    process.exit(0);
+  }
 
   const result = await migrateFromPostgres(amr, pg, qFetch, collection, orgId);
   const stats = amr.stats({});

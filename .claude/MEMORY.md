@@ -8,6 +8,25 @@ entry after each meaningful task. Newest at top within a date. Pair with
 
 ## 2026-07-09
 
+### Personal AMR storage policy rollout
+- Added `Organization.memoryStorageMode` with values `amr_embedded`, `hybrid`,
+  `hybrid_amr_index`, `byod_amr`, and `byod_hybrid`. Existing organizations default to
+  `hybrid`; there is no silent migration of existing customer data.
+- New managed personal/free organizations now persist `amr_embedded` and register `local:` in
+  the agent registry at creation. Their primary memory records, vectors, recall, lexical search,
+  graph, and relationships route through the embedded `.amr` store. Enterprise/managed/scale
+  organizations default to `hybrid`; self-host defaults to `byod_amr`.
+- Important boundary: embedded `.amr` does not make every feature Postgres/Qdrant-free. KB
+  documents/segments and selected operational side tables still use the `hm` PostgreSQL schema and
+  Qdrant. Do not claim full data-plane elimination until those domains have separate migration work.
+- Platform Admin now reports each user's workspace type, effective storage modes, `.amr`/hybrid
+  filesystem label, and routed memory count. AMR counts are read from the agent stats path and
+  cached for 15 seconds; unavailable agent counts return `Unavailable`, never a false zero.
+- Migration `20260709211000_add_memory_storage_mode` was applied directly to legacy production
+  Postgres because Prisma migrate deploy is not baselined there (`P3005`). Preserve this operational
+  fact: use an idempotent SQL migration plus verification for this production database unless the
+  migration ledger is formally baselined first.
+
 ### vNext B2B/B2C parallel canary
 - Deployed `codex/production-hardening-runtime` beside production from clean
   `/root/hivemind-next`; never pulled, reset, or edited dirty `/root/hivemind`.

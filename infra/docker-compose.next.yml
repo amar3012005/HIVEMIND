@@ -115,6 +115,9 @@ services:
       <<: *runtime-env
       HIVEMIND_RUNTIME_ROLE: maintenance
     depends_on: [core-b2b]
+    # Maintenance intentionally has no HTTP listener.
+    healthcheck:
+      disable: true
     mem_limit: 512m
     cpus: 0.5
 
@@ -169,6 +172,9 @@ services:
       <<: *runtime-env
       HIVEMIND_RUNTIME_ROLE: maintenance
     depends_on: [core-b2c]
+    # Maintenance intentionally has no HTTP listener.
+    healthcheck:
+      disable: true
     mem_limit: 384m
     cpus: 0.25
 

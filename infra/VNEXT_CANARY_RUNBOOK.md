@@ -25,6 +25,17 @@ docker build -t hivemind/employees:hivemind-next-<sha> employees-service
 cp infra/.env.next.example infra/.env.next
 # Replace every placeholder in infra/.env.next with a unique random value.
 docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml --profile b2b config --quiet
+docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml up -d postgres-next qdrant-next redis-next
+
+# Bootstrap only the authoritative schema structure. This copies no customer rows.
+# Do not run `prisma migrate deploy` for a fresh canary yet: historical migrations
+# contain public-schema references that do not replay against hivemind.
+docker exec hm-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
+  -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=hivemind --schema-only \
+  --no-owner --no-privileges' \
+  | docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml \
+    exec -T postgres-next psql -v ON_ERROR_STOP=1 -U hivemind_next -d hivemind_next
+
 docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml --profile b2b up -d
 ```
 

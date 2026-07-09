@@ -15,6 +15,8 @@ test('vNext deployment separates B2B and B2C app/control/worker pools', () => {
   assert.match(text, /profiles: \[b2c\]/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE: app/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE: maintenance/);
+  assert.match(text, /maintenance-b2b:[\s\S]*?healthcheck:\n      disable: true/);
+  assert.match(text, /maintenance-b2c:[\s\S]*?healthcheck:\n      disable: true/);
 });
 
 test('vNext deployment uses distinct state volumes, loopback ports, and mandatory isolated configuration', () => {
@@ -37,4 +39,11 @@ test('vNext Caddy hosts preserve production hosts and point only at vNext loopba
   }
   for (const port of ['2126', '2127', '2226', '2227']) assert.match(text, new RegExp(`localhost:${port}`));
   assert.doesNotMatch(text, /reverse_proxy localhost:202[67]/);
+});
+
+test('vNext runbook bootstraps a schema-only canary without replaying legacy migrations', () => {
+  const text = read('infra/VNEXT_CANARY_RUNBOOK.md');
+  assert.match(text, /--schema=hivemind --schema-only/);
+  assert.match(text, /copies no customer rows/i);
+  assert.match(text, /Do not run `prisma migrate deploy`/);
 });

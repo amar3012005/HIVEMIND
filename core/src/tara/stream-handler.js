@@ -217,7 +217,9 @@ export class TaraStreamHandler {
           model: tgt.model,
           messages,
           temperature: config.temperature ?? 0.7,
-          max_tokens: config.max_tokens ?? 2048,  // gpt-oss reasoning models need headroom
+          // voice_max_tokens (voice-v2 shim) caps spoken answers short — keeps a
+          // verbose diffusion model (mercury) fast and voice-appropriate.
+          max_tokens: params.voice_max_tokens || config.max_tokens || 2048,
           stream: true,
           // OpenRouter provider routing. voice_provider (voice-v2 shim) pins a
           // specific fast provider (e.g. Cerebras); else fastest-throughput.

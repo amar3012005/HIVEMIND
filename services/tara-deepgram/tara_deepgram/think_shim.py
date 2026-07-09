@@ -187,6 +187,7 @@ async def think(request: Request):
                 # Speed the spoken recall answer: force the fast model/provider.
                 if config.RECALL_MODEL:
                     extra["voice_model"] = config.RECALL_MODEL
+                extra["voice_max_tokens"] = config.VOICE_MAX_TOKENS  # keep mercury short + fast
                 if config.DIRECT_PROVIDER:
                     extra["voice_provider"] = ",".join(config.DIRECT_PROVIDER)
                 if config.DIRECT_REASONING_EFFORT:

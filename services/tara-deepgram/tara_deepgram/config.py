@@ -66,17 +66,24 @@ TELNYX_ALLOWED_NUMBERS = ALLOWED_NUMBERS  # alias
 VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-20b")
-# Direct-answer model. gpt-oss-120b on Cerebras = ~3x faster full completion
-# than llama-70b (the TTS-blocking metric). Provider pin + low reasoning effort.
-DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "openai/gpt-oss-120b")
+# Mercury-2 (Inception diffusion LLM) — fastest we have: voice reply ~0.6s,
+# strategist JSON ~1s, no reasoning-token tax. Diffusion budgets tokens
+# differently → needs generous max_tokens (>=300) or it returns empty.
+# Router = the strategist JSON call. Keep it a fast structured-output model
+# (gemini-flash-lite ~0.5s); mercury's diffusion fills the token budget and is
+# slower for tight JSON. DIRECT + RECALL answers = mercury (fastest spoken text).
+ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "google/gemini-2.5-flash-lite")
+DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "inception/mercury-2")
 # Comma-sep OpenRouter provider order for the direct model (empty = latency sort).
-DIRECT_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_DIRECT_PROVIDER", "Cerebras").split(",") if p.strip()]
-# gpt-oss reasoning effort for voice: low = fewer reasoning tokens = faster.
-DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "low")
-# Model core uses for spoken recall answers (voice_model override). Same fast
-# Cerebras gpt-oss-120b; empty = leave core's default.
-RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
+# Mercury only serves via Inception → leave empty (single provider).
+DIRECT_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_DIRECT_PROVIDER", "").split(",") if p.strip()]
+# Reasoning effort only applies to gpt-oss; empty for mercury (no reasoning tax).
+DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "")
+# Model core uses for spoken recall answers (voice_model override).
+RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "inception/mercury-2")
+# Hard cap on spoken-answer length (core recall). Short = fast + voice-natural;
+# mercury needs >=~200 to emit content at all.
+VOICE_MAX_TOKENS = int(os.getenv("TARA_DG_VOICE_MAX_TOKENS", "240"))
 # Speak a filler if the grounded recall answer hasn't started within this many ms.
 FILLER_AFTER_MS = int(os.getenv("TARA_DG_FILLER_AFTER_MS", "400"))
 # Fillers off by default now — Cerebras + warm recall make them unnecessary and

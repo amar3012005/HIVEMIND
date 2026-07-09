@@ -679,7 +679,7 @@ async function enrichPlatformUsers(records) {
     by: ['userId'],
     where: {
       userId: { in: userIds }, deletedAt: null, isLatest: true,
-      org: { memoryStorageMode: { in: ['hybrid', 'hybrid_amr_index', 'byod_hybrid'] } },
+      organization: { memoryStorageMode: { in: ['hybrid', 'hybrid_amr_index', 'byod_hybrid'] } },
     },
     _count: { _all: true },
   });

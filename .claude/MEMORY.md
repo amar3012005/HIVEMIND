@@ -6,6 +6,23 @@ entry after each meaningful task. Newest at top within a date. Pair with
 
 ---
 
+## 2026-07-09
+
+### vNext B2B/B2C parallel canary
+- Deployed `codex/production-hardening-runtime` beside production from clean
+  `/root/hivemind-next`; never pulled, reset, or edited dirty `/root/hivemind`.
+- Exposed isolated endpoints: `b2b-next-core`, `b2b-next-api`,
+  `b2c-next-core`, and `b2c-next-api` on separate loopback ports and Caddy
+  routes. All four plus existing production health/bootstrap endpoints returned
+  HTTP 200 after rollout.
+- vNext has independent Postgres, Qdrant, Redis volumes and generated secrets.
+  It uses a production **schema-only** export, never production rows, because
+  historical Prisma migrations contain `public.*` references and cannot replay
+  safely against the authoritative `hivemind` schema.
+- B2B/B2C app, control-plane, maintenance, and HyperAgent pools are separately
+  capped. This is a canary topology, not yet the final paid-customer traffic
+  router or a physically isolated B2B data plane.
+
 ## 2026-05-30
 
 ### CSI / MiroFish + Employees architecture docs

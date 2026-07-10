@@ -48,6 +48,11 @@ docker exec hm-postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
   | docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml \
     exec -T postgres-next psql -v ON_ERROR_STOP=1 -U hivemind_next -d hivemind_next
 
+# Apply the post-snapshot vNext migrations in dependency order. The runner has
+# an isolated ledger because the schema-only bootstrap intentionally has no
+# Prisma migration history.
+infra/apply-vnext-migrations.sh
+
 docker compose --env-file infra/.env.next -f infra/docker-compose.next.yml --profile b2b up -d
 ```
 

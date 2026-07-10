@@ -183,4 +183,4 @@
 
 ### Promotion Gate
 - Rebuild and redeploy the Control canary with the TARA boundary fix, prove member denial and owner passage at the live route, then remove the disposable fixture and disable dummy checkout again.
-- Do not promote while migration history and the actual canary schema disagree; reconcile the migration runner so a fresh environment receives every required historical migration in dependency order.
+- Run the idempotent `infra/apply-vnext-migrations.sh` before every canary application start. Its explicit ledger closes the schema-snapshot gap without pretending the imported schema has Prisma migration history.

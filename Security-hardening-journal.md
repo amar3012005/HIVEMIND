@@ -64,3 +64,17 @@
 - Do not repeat the direct loopback port remap on this host topology.
 - Migrate the Caddy ingress and these services to a shared Docker network, then proxy by service name, or move each standalone service to host networking with an explicit loopback listener.
 - Keep the existing direct port exposure until that migration is tested atomically with a rollback plan. Do not rely on UFW alone because Docker-published ports bypass ordinary host firewall policy.
+
+## Phase 5 - Docker Published-Port Firewall (2026-07-10)
+
+### Change
+- Added `infra/docker-edge-firewall.sh` and the `hivemind-docker-edge-firewall.service` systemd unit.
+- The unit installs idempotent `DOCKER-USER` rules for both IPv4 and IPv6. It drops new forwarded TCP connections to legacy direct-published ports `8088`, `8090`, `8091`, and `8095`.
+- The unit is enabled on production and ordered after Docker, so Docker restarts cannot silently remove the protection.
+
+### Validation
+- Verified all eight rules (four ports across IPv4 and IPv6) on production.
+- Caddy-hosted frontend and core health routes remain `200` after the rules are active.
+
+### Rollback
+- Disable and remove the unit, then remove the matching `DOCKER-USER` rules with `iptables -D` and `ip6tables -D`. Do not remove the rules until an alternative edge ingress path has been verified.

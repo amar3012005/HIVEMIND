@@ -2216,7 +2216,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/auth/google/callback' && req.method === 'GET') {
-    console.log(`[google-auth] Callback received from Google - URL: ${req.url}`);
+    console.log('[google-auth] Callback received from Google');
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     const error = url.searchParams.get('error');
@@ -2307,7 +2307,7 @@ const server = http.createServer(async (req, res) => {
         email: user.email,
         orgId: org?.id || null,
       });
-      console.log(`[google-auth] Session created - sessionId: ${sessionId}`);
+      console.log('[google-auth] Session created');
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
       console.log(`[google-auth] Preparing redirect - initial finalRedirect: ${finalRedirect}`);
@@ -4175,7 +4175,7 @@ const server = http.createServer(async (req, res) => {
       console.warn('[account-delete] ✗ No valid session — requireSession rejected');
       return;
     }
-    console.log('[account-delete] ✓ Session valid, userId:', current.session.userId, 'sessionId:', current.sessionId);
+    console.log('[account-delete] Session validated');
 
     if (!prisma) {
       console.error('[account-delete] ✗ Database unavailable (prisma is null)');

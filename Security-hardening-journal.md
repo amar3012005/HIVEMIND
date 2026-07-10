@@ -184,3 +184,9 @@
 ### Promotion Gate
 - Rebuild and redeploy the Control canary with the TARA boundary fix, prove member denial and owner passage at the live route, then remove the disposable fixture and disable dummy checkout again.
 - Run the idempotent `infra/apply-vnext-migrations.sh` before every canary application start. Its explicit ledger closes the schema-snapshot gap without pretending the imported schema has Prisma migration history.
+
+### Integration Verification
+- Shared OIDC, Google, and Cartesia credentials are now server-only vNext variables; B2B and B2C retain separate callback URLs and isolated session secrets.
+- Cartesia live E2E passed on both tiers: owners received a short-lived token and agent ID, while ordinary members received `403`. The disposable users, organization, and Redis sessions were removed afterwards.
+- ZITADEL and Google both reject the new callback URLs because they are not yet registered in their provider consoles. Keep production callbacks and add both B2B/B2C callbacks before promotion; never replace the existing production entries.
+- Removed callback query strings and raw session IDs from authentication/account-deletion logs to prevent authorization codes and bearer sessions entering centralized logs.

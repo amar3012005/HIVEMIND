@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   buildReferralOffer,
   buildStandardOffer,
+  claimReferralOffer,
   mergeEntitlementPlan,
   normalizeLimitOverrides,
   normalizeReferralCode,
@@ -45,6 +46,33 @@ describe('referral entitlements', () => {
     }, now);
     assert.deepEqual(referral.onboarding_limits, { maxUsers: 25 });
     assert.deepEqual(referral.runway_limits, { maxUsers: 10 });
+  });
+
+  it('returns the activated plan for post-payment provisioning', async () => {
+    const campaign = {
+      id: 'campaign-id', code: 'GTM2026', active: true, startsAt: null, endsAt: null,
+      maxRedemptions: null, onboardingDays: 14, onboardingPlan: 'enterprise',
+      onboardingLimits: {}, runwayPlan: 'scale', runwayLimits: {},
+    };
+    const tx = {
+      referralRedemption: {
+        findUnique: async () => null,
+        create: async ({ data }) => data,
+      },
+      referralCampaign: {
+        findUnique: async () => campaign,
+        updateMany: async () => ({ count: 1 }),
+      },
+      organizationEntitlement: {
+        deleteMany: async () => ({}), updateMany: async () => ({}), createMany: async () => ({}),
+      },
+      organization: { update: async () => ({}) },
+    };
+    const result = await claimReferralOffer({
+      tx, orgId: 'org-id', userId: 'user-id', offer: buildReferralOffer(campaign),
+    });
+    assert.equal(result.onboardingPlan, 'enterprise');
+    assert.equal(result.runwayPlan, 'scale');
   });
 
   it('records cumulative memory usage without any decrement path', async () => {

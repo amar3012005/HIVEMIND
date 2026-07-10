@@ -131,7 +131,7 @@ export async function claimReferralOffer({ tx, orgId, userId, offer, now = new D
       termsSnapshot: offer,
     },
   });
-  return { redemption, terms: offer, runwayStartsAt: activation.runwayStartsAt };
+  return { redemption, terms: offer, ...activation };
 }
 
 export async function redeemReferral({ prisma, orgId, userId, code }) {

@@ -151,6 +151,24 @@ export async function provisionManagedAgent({ orgId, dim = 1024 }) {
     const mnemeVol = `hm-org-mneme-${sid}`;
     const qdVol = `hm-org-qdrant-${sid}`;
 
+    // A completed provisioning is immutable: reuse its persisted credentials
+    // instead of generating credentials that do not match existing containers.
+    try {
+      const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE(), 'utf8'));
+      const existing = registry?.[orgId];
+      if (existing?.kind === 'managed' && existing.url && existing.token) {
+        return { provisioned: true, registered: true, reused: true, url: existing.url };
+      }
+    } catch { /* no completed registration */ }
+
+    const existingContainers = await Promise.all([pgName, qdName, agentName].map(containerExists));
+    if (existingContainers.some(Boolean)) {
+      // Partial state cannot be repaired without the original generated secrets.
+      // Never overwrite it with fresh credentials; an operator must remove or
+      // recover the three org resources before retrying.
+      return { provisioned: false, reason: 'partial-state', containers: existingContainers };
+    }
+
     // Secrets — generated per org, never logged.
     const agentToken = crypto.randomBytes(32).toString('hex');
     const pgPassword = crypto.randomBytes(24).toString('hex');

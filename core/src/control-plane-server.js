@@ -159,6 +159,38 @@ function dummyCheckoutAllowed(orgId) {
   return allowed.has(orgId);
 }
 
+async function provisionPaidManagedOrg(orgId, planId) {
+  if (planId !== 'enterprise' || !orgId) return { provisioned: false, reason: 'not-managed-enterprise' };
+  const org = await prisma.organization.findUnique({
+    where: { id: orgId },
+    select: { hostingMode: true },
+  });
+  if (!org || org.hostingMode === 'self_host') return { provisioned: false, reason: 'self-hosted' };
+  let [memories, documents] = await Promise.all([
+    prisma.memory.count({ where: { orgId } }),
+    prisma.knowledgeDocument.count({ where: { orgId } }).catch(() => 0),
+  ]);
+  const { agentFor, remoteStats } = await import('./vector/mneme/remote-backend.js');
+  if (agentFor(orgId)?.url === 'local:') {
+    const sourceStats = await remoteStats(orgId, {});
+    if (!sourceStats) return { provisioned: false, reason: 'storage-verification-failed' };
+    memories = Math.max(memories, Number(sourceStats.memory_count ?? sourceStats.memories) || 0);
+  }
+  if (memories > 0 || documents > 0) {
+    console.warn('[managed-provision] migration required before cutover', { orgId, memories, documents });
+    return { provisioned: false, reason: 'migration-required', memories, documents };
+  }
+  const { provisionManagedAgent } = await import('./selfhost/managed-provisioner.js');
+  const result = await provisionManagedAgent({ orgId });
+  if (result.provisioned && result.registered) {
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { memoryStorageMode: 'hybrid_amr_index' },
+    });
+  }
+  return result;
+}
+
 class PlanCapacityError extends Error {
   constructor(resource, plan, limit, current) {
     super(`${resource} limit reached (${plan.name} plan: ${limit.toLocaleString()})`);
@@ -8885,6 +8917,10 @@ Write the persona now.`;
           resourceType: 'billing_checkout', resourceId: checkoutId,
           metadata: { plan: result.checkout.targetPlanId, already_confirmed: result.alreadyConfirmed }, ..._reqMeta(req),
         });
+        if (!result.alreadyConfirmed) {
+          provisionPaidManagedOrg(orgId, result.activation?.onboardingPlan || result.activation?.runwayPlan)
+            .catch((error) => console.error('[managed-provision] post-checkout failed', { orgId, error: error.message }));
+        }
         return jsonResponse(res, {
           success: true,
           already_confirmed: result.alreadyConfirmed,
@@ -9122,6 +9158,10 @@ Write the persona now.`;
               data: { orgId: org.id, source: 'stripe', phase: 'subscription', planId, limits: {}, effectiveFrom: new Date() },
             });
           });
+          if (['active', 'trialing'].includes(sub.status)) {
+            provisionPaidManagedOrg(org.id, planId)
+              .catch((error) => console.error('[managed-provision] post-stripe failed', { orgId: org.id, error: error.message }));
+          }
           break;
         }
         case 'customer.subscription.deleted':

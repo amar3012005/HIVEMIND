@@ -166,4 +166,5 @@
 ### Deployment Gate
 - Apply migrations `20260710153000_agent_usage_quotas` and `20260710154000_provider_neutral_checkout` before recreating Core or Control.
 - Set `BILLING_DUMMY_ALLOWED_ORGS` only for test organizations. Never use a wildcard or expose dummy confirmation broadly.
-- Do not deploy this phase until the managed-enterprise post-payment data-plane transition is verified; entitlement activation currently changes commercial access, while storage-plane migration/provisioning needs an explicit tested handoff.
+- Post-payment provisioning now cuts over only empty managed-enterprise organizations after source PostgreSQL and embedded `.amr` counts are verified. Existing-data organizations remain on central hybrid and log `migration-required`; build and test an explicit data migration before enabling automatic cutover for them.
+- Managed provisioning reuses completed registrations and fails closed on partial container state instead of rotating credentials against reused containers. Operators must recover or remove partial org resources before retrying.

@@ -78,4 +78,23 @@
 - Caddy-hosted frontend and core health routes remain `200` after the rules are active.
 
 ### Rollback
-- Disable and remove the unit, then remove the matching `DOCKER-USER` rules with `iptables -D` and `ip6tables -D`. Do not remove the rules until an alternative edge ingress path has been verified.
+- Disable and remove the unit, then remove the matching loopback-allow and remote-drop `INPUT` rules with `iptables -D` and `ip6tables -D`. Do not remove the rules until an alternative edge ingress path has been verified.
+
+## Phase 6 - SSH and Host Access (2026-07-10)
+
+### Findings
+- SSH accepted passwords and enabled X11 forwarding. Authentication logs showed active password spraying against `root` and invalid users.
+- The sole current management identity is an ED25519 key for `root`; `PermitRootLogin prohibit-password` already prevented root password login, but the global password surface was still enabled.
+- Unattended security upgrades are enabled. A kernel update has left the host in a reboot-required state.
+
+### Change
+- Added `infra/sshd_config.d/99-hivemind-hardening.conf`: disables password and keyboard-interactive SSH, disables X11 forwarding, retains root public-key access, reduces authentication/session limits, enables keepalives, and raises SSH audit verbosity.
+- Added `infra/fail2ban/jail.d/hivemind-sshd.local`, then installed and enabled Fail2ban with an aggressive systemd-backed SSH jail: four attempts in ten minutes results in a one-hour ban.
+
+### Validation
+- `sshd -t` passed before reload; effective SSH policy confirms password authentication and X11 forwarding are disabled.
+- A fresh key-only root SSH connection succeeded after the policy reload and again after Fail2ban activation.
+- Fail2ban is running and has already banned repeated hostile sources observed in the SSH journal.
+
+### Operational Follow-up
+- Schedule a maintenance-window reboot to apply the pending kernel update. Do not reboot this single production host without confirming backups, public health checks, and a rollback/operator-access plan.

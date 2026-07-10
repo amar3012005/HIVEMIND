@@ -69,11 +69,12 @@
 
 ### Change
 - Added `infra/docker-edge-firewall.sh` and the `hivemind-docker-edge-firewall.service` systemd unit.
-- The unit installs idempotent `DOCKER-USER` rules for both IPv4 and IPv6. It drops new forwarded TCP connections to legacy direct-published ports `8088`, `8090`, `8091`, and `8095`.
+- Docker's legacy userland proxy owns these published host sockets, so `DOCKER-USER` forwarding rules do not govern their inbound traffic. The initial forwarding rules were removed.
+- The unit now installs idempotent `INPUT` rules for both IPv4 and IPv6: allow loopback traffic, then drop all other TCP traffic to legacy direct-published ports `8088`, `8090`, `8091`, and `8095`.
 - The unit is enabled on production and ordered after Docker, so Docker restarts cannot silently remove the protection.
 
 ### Validation
-- Verified all eight rules (four ports across IPv4 and IPv6) on production.
+- Verified the loopback allow and remote-drop rules for all four ports across IPv4 and IPv6 on production.
 - Caddy-hosted frontend and core health routes remain `200` after the rules are active.
 
 ### Rollback

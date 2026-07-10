@@ -98,3 +98,20 @@
 
 ### Operational Follow-up
 - Schedule a maintenance-window reboot to apply the pending kernel update. Do not reboot this single production host without confirming backups, public health checks, and a rollback/operator-access plan.
+
+## Phase 7 - Secret File Permissions (2026-07-10)
+
+### Findings
+- The live production dotenv file was root-only, but several historical `/root/hivemind/.env.bak*` files were mode `0644` and could contain still-valid credentials.
+- Docker container inspection shows that several application containers receive a broad shared environment with credentials unrelated to their individual responsibilities. This is a separate least-privilege refactor and was not changed blindly in production.
+
+### Change
+- Added `infra/hivemind-secret-permissions.sh` and a systemd path unit. It restricts the known production dotenv and backup locations to `0600` whenever `/root/hivemind` changes.
+- Installed and enabled the path guard on production, and corrected every existing root deployment dotenv/backup file plus the next-stack deployment environment.
+
+### Validation
+- Verified all tracked deployment dotenv files are mode `0600`.
+- Created a deliberately mode-`0644` dotenv-style test file; the path guard changed it to `0600` automatically.
+
+### Next Phase
+- Refactor Compose service environments to explicit per-service allowlists, starting with the broker and edge services, then core/control/employees after dependency mapping and staging validation. This will reduce the blast radius of a container compromise.

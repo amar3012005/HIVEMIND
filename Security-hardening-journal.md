@@ -19,6 +19,10 @@
 - `core.singulancelabs.com`, `api.singulancelabs.com`, and `nango.singulancelabs.com` remain reachable through Caddy.
 - Ports 2026, 2027, and 3003 are no longer listening on `0.0.0.0` or `[::]`.
 
+### Follow-up
+- Nango listens on container port 8080. Corrected the host mapping from 3003:3003 to 127.0.0.1:3003:8080 after the hardened recreation exposed the mismatch.
+- Nango migrations required `public.uuid_generate_v4()` while `uuid-ossp` is installed in the shared `hivemind` schema. Added a compatibility wrapper that delegates to `hivemind.uuid_generate_v4()`; the extension itself was not moved.
+
 ### Next Phase
 - Map BYOD broker authentication/TLS and expose it only through a named Caddy route.
 - Enable a restrictive host firewall after confirming SSH access and the complete public ingress inventory.

@@ -184,7 +184,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "127.0.0.1:${NANGO_PORT:-3003}:3003"
+      - "127.0.0.1:${NANGO_PORT:-3003}:8080"
 
   docling:
     image: ghcr.io/docling-project/docling-serve:latest

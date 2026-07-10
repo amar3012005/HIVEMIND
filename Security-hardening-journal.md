@@ -139,3 +139,11 @@
 
 ### Rollback
 - Retain the previous Core, Control, and Frontend image tags before recreation. Roll back all three together because the new UI consumes the new usage-summary contract while remaining backward-compatible with the legacy payload.
+
+### Production Deployment
+- Merged the hardening branch with the production-only Calendar/TARA history; deployed backend source `731b95cd` and frontend source `18541b4`.
+- Live images: `hivemind/core-api:next-731b95cd-quotas`, `hivemind/control-plane:next-731b95cd-quotas`, and `hivemind/fe:next-18541b4-quotas`.
+- Rollback images use timestamp `20260710-020312`; the prior frontend container is also retained stopped as `hm-fe-rollback-20260710-020312`.
+- Live authenticated usage response returns Free daily limits for tokens, combined queries, uploads, KB pages, Deep Research, and Web Intel plus the reminders array. Unauthenticated usage returns `401`.
+- Main frontend, Core health, and Control health return `200`; no recent fatal/uncaught runtime logs were found.
+- Previous controls remain active after recreation: Fail2ban, Docker edge firewall, dotenv permission guard, key-only SSH, KB queue mode `all`, and unauthenticated BYOD enrollment `401`.

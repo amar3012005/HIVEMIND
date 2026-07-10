@@ -43,4 +43,8 @@
 
 ### Change
 - Broker database configuration is separated from the application database credential via `BROKER_DATABASE_URL`.
-- Planned role scope: connect to the shared database, use `hivemind` schema, and read only the API-key hash/revocation/org fields needed for self-host enrollment.
+- Role scope: connect to the shared database, use `hivemind` schema, and read only the API-key hash/revocation/org fields needed for self-host enrollment.
+
+### Validation
+- Broker runs as `hivemind_broker`; unauthenticated HTTPS enrollment returns `401`.
+- A query for the `memories` table from inside the broker container is denied.

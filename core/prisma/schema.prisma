@@ -62,6 +62,9 @@ model Organization {
   // Captured at onboarding so the dashboard can gate self-host orgs into the connect-your-agent flow
   // before showing the workspace — independent of whether the agent has registered yet.
   hostingMode                  String?            @default("managed") @map("hosting_mode") @db.VarChar(20)
+  // Canonical company context shared by the workspace profile, onboarding,
+  // and agent grounding. This is organization-scoped, never browser-only.
+  companyProfile               Json?              @map("company_profile")
   // Stripe billing state — populated on first checkout, sync'd via webhook.
   stripeCustomerId             String?            @unique @map("stripe_customer_id") @db.VarChar(64)
   stripeSubscriptionId         String?            @map("stripe_subscription_id") @db.VarChar(64)

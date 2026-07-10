@@ -9424,6 +9424,7 @@ Write the persona now.`;
   if (pathname === '/v1/tara/cartesia-token' && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
+    if (!await requirePrivilegedAgentAccess(req, res, current)) return;
     const apiKey = process.env.CARTESIA_API_KEY || '';
     const agentId = process.env.CARTESIA_AGENT_ID || '';
     if (!apiKey || !agentId) {

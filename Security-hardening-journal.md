@@ -168,3 +168,19 @@
 - Set `BILLING_DUMMY_ALLOWED_ORGS` only for test organizations. Never use a wildcard or expose dummy confirmation broadly.
 - Post-payment provisioning now cuts over only empty managed-enterprise organizations after source PostgreSQL and embedded `.amr` counts are verified. Existing-data organizations remain on central hybrid and log `migration-required`; build and test an explicit data migration before enabling automatic cutover for them.
 - Managed provisioning reuses completed registrations and fails closed on partial container state instead of rotating credentials against reused containers. Operators must recover or remove partial org resources before retrying.
+
+## Phase 10 - Isolated Checkout Canary and TARA Boundary (2026-07-10)
+
+### Change
+- Exposed dummy-checkout configuration only through fail-closed vNext Compose variables; production mode still requires an explicit organization UUID allowlist.
+- Added the missing privileged-agent authorization check to the TARA Cartesia token-mint route, reusing the same owner/admin/team-lead/project-owner policy as HyperAgents.
+- Restored the two omitted B2B/B2C canary frontend routes in live Caddy configuration after config validation and a timestamped backup.
+
+### Canary Evidence
+- Applied the referral, agent-usage, provider-neutral checkout, and previously omitted memory-storage migrations only to the isolated vNext database.
+- Deployed immutable Core, Control, and B2B/B2C frontend canary images. All loopback and public canary health/bootstrap/frontend paths return `200`; production health remained `200`.
+- Disposable authenticated E2E proved unauthenticated billing is `401`, ordinary-member checkout is `403`, invalid referral is `400`, owner checkout and confirmation are `200`, repeat confirmation is idempotent, and the organization enters the referral onboarding entitlement only after confirmation.
+
+### Promotion Gate
+- Rebuild and redeploy the Control canary with the TARA boundary fix, prove member denial and owner passage at the live route, then remove the disposable fixture and disable dummy checkout again.
+- Do not promote while migration history and the actual canary schema disagree; reconcile the migration runner so a fresh environment receives every required historical migration in dependency order.

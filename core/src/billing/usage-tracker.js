@@ -340,7 +340,7 @@ export class UsageTracker {
     try {
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT to_char("day", 'YYYY-MM-DD') AS day,
-                "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested",
+                "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested",
                 "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage"
            FROM "OrgUsageDaily"
           WHERE "orgId" = $1::uuid AND "day" >= (CURRENT_DATE - ($2 || ' days')::interval)
@@ -352,6 +352,7 @@ export class UsageTracker {
         tokens: Number(r.tokensProcessed || 0),
         searches: Number(r.searchQueries || 0),
         uploads: Number(r.knowledgeBaseUploads || 0),
+        kbPages: Number(r.knowledgeBasePages || 0),
         memories: Number(r.memoriesIngested || 0),
         deepResearch: Number(r.deepResearchJobs || 0),
         webIntel: Number(r.webIntelJobs || 0),

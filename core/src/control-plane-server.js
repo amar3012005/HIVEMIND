@@ -8601,6 +8601,12 @@ Write the persona now.`;
           source: entitlement.source, phase: entitlement.phase, effective_from: entitlement.effectiveFrom,
           effective_until: entitlement.effectiveUntil,
         } : null,
+        organization: {
+          id: org.id,
+          plan: org.plan,
+          hosting_mode: org.hostingMode,
+          memory_storage_mode: org.memoryStorageMode,
+        },
         usage,
         cumulative_usage: cumulative,
         warnings: limitCheck.warnings || [],

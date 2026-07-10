@@ -90,4 +90,18 @@ describe('PlanEnforcer B2C limits', () => {
     assert.ok(summary.reminders.some(reminder => reminder.resource === 'tokens' && reminder.period === 'daily'));
     assert.ok(summary.reminders.some(reminder => reminder.resource === 'tokens' && reminder.period === 'monthly'));
   });
+
+  it('blocks TARA and HyperAgents at daily limits', async () => {
+    const tara = makeEnforcer({ daily: { taraSeconds: 300 } });
+    const hyper = makeEnforcer({ daily: { hyperAgentRuns: 5 } });
+    assert.equal((await tara.checkLimit(ORG_ID, 'taraSeconds', 1)).allowed, false);
+    assert.equal((await hyper.checkLimit(ORG_ID, 'hyperAgentRuns', 1)).allowed, false);
+  });
+
+  it('blocks TARA and HyperAgents at monthly limits', async () => {
+    const tara = makeEnforcer({ usage: { taraSeconds: 1_800 }, daily: { taraSeconds: 0 } });
+    const hyper = makeEnforcer({ usage: { hyperAgentRuns: 25 }, daily: { hyperAgentRuns: 0 } });
+    assert.equal((await tara.checkLimit(ORG_ID, 'taraSeconds', 1)).allowed, false);
+    assert.equal((await hyper.checkLimit(ORG_ID, 'hyperAgentRuns', 1)).allowed, false);
+  });
 });

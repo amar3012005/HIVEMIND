@@ -582,15 +582,20 @@ export async function assertTeamPermission(prisma, { teamId, userId, orgRole, le
   return true;
 }
 
-export async function assertProjectPermission(prisma, { projectId, userId, orgRole, level }) {
-  const isOrgAdmin = orgRole === 'owner' || orgRole === 'admin';
-  if (isOrgAdmin) return true;
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+export async function assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level }) {
+  if (!orgId) {
+    const err = new Error('Organization scope required');
+    err.status = 400;
+    throw err;
+  }
+  const project = await prisma.project.findFirst({ where: { id: projectId, orgId, archivedAt: null } });
   if (!project) {
     const err = new Error('Project not found');
     err.status = 404;
     throw err;
   }
+  const isOrgAdmin = orgRole === 'owner' || orgRole === 'admin';
+  if (isOrgAdmin) return true;
   // Owner-style mutation requires explicit ProjectMember role='owner' or team_lead
   const m = await prisma.projectMember.findUnique({
     where: { projectId_userId: { projectId, userId } },

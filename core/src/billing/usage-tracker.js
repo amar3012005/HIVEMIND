@@ -41,6 +41,12 @@ export function meterDeepResearch(orgId) { if (_tracker && orgId) _safe(_tracker
 export function meterWebIntel(orgId)   { if (_tracker && orgId) _safe(_tracker.recordWebIntel(orgId)); }
 export function meterGraphQuery(orgId) { if (_tracker && orgId) _safe(_tracker.recordGraphQuery(orgId)); }
 export function meterTara(orgId)       { if (_tracker && orgId) _safe(_tracker.recordTara(orgId)); }
+export function meterTaraSeconds(orgId, seconds) {
+  if (_tracker && orgId && seconds > 0) _safe(_tracker.recordTaraSeconds(orgId, seconds));
+}
+export function meterHyperAgentRun(orgId) {
+  if (_tracker && orgId) _safe(_tracker.recordHyperAgentRun(orgId));
+}
 
 export class UsageTracker {
   constructor(prisma) {
@@ -56,6 +62,7 @@ export class UsageTracker {
       tokens: 'tokens_processed', searches: 'search_queries', uploads: 'knowledge_base_uploads',
       kbPages: 'knowledge_base_pages', memories: 'memories_ingested', deepResearch: 'deep_research_jobs',
       webIntel: 'web_intel_jobs', graphQueries: 'graph_queries', tara: 'tara_usage',
+      taraSeconds: 'tara_seconds', hyperAgentRuns: 'hyper_agent_runs',
     };
     const column = columns[metric];
     if (!this.prisma || !orgId || !column || !(amount > 0)) return;
@@ -299,12 +306,41 @@ export class UsageTracker {
     }
   }
 
+  async _recordMeteredMetric(orgId, type, amount) {
+    const columns = { taraSeconds: 'taraSeconds', hyperAgentRuns: 'hyperAgentRuns' };
+    const column = columns[type];
+    if (!this.prisma || !orgId || !column || !(amount > 0)) return;
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "${column}", "updatedAt")
+         VALUES ($1::uuid, $2, $3, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "${column}" = "OrgUsage"."${column}" + $3, "updatedAt" = NOW()`,
+        orgId, this._currentMonth(), Math.round(amount),
+      );
+      await this.recordDaily(orgId, type, Math.round(amount));
+      await this._recordCumulative(orgId, type, Math.round(amount));
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn(`[usage-tracker] Record ${type} failed:`, err.message);
+    }
+  }
+
+  async recordTaraSeconds(orgId, seconds) {
+    return this._recordMeteredMetric(orgId, 'taraSeconds', seconds);
+  }
+
+  async recordHyperAgentRun(orgId) {
+    return this._recordMeteredMetric(orgId, 'hyperAgentRuns', 1);
+  }
+
   // type → OrgUsageDaily column. (Internal constant — safe to interpolate.)
   static _DAILY_COL = {
     tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads',
     kbPages: 'knowledgeBasePages',
     memories: 'memoriesIngested', deepResearch: 'deepResearchJobs', webIntel: 'webIntelJobs',
-    graphQueries: 'graphQueries', tara: 'taraUsage',
+    graphQueries: 'graphQueries', tara: 'taraUsage', taraSeconds: 'taraSeconds',
+    hyperAgentRuns: 'hyperAgentRuns',
   };
 
   /**
@@ -341,7 +377,7 @@ export class UsageTracker {
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT to_char("day", 'YYYY-MM-DD') AS day,
                 "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested",
-                "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage"
+                "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "taraSeconds", "hyperAgentRuns"
            FROM "OrgUsageDaily"
           WHERE "orgId" = $1::uuid AND "day" >= (CURRENT_DATE - ($2 || ' days')::interval)
           ORDER BY "day" ASC`,
@@ -358,6 +394,8 @@ export class UsageTracker {
         webIntel: Number(r.webIntelJobs || 0),
         graphQueries: Number(r.graphQueries || 0),
         tara: Number(r.taraUsage || 0),
+        taraSeconds: Number(r.taraSeconds || 0),
+        hyperAgentRuns: Number(r.hyperAgentRuns || 0),
       }));
     } catch (err) {
       console.warn('[usage-tracker] Get daily usage failed:', err.message);
@@ -370,7 +408,7 @@ export class UsageTracker {
     try {
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages",
-                "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage"
+                "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "taraSeconds", "hyperAgentRuns"
            FROM "OrgUsageDaily" WHERE "orgId" = $1::uuid AND "day" = $2::date LIMIT 1`,
         orgId, this._currentDay(),
       );
@@ -385,6 +423,8 @@ export class UsageTracker {
         webIntel: Number(row.webIntelJobs || 0),
         graphQueries: Number(row.graphQueries || 0),
         tara: Number(row.taraUsage || 0),
+        taraSeconds: Number(row.taraSeconds || 0),
+        hyperAgentRuns: Number(row.hyperAgentRuns || 0),
       };
     } catch (err) {
       console.warn('[usage-tracker] Get daily snapshot failed:', err.message);
@@ -405,7 +445,7 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       const rows = await this.prisma.$queryRawUnsafe(
-        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "connectorCount"
+        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "taraSeconds", "hyperAgentRuns", "connectorCount"
          FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "month" = $2 LIMIT 1`,
         orgId, month
       );
@@ -420,6 +460,8 @@ export class UsageTracker {
         webIntelJobs: Number(usage.webIntelJobs || 0),
         graphQueries: Number(usage.graphQueries || 0),
         taraUsage: Number(usage.taraUsage || 0),
+        taraSeconds: Number(usage.taraSeconds || 0),
+        hyperAgentRuns: Number(usage.hyperAgentRuns || 0),
         connectorCount: Number(usage.connectorCount || 0),
         month,
       };
@@ -458,7 +500,7 @@ export class UsageTracker {
     const empty = {
       tokensProcessed: 0, searchQueries: 0, knowledgeBaseUploads: 0,
       knowledgeBasePages: 0, memoriesIngested: 0, deepResearchJobs: 0,
-      webIntelJobs: 0, graphQueries: 0, taraUsage: 0,
+      webIntelJobs: 0, graphQueries: 0, taraUsage: 0, taraSeconds: 0, hyperAgentRuns: 0,
     };
     if (!this.prisma || !orgId) return empty;
     try {
@@ -472,6 +514,8 @@ export class UsageTracker {
         memoriesIngested: Number(row.memories_ingested || 0), deepResearchJobs: Number(row.deep_research_jobs || 0),
         webIntelJobs: Number(row.web_intel_jobs || 0), graphQueries: Number(row.graph_queries || 0),
         taraUsage: Number(row.tara_usage || 0),
+        taraSeconds: Number(row.tara_seconds || 0),
+        hyperAgentRuns: Number(row.hyper_agent_runs || 0),
       };
     } catch (err) {
       // The migration may not yet exist during a rolling deployment.
@@ -492,6 +536,8 @@ export class UsageTracker {
     const queryLimit = plan.limits.searchQueriesPerMonth;
     const uploadLimit = plan.limits.knowledgeBaseUploadsPerMonth;
     const deepResearchLimit = plan.limits.deepResearchPerMonth;
+    const taraSecondsLimit = plan.limits.taraTalkSecondsPerMonth;
+    const hyperRunsLimit = plan.limits.hyperAgentRunsPerMonth;
 
     const result = { allowed: true, warnings: [], exceeded: [] };
 
@@ -536,6 +582,19 @@ export class UsageTracker {
       }
     }
 
+    for (const [limitKey, used, limit, label] of [
+      ['taraTalkSecondsPerMonth', usage.taraSeconds || 0, taraSecondsLimit, 'TARA talk time'],
+      ['hyperAgentRunsPerMonth', usage.hyperAgentRuns || 0, hyperRunsLimit, 'HyperAgents runs'],
+    ]) {
+      if (!(limit > 0)) continue;
+      if (used >= limit) {
+        result.allowed = false;
+        result.exceeded.push(limitKey);
+      } else if (used / limit >= 0.8) {
+        result.warnings.push(`80% of monthly ${label} used (${used.toLocaleString()}/${limit.toLocaleString()}).`);
+      }
+    }
+
     const daily = await this.getDailySnapshot(orgId) || {};
     const dailyChecks = [
       ['llmTokensPerDay', daily.tokens || 0, 'daily token'],
@@ -544,6 +603,8 @@ export class UsageTracker {
       ['knowledgeBasePagesPerDay', daily.kbPages || 0, 'daily KB page'],
       ['deepResearchPerDay', daily.deepResearch || 0, 'daily deep research'],
       ['webIntelPerDay', daily.webIntel || 0, 'daily web intel'],
+      ['taraTalkSecondsPerDay', daily.taraSeconds || 0, 'daily TARA talk time'],
+      ['hyperAgentRunsPerDay', daily.hyperAgentRuns || 0, 'daily HyperAgents run'],
     ];
     for (const [limitKey, used, label] of dailyChecks) {
       const limit = plan.limits[limitKey];
@@ -580,6 +641,8 @@ export class UsageTracker {
       webIntelJobs: 0,
       graphQueries: 0,
       taraUsage: 0,
+      taraSeconds: 0,
+      hyperAgentRuns: 0,
       connectorCount: 0,
       month: this._currentMonth(),
     };

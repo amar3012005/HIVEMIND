@@ -28,6 +28,8 @@ const DAILY_LIMITS = {
   kbPages: ['knowledgeBasePagesPerDay', 'kbPages', 'pages'],
   deepResearch: ['deepResearchPerDay', 'deepResearch', 'jobs'],
   webIntel: ['webIntelPerDay', 'webIntel', 'jobs'],
+  taraSeconds: ['taraTalkSecondsPerDay', 'taraSeconds', 'seconds'],
+  hyperAgentRuns: ['hyperAgentRunsPerDay', 'hyperAgentRuns', 'runs'],
 };
 
 /**
@@ -128,6 +130,8 @@ export class PlanEnforcer {
       webIntelJobs: 0,
       graphQueries: 0,
       taraUsage: 0,
+      taraSeconds: 0,
+      hyperAgentRuns: 0,
       connectorCount: 0,
     };
     if (this.usageTracker) {
@@ -144,6 +148,8 @@ export class PlanEnforcer {
       webIntel: dbUsage.webIntelJobs || 0,
       graphQueries: dbUsage.graphQueries || 0,
       tara: dbUsage.taraUsage || 0,
+      taraSeconds: dbUsage.taraSeconds || 0,
+      hyperAgentRuns: dbUsage.hyperAgentRuns || 0,
       connectors: dbUsage.connectorCount || 0,
       month,
     };
@@ -305,9 +311,22 @@ export class PlanEnforcer {
       }
     }
 
-    if (type === 'tara') {
-      // TARA usage is tracked but not limited (uses token budget)
-      return { allowed: true };
+    if (type === 'taraSeconds' || type === 'hyperAgentRuns') {
+      const limitKey = type === 'taraSeconds' ? 'taraTalkSecondsPerMonth' : 'hyperAgentRunsPerMonth';
+      const unit = type === 'taraSeconds' ? 'TARA talk seconds' : 'HyperAgents runs';
+      const limit = limits[limitKey];
+      if (!limit || limit === -1) return { allowed: true };
+      const used = counters[type] || 0;
+      if (used + amount > limit) {
+        return {
+          allowed: false,
+          reason: `Monthly ${unit} limit exceeded (${planDef.name} plan: ${limit.toLocaleString()})`,
+          limit,
+          current: used,
+          plan: planDef.id,
+          period: 'month',
+        };
+      }
     }
 
     if (type === 'connectors') {
@@ -396,6 +415,8 @@ export class PlanEnforcer {
       if (type === 'webIntel') c.webIntel += amount;
       if (type === 'graphQueries') c.graphQueries += amount;
       if (type === 'tara') c.tara += amount;
+      if (type === 'taraSeconds') c.taraSeconds = (c.taraSeconds || 0) + amount;
+      if (type === 'hyperAgentRuns') c.hyperAgentRuns = (c.hyperAgentRuns || 0) + amount;
       if (type === 'connectors') c.connectors += amount;
       if (type === 'kbPages') c.kbPages = (c.kbPages || 0) + amount;
     }
@@ -418,8 +439,12 @@ export class PlanEnforcer {
       if (type === 'webIntel') this.usageTracker.recordWebIntel(orgId).catch(() => {});
       if (type === 'graphQueries') this.usageTracker.recordGraphQuery(orgId).catch(() => {});
       if (type === 'tara') this.usageTracker.recordTara(orgId).catch(() => {});
+      if (type === 'taraSeconds') this.usageTracker.recordTaraSeconds?.(orgId, amount).catch(() => {});
+      if (type === 'hyperAgentRuns') this.usageTracker.recordHyperAgentRun?.(orgId).catch(() => {});
       // Per-day rollup (powers the Usage page daily graphs) — same type vocab.
-      this.usageTracker.recordDaily?.(orgId, type, amount).catch(() => {});
+      if (!['taraSeconds', 'hyperAgentRuns'].includes(type)) {
+        this.usageTracker.recordDaily?.(orgId, type, amount).catch(() => {});
+      }
     }
   }
 
@@ -473,7 +498,9 @@ export class PlanEnforcer {
       deepResearch: { used: Number(dbUsage.deepResearchJobs) || 0, limit: limits.deepResearchPerMonth ?? -1 },
       webIntel: { used: Number(safeDailyUsage.webIntel) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
       graphQueries: { used: Number(dbUsage.graphQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
-      tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 }, // tracked, not limited
+      tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 },
+      taraSeconds: { used: Number(dbUsage.taraSeconds) || 0, limit: limits.taraTalkSecondsPerMonth ?? -1 },
+      hyperAgentRuns: { used: Number(dbUsage.hyperAgentRuns) || 0, limit: limits.hyperAgentRunsPerMonth ?? -1 },
       connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
       hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
       users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
@@ -487,6 +514,8 @@ export class PlanEnforcer {
         kbPages: { used: Number(safeDailyUsage.kbPages) || 0, limit: limits.knowledgeBasePagesPerDay ?? -1 },
         deepResearch: { used: Number(safeDailyUsage.deepResearch) || 0, limit: limits.deepResearchPerDay ?? -1 },
         webIntel: { used: Number(safeDailyUsage.webIntel) || 0, limit: limits.webIntelPerDay ?? -1 },
+        taraSeconds: { used: Number(safeDailyUsage.taraSeconds) || 0, limit: limits.taraTalkSecondsPerDay ?? -1 },
+        hyperAgentRuns: { used: Number(safeDailyUsage.hyperAgentRuns) || 0, limit: limits.hyperAgentRunsPerDay ?? -1 },
       },
       // Monotonic commercial/audit totals. These never decrease on deletion.
       cumulative,
@@ -497,7 +526,7 @@ export class PlanEnforcer {
     };
 
     const reminders = [];
-    const monthlyResources = ['tokens', 'searches', 'uploads', 'kbPages', 'memories', 'deepResearch'];
+    const monthlyResources = ['tokens', 'searches', 'uploads', 'kbPages', 'memories', 'deepResearch', 'taraSeconds', 'hyperAgentRuns'];
     for (const resource of monthlyResources) {
       const reminder = buildReminder(resource, summary[resource].used, summary[resource].limit, resource === 'memories' ? 'total' : 'monthly');
       if (reminder) reminders.push(reminder);

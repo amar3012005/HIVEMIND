@@ -49,6 +49,10 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 100,
       knowledgeBasePagesPerDay: 25,
       maxHyperRooms: 1,
+      hyperAgentRunsPerDay: 5,
+      hyperAgentRunsPerMonth: 25,
+      taraTalkSecondsPerDay: 300,
+      taraTalkSecondsPerMonth: 1_800,
     },
     features: {
       ...BASE_FEATURES,
@@ -59,6 +63,7 @@ export const PLANS = {
     // Stripe price IDs are read from env (different prices per env).
     // Stays null on free since there's nothing to charge.
     stripePriceIdEnv: null,
+    commercial: { audience: 'personal', onboardingDays: 0, onboardingPrice: 0, selfServe: true },
   },
   pro: {
     id: 'pro',
@@ -82,6 +87,10 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 1_000,
       knowledgeBasePagesPerDay: 250,
       maxHyperRooms: 5,
+      hyperAgentRunsPerDay: 50,
+      hyperAgentRunsPerMonth: 500,
+      taraTalkSecondsPerDay: 1_800,
+      taraTalkSecondsPerMonth: 18_000,
     },
     features: {
       ...BASE_FEATURES,
@@ -91,6 +100,7 @@ export const PLANS = {
     support: 'email',
     sla: '99.5%',
     stripePriceIdEnv: 'STRIPE_PRICE_ID_PRO',
+    commercial: { audience: 'business', onboardingDays: 14, onboardingPrice: 0, selfServe: true },
   },
   scale: {
     id: 'scale',
@@ -114,6 +124,10 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 10_000,
       knowledgeBasePagesPerDay: 2_500,
       maxHyperRooms: 25,
+      hyperAgentRunsPerDay: 500,
+      hyperAgentRunsPerMonth: 5_000,
+      taraTalkSecondsPerDay: 14_400,
+      taraTalkSecondsPerMonth: 120_000,
     },
     features: {
       ...BASE_FEATURES,
@@ -127,6 +141,7 @@ export const PLANS = {
     support: 'priority',
     sla: '99.9%',
     stripePriceIdEnv: 'STRIPE_PRICE_ID_SCALE',
+    commercial: { audience: 'business', onboardingDays: 14, onboardingPrice: 0, selfServe: true },
   },
   enterprise: {
     id: 'enterprise',
@@ -150,6 +165,10 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: -1,
       knowledgeBasePagesPerDay: -1,
       maxHyperRooms: -1,
+      hyperAgentRunsPerDay: -1,
+      hyperAgentRunsPerMonth: -1,
+      taraTalkSecondsPerDay: -1,
+      taraTalkSecondsPerMonth: -1,
     },
     features: {
       ...BASE_FEATURES,
@@ -166,6 +185,7 @@ export const PLANS = {
     sla: 'custom',
     // Enterprise is sales-led; we don't expose a self-serve Stripe price.
     stripePriceIdEnv: null,
+    commercial: { audience: 'enterprise', onboardingDays: 14, onboardingPrice: null, selfServe: false },
   },
 };
 

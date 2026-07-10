@@ -32,6 +32,7 @@ import {
 } from './runtime/runtime-role.js';
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
+import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -5469,6 +5470,28 @@ exit \$RC
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
+      if (pathname.startsWith('/api/tara/')) {
+        const membership = await prisma?.userOrganization.findUnique({
+          where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
+        }).catch(() => null);
+        const requestedProjectId = typeof body?.project_id === 'string' ? body.project_id : null;
+        const projectMembership = await prisma?.projectMember.findFirst({
+          where: {
+            ...(requestedProjectId ? { projectId: requestedProjectId } : {}),
+            userId: _mUserId,
+            role: 'owner',
+            project: { orgId: _mOrgId, archivedAt: null },
+          },
+          select: { role: true },
+        }).catch(() => null);
+        const projectRole = projectMembership?.role || null;
+        if (!membership?.isActive || !canUsePrivilegedAgent(effectiveRoles(membership), projectRole)) {
+          return jsonResponse(res, {
+            error: 'forbidden',
+            code: 'PRIVILEGED_AGENT_ROLE_REQUIRED',
+          }, 403);
+        }
+      }
       // RESIDENCY: meetings + tara are now routed to the org's agent for remote (self-host) orgs.
       // The 501 block is gone — each endpoint below branches on orgIsRemote(_mOrgId) and calls
       // amrMeeting*/amrTaraCall instead of Prisma/raw-SQL. Central/managed orgs are BYTE-UNCHANGED.
@@ -6972,6 +6995,8 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const talkLimit = await planEnforcer.checkLimit(tOrg, 'taraSeconds', 1);
+          if (!talkLimit.allowed) return jsonResponse(res, planLimitBody(talkLimit, 'taraSeconds'), talkLimit.status || 429);
           // Remote (self-host) orgs: ledger on agent.
           if (orgIsRemote(tOrg)) {
             try {
@@ -7043,6 +7068,7 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const meteredDurationSeconds = Math.max(0, Math.ceil(Number(body.duration_sec) || 0));
           // Remote (self-host) orgs: mark completed, then generate the same
           // post-call insight as central — stored in the agent's call metadata
           // (the agent has no tara_insights table; detail maps metadata.insight).
@@ -7054,6 +7080,7 @@ exit \$RC
                 status: 'completed',
                 ...(pTok ? { prompt_tokens_inc: pTok } : {}), ...(cTok ? { completion_tokens_inc: cTok } : {}),
                 metadata_merge: { duration_sec: durSec } });
+              if (meteredDurationSeconds > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', meteredDurationSeconds);
               (async () => {
                 try {
                   const g = await amrTaraCall(tOrg, { op: 'get', session_id: String(body.session_id) });
@@ -7106,8 +7133,12 @@ exit \$RC
           try {
             const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            if (call.status === 'completed') {
+              return jsonResponse(res, { ok: true, already_completed: true, duration_ms: call.durationMs || 0, turns: call.turnCount || 0 });
+            }
             const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
             await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            if (durationMs > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', Math.ceil(durationMs / 1000));
             const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
             const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
             if (transcript.trim() && process.env.GROQ_API_KEY) {
@@ -20482,6 +20513,8 @@ exit \$RC
         case '/api/tara/stream':
           if (req.method === 'POST') {
             if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            const talkLimit = await planEnforcer.checkLimit(orgId, 'taraSeconds', 1);
+            if (!talkLimit.allowed) return jsonResponse(res, planLimitBody(talkLimit, 'taraSeconds'), talkLimit.status || 429);
             // Don't use jsonResponse — stream handler writes NDJSON directly.
             // Build the multi-tier access context (projectIds/teamIds) so Tara's
             // recall sees project/team/org-shared memories, not just personal —

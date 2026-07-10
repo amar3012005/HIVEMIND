@@ -147,3 +147,23 @@
 - Live authenticated usage response returns Free daily limits for tokens, combined queries, uploads, KB pages, Deep Research, and Web Intel plus the reminders array. Unauthenticated usage returns `401`.
 - Main frontend, Core health, and Control health return `200`; no recent fatal/uncaught runtime logs were found.
 - Previous controls remain active after recreation: Fail2ban, Docker edge firewall, dotenv permission guard, key-only SSH, KB queue mode `all`, and unauthenticated BYOD enrollment `401`.
+
+## Phase 9 - Organization Entitlements and Privileged Agents (2026-07-10)
+
+### Change
+- Added provider-neutral, expiring checkout intents. Dummy checkout is restricted to an explicit organization allowlist and confirmation is idempotent under a PostgreSQL advisory transaction lock.
+- Referral limits are server-owned campaign data. Unknown or malformed limit overrides are discarded, redemption caps are claimed atomically, and onboarding/runway entitlements are activated only after checkout confirmation.
+- Removed the org-creation shortcut that activated and provisioned referral plans before payment. Signup now returns a pending offer preview while the organization remains on its authorized base plan.
+- Added daily and monthly TARA talk-time and HyperAgents-run limits, durable daily/monthly/cumulative counters, and frontend usage meters.
+- Restricted TARA and HyperAgents to active organization owners/admins, team leads, and project owners. Project owners only see their owned project rooms.
+
+### Validation
+- Targeted billing, entitlement, plan-enforcement, and privileged-agent tests: 23 passed.
+- Modified backend JavaScript passes syntax checks and `git diff --check`.
+- Prisma schema validates with a non-connecting PostgreSQL validation URL.
+- Frontend production build succeeds with referral checkout, explicit dummy confirmation, and new agent-usage meters.
+
+### Deployment Gate
+- Apply migrations `20260710153000_agent_usage_quotas` and `20260710154000_provider_neutral_checkout` before recreating Core or Control.
+- Set `BILLING_DUMMY_ALLOWED_ORGS` only for test organizations. Never use a wildcard or expose dummy confirmation broadly.
+- Do not deploy this phase until the managed-enterprise post-payment data-plane transition is verified; entitlement activation currently changes commercial access, while storage-plane migration/provisioning needs an explicit tested handoff.

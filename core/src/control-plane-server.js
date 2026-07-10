@@ -18,13 +18,24 @@ import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { PLANS } from './billing/plans.js';
-import { getEffectivePlan, normalizeReferralCode, redeemReferral } from './billing/entitlements.js';
+import {
+  activateOffer,
+  buildReferralOffer,
+  buildStandardOffer,
+  claimReferralOffer,
+  getEffectivePlan,
+  normalizeLimitOverrides,
+  normalizeReferralCode,
+  redeemReferral,
+} from './billing/entitlements.js';
+import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
+import { UsageTracker } from './billing/usage-tracker.js';
 import {
   installConsoleCapture,
   getRecentLogs,
   getLogSummary,
 } from './admin/live-log-store.js';
-import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
+import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilegedAgent } from './auth/permissions.js';
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
@@ -133,6 +144,20 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+const controlUsageTracker = new UsageTracker(prisma);
+const planEnforcer = new PlanEnforcer(
+  prisma,
+  { getOrgPlan: async (orgId) => (await getEffectivePlan(prisma, orgId)).plan },
+  controlUsageTracker,
+);
+
+function dummyCheckoutAllowed(orgId) {
+  if (process.env.BILLING_DUMMY_CHECKOUT_ENABLED !== 'true') return false;
+  if (process.env.NODE_ENV !== 'production') return true;
+  const allowed = new Set(String(process.env.BILLING_DUMMY_ALLOWED_ORGS || '')
+    .split(',').map((value) => value.trim()).filter(Boolean));
+  return allowed.has(orgId);
+}
 
 class PlanCapacityError extends Error {
   constructor(resource, plan, limit, current) {
@@ -1148,6 +1173,54 @@ async function requireOrgAdmin(req, res, userId, orgId) {
   // Attach effective roles to the membership object for callers that need it
   membership._roles = roles;
   return membership;
+}
+
+async function requirePrivilegedAgentAccess(req, res, current, projectId = null) {
+  const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+  if (!membership?.isActive) {
+    jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    return null;
+  }
+  let projectRole = null;
+  const projectMembership = await prisma.projectMember.findFirst({
+    where: {
+      ...(projectId ? { projectId } : {}),
+      userId: current.session.userId,
+      role: 'owner',
+      project: { orgId: current.session.orgId, archivedAt: null },
+    },
+    select: { role: true },
+  });
+  projectRole = projectMembership?.role || null;
+  const roles = effectiveRoles(membership);
+  if (!canUsePrivilegedAgent(roles, projectRole)) {
+    jsonResponse(res, {
+      error: 'Forbidden',
+      code: 'PRIVILEGED_AGENT_ROLE_REQUIRED',
+      required: ['org_owner', 'org_admin', 'team_lead', 'project_owner'],
+    }, 403);
+    return null;
+  }
+  return { membership, roles, projectRole };
+}
+
+async function validateInviteScopes(orgId, teamIds, projectIds) {
+  const uniqueTeamIds = [...new Set(teamIds || [])];
+  const uniqueProjectIds = [...new Set(projectIds || [])];
+  const [teams, projects] = await Promise.all([
+    uniqueTeamIds.length
+      ? prisma.team.findMany({ where: { id: { in: uniqueTeamIds }, orgId, archivedAt: null }, select: { id: true } })
+      : [],
+    uniqueProjectIds.length
+      ? prisma.project.findMany({ where: { id: { in: uniqueProjectIds }, orgId, archivedAt: null }, select: { id: true } })
+      : [],
+  ]);
+  if (teams.length !== uniqueTeamIds.length || projects.length !== uniqueProjectIds.length) {
+    const error = new Error('Invite contains a team or project outside this organization');
+    error.status = 400;
+    throw error;
+  }
+  return { teamIds: uniqueTeamIds, projectIds: uniqueProjectIds };
 }
 
 async function resolveCurrentOrg(userId) {
@@ -2734,11 +2807,14 @@ const server = http.createServer(async (req, res) => {
     if (referralCode) {
       referralCampaign = await prisma.referralCampaign.findUnique({ where: { code: referralCode } }).catch(() => null);
       const now = new Date();
-      if (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now) || (referralCampaign.endsAt && referralCampaign.endsAt <= now)) {
+      if (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now)
+        || (referralCampaign.endsAt && referralCampaign.endsAt <= now)
+        || (referralCampaign.maxRedemptions != null && referralCampaign.redemptionCount >= referralCampaign.maxRedemptions)) {
         return jsonResponse(res, { error: 'invalid or inactive referral code' }, 400);
       }
     }
-    const provisionPlan = referralCampaign?.onboardingPlan || requestedPlan;
+    const referralOffer = referralCampaign ? buildReferralOffer(referralCampaign) : null;
+    const provisionPlan = requestedPlan;
 
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
@@ -2746,16 +2822,34 @@ const server = http.createServer(async (req, res) => {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
-    const org = await prisma.organization.create({
-      data: {
-        zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
-        name: body.name,
-        slug,
-        plan: requestedPlan,
-        hostingMode,
-        memoryStorageMode: memoryStorageModeFor(provisionPlan, hostingMode),
-      }
-    });
+    let org;
+    try {
+      const created = await prisma.$transaction(async (tx) => {
+        const newOrg = await tx.organization.create({
+          data: {
+            zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
+            name: body.name,
+            slug,
+            plan: requestedPlan,
+            hostingMode,
+            memoryStorageMode: memoryStorageModeFor(provisionPlan, hostingMode),
+          },
+        });
+        await tx.userOrganization.create({
+          data: {
+            userId: current.session.userId,
+            orgId: newOrg.id,
+            role: 'owner',
+            roles: ['org_owner'],
+            joinedAt: new Date(),
+          },
+        });
+        return { org: newOrg };
+      });
+      org = created.org;
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 409);
+    }
 
     // .amr-by-default for NEW personal orgs (flag: MNEME_PERSONAL_DEFAULT=1, default off):
     // register the org in the agent registry with url 'local:' — every memory-domain seam then
@@ -2806,26 +2900,6 @@ const server = http.createServer(async (req, res) => {
         );
     }
 
-    await prisma.userOrganization.create({
-      data: {
-        userId: current.session.userId,
-        orgId: org.id,
-        role: 'owner',
-        joinedAt: new Date()
-      }
-    });
-
-    let referral = null;
-    if (referralCode) {
-      try {
-        referral = await redeemReferral({ prisma, orgId: org.id, userId: current.session.userId, code: referralCode });
-      } catch (error) {
-        // The pre-check above avoids normal failures; this covers a concurrent
-        // redemption cap and does not silently grant an unpaid entitlement.
-        return jsonResponse(res, { error: error.message, organization_id: org.id }, 409);
-      }
-    }
-
     await sessionStore.destroySession(current.sessionId);
     const sessionId = await sessionStore.createSession({
       ...current.session,
@@ -2838,11 +2912,11 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: referral?.terms?.onboarding_plan || org.plan || requestedPlan,
+        plan: org.plan || requestedPlan,
         hosting_mode: org.hostingMode || hostingMode,
         memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode),
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
-        referral: referral ? { code: referral.terms.code, phase: 'onboarding', runway_starts_at: referral.runwayStartsAt.toISOString() } : null,
+        referral: referralOffer ? { code: referralOffer.code, phase: 'pending_payment', offer: referralOffer } : null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -2877,9 +2951,15 @@ const server = http.createServer(async (req, res) => {
     const bulkRoles = bulkRole === 'admin' ? ['org_admin'] : [bulkRole];
     // Optional project scoping — invitees auto-join these projects on accept
     // (project-scoped member invites become guests of just those projects).
-    const bulkProjectIds = Array.isArray(body.project_ids)
+    const requestedProjectIds = Array.isArray(body.project_ids)
       ? body.project_ids.filter((id) => typeof id === 'string' && id.length > 0).slice(0, 10)
       : [];
+    let bulkProjectIds;
+    try {
+      ({ projectIds: bulkProjectIds } = await validateInviteScopes(orgId, [], requestedProjectIds));
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, error.status || 400);
+    }
 
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
     const inviter = await prisma.user.findUnique({
@@ -2968,9 +3048,19 @@ const server = http.createServer(async (req, res) => {
       inviteRoles = [legacyMap[legacyRole] || legacyRole];
     }
 
+    if (inviteRoles.includes('org_owner') && !membership._roles.includes('org_owner')) {
+      return jsonResponse(res, { error: 'Only an organization owner can invite another owner' }, 403);
+    }
+
     // team_ids / project_ids — optional arrays of UUIDs to auto-join on accept.
-    const teamIds    = Array.isArray(body.team_ids)    ? body.team_ids.filter(id => typeof id === 'string')    : [];
-    const projectIds = Array.isArray(body.project_ids) ? body.project_ids.filter(id => typeof id === 'string') : [];
+    const requestedTeamIds = Array.isArray(body.team_ids) ? body.team_ids.filter(id => typeof id === 'string') : [];
+    const requestedProjectIds = Array.isArray(body.project_ids) ? body.project_ids.filter(id => typeof id === 'string') : [];
+    let teamIds; let projectIds;
+    try {
+      ({ teamIds, projectIds } = await validateInviteScopes(orgId, requestedTeamIds, requestedProjectIds));
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, error.status || 400);
+    }
 
     const token = crypto.randomBytes(24).toString('hex');
     const legacyRoleReverse = inviteRoles.includes('org_owner') ? 'owner'
@@ -3277,8 +3367,18 @@ const server = http.createServer(async (req, res) => {
     else if (invite.revokedAt) status = 'revoked';
     else if (invite.expiresAt < now) status = 'expired';
 
-    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
-    const teamIds    = Array.isArray(invite.teamIds)    ? invite.teamIds    : [];
+    let projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    let validatedTeamIds = Array.isArray(invite.teamIds) ? invite.teamIds : [];
+    try {
+      ({ teamIds: validatedTeamIds, projectIds } = await validateInviteScopes(
+        invite.orgId,
+        validatedTeamIds,
+        projectIds,
+      ));
+    } catch {
+      return jsonResponse(res, { error: 'Invite scope is no longer valid' }, 410);
+    }
+    const teamIds = validatedTeamIds;
 
     const [projects, teams, inviter] = await Promise.all([
       projectIds.length
@@ -3376,7 +3476,17 @@ const server = http.createServer(async (req, res) => {
     // those projects only, never the whole org (no org-wide memories, no other
     // projects, no default-team flood). Explicit elevated roles (admin/owner)
     // on the invite are honored as before.
-    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    let projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    let validatedTeamIds = Array.isArray(invite.teamIds) ? invite.teamIds : [];
+    try {
+      ({ teamIds: validatedTeamIds, projectIds } = await validateInviteScopes(
+        invite.orgId,
+        validatedTeamIds,
+        projectIds,
+      ));
+    } catch {
+      return jsonResponse(res, { error: 'Invite scope is no longer valid' }, 410);
+    }
     const isProjectScopedInvite = projectIds.length > 0
       && (!invite.role || invite.role === 'member' || invite.role === 'guest');
     const effectiveRole = isProjectScopedInvite ? 'guest' : (invite.role || 'member');
@@ -3401,7 +3511,7 @@ const server = http.createServer(async (req, res) => {
 
     // Auto-add to invited teams — never for guests (team membership grants
     // visibility of every team project, which defeats project scoping).
-    const teamIds = isProjectScopedInvite ? [] : (Array.isArray(invite.teamIds) ? invite.teamIds : []);
+    const teamIds = isProjectScopedInvite ? [] : validatedTeamIds;
     if (teamIds.length > 0) {
       for (const teamId of teamIds) {
         await prisma.teamMember.upsert({
@@ -3680,13 +3790,16 @@ const server = http.createServer(async (req, res) => {
     if (!targetMembership) {
       return jsonResponse(res, { error: 'Member not found' }, 404);
     }
-    if (targetMembership.role === 'owner') {
+    if (effectiveRoles(targetMembership).includes('org_owner')) {
       return jsonResponse(res, { error: 'Owner role cannot be changed here' }, 400);
     }
 
+    const canonicalRole = role === 'admin' ? 'org_admin'
+      : role === 'developer' ? 'member'
+      : role;
     const updated = await prisma.userOrganization.update({
       where: { userId_orgId: { userId: targetUserId, orgId } },
-      data: { role },
+      data: { role, roles: [canonicalRole] },
     });
 
     return jsonResponse(res, { success: true, member: { user_id: updated.userId, role: updated.role } });
@@ -5058,7 +5171,7 @@ const server = http.createServer(async (req, res) => {
     // GET /v1/projects/:id
     if (!sub && req.method === 'GET') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'member' });
         return jsonResponse(res, await ts.store.getProject({ projectId, orgId }));
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -5067,7 +5180,7 @@ const server = http.createServer(async (req, res) => {
     // PATCH /v1/projects/:id
     if (!sub && req.method === 'PATCH') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'owner' });
         const body = await parseBody(req);
         const updated = await ts.store.updateProject({ projectId, data: body });
         return jsonResponse(res, { project: updated });
@@ -5078,7 +5191,7 @@ const server = http.createServer(async (req, res) => {
     // DELETE /v1/projects/:id (archive)
     if (!sub && req.method === 'DELETE') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'owner' });
         await ts.store.archiveProject({ projectId });
         return jsonResponse(res, { success: true });
       } catch (err) {
@@ -5088,7 +5201,7 @@ const server = http.createServer(async (req, res) => {
     // GET /v1/projects/:id/members
     if (sub === 'members' && req.method === 'GET') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'member' });
         const proj = await ts.store.getProject({ projectId, orgId });
         const rows = proj?.members || [];
         // Enrich with the member's ORG role + external flag so the UI can show
@@ -5124,7 +5237,7 @@ const server = http.createServer(async (req, res) => {
     // their project's activity; no org-admin requirement).
     if (sub === 'activity' && req.method === 'GET') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'member' });
         const memWhere = {
           orgId, deletedAt: null,
           OR: [{ projectId }, { memoryProjects: { some: { projectId } } }],
@@ -5159,7 +5272,7 @@ const server = http.createServer(async (req, res) => {
     // governance / enterprise offboarding). Project-owner or org-admin gated.
     if (sub === 'export' && req.method === 'GET') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'owner' });
         const memories = await prisma.memory.findMany({
           where: {
             orgId, deletedAt: null,
@@ -5200,7 +5313,7 @@ const server = http.createServer(async (req, res) => {
       try {
         // Any project member can bring in teammates (one-tap add / invite);
         // role changes + removals stay owner/admin-gated below.
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'member' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
         const role = body.role || 'contributor';
@@ -5233,7 +5346,7 @@ const server = http.createServer(async (req, res) => {
     const projMemberPatch = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
     if (projMemberPatch && req.method === 'PATCH') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'owner' });
         const targetUserId = projMemberPatch[1];
         const body = await parseBody(req);
         if (!body.role || !PROJECT_ROLES.includes(body.role)) {
@@ -5263,7 +5376,7 @@ const server = http.createServer(async (req, res) => {
     const projMemberDel = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
     if (projMemberDel && req.method === 'DELETE') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.assertProjectPermission(prisma, { projectId, orgId, userId, orgRole, level: 'owner' });
         await ts.store.removeProjectMember({ projectId, userId: projMemberDel[1] });
         audit({
           organizationId: orgId,
@@ -6646,10 +6759,20 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       try {
+        const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+        const orgAgentAccess = canUsePrivilegedAgent(effectiveRoles(membership));
+        const ownedProjects = orgAgentAccess ? [] : await prisma.projectMember.findMany({
+          where: { userId: current.session.userId, role: 'owner', project: { orgId: current.session.orgId, archivedAt: null } },
+          select: { projectId: true },
+        });
+        if (!orgAgentAccess && ownedProjects.length === 0) {
+          return jsonResponse(res, { error: 'Forbidden', code: 'PRIVILEGED_AGENT_ROLE_REQUIRED' }, 403);
+        }
+        const ownedProjectIds = new Set(ownedProjects.map((entry) => entry.projectId));
         // Org-shared rooms: any member of the room's org sees the org's rooms
         // (Digital-Employees rooms are collaborative; rooms carry org_id). Org
         // isolation preserved — a member never sees another org's rooms.
-        const rooms = await prisma.hyperRoom.findMany({
+        let rooms = await prisma.hyperRoom.findMany({
           where: { orgId: current.session.orgId },
           orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
           take: 200,
@@ -6671,6 +6794,7 @@ Write the persona now.`;
             }
           }
         } catch { /* leave projectId undefined */ }
+        if (!orgAgentAccess) rooms = rooms.filter((room) => room.projectId && ownedProjectIds.has(room.projectId));
         // Hydrate participants + project scope for the rail
         const allIds = Array.from(new Set(rooms.flatMap(r => r.participantIds || [])));
         const projectIds = Array.from(new Set(rooms.map(r => r.projectId).filter(Boolean)));
@@ -6782,6 +6906,7 @@ Write the persona now.`;
           if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
           projectId = proj.id;
         }
+        if (!await requirePrivilegedAgentAccess(req, res, current, projectId)) return;
         const room = await createHyperRoomWithinPlan({
             userId: current.session.userId,
             orgId: current.session.orgId,
@@ -6832,6 +6957,7 @@ Write the persona now.`;
     if (pathname === '/v1/hyper/onboarding/status' && req.method === 'GET') {
       const current = await requireSession(req, res);
       if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
       const job = _hyperOnboardJobs.get(current.session.orgId);
       if (!job) return jsonResponse(res, { running: false, lines: [], done: false });
       // A completed job whose HQ room was since DELETED is stale — serving it
@@ -6860,6 +6986,7 @@ Write the persona now.`;
     if (pathname === '/v1/hyper/onboarding/start' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
       const orgId = current.session.orgId;
       const userId = current.session.userId;
       if (!orgId) return jsonResponse(res, { error: 'no active organization' }, 400);
@@ -8157,6 +8284,9 @@ Write the persona now.`;
           room.goal = gr?.[0]?.goal || '';
         } catch { room.goal = ''; }
       }
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const agentAccess = await requirePrivilegedAgentAccess(req, res, current, room.projectId || null);
+      if (!agentAccess) return;
       if (body.action === 'flyby-decision') {
         const turnId = typeof body.turn_id === 'string' ? body.turn_id : '';
         const decision = String(body.decision || '').trim().toLowerCase();
@@ -8207,9 +8337,15 @@ Write the persona now.`;
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 
+      const runLimit = await planEnforcer.checkLimit(current.session.orgId, 'hyperAgentRuns', 1);
+      if (!runLimit.allowed) {
+        return jsonResponse(res, planLimitBody(runLimit, 'hyperAgentRuns'), runLimit.status || 429);
+      }
+
       // Sequence is monotonic per room. Atomic via SELECT max + insert
       // wrapped in serializable transaction.
       try {
+        let createdNew = false;
         const turn = await prisma.$transaction(async (tx) => {
           const last = await tx.hyperTurn.findFirst({
             where: { roomId },
@@ -8242,8 +8378,11 @@ Write the persona now.`;
             where: { id: roomId },
             data: { updatedAt: new Date() },
           });
+          createdNew = true;
           return created;
         });
+
+        if (createdNew) planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
 
         // Emit a bootstrap router event immediately so the UI can render the
         // lead/reactor line before the sidecar finishes the heavier recall and
@@ -8565,7 +8704,7 @@ Write the persona now.`;
     const current = await requireSession(req, res);
     if (!current) return;
     const membership = await getOrgMembership(current.session.userId, current.session.orgId);
-    if (!membership || !effectiveRoles(membership).includes('owner')) return jsonResponse(res, { error: 'organization owner required' }, 403);
+    if (!membership || !effectiveRoles(membership).includes('org_owner')) return jsonResponse(res, { error: 'organization owner required' }, 403);
     const body = await parseBody(req).catch(() => ({}));
     try {
       const result = await redeemReferral({ prisma, orgId: current.session.orgId, userId: current.session.userId, code: body.code });
@@ -8592,13 +8731,23 @@ Write the persona now.`;
     }
     const onboardingDays = Number(body.onboarding_days || 14);
     if (!Number.isInteger(onboardingDays) || onboardingDays < 1 || onboardingDays > 90) return jsonResponse(res, { error: 'onboarding_days must be 1..90' }, 400);
+    if (!/^[A-Z0-9][A-Z0-9_-]{2,63}$/.test(code)) return jsonResponse(res, { error: 'code must be 3..64 letters, numbers, underscores, or hyphens' }, 400);
+    const maxRedemptions = body.max_redemptions == null ? null : Number(body.max_redemptions);
+    if (maxRedemptions != null && (!Number.isSafeInteger(maxRedemptions) || maxRedemptions < 1)) {
+      return jsonResponse(res, { error: 'max_redemptions must be a positive integer' }, 400);
+    }
+    const startsAt = body.starts_at ? new Date(body.starts_at) : null;
+    const endsAt = body.ends_at ? new Date(body.ends_at) : null;
+    if ((startsAt && Number.isNaN(startsAt.getTime())) || (endsAt && Number.isNaN(endsAt.getTime()))
+      || (startsAt && endsAt && startsAt >= endsAt)) {
+      return jsonResponse(res, { error: 'starts_at and ends_at must be valid and ordered dates' }, 400);
+    }
     try {
       const campaign = await prisma.referralCampaign.create({ data: {
         code, name: String(body.name).slice(0, 160), active: body.active !== false,
-        maxRedemptions: body.max_redemptions == null ? null : Number(body.max_redemptions),
-        startsAt: body.starts_at ? new Date(body.starts_at) : null, endsAt: body.ends_at ? new Date(body.ends_at) : null,
-        onboardingDays, onboardingPlan, onboardingLimits: body.onboarding_limits || {},
-        runwayPlan, runwayLimits: body.runway_limits || {},
+        maxRedemptions, startsAt, endsAt,
+        onboardingDays, onboardingPlan, onboardingLimits: normalizeLimitOverrides(onboardingPlan, body.onboarding_limits),
+        runwayPlan, runwayLimits: normalizeLimitOverrides(runwayPlan, body.runway_limits),
       } });
       return jsonResponse(res, { campaign }, 201);
     } catch (error) {
@@ -8701,13 +8850,96 @@ Write the persona now.`;
       });
     }
 
-    // POST /v1/billing/checkout — { plan: "pro"|"scale" }
-    if (pathname === '/v1/billing/checkout' && req.method === 'POST') {
-      if (!billingMod.isEnabled()) {
-        return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+    // POST /v1/billing/dummy/confirm — owner confirms an allow-listed test checkout.
+    // Production never enables this globally; BILLING_DUMMY_ALLOWED_ORGS is mandatory.
+    if (pathname === '/v1/billing/dummy/confirm' && req.method === 'POST') {
+      if (!dummyCheckoutAllowed(orgId)) return jsonResponse(res, { error: 'Dummy checkout is not enabled for this organization' }, 403);
+      const body = await parseBody(req).catch(() => ({}));
+      const checkoutId = String(body.checkout_id || '').trim();
+      if (!/^[0-9a-f-]{36}$/i.test(checkoutId)) return jsonResponse(res, { error: 'valid checkout_id required' }, 400);
+      try {
+        const result = await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `billing:checkout:${checkoutId}`);
+          const checkout = await tx.billingCheckout.findUnique({ where: { id: checkoutId } });
+          if (!checkout || checkout.orgId !== orgId || checkout.userId !== userId || checkout.provider !== 'dummy') {
+            const error = new Error('Checkout not found'); error.status = 404; throw error;
+          }
+          if (checkout.status === 'confirmed') return { checkout, alreadyConfirmed: true };
+          if (checkout.status !== 'pending' || checkout.expiresAt <= new Date()) {
+            await tx.billingCheckout.updateMany({ where: { id: checkout.id, status: 'pending' }, data: { status: 'expired' } });
+            const error = new Error('Checkout expired'); error.status = 410; throw error;
+          }
+          const offer = checkout.offer || {};
+          const activation = offer.kind === 'referral'
+            ? await claimReferralOffer({ tx, orgId, userId, offer })
+            : await activateOffer({ tx, orgId, offer, source: 'dummy_checkout' });
+          const confirmed = await tx.billingCheckout.update({
+            where: { id: checkout.id },
+            data: { status: 'confirmed', confirmedAt: new Date() },
+          });
+          return { checkout: confirmed, activation, alreadyConfirmed: false };
+        });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'billing.dummy_checkout_confirmed', eventCategory: 'billing', action: 'update',
+          resourceType: 'billing_checkout', resourceId: checkoutId,
+          metadata: { plan: result.checkout.targetPlanId, already_confirmed: result.alreadyConfirmed }, ..._reqMeta(req),
+        });
+        return jsonResponse(res, {
+          success: true,
+          already_confirmed: result.alreadyConfirmed,
+          plan: result.checkout.targetPlanId,
+          status: result.checkout.status,
+        });
+      } catch (error) {
+        return jsonResponse(res, { error: error.message }, error.status || 409);
       }
+    }
+
+    // POST /v1/billing/checkout — { plan: "pro"|"scale", referral_code? }
+    if (pathname === '/v1/billing/checkout' && req.method === 'POST') {
       const body = await parseBody(req).catch(() => ({}));
       const targetPlanId = String(body.plan || '').trim();
+      const targetPlan = plansMod.PLANS[targetPlanId];
+      if (!targetPlan || targetPlanId === 'free') return jsonResponse(res, { error: 'invalid checkout plan' }, 400);
+
+      if (!billingMod.isEnabled()) {
+        if (!dummyCheckoutAllowed(orgId)) {
+          return jsonResponse(res, { error: 'Payment provider is not configured for this organization' }, 503);
+        }
+        const now = new Date();
+        let offer = buildStandardOffer(targetPlanId, now);
+        const referralCode = normalizeReferralCode(body.referral_code);
+        if (referralCode) {
+          const campaign = await prisma.referralCampaign.findUnique({ where: { code: referralCode } });
+          if (!campaign || !campaign.active || (campaign.startsAt && campaign.startsAt > now)
+            || (campaign.endsAt && campaign.endsAt <= now)) {
+            return jsonResponse(res, { error: 'invalid or inactive referral code' }, 400);
+          }
+          offer = buildReferralOffer(campaign, now);
+        } else if (targetPlan.commercial?.selfServe !== true) {
+          return jsonResponse(res, { error: 'This plan requires a custom offer or referral code' }, 400);
+        }
+        const checkout = await prisma.billingCheckout.create({
+          data: {
+            orgId, userId, provider: 'dummy', targetPlanId,
+            offer, expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+          },
+        });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'billing.checkout_started', eventCategory: 'billing', action: 'create',
+          resourceType: 'billing_checkout', resourceId: checkout.id,
+          metadata: { plan: targetPlanId, provider: 'dummy', referral: Boolean(referralCode) }, ..._reqMeta(req),
+        });
+        return jsonResponse(res, {
+          checkout_url: `/hivemind/app/billing?dummy_checkout=${checkout.id}`,
+          session_id: checkout.id,
+          provider: 'dummy',
+          offer,
+          expires_at: checkout.expiresAt,
+        });
+      }
       const priceId = plansMod.getStripePriceId(targetPlanId);
       if (!priceId) {
         return jsonResponse(res, { error: `Plan "${targetPlanId}" is not available for self-serve checkout` }, 400);

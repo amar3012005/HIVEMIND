@@ -1309,6 +1309,8 @@ model OrgUsage {
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  taraSeconds          BigInt   @default(0)
+  hyperAgentRuns       Int      @default(0)
   connectorCount       Int      @default(0)
   webIntelDay          DateTime @default(now()) @db.Date
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
@@ -1336,6 +1338,8 @@ model OrgUsageDaily {
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  taraSeconds          BigInt   @default(0)
+  hyperAgentRuns       Int      @default(0)
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([orgId, day])
@@ -1355,6 +1359,8 @@ model OrgUsageCumulative {
   webIntelJobs         BigInt   @default(0) @map("web_intel_jobs")
   graphQueries         BigInt   @default(0) @map("graph_queries")
   taraUsage            BigInt   @default(0) @map("tara_usage")
+  taraSeconds          BigInt   @default(0) @map("tara_seconds")
+  hyperAgentRuns       BigInt   @default(0) @map("hyper_agent_runs")
   updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("org_usage_cumulative")
@@ -1414,6 +1420,27 @@ model OrganizationEntitlement {
 
   @@index([orgId, effectiveFrom, effectiveUntil])
   @@map("organization_entitlements")
+}
+
+/// Provider-neutral checkout intent. The browser can request an offer but only
+/// a provider confirmation transitions it to paid and creates entitlements.
+model BillingCheckout {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  provider       String    @db.VarChar(24)
+  status         String    @default("pending") @db.VarChar(24)
+  targetPlanId   String    @map("target_plan_id") @db.VarChar(50)
+  offer          Json      @default("{}")
+  providerRef    String?   @unique @map("provider_ref") @db.VarChar(255)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  confirmedAt    DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, createdAt])
+  @@index([userId, createdAt])
+  @@map("billing_checkouts")
 }
 
 /// Per-API-key LLM usage rollup. Records EVERY LLM call against the org's HIVEMIND

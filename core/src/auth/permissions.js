@@ -70,6 +70,9 @@ export const PERMISSIONS = {
     manage: new Set(['org_owner', 'org_admin']),
     read:   new Set(['org_owner', 'org_admin']),
   },
+  privileged_agent: {
+    use: new Set(['org_owner', 'org_admin', 'team_lead']),
+  },
 };
 
 // ─── Core check ───────────────────────────────────────────────────────────────
@@ -113,6 +116,15 @@ export function effectiveRoles(membership) {
   };
   const mapped = legacyMap[membership.role] || 'member';
   return [mapped];
+}
+
+/**
+ * Expensive autonomous agents are restricted to organization leadership or
+ * the owner of the project they are scoped to. Project ownership is checked
+ * separately because it is not an organization role.
+ */
+export function canUsePrivilegedAgent(userRoles, projectRole = null) {
+  return hasPermission(userRoles, 'privileged_agent', 'use') || projectRole === 'owner';
 }
 
 // ─── Denial dedup ─────────────────────────────────────────────────────────────

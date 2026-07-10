@@ -33,3 +33,8 @@
 - Restricted broker enrollment keys to organizations with `hosting_mode = self_host`.
 - Rejected public cleartext agent and instance URLs; HTTPS is required unless the address is loopback, private LAN, or Tailscale.
 - Bound the broker host port to loopback. Public enrollment must be routed through Caddy over HTTPS.
+
+### Deployment Validation
+- Caddy now routes `https://api.singulancelabs.com/v1/byod/*` to the loopback broker.
+- The enrollment endpoint returns `401` without an API key; direct host port 8790 is no longer public.
+- Caddy required a container restart after the host Caddyfile was atomically replaced, because the bind mount retained the prior inode.

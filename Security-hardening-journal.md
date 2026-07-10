@@ -190,3 +190,4 @@
 - Cartesia live E2E passed on both tiers: owners received a short-lived token and agent ID, while ordinary members received `403`. The disposable users, organization, and Redis sessions were removed afterwards.
 - ZITADEL and Google both reject the new callback URLs because they are not yet registered in their provider consoles. Keep production callbacks and add both B2B/B2C callbacks before promotion; never replace the existing production entries.
 - Removed callback query strings and raw session IDs from authentication/account-deletion logs to prevent authorization codes and bearer sessions entering centralized logs.
+- Login organization resolution now accepts only active memberships, preserves an active organization already bound to the session, and otherwise selects the newest active membership. Existing users therefore return to their assigned personal or enterprise workspace instead of re-entering account-type creation.

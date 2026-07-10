@@ -1255,14 +1255,23 @@ async function validateInviteScopes(orgId, teamIds, projectIds) {
   return { teamIds: uniqueTeamIds, projectIds: uniqueProjectIds };
 }
 
-async function resolveCurrentOrg(userId) {
+async function resolveCurrentOrg(userId, preferredOrgId = null) {
+  if (preferredOrgId) {
+    const preferred = await prisma?.userOrganization.findUnique({
+      where: { userId_orgId: { userId, orgId: preferredOrgId } },
+      include: { org: true },
+    });
+    if (preferred?.isActive) {
+      return { org: preferred.org, role: preferred.role || 'member' };
+    }
+  }
   const membership = await prisma?.userOrganization.findFirst({
-    where: { userId },
+    where: { userId, isActive: true },
     include: { org: true },
-    orderBy: { joinedAt: 'asc' }
+    orderBy: [{ joinedAt: 'desc' }, { invitedAt: 'desc' }]
   });
   if (!membership) return { org: null, role: null };
-  return { org: membership.org, role: membership.role || 'admin' };
+  return { org: membership.org, role: membership.role || 'member' };
 }
 
 async function upsertUserFromZitadel(userInfo) {
@@ -1373,8 +1382,8 @@ async function buildAnonymousBootstrapPayload(req) {
   };
 }
 
-async function buildBootstrapPayload(user, req) {
-  const { org, role } = await resolveCurrentOrg(user.id);
+async function buildBootstrapPayload(user, req, preferredOrgId = null) {
+  const { org, role } = await resolveCurrentOrg(user.id, preferredOrgId);
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
   const core = resolveCoreTarget(req, org);
   const coreHealth = await getCoreHealth(core.internalUrl);
@@ -2725,7 +2734,7 @@ const server = http.createServer(async (req, res) => {
     if (!user) {
       return jsonResponse(res, await buildAnonymousBootstrapPayload(req));
     }
-    return jsonResponse(res, await buildBootstrapPayload(user, req));
+    return jsonResponse(res, await buildBootstrapPayload(user, req, current.session.orgId));
   }
 
   // Welcome email — fired by the frontend once the user lands on Overview after

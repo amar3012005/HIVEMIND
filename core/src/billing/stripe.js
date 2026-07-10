@@ -23,6 +23,39 @@
 let _client = null;
 let _clientPromise = null;
 
+export function defaultBillingUrl() {
+  return String(
+    process.env.STRIPE_PUBLIC_BILLING_URL
+    || 'https://next.singulancelabs.com/hivemind/app/billing',
+  ).replace(/\/+$/, '');
+}
+
+export function resolveHostedBillingUrls() {
+  return {
+    success: process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
+      || `${defaultBillingUrl()}?checkout=success`,
+    cancel: process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
+      || `${defaultBillingUrl()}?checkout=cancelled`,
+    portal: process.env.STRIPE_PUBLIC_PORTAL_RETURN
+      || defaultBillingUrl(),
+  };
+}
+
+export function buildCheckoutMetadata({ orgId, userId, planId = '', referralCode = '' }) {
+  const metadata = {
+    hivemind_org_id: orgId,
+    hivemind_user_id: userId || '',
+    hivemind_plan_id: planId || '',
+  };
+  if (referralCode) metadata.hivemind_referral_code = referralCode;
+  return metadata;
+}
+
+export function isAutomaticTaxEnabled() {
+  const raw = String(process.env.STRIPE_AUTOMATIC_TAX_ENABLED || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 export function isEnabled() {
   return Boolean(process.env.STRIPE_SECRET_KEY);
 }
@@ -80,27 +113,25 @@ export async function ensureCustomer(prisma, org, ownerEmail) {
  * the user is redirected to. The webhook handler is what finalises the
  * subscription state after payment succeeds.
  */
-export async function createCheckoutSession({ customerId, priceId, orgId, userId }) {
+export async function createCheckoutSession({ customerId, priceId, orgId, userId, planId = '', referralCode = '' }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
-  const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success';
-  const returnCancel = process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled';
+  const urls = resolveHostedBillingUrls();
+  const metadata = buildCheckoutMetadata({ orgId, userId, planId, referralCode });
   return stripe.checkout.sessions.create({
     mode: 'subscription',
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
-    success_url: returnSuccess,
-    cancel_url: returnCancel,
+    success_url: urls.success,
+    cancel_url: urls.cancel,
     allow_promotion_codes: true,
     billing_address_collection: 'auto',
-    automatic_tax: { enabled: true },
+    ...(isAutomaticTaxEnabled() ? { automatic_tax: { enabled: true } } : {}),
     customer_update: { address: 'auto', name: 'auto' },
     subscription_data: {
-      metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '' },
+      metadata,
     },
-    metadata: { hivemind_org_id: orgId },
+    metadata,
   });
 }
 
@@ -112,11 +143,10 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
 export async function createPortalSession({ customerId }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
-  const returnUrl = process.env.STRIPE_PUBLIC_PORTAL_RETURN
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing';
+  const urls = resolveHostedBillingUrls();
   return stripe.billingPortal.sessions.create({
     customer: customerId,
-    return_url: returnUrl,
+    return_url: urls.portal,
   });
 }
 

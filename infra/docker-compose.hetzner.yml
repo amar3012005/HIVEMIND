@@ -142,7 +142,7 @@ services:
       retries: 10
 
   qdrant:
-    image: qdrant/qdrant:v1.18.0
+    image: qdrant/qdrant:v1.12.4
     container_name: hm-qdrant
     restart: unless-stopped
     mem_limit: 2g

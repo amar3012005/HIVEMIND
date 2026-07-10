@@ -32,7 +32,7 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@noble/post-quantum": "^0.6.1",
     "@prisma/client": "^5.22.0",
-    "@qdrant/js-client-rest": "1.18.0",
+    "@qdrant/js-client-rest": "1.12.0",
     "@tavily/core": "^0.7.2",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
@@ -63,6 +63,11 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3",
     "vitest": "^4.1.1"
+  },
+  "overrides": {
+    "@qdrant/js-client-rest": {
+      "undici": "6.27.0"
+    }
   },
   "engines": {
     "node": ">=20"

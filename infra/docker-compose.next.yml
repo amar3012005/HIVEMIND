@@ -23,6 +23,13 @@ x-runtime-env: &runtime-env
   DOCLING_URL: ${NEXT_DOCLING_URL:-}
   BILLING_DUMMY_CHECKOUT_ENABLED: ${NEXT_BILLING_DUMMY_CHECKOUT_ENABLED:-false}
   BILLING_DUMMY_ALLOWED_ORGS: ${NEXT_BILLING_DUMMY_ALLOWED_ORGS:-}
+  ZITADEL_ISSUER_URL: ${NEXT_ZITADEL_ISSUER_URL:-}
+  ZITADEL_CLIENT_ID: ${NEXT_ZITADEL_CLIENT_ID:-}
+  ZITADEL_CLIENT_SECRET: ${NEXT_ZITADEL_CLIENT_SECRET:-}
+  GOOGLE_CLIENT_ID: ${NEXT_GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${NEXT_GOOGLE_CLIENT_SECRET:-}
+  CARTESIA_API_KEY: ${NEXT_CARTESIA_API_KEY:-}
+  CARTESIA_AGENT_ID: ${NEXT_CARTESIA_AGENT_ID:-}
 
 x-core-service: &core-service
   image: hivemind/core-api:${NEXT_VERSION:?build and set NEXT_VERSION}
@@ -107,6 +114,7 @@ services:
       HIVEMIND_CORE_API_PUBLIC_URL: https://b2b-next-core.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://b2b-next-api.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://b2b-next.singulancelabs.com/hivemind/app
+      ZITADEL_REDIRECT_URI: https://b2b-next-api.singulancelabs.com/auth/callback
       EMPLOYEES_SIDECAR_URL: http://employees-b2b:8060
     ports: ["127.0.0.1:${NEXT_B2B_CONTROL_PORT:-2127}:3000"]
     depends_on: [core-b2b]
@@ -176,6 +184,7 @@ services:
       HIVEMIND_CORE_API_PUBLIC_URL: https://b2c-next-core.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://b2c-next-api.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://b2c-next.singulancelabs.com/hivemind/app
+      ZITADEL_REDIRECT_URI: https://b2c-next-api.singulancelabs.com/auth/callback
       EMPLOYEES_SIDECAR_URL: http://employees-b2c:8060
     ports: ["127.0.0.1:${NEXT_B2C_CONTROL_PORT:-2227}:3000"]
     depends_on: [core-b2c]

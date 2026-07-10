@@ -67,7 +67,7 @@ services:
       qdrant:   { condition: service_started }
       redis:    { condition: service_started }
     ports:
-      - "${CORE_PORT:-2026}:3000"
+      - "127.0.0.1:${CORE_PORT:-2026}:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -96,7 +96,7 @@ services:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }
     ports:
-      - "${CONTROL_PORT:-2027}:3000"
+      - "127.0.0.1:${CONTROL_PORT:-2027}:3000"
 
   employees:
     build: { context: ../employees-service }
@@ -184,7 +184,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "${NANGO_PORT:-3003}:3003"
+      - "127.0.0.1:${NANGO_PORT:-3003}:3003"
 
   docling:
     image: ghcr.io/docling-project/docling-serve:latest

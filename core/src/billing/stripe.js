@@ -33,12 +33,26 @@ export function defaultBillingUrl() {
 export function resolveHostedBillingUrls() {
   return {
     success: process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
-      || `${defaultBillingUrl()}?checkout=success`,
+      || `${defaultBillingUrl()}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel: process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
       || `${defaultBillingUrl()}?checkout=cancelled`,
     portal: process.env.STRIPE_PUBLIC_PORTAL_RETURN
       || defaultBillingUrl(),
   };
+}
+
+export function isEntitledSubscriptionStatus(status) {
+  return status === 'active' || status === 'trialing';
+}
+
+export function getSubscriptionIdFromStripeObject(object = {}) {
+  if (typeof object.subscription === 'string') return object.subscription;
+  if (object.subscription?.id) return object.subscription.id;
+  return object.parent?.subscription_details?.subscription || null;
+}
+
+export function getSubscriptionPriceId(subscription = {}) {
+  return subscription.items?.data?.[0]?.price?.id || null;
 }
 
 export function buildCheckoutMetadata({ orgId, userId, planId = '', referralCode = '' }) {

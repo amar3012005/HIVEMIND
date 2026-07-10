@@ -19,6 +19,7 @@ import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { transcribeAudio } from './llm/stt-route.js';
+import { canUsePrivilegedAgent } from './auth/permissions.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -409,6 +410,28 @@ async function buildAccessContext(userId, orgId) {
     console.warn('[access-context] build failed:', err.message);
     return null;
   }
+}
+
+async function hasPrivilegedAgentAccess(userId, orgId) {
+  if (!prisma || !userId || !orgId) return false;
+  const [membership, projectHead, teamLead] = await Promise.all([
+    prisma.userOrganization.findUnique({
+      where: { userId_orgId: { userId, orgId } },
+      select: { role: true, roles: true },
+    }).catch(() => null),
+    prisma.projectMember.findFirst({
+      where: { userId, role: 'owner', project: { orgId, status: 'active' } },
+      select: { role: true },
+    }).catch(() => null),
+    prisma.teamMember.findFirst({
+      where: { userId, role: 'lead', team: { orgId, archivedAt: null } },
+      select: { role: true },
+    }).catch(() => null),
+  ]);
+  return canUsePrivilegedAgent(membership, {
+    projectRole: projectHead?.role,
+    teamRole: teamLead?.role,
+  });
 }
 
 /**
@@ -10289,6 +10312,10 @@ exit \$RC
           console.error('[documents/:id] Failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
         }
+      }
+
+      if (pathname.startsWith('/api/tara/') && !await hasPrivilegedAgentAccess(userId, orgId)) {
+        return jsonResponse(res, { error: 'TARA requires an organization admin or project head' }, 403);
       }
 
       switch (pathname) {

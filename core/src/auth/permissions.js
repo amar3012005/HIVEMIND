@@ -66,6 +66,9 @@ export const PERMISSIONS = {
     read:   new Set(['org_owner', 'org_admin']),
     manage: new Set(['org_owner']),
   },
+  privileged_agent: {
+    use: new Set(['org_owner', 'org_admin', 'team_lead']),
+  },
   webhook: {
     manage: new Set(['org_owner', 'org_admin']),
     read:   new Set(['org_owner', 'org_admin']),
@@ -113,6 +116,13 @@ export function effectiveRoles(membership) {
   };
   const mapped = legacyMap[membership.role] || 'member';
   return [mapped];
+}
+
+/** HyperAgents and TARA are restricted to org admins and scoped project heads. */
+export function canUsePrivilegedAgent(membership, { projectRole, teamRole } = {}) {
+  return hasPermission(effectiveRoles(membership), 'privileged_agent', 'use')
+    || projectRole === 'owner'
+    || teamRole === 'lead';
 }
 
 // ─── Denial dedup ─────────────────────────────────────────────────────────────

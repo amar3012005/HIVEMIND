@@ -20,7 +20,7 @@ import {
   getRecentLogs,
   getLogSummary,
 } from './admin/live-log-store.js';
-import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
+import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilegedAgent } from './auth/permissions.js';
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
@@ -814,6 +814,25 @@ async function getOrgMembership(userId, orgId) {
         },
       },
     },
+  });
+}
+
+async function hasPrivilegedAgentAccess(userId, orgId) {
+  if (!userId || !orgId) return false;
+  const [membership, projectHead, teamLead] = await Promise.all([
+    getOrgMembership(userId, orgId),
+    prisma.projectMember.findFirst({
+      where: { userId, role: 'owner', project: { orgId, status: 'active' } },
+      select: { role: true },
+    }).catch(() => null),
+    prisma.teamMember.findFirst({
+      where: { userId, role: 'lead', team: { orgId, archivedAt: null } },
+      select: { role: true },
+    }).catch(() => null),
+  ]);
+  return canUsePrivilegedAgent(membership, {
+    projectRole: projectHead?.role,
+    teamRole: teamLead?.role,
   });
 }
 
@@ -6222,6 +6241,14 @@ Write the persona now.`;
   //   - archive: distill transcript → one summary memory
   //   - human-gated prompt promotion path
   // ═══════════════════════════════════════════════════════════
+  if ((pathname.startsWith('/v1/hyper-rooms') || pathname.startsWith('/v1/hyper/'))
+      && !pathname.startsWith('/internal/')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await hasPrivilegedAgentAccess(current.session.userId, current.session.orgId)) {
+      return jsonResponse(res, { error: 'HyperAgents requires an organization admin or project head' }, 403);
+    }
+  }
   {
     const { deriveCsiLane, buildIdempotencyKey, preflightTurn } = await import('./employees/hyper-rooms.js');
 

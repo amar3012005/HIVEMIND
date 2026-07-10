@@ -365,6 +365,33 @@ export class UsageTracker {
     }
   }
 
+  async getDailySnapshot(orgId) {
+    if (!this.prisma || !orgId) return {};
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "knowledgeBasePages",
+                "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage"
+           FROM "OrgUsageDaily" WHERE "orgId" = $1::uuid AND "day" = $2::date LIMIT 1`,
+        orgId, this._currentDay(),
+      );
+      const row = rows[0] || {};
+      return {
+        tokens: Number(row.tokensProcessed || 0),
+        searches: Number(row.searchQueries || 0),
+        uploads: Number(row.knowledgeBaseUploads || 0),
+        kbPages: Number(row.knowledgeBasePages || 0),
+        memories: Number(row.memoriesIngested || 0),
+        deepResearch: Number(row.deepResearchJobs || 0),
+        webIntel: Number(row.webIntelJobs || 0),
+        graphQueries: Number(row.graphQueries || 0),
+        tara: Number(row.taraUsage || 0),
+      };
+    } catch (err) {
+      console.warn('[usage-tracker] Get daily snapshot failed:', err.message);
+      return null;
+    }
+  }
+
   /**
    * Get current usage for an org this month.
    */
@@ -423,19 +450,8 @@ export class UsageTracker {
   }
 
   async getDailyMetricToday(orgId, metric) {
-    const columns = { tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads', kbPages: 'knowledgeBasePages' };
-    const column = columns[metric];
-    if (!this.prisma || !orgId || !column) return 0;
-    try {
-      const rows = await this.prisma.$queryRawUnsafe(
-        `SELECT "${column}" FROM "OrgUsageDaily" WHERE "orgId" = $1::uuid AND day = $2::date LIMIT 1`,
-        orgId, this._currentDay(),
-      );
-      return Number(rows[0]?.[column] || 0);
-    } catch (err) {
-      console.warn('[usage-tracker] Get daily metric failed:', err.message);
-      return 0;
-    }
+    const snapshot = await this.getDailySnapshot(orgId);
+    return Number(snapshot?.[metric] || 0);
   }
 
   async getCumulativeUsage(orgId) {
@@ -468,16 +484,14 @@ export class UsageTracker {
    * Check if an org has exceeded their plan limits.
    * Returns { allowed, warnings, exceeded }
    */
-  async checkLimits(orgId, planId) {
+  async checkLimits(orgId, planOrId) {
     const usage = await this.getUsage(orgId);
-    const plan = getPlan(planId);
+    const plan = planOrId && typeof planOrId === 'object' ? planOrId : getPlan(planOrId);
 
     const tokenLimit = plan.limits.llmTokensPerMonth;
     const queryLimit = plan.limits.searchQueriesPerMonth;
     const uploadLimit = plan.limits.knowledgeBaseUploadsPerMonth;
-    const memoryLimit = plan.limits.maxMemories;
     const deepResearchLimit = plan.limits.deepResearchPerMonth;
-    const webIntelDayLimit = plan.limits.webIntelPerDay;
 
     const result = { allowed: true, warnings: [], exceeded: [] };
 
@@ -485,12 +499,8 @@ export class UsageTracker {
     if (tokenLimit > 0) {
       const pct = usage.tokensProcessed / tokenLimit;
       if (pct >= 1.0) {
-        if (plan.overage) {
-          result.warnings.push(`Token limit reached (${usage.tokensProcessed.toLocaleString()}/${tokenLimit.toLocaleString()}). Overage billing active.`);
-        } else {
-          result.allowed = false;
-          result.exceeded.push('llmTokensPerMonth');
-        }
+        result.allowed = false;
+        result.exceeded.push('llmTokensPerMonth');
       } else if (pct >= 0.8) {
         result.warnings.push(`80% of token budget used (${usage.tokensProcessed.toLocaleString()}/${tokenLimit.toLocaleString()}).`);
       }
@@ -498,14 +508,11 @@ export class UsageTracker {
 
     // Check queries
     if (queryLimit > 0) {
-      const pct = usage.searchQueries / queryLimit;
+      const queryUsage = usage.searchQueries + usage.graphQueries;
+      const pct = queryUsage / queryLimit;
       if (pct >= 1.0) {
-        if (plan.overage) {
-          result.warnings.push(`Query limit reached. Overage billing active.`);
-        } else {
-          result.allowed = false;
-          result.exceeded.push('searchQueriesPerMonth');
-        }
+        result.allowed = false;
+        result.exceeded.push('searchQueriesPerMonth');
       } else if (pct >= 0.8) {
         result.warnings.push(`80% of query budget used.`);
       }
@@ -519,16 +526,6 @@ export class UsageTracker {
       }
     }
 
-    // Check memories
-    if (memoryLimit > 0) {
-      if (usage.memoriesIngested >= memoryLimit) {
-        result.allowed = false;
-        result.exceeded.push('maxMemories');
-      } else if (usage.memoriesIngested / memoryLimit >= 0.8) {
-        result.warnings.push(`80% of memory limit used (${usage.memoriesIngested}/${memoryLimit}).`);
-      }
-    }
-
     // Check deep research
     if (deepResearchLimit > 0) {
       if (usage.deepResearchJobs >= deepResearchLimit) {
@@ -539,14 +536,23 @@ export class UsageTracker {
       }
     }
 
-    // Check web intel (daily)
-    if (webIntelDayLimit > 0) {
-      const todayCount = await this.getWebIntelToday(orgId);
-      if (todayCount >= webIntelDayLimit) {
+    const daily = await this.getDailySnapshot(orgId) || {};
+    const dailyChecks = [
+      ['llmTokensPerDay', daily.tokens || 0, 'daily token'],
+      ['searchQueriesPerDay', (daily.searches || 0) + (daily.graphQueries || 0), 'daily query'],
+      ['knowledgeBaseUploadsPerDay', daily.uploads || 0, 'daily upload'],
+      ['knowledgeBasePagesPerDay', daily.kbPages || 0, 'daily KB page'],
+      ['deepResearchPerDay', daily.deepResearch || 0, 'daily deep research'],
+      ['webIntelPerDay', daily.webIntel || 0, 'daily web intel'],
+    ];
+    for (const [limitKey, used, label] of dailyChecks) {
+      const limit = plan.limits[limitKey];
+      if (!(limit > 0)) continue;
+      if (used >= limit) {
         result.allowed = false;
-        result.exceeded.push('webIntelPerDay');
-      } else if (todayCount / webIntelDayLimit >= 0.8) {
-        result.warnings.push(`80% of daily web intel limit used (${todayCount}/${webIntelDayLimit}).`);
+        result.exceeded.push(limitKey);
+      } else if (used / limit >= 0.8) {
+        result.warnings.push(`80% of ${label} limit used (${used.toLocaleString()}/${limit.toLocaleString()}).`);
       }
     }
 

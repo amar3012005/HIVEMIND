@@ -3905,6 +3905,14 @@ const server = http.createServer(async (req, res) => {
           });
           continue;
         }
+
+        if (planEnforcer) {
+          const seatCheck = await planEnforcer.checkLimit(invite.orgId, 'users', 1);
+          if (!seatCheck.allowed) {
+            results.push({ orgId: invite.orgId, status: 'plan_limit', error: seatCheck.reason });
+            continue;
+          }
+        }
         
         // Create org membership
         await prisma.userOrganization.create({
@@ -9628,7 +9636,7 @@ exit \$RC
           const check = await planEnforcer.checkLimit(orgId, enforcementType, enforcementAmount);
           if (!check.allowed) {
             // Monthly token/search QUOTA exhaustion is a plan limit, not a rate-limit → 402 contract.
-            return jsonResponse(res, planLimitBody(check, enforcementType), 402);
+            return jsonResponse(res, planLimitBody(check, enforcementType), check.status || 402);
           }
           // Set warning header for overage plans
           if (check.overage) {
@@ -9639,7 +9647,7 @@ exit \$RC
         // Legacy warning headers from UsageTracker
         if (usageTracker && planStore) {
           const orgPlan = await planStore.getOrgPlan(orgId);
-          const limits = await usageTracker.checkLimits(orgId, orgPlan.id);
+          const limits = await usageTracker.checkLimits(orgId, orgPlan);
           if (limits.warnings.length > 0) {
             res.setHeader('X-HiveMind-Usage-Warning', limits.warnings[0]);
           }
@@ -9795,6 +9803,13 @@ exit \$RC
           if (invite.expiresAt < new Date()) return jsonResponse(res, { error: 'Invite expired' }, 410);
           const existing = await prisma.userOrganization.findFirst({ where: { userId, orgId: invite.orgId } });
           if (existing) return jsonResponse(res, { error: 'Already a member of this organization' }, 409);
+
+          if (planEnforcer) {
+            const seatCheck = await planEnforcer.checkLimit(invite.orgId, 'users', 1);
+            if (!seatCheck.allowed) {
+              return jsonResponse(res, planLimitBody(seatCheck, 'users'), seatCheck.status || 402);
+            }
+          }
           
           // Create org membership
           await prisma.userOrganization.create({
@@ -12208,6 +12223,17 @@ exit \$RC
 
               if (!prisma) {
                 return jsonResponse(res, { error: 'Database unavailable' }, 503);
+              }
+
+              const existingConnection = await prisma.nangoConnection.findUnique({
+                where: { userId_providerKey_orgId: { userId, providerKey, orgId } },
+                select: { status: true },
+              });
+              if (existingConnection?.status !== 'active' && planEnforcer && orgId) {
+                const connectorCheck = await planEnforcer.checkLimit(orgId, 'connectors', 1);
+                if (!connectorCheck.allowed) {
+                  return jsonResponse(res, planLimitBody(connectorCheck, 'connectors'), connectorCheck.status || 402);
+                }
               }
 
               await prisma.nangoConnection.upsert({
@@ -15342,7 +15368,6 @@ exit \$RC
           if (req.method === 'POST') {
             // Web search open to all authenticated users (entitlement gate removed — all keys get access)
             try {
-              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -15353,7 +15378,7 @@ exit \$RC
               if (planEnforcer && orgId) {
                 const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
                 if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), 402);
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
                 }
               }
 
@@ -15426,7 +15451,6 @@ exit \$RC
         case '/api/web/research/jobs':
           if (req.method === 'POST') {
             try {
-              try { planEnforcer?.recordUsage(orgId, 'deepResearch', 1); } catch { /* meter */ }
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
@@ -15436,7 +15460,7 @@ exit \$RC
                 // 'webIntel', so the per-month cap never fired. Check the right type.
                 const drCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
                 if (!drCheck.allowed) {
-                  return jsonResponse(res, planLimitBody(drCheck, 'deepResearch'), 402);
+                  return jsonResponse(res, planLimitBody(drCheck, 'deepResearch'), drCheck.status || 402);
                 }
               }
               // Reuse the search quota (research counts as a heavier search).
@@ -15583,7 +15607,7 @@ exit \$RC
                   });
 
                   if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                    planEnforcer.recordUsage(orgId, 'deepResearch', 1);
                   }
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
@@ -15602,7 +15626,6 @@ exit \$RC
           if (req.method === 'POST') {
             // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
             try {
-              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -15613,7 +15636,7 @@ exit \$RC
               if (planEnforcer && orgId) {
                 const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
                 if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), 402);
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
                 }
               }
 
@@ -17098,7 +17121,7 @@ exit \$RC
             if (planEnforcer && orgId) {
               const memoryLimitCheck = await planEnforcer.checkLimit(orgId, 'memories', 1);
               if (!memoryLimitCheck.allowed) {
-                return jsonResponse(res, planLimitBody(memoryLimitCheck, 'memories'), 402);
+                return jsonResponse(res, planLimitBody(memoryLimitCheck, 'memories'), memoryLimitCheck.status || 402);
               }
             }
             
@@ -20310,7 +20333,7 @@ exit \$RC
               if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
               const billingPlan = await planStore.getOrgPlan(orgId);
               const billingUsage = await usageTracker.getUsage(orgId);
-              const billingLimits = await usageTracker.checkLimits(orgId, billingPlan.id);
+              const billingLimits = await usageTracker.checkLimits(orgId, billingPlan);
               return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
             }
             const usageSummary = await planEnforcer.getUsageSummary(orgId);

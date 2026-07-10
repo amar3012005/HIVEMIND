@@ -36,11 +36,9 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
   if (planEnforcer && orgId) {
     const upCheck = await planEnforcer.checkLimit(orgId, 'uploads', 1);
     if (!upCheck.allowed) {
-      return jsonResponse(res, planLimitBody(upCheck, 'uploads'), 402);
+      return jsonResponse(res, planLimitBody(upCheck, 'uploads'), upCheck.status || 402);
     }
   }
-  try { planEnforcer?.recordUsage(orgId, 'uploads', 1); } catch {}
-
   try {
     const contentType = req.headers['content-type'] || '';
     if (!contentType.includes('multipart/form-data')) {
@@ -165,7 +163,7 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
       const estPages = Math.max(1, Math.ceil(filePart.data.length / 50_000));
       const check = await planEnforcer.checkLimit(orgId, 'kbPages', estPages);
       if (!check.allowed) {
-        return jsonResponse(res, { ...planLimitBody(check, 'kbPages'), estimated_pages: estPages }, 402);
+        return jsonResponse(res, { ...planLimitBody(check, 'kbPages'), estimated_pages: estPages }, check.status || 402);
       }
     }
 

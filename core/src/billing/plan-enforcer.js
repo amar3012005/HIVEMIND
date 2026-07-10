@@ -20,6 +20,16 @@ import { getOrgCounts } from '../memory/org-counts.js';
  */
 const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
 
+const DAILY_LIMITS = {
+  tokens: ['llmTokensPerDay', 'tokens', 'tokens'],
+  searches: ['searchQueriesPerDay', 'searches', 'queries'],
+  graphQueries: ['searchQueriesPerDay', 'graphQueries', 'queries'],
+  uploads: ['knowledgeBaseUploadsPerDay', 'uploads', 'uploads'],
+  kbPages: ['knowledgeBasePagesPerDay', 'kbPages', 'pages'],
+  deepResearch: ['deepResearchPerDay', 'deepResearch', 'jobs'],
+  webIntel: ['webIntelPerDay', 'webIntel', 'jobs'],
+};
+
 /**
  * Build the canonical plan-limit-exceeded response body (the LIMIT-EXCEEDED
  * RESPONSE CONTRACT the frontend keys off). Pure function — no I/O.
@@ -31,6 +41,15 @@ const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise
  */
 export function planLimitBody(check, resource) {
   const c = check || {};
+  if (c.status === 503) {
+    return {
+      error: 'usage_verification_unavailable',
+      code: 'usage_verification_unavailable',
+      message: c.reason || 'Usage verification is temporarily unavailable',
+      resource,
+      retryable: true,
+    };
+  }
   const plan = c.plan || 'free';
   const suggested = Object.prototype.hasOwnProperty.call(PLAN_LADDER, plan)
     ? PLAN_LADDER[plan]
@@ -45,6 +64,24 @@ export function planLimitBody(check, resource) {
     current: c.current ?? null,
     suggested_plan: suggested,      // next tier up, or null at enterprise
     upgrade_url: '/hivemind/app/billing',
+  };
+}
+
+function buildReminder(resource, used, limit, period) {
+  if (!(limit > 0)) return null;
+  const ratio = used / limit;
+  if (ratio < 0.8) return null;
+  const reached = ratio >= 1;
+  return {
+    resource,
+    period,
+    level: reached ? 'limit' : 'warning',
+    used,
+    limit,
+    percent: Math.min(100, Math.round(ratio * 100)),
+    message: reached
+      ? `${resource} ${period} limit reached. Upgrade or wait for the limit to reset.`
+      : `${resource} is at ${Math.round(ratio * 100)}% of the ${period} limit.`,
   };
 }
 
@@ -131,21 +168,42 @@ export class PlanEnforcer {
     if (!planDef) return { allowed: true };
 
     const limits = planDef.limits || {};
-    const hasOverage = !!planDef.overage;
     const counters = await this._getCounters(orgId);
 
-    if (type === 'tokens') {
-      const dailyLimit = limits.llmTokensPerDay;
-      if (dailyLimit && dailyLimit !== -1) {
-        const today = await this.usageTracker?.getDailyMetricToday(orgId, 'tokens') || 0;
+    const dailyRule = DAILY_LIMITS[type];
+    if (dailyRule) {
+      const [limitKey, metric, unit] = dailyRule;
+      const dailyLimit = limits[limitKey];
+      if (dailyLimit > 0) {
+        const snapshot = await this.usageTracker?.getDailySnapshot?.(orgId);
+        if (snapshot == null) {
+          return {
+            allowed: false,
+            reason: 'Usage verification is temporarily unavailable. Retry shortly.',
+            plan: planDef.id,
+            status: 503,
+          };
+        }
+        const today = type === 'searches' || type === 'graphQueries'
+          ? Number(snapshot.searches || 0) + Number(snapshot.graphQueries || 0)
+          : Number(snapshot[metric] || 0);
         if (today + amount > dailyLimit) {
-          return { allowed: false, reason: `Daily token limit exceeded (${planDef.name} plan: ${dailyLimit.toLocaleString()} tokens/day)`, limit: dailyLimit, current: today, plan: planDef.id };
+          return {
+            allowed: false,
+            reason: `Daily ${unit} limit exceeded (${planDef.name} plan: ${dailyLimit.toLocaleString()} ${unit}/day)`,
+            limit: dailyLimit,
+            current: today,
+            plan: planDef.id,
+            period: 'day',
+          };
         }
       }
+    }
+
+    if (type === 'tokens') {
       const limit = limits.llmTokensPerMonth;
       if (!limit || limit === -1) return { allowed: true }; // unlimited
       if (counters.tokens + amount > limit) {
-        if (hasOverage) return { allowed: true, overage: true }; // overage plan — allow but flag
         return {
           allowed: false,
           reason: `Monthly token limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} tokens/month)`,
@@ -159,13 +217,13 @@ export class PlanEnforcer {
     if (type === 'searches') {
       const limit = limits.searchQueriesPerMonth;
       if (!limit || limit === -1) return { allowed: true };
-      if (counters.searches + amount > limit) {
-        if (hasOverage) return { allowed: true, overage: true };
+      const used = counters.searches + counters.graphQueries;
+      if (used + amount > limit) {
         return {
           allowed: false,
           reason: `Monthly search limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} searches/month)`,
           limit,
-          current: counters.searches,
+          current: used,
           plan: planDef.id,
         };
       }
@@ -191,7 +249,6 @@ export class PlanEnforcer {
       if (!limit || limit === -1) return { allowed: true };
       const used = counters.kbPages || 0;
       if (used + amount > limit) {
-        if (hasOverage) return { allowed: true, overage: true };
         return {
           allowed: false,
           reason: `Monthly KB pages limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} pages/month)`,
@@ -205,12 +262,13 @@ export class PlanEnforcer {
     if (type === 'memories') {
       const limit = limits.maxMemories;
       if (!limit || limit === -1) return { allowed: true };
-      if (counters.memories + amount > limit) {
+      const liveMemories = Number((await getOrgCounts(this.prisma, orgId)).memories) || 0;
+      if (liveMemories + amount > limit) {
         return {
           allowed: false,
           reason: `Memory limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} memories)`,
           limit,
-          current: counters.memories,
+          current: liveMemories,
           plan: planDef.id,
         };
       }
@@ -230,32 +288,18 @@ export class PlanEnforcer {
       }
     }
 
-    if (type === 'webIntel') {
-      const limit = limits.webIntelPerDay;
-      if (!limit || limit === -1) return { allowed: true };
-      // Web intel is tracked daily, so we need to check today's usage
-      const todayUsage = await this.usageTracker?.getWebIntelToday(orgId) || 0;
-      if (todayUsage + amount > limit) {
-        return {
-          allowed: false,
-          reason: `Daily web intel limit exceeded (${planDef.name} plan: ${limit} jobs/day)`,
-          limit,
-          current: todayUsage,
-          plan: planDef.id,
-        };
-      }
-    }
+    if (type === 'webIntel') return { allowed: true };
 
     if (type === 'graphQueries') {
       const limit = limits.searchQueriesPerMonth;
       if (!limit || limit === -1) return { allowed: true };
-      if (counters.graphQueries + amount > limit) {
-        if (hasOverage) return { allowed: true, overage: true };
+      const used = counters.searches + counters.graphQueries;
+      if (used + amount > limit) {
         return {
           allowed: false,
-          reason: `Monthly graph query limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} queries/month)`,
+          reason: `Monthly query limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} queries/month)`,
           limit,
-          current: counters.graphQueries,
+          current: used,
           plan: planDef.id,
         };
       }
@@ -274,7 +318,7 @@ export class PlanEnforcer {
         // we count all active integrations belonging to users in the org.
         const count = await this.prisma.platformIntegration.count({
           where: {
-            user: { organizations: { some: { orgId } } },
+            user: { organizations: { some: { orgId, isActive: true } } },
             isActive: true,
           },
         });
@@ -288,7 +332,7 @@ export class PlanEnforcer {
           };
         }
       } catch {
-        // If the query fails (e.g. no membership table), skip enforcement
+        return { allowed: false, reason: 'Connector capacity verification is temporarily unavailable.', plan: planDef.id, status: 503 };
       }
     }
 
@@ -296,7 +340,7 @@ export class PlanEnforcer {
       const limit = limits.maxHyperRooms;
       if (!limit || limit === -1) return { allowed: true };
       try {
-        const count = await this.prisma.hyperRoom.count({ where: { orgId } });
+        const count = await this.prisma.hyperRoom.count({ where: { orgId, archivedAt: null } });
         if (count + amount > limit) {
           return {
             allowed: false,
@@ -306,14 +350,16 @@ export class PlanEnforcer {
             plan: planDef.id,
           };
         }
-      } catch { /* model absent → skip */ }
+      } catch {
+        return { allowed: false, reason: 'Room capacity verification is temporarily unavailable.', plan: planDef.id, status: 503 };
+      }
     }
 
     if (type === 'users') {
       const limit = limits.maxUsers;
       if (!limit || limit === -1) return { allowed: true };
       try {
-        const count = await this.prisma.userOrganization.count({ where: { orgId } });
+        const count = await this.prisma.userOrganization.count({ where: { orgId, isActive: true } });
         if (count + amount > limit) {
           return {
             allowed: false,
@@ -323,7 +369,9 @@ export class PlanEnforcer {
             plan: planDef.id,
           };
         }
-      } catch { /* skip */ }
+      } catch {
+        return { allowed: false, reason: 'Seat capacity verification is temporarily unavailable.', plan: planDef.id, status: 503 };
+      }
     }
 
     return { allowed: true };
@@ -389,18 +437,19 @@ export class PlanEnforcer {
       ? await this.usageTracker.getUsage(orgId).catch(() => null)
       : null) || {};
     const month = dbUsage.month || this._currentMonth();
-    const webIntelToday = this.usageTracker
-      ? await this.usageTracker.getWebIntelToday(orgId).catch(() => 0)
-      : 0;
     const cumulative = this.usageTracker
       ? await this.usageTracker.getCumulativeUsage(orgId).catch(() => ({}))
       : {};
+    const dailyUsage = this.usageTracker
+      ? await this.usageTracker.getDailySnapshot(orgId).catch(() => ({}))
+      : {};
+    const safeDailyUsage = dailyUsage || {};
 
     // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
     let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
-    try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizations: { some: { orgId } } }, isActive: true } }); } catch { /* skip */ }
-    try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId } }); } catch { /* skip */ }
-    try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId } }); } catch { /* skip */ }
+    try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizations: { some: { orgId, isActive: true } } }, isActive: true } }); } catch { /* display zero */ }
+    try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId, archivedAt: null } }); } catch { /* display zero */ }
+    try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId, isActive: true } }); } catch { /* display zero */ }
 
     // memories = TOTAL live memory count for the org (lifetime cap vs maxMemories),
     // NOT the monthly memoriesIngested counter. Prefer a caller-supplied total (avoids a
@@ -412,22 +461,33 @@ export class PlanEnforcer {
       catch { memoriesUsed = 0; }
     }
 
-    return {
+    const summary = {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
-      period: { month },
+      period: { month, day: new Date().toISOString().slice(0, 10) },
       tokens: { used: Number(dbUsage.tokensProcessed) || 0, limit: limits.llmTokensPerMonth ?? -1 },
       searches: { used: Number(dbUsage.searchQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
       uploads: { used: Number(dbUsage.knowledgeBaseUploads) || 0, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
       kbPages: { used: Number(dbUsage.knowledgeBasePages) || 0, limit: limits.knowledgeBasePagesPerMonth ?? -1 },
       memories: { used: memoriesUsed, limit: limits.maxMemories ?? -1 },
       deepResearch: { used: Number(dbUsage.deepResearchJobs) || 0, limit: limits.deepResearchPerMonth ?? -1 },
-      webIntel: { used: Number(webIntelToday) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
+      webIntel: { used: Number(safeDailyUsage.webIntel) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
       graphQueries: { used: Number(dbUsage.graphQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
       tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 }, // tracked, not limited
       connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
       hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
       users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
+      daily: {
+        tokens: { used: Number(safeDailyUsage.tokens) || 0, limit: limits.llmTokensPerDay ?? -1 },
+        searches: {
+          used: Number(safeDailyUsage.searches || 0) + Number(safeDailyUsage.graphQueries || 0),
+          limit: limits.searchQueriesPerDay ?? -1,
+        },
+        uploads: { used: Number(safeDailyUsage.uploads) || 0, limit: limits.knowledgeBaseUploadsPerDay ?? -1 },
+        kbPages: { used: Number(safeDailyUsage.kbPages) || 0, limit: limits.knowledgeBasePagesPerDay ?? -1 },
+        deepResearch: { used: Number(safeDailyUsage.deepResearch) || 0, limit: limits.deepResearchPerDay ?? -1 },
+        webIntel: { used: Number(safeDailyUsage.webIntel) || 0, limit: limits.webIntelPerDay ?? -1 },
+      },
       // Monotonic commercial/audit totals. These never decrease on deletion.
       cumulative,
       // honest scope: tokens are metered at chat + TARA today (full coverage =
@@ -435,5 +495,18 @@ export class PlanEnforcer {
       // for total platform spend.
       tokensScope: 'chat+tara',
     };
+
+    const reminders = [];
+    const monthlyResources = ['tokens', 'searches', 'uploads', 'kbPages', 'memories', 'deepResearch'];
+    for (const resource of monthlyResources) {
+      const reminder = buildReminder(resource, summary[resource].used, summary[resource].limit, resource === 'memories' ? 'total' : 'monthly');
+      if (reminder) reminders.push(reminder);
+    }
+    for (const [resource, value] of Object.entries(summary.daily)) {
+      const reminder = buildReminder(resource, value.used, value.limit, 'daily');
+      if (reminder) reminders.push(reminder);
+    }
+    summary.reminders = reminders;
+    return summary;
   }
 }

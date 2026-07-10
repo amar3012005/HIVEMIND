@@ -115,3 +115,27 @@
 
 ### Next Phase
 - Refactor Compose service environments to explicit per-service allowlists, starting with the broker and edge services, then core/control/employees after dependency mapping and staging validation. This will reduce the blast radius of a container compromise.
+
+## Phase 8 - B2C Quota Abuse Protection (2026-07-10)
+
+### Findings
+- Free, Pro, and Scale had monthly allocations but no complete daily budget contract. Pro and Scale also allowed unlimited unbilled overage after their allocation.
+- Search and graph queries consumed separate counters against the same limit, effectively doubling query allowance.
+- The memory cap used monthly ingestion instead of the live memory count. Deep Research success was recorded as Web Intel, and several web/knowledge paths recorded usage before success or recorded it twice.
+- Room, connector, and seat capacity checks could ignore effective referral entitlements, fail open on database errors, or race under concurrent requests.
+- Billing displayed hardcoded plan data and an annual discount not supplied by the backend.
+
+### Change
+- Added explicit daily token, query, upload, KB-page, and research limits for Free, Pro, and Scale. Paid B2C overage is hard-disabled until metered charging exists end-to-end.
+- Unified search and graph-query budgets, enforced live memory totals, corrected success-only metering, and made daily-ledger/capacity verification fail closed with retryable `503` responses.
+- Added transaction-locked seat, connector, and active HyperAgents-room capacity controls using the effective entitlement plan.
+- Billing and Usage now render backend plan truth, daily/monthly counters, KB pages, and 80%/100% reminders. Removed the browser-side direct plan flip and invented annual discount.
+
+### Validation Before Deploy
+- Targeted billing suite: 17 tests pass; modified runtime files pass `node --check` and `git diff --check`.
+- Frontend optimized production build succeeds.
+- Full core suite is not a release gate in its current state: 462 tests pass; failures are dominated by missing test `DATABASE_URL`, Vitest files executed by Node, unavailable local `.amr` native binaries, and pre-existing placeholder/contract failures.
+- Production currently has three Free orgs, four Enterprise orgs, 48 daily-usage rows, and one active entitlement. No migration is required.
+
+### Rollback
+- Retain the previous Core, Control, and Frontend image tags before recreation. Roll back all three together because the new UI consumes the new usage-summary contract while remaining backward-compatible with the legacy payload.

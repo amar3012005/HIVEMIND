@@ -134,6 +134,109 @@ const CONFIG = {
 
 const prisma = getPrismaClient();
 
+class PlanCapacityError extends Error {
+  constructor(resource, plan, limit, current) {
+    super(`${resource} limit reached (${plan.name} plan: ${limit.toLocaleString()})`);
+    this.code = 'PLAN_LIMIT';
+    this.resource = resource;
+    this.plan = plan.id;
+    this.limit = limit;
+    this.current = current;
+  }
+}
+
+async function createHyperRoomWithinPlan(data) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:rooms:${data.orgId}`);
+    const { plan } = await getEffectivePlan(tx, data.orgId);
+    const limit = plan.limits?.maxHyperRooms ?? -1;
+    if (limit > 0) {
+      const current = await tx.hyperRoom.count({ where: { orgId: data.orgId, archivedAt: null } });
+      if (current >= limit) throw new PlanCapacityError('HyperAgents room', plan, limit, current);
+    }
+    return tx.hyperRoom.create({ data });
+  });
+}
+
+async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles, invitedAt }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
+    const freshInvite = await tx.orgInvite.findUnique({ where: { id: inviteId }, select: { usedAt: true } });
+    if (!freshInvite || freshInvite.usedAt) {
+      const error = new Error('Invite already used');
+      error.code = 'INVITE_USED';
+      throw error;
+    }
+    const existing = await tx.userOrganization.findUnique({ where: { userId_orgId: { userId, orgId } } });
+    if (!existing?.isActive) {
+      const { plan } = await getEffectivePlan(tx, orgId);
+      const limit = plan.limits?.maxUsers ?? -1;
+      if (limit > 0) {
+        const current = await tx.userOrganization.count({ where: { orgId, isActive: true } });
+        if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
+      }
+    }
+    const membership = await tx.userOrganization.upsert({
+      where: { userId_orgId: { userId, orgId } },
+      update: { role, roles, joinedAt: new Date(), isActive: true, deactivatedAt: null },
+      create: { userId, orgId, role, roles, invitedAt, joinedAt: new Date(), isActive: true },
+    });
+    await tx.orgInvite.update({ where: { id: inviteId }, data: { usedAt: new Date(), usedBy: userId } });
+    return membership;
+  });
+}
+
+async function createMembershipWithinPlan(data) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${data.orgId}`);
+    const existing = await tx.userOrganization.findUnique({ where: { userId_orgId: { userId: data.userId, orgId: data.orgId } } });
+    if (existing?.isActive) return existing;
+    const { plan } = await getEffectivePlan(tx, data.orgId);
+    const limit = plan.limits?.maxUsers ?? -1;
+    if (limit > 0) {
+      const current = await tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } });
+      if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
+    }
+    return tx.userOrganization.upsert({
+      where: { userId_orgId: { userId: data.userId, orgId: data.orgId } },
+      update: { ...data, isActive: true, deactivatedAt: null },
+      create: { ...data, isActive: true },
+    });
+  });
+}
+
+async function upsertConnectorWithinPlan(orgId, connectorInput) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:connectors:${orgId}`);
+    const existing = await tx.platformIntegration.findUnique({
+      where: { userId_platformType: { userId: connectorInput.userId, platformType: connectorInput.provider } },
+      select: { isActive: true },
+    });
+    if (!existing?.isActive) {
+      const { plan } = await getEffectivePlan(tx, orgId);
+      const limit = plan.limits?.maxConnectors ?? -1;
+      if (limit > 0) {
+        const current = await tx.platformIntegration.count({
+          where: { user: { organizations: { some: { orgId, isActive: true } } }, isActive: true },
+        });
+        if (current >= limit) throw new PlanCapacityError('Connector', plan, limit, current);
+      }
+    }
+    return new ConnectorStore(tx).upsertConnector(connectorInput);
+  });
+}
+
+function capacityErrorResponse(res, error) {
+  return jsonResponse(res, {
+    error: error.message,
+    code: error.code,
+    resource: error.resource,
+    plan: error.plan,
+    limit: error.limit,
+    current: error.current,
+  }, 402);
+}
+
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
 // The room-turn kick to the employees sidecar is fire-and-forget and can be
 // dropped (the sidecar holds the connection open for the whole synchronous
@@ -265,12 +368,10 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         let roomId = task.room_id;
         if (!roomId) {
           const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-          const taskRoom = await prisma.hyperRoom.create({
-            data: {
+          const taskRoom = await createHyperRoomWithinPlan({
               userId: hq.user_id, orgId: hq.org_id,
               name: task.title.slice(0, 120), participantIds,
               template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
-            },
           });
           roomId = taskRoom.id;
           const goal = `${task.title}\n${task.detail || ''}\nCompany: ${state.company} — ${state.mission || ''}`.slice(0, 2000);
@@ -2348,9 +2449,7 @@ const server = http.createServer(async (req, res) => {
             });
             if (!existingMembership) {
               const role = ssoConf.defaultRole || 'member';
-              await prisma.userOrganization.create({
-                data: { userId: user.id, orgId: org.id, role, joinedAt: new Date() },
-              });
+              await createMembershipWithinPlan({ userId: user.id, orgId: org.id, role, joinedAt: new Date() });
               if (ssoConf.defaultTeamId) {
                 await prisma.teamMember.upsert({
                   where: { teamId_userId: { teamId: ssoConf.defaultTeamId, userId: user.id } },
@@ -3285,25 +3384,20 @@ const server = http.createServer(async (req, res) => {
       ? ['guest']
       : (Array.isArray(invite.roles) && invite.roles.length > 0 ? invite.roles : [effectiveRole]);
 
-    await prisma.userOrganization.upsert({
-      where: { userId_orgId: { userId: current.session.userId, orgId: invite.orgId } },
-      update: {
-        role: effectiveRole,
-        roles: inviteRoles,
-        joinedAt: new Date(),
-        isActive: true,
-        deactivatedAt: null,
-      },
-      create: {
-        userId: current.session.userId,
+    try {
+      await claimInviteSeatWithinPlan({
+        inviteId: invite.id,
         orgId: invite.orgId,
+        userId: current.session.userId,
         role: effectiveRole,
         roles: inviteRoles,
         invitedAt: invite.createdAt,
-        joinedAt: new Date(),
-        isActive: true,
-      },
-    });
+      });
+    } catch (error) {
+      if (error?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, error);
+      if (error?.code === 'INVITE_USED') return jsonResponse(res, { error: error.message }, 410);
+      throw error;
+    }
 
     // Auto-add to invited teams — never for guests (team membership grants
     // visibility of every team project, which defeats project scoping).
@@ -3336,14 +3430,6 @@ const server = http.createServer(async (req, res) => {
         }).catch(() => null);
       }
     }
-
-    await prisma.orgInvite.update({
-      where: { id: invite.id },
-      data: {
-        usedAt: new Date(),
-        usedBy: current.session.userId,
-      },
-    });
 
     audit({
       organizationId: invite.orgId,
@@ -3451,10 +3537,6 @@ const server = http.createServer(async (req, res) => {
     if (!membership) {
       return jsonResponse(res, { error: 'Organization membership not found' }, 404);
     }
-    if (membership.org?.plan !== 'enterprise') {
-      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
-    }
-
     // Role + policy aware: was an unfiltered findMany that listed EVERY org
     // project to ANY member — including guests and other members' private
     // projects. Now routes through the same visibility engine as /v1/projects.
@@ -4425,7 +4507,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Store encrypted tokens
-      await connectorStore.upsertConnector({
+      await upsertConnectorWithinPlan(authState.orgId, {
         userId: authState.userId,
         provider,
         targetScope: authState.targetScope || 'personal',
@@ -6664,16 +6746,6 @@ Write the persona now.`;
         : [];
       if (!name) return jsonResponse(res, { error: 'name is required' }, 400);
       if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
-      // Plan limit — HyperAgents rooms per org (heaviest LLM feature; cap by tier).
-      try {
-        const _org = await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { plan: true } });
-        const _plan = PLANS[_org?.plan] || PLANS.free;
-        const _lim = _plan?.limits?.maxHyperRooms ?? -1;
-        if (_lim !== -1) {
-          const _n = await prisma.hyperRoom.count({ where: { orgId: current.session.orgId } });
-          if (_n >= _lim) return jsonResponse(res, { error: `HyperAgents room limit reached (${_plan.name} plan: ${_lim} ${_lim === 1 ? 'room' : 'rooms'}). Archive a room or upgrade.`, code: 'PLAN_LIMIT', limit: _lim, current: _n }, 402);
-        }
-      } catch { /* never block creation on a metering hiccup */ }
       try {
         // Restrict participants to employees in this org
         const valid = participantIds.length
@@ -6710,8 +6782,7 @@ Write the persona now.`;
           if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
           projectId = proj.id;
         }
-        const room = await prisma.hyperRoom.create({
-          data: {
+        const room = await createHyperRoomWithinPlan({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name,
@@ -6719,7 +6790,6 @@ Write the persona now.`;
             template,
             permanentLeadId,
             permanentSkepticId,
-          },
         });
         // Persist goal/scope via raw SQL — avoids requiring a regenerated Prisma
         // client for newly-added columns during rolling deploys.
@@ -6746,6 +6816,7 @@ Write the persona now.`;
         }
         return jsonResponse(res, { room }, 201);
       } catch (err) {
+        if (err?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, err);
         console.warn('[hyper-rooms] create failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -7220,14 +7291,12 @@ Write the persona now.`;
           // Marketplace specialists take the room seats ahead of legacy generics.
           const rankedTeam = [...team].sort((a, b) => Number(_isSpecialist(b)) - Number(_isSpecialist(a)));
           const participantIds = rankedTeam.map((t) => t.id).slice(0, 5);
-          const room = await prisma.hyperRoom.create({
-            data: {
+          const room = await createHyperRoomWithinPlan({
               userId, orgId,
               name: `${companyName} — HQ`,
               participantIds,
               template: 'auto',
               permanentLeadId: participantIds.slice().sort()[0] || null,
-            },
           });
           // "You are the team running <name>" — NOT "Operate <name>", which a
           // model can misread as a proper noun ("Operate B&B" evaluated as a
@@ -7414,15 +7483,13 @@ Write the persona now.`;
           }
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-        const taskRoom = await prisma.hyperRoom.create({
-          data: {
+        const taskRoom = await createHyperRoomWithinPlan({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name: task.title.slice(0, 120),
             participantIds,
             template: 'auto',
             permanentLeadId: participantIds.slice().sort()[0] || null,
-          },
         });
         const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company} — ${company.mission || ''}`.slice(0, 2000);
         try {
@@ -7439,6 +7506,7 @@ Write the persona now.`;
         } catch { /* state best-effort */ }
         return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
       } catch (err) {
+        if (err?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, err);
         return jsonResponse(res, { error: err.message }, 500);
       }
     }
@@ -8578,7 +8646,13 @@ Write the persona now.`;
       const { plan, entitlement } = await getEffectivePlan(prisma, orgId);
       const usage = await usageTracker.getUsage(orgId);
       const cumulative = await usageTracker.getCumulativeUsage(orgId);
-      const limitCheck = await usageTracker.checkLimits(orgId, plan.id);
+      const limitCheck = await usageTracker.checkLimits(orgId, plan);
+      const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
+      const usageSummary = await new PlanEnforcer(
+        prisma,
+        { getOrgPlan: async () => plan },
+        usageTracker,
+      ).getUsageSummary(orgId);
       return jsonResponse(res, {
         plan: {
           id: plan.id,
@@ -8608,8 +8682,10 @@ Write the persona now.`;
           memory_storage_mode: org.memoryStorageMode,
         },
         usage,
+        usage_summary: usageSummary,
         cumulative_usage: cumulative,
         warnings: limitCheck.warnings || [],
+        reminders: usageSummary.reminders || [],
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
         all_plans: plansMod.getAllPlans().map(p => ({

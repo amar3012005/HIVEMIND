@@ -769,6 +769,27 @@ function sanitizeSlug(input) {
     .slice(0, 40) || `workspace-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+function sanitizeCompanyProfile(input, { fallbackName = '' } = {}) {
+  const raw = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const text = (key, max) => String(raw[key] || '').trim().replace(/\s+/g, ' ').slice(0, max);
+  let website = text('website', 512);
+  if (website && !/^https?:\/\//i.test(website)) website = `https://${website}`;
+  try {
+    if (website) {
+      const parsed = new URL(website);
+      if (!['http:', 'https:'].includes(parsed.protocol)) website = '';
+    }
+  } catch { website = ''; }
+  return {
+    name: text('name', 120) || String(fallbackName || '').trim().slice(0, 120),
+    website,
+    industry: text('industry', 120),
+    description: text('description', 2000),
+    audience: text('audience', 1000),
+    mission: text('mission', 1000),
+  };
+}
+
 async function getCurrentSession(req) {
   const cookies = parseCookies(req);
   const rawCookie = cookies[CONFIG.sessionCookieName];
@@ -961,7 +982,8 @@ async function buildBootstrapPayload(user) {
       name: org.name,
       slug: org.slug,
       plan: org.plan || 'free',
-      hosting_mode: org.hostingMode || 'managed'
+      hosting_mode: org.hostingMode || 'managed',
+      company_profile: org.companyProfile || {},
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -2376,6 +2398,7 @@ const server = http.createServer(async (req, res) => {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
+    const companyProfile = sanitizeCompanyProfile(body.company_profile, { fallbackName: body.name });
     const org = await prisma.organization.create({
       data: {
         zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
@@ -2383,6 +2406,7 @@ const server = http.createServer(async (req, res) => {
         slug,
         plan: requestedPlan,
         hostingMode,
+        companyProfile,
       }
     });
 
@@ -2462,6 +2486,53 @@ const server = http.createServer(async (req, res) => {
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
+    });
+  }
+
+  // GET/PATCH /v1/orgs/:id/profile — canonical organization context for the
+  // workspace Profile screen and agent consumers. Members may read; only
+  // owners/admins may modify the company brief.
+  const orgProfileMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/profile$/);
+  if (orgProfileMatch && (req.method === 'GET' || req.method === 'PATCH')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = orgProfileMatch[1];
+    const membership = await getOrgMembership(current.session.userId, orgId);
+    if (!membership?.isActive) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    if (req.method === 'PATCH') {
+      const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
+      if (!admin) return;
+      const body = await parseBody(req);
+      const companyProfile = sanitizeCompanyProfile(body.company_profile, { fallbackName: membership.org.name });
+      const updated = await prisma.organization.update({
+        where: { id: orgId },
+        data: { companyProfile },
+      });
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: 'organization.profile_updated',
+        eventCategory: 'organization',
+        action: 'update',
+        resourceType: 'organization',
+        resourceId: orgId,
+        metadata: { fields: Object.keys(companyProfile).filter((key) => companyProfile[key]) },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, {
+        organization: {
+          id: updated.id, name: updated.name, slug: updated.slug, plan: updated.plan || 'free',
+          hosting_mode: updated.hostingMode || 'managed', company_profile: updated.companyProfile || {},
+        },
+      });
+    }
+    return jsonResponse(res, {
+      organization: {
+        id: membership.org.id, name: membership.org.name, slug: membership.org.slug,
+        plan: membership.org.plan || 'free', hosting_mode: membership.org.hostingMode || 'managed',
+        company_profile: membership.org.companyProfile || {},
+      },
+      can_edit: effectiveRoles(membership).some((role) => ['org_owner', 'org_admin'].includes(role)),
     });
   }
 
@@ -6964,6 +7035,24 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          // Mirror the durable company brief on the organization itself. The
+          // Profile page and API can then serve it without depending on an HQ
+          // room surviving, while the room keeps the richer task dashboard.
+          try {
+            await prisma.organization.update({
+              where: { id: orgId },
+              data: {
+                companyProfile: sanitizeCompanyProfile({
+                  name: companyName,
+                  website: siteUrl,
+                  industry: profile.industry || '',
+                  description: profile.what_it_does || '',
+                  audience: profile.icp || '',
+                  mission,
+                }, { fallbackName: companyName }),
+              },
+            });
+          } catch (e) { console.warn('[hyper-onboarding] org company profile persist failed:', e.message); }
           say('Completed · onboarding');
           job.result = resultPayload;
           job.done = true;

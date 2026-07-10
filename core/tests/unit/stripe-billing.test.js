@@ -24,7 +24,7 @@ describe('stripe billing urls and metadata', () => {
     const stripeMod = await loadStripeModule();
     const urls = stripeMod.resolveHostedBillingUrls();
 
-    assert.equal(urls.success, 'https://next.singulancelabs.com/hivemind/app/billing?checkout=success');
+    assert.equal(urls.success, 'https://next.singulancelabs.com/hivemind/app/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}');
     assert.equal(urls.cancel, 'https://next.singulancelabs.com/hivemind/app/billing?checkout=cancelled');
     assert.equal(urls.portal, 'https://next.singulancelabs.com/hivemind/app/billing');
   });
@@ -51,5 +51,14 @@ describe('stripe billing urls and metadata', () => {
     process.env.STRIPE_AUTOMATIC_TAX_ENABLED = 'true';
     const stripeModEnabled = await loadStripeModule();
     assert.equal(stripeModEnabled.isAutomaticTaxEnabled(), true);
+  });
+
+  it('extracts subscription ids from Checkout and invoice payloads', async () => {
+    const stripeMod = await loadStripeModule();
+    assert.equal(stripeMod.getSubscriptionIdFromStripeObject({ subscription: 'sub_checkout' }), 'sub_checkout');
+    assert.equal(stripeMod.getSubscriptionIdFromStripeObject({ parent: { subscription_details: { subscription: 'sub_invoice' } } }), 'sub_invoice');
+    assert.equal(stripeMod.isEntitledSubscriptionStatus('active'), true);
+    assert.equal(stripeMod.isEntitledSubscriptionStatus('trialing'), true);
+    assert.equal(stripeMod.isEntitledSubscriptionStatus('past_due'), false);
   });
 });

@@ -21385,6 +21385,14 @@ exit \$RC
           }
           break;
 
+        case '/api/billing/plan/refresh':
+          if (req.method === 'POST') {
+            if (!planStore || !orgId) return jsonResponse(res, { error: 'Billing not available' }, 503);
+            planStore.invalidate(orgId);
+            return jsonResponse(res, { ok: true });
+          }
+          break;
+
         case '/api/billing/usage/daily':
           if (req.method === 'GET') {
             if (!usageTracker) return jsonResponse(res, { error: 'Billing not available' }, 503);

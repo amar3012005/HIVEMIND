@@ -8285,9 +8285,14 @@ Write the persona now.`;
     // GET /v1/billing/plan
     if (pathname === '/v1/billing/plan' && req.method === 'GET') {
       const plan = plansMod.getPlan(org.plan || 'free');
+      const isEnterpriseWorkspace = plansMod.isEnterpriseWorkspace(org);
       const usage = await usageTracker.getUsage(orgId);
       const limitCheck = await usageTracker.checkLimits(orgId, plan.id);
+      const availablePlans = isEnterpriseWorkspace
+        ? []
+        : plansMod.getPersonalPlans();
       return jsonResponse(res, {
+        billing_model: isEnterpriseWorkspace ? 'enterprise_contract' : 'personal_subscription',
         plan: {
           id: plan.id,
           name: plan.name,
@@ -8305,11 +8310,16 @@ Write the persona now.`;
           current_period_end: org.currentPeriodEnd?.toISOString() || null,
           trial_ends_at: org.trialEndsAt?.toISOString() || null,
         },
+        enterprise_engagement: isEnterpriseWorkspace ? {
+          phase: plansMod.getEnterpriseBillingPhase(org),
+          hosting_mode: org.hostingMode || 'managed',
+          onboarding_ends_at: org.trialEndsAt?.toISOString() || null,
+        } : null,
         usage,
         warnings: limitCheck.warnings || [],
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
-        all_plans: plansMod.getAllPlans().map(p => ({
+        all_plans: availablePlans.map(p => ({
           id: p.id,
           name: p.name,
           price: p.price,
@@ -8329,8 +8339,13 @@ Write the persona now.`;
       }
       const body = await parseBody(req).catch(() => ({}));
       const targetPlanId = String(body.plan || '').trim();
+      if (plansMod.isEnterpriseWorkspace(org)) {
+        return jsonResponse(res, {
+          error: 'Enterprise workspaces use an onboarding or runway agreement and cannot use self-serve checkout',
+        }, 409);
+      }
       const priceId = plansMod.getStripePriceId(targetPlanId);
-      if (!priceId) {
+      if (!plansMod.isPersonalPlan(targetPlanId) || !priceId) {
         return jsonResponse(res, { error: `Plan "${targetPlanId}" is not available for self-serve checkout` }, 400);
       }
 
@@ -8347,6 +8362,8 @@ Write the persona now.`;
           priceId,
           orgId,
           userId,
+          planId: targetPlanId,
+          referralCode: String(body.referral_code || '').trim(),
         });
         audit({
           organizationId: orgId, userId,
@@ -8364,6 +8381,11 @@ Write the persona now.`;
     if (pathname === '/v1/billing/portal' && req.method === 'POST') {
       if (!billingMod.isEnabled()) {
         return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+      }
+      if (plansMod.isEnterpriseWorkspace(org)) {
+        return jsonResponse(res, {
+          error: 'Enterprise billing is managed through the onboarding or runway agreement',
+        }, 409);
       }
       if (!org.stripeCustomerId) {
         return jsonResponse(res, { error: 'No Stripe customer for this org yet — start a checkout first' }, 412);

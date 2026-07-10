@@ -144,12 +144,34 @@ export const PLANS = {
   },
 };
 
+// Consumer subscriptions are intentionally separate from enterprise commercial
+// agreements. Enterprise onboarding and runway are managed by the account team,
+// never by a self-serve Stripe price.
+export const PERSONAL_PLAN_IDS = Object.freeze(['free', 'pro', 'scale']);
+
+export function isPersonalPlan(planId) {
+  return PERSONAL_PLAN_IDS.includes(planId);
+}
+
+export function isEnterpriseWorkspace(org) {
+  return org?.plan === 'enterprise';
+}
+
+export function getEnterpriseBillingPhase(org, now = new Date()) {
+  const onboardingEndsAt = org?.trialEndsAt ? new Date(org.trialEndsAt) : null;
+  return onboardingEndsAt && onboardingEndsAt > now ? 'onboarding' : 'runway';
+}
+
 export function getPlan(planId) {
   return PLANS[planId] || PLANS.free;
 }
 
 export function getAllPlans() {
   return Object.values(PLANS);
+}
+
+export function getPersonalPlans() {
+  return PERSONAL_PLAN_IDS.map((planId) => PLANS[planId]);
 }
 
 /**

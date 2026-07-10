@@ -48,3 +48,19 @@
 ### Validation
 - Broker runs as `hivemind_broker`; unauthenticated HTTPS enrollment returns `401`.
 - A query for the `memories` table from inside the broker container is denied.
+
+## Phase 4 - Standalone Edge Service Exposure (2026-07-10)
+
+### Finding
+- Four legacy standalone containers are still published directly on all interfaces: frontend `8088`, TARA AAAS `8090`, TARA Deepgram `8091`, and waitlist relay `8095`.
+- Caddy is host-networked and is the intended public ingress for each service.
+
+### Attempt and Rollback
+- Rebinding the four Docker ports to `127.0.0.1` was attempted with preserved rollback containers.
+- The frontend became unavailable through Caddy (`502`). The replacement frontend mapping also targeted container port `8088`, while its embedded Caddy listens on `80`; host-networked Caddy traffic to Docker's loopback-published proxy reset rather than reaching the service.
+- All four containers were restored from their preserved rollback copies. Public verification after rollback: main frontend `200`, core health `200`, and unauthenticated BYOD enrollment `401`.
+
+### Required Design Before Retrying
+- Do not repeat the direct loopback port remap on this host topology.
+- Migrate the Caddy ingress and these services to a shared Docker network, then proxy by service name, or move each standalone service to host networking with an explicit loopback listener.
+- Keep the existing direct port exposure until that migration is tested atomically with a rollback plan. Do not rely on UFW alone because Docker-published ports bypass ordinary host firewall policy.

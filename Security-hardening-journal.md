@@ -38,3 +38,9 @@
 - Caddy now routes `https://api.singulancelabs.com/v1/byod/*` to the loopback broker.
 - The enrollment endpoint returns `401` without an API key; direct host port 8790 is no longer public.
 - Caddy required a container restart after the host Caddyfile was atomically replaced, because the bind mount retained the prior inode.
+
+## Phase 3 - Broker Least Privilege (2026-07-10)
+
+### Change
+- Broker database configuration is separated from the application database credential via `BROKER_DATABASE_URL`.
+- Planned role scope: connect to the shared database, use `hivemind` schema, and read only the API-key hash/revocation/org fields needed for self-host enrollment.

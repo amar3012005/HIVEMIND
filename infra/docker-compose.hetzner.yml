@@ -108,7 +108,7 @@ services:
     memswap_limit: 1536m
     cpus: 0.75
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
+      DATABASE_URL: ${BROKER_DATABASE_URL:?set BROKER_DATABASE_URL for the BYOD broker}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
       GROQ_API_KEY: ${GROQ_API_KEY}

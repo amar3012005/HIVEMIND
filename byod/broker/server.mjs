@@ -40,11 +40,30 @@ function saveReg(o) {
   renameSync(temp, REG);
 }
 
-// Validate an org API key → { orgId } or null. Matches sha256(key) against api_keys.key_hash.
+function isSecureAgentUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:') return true;
+    if (url.protocol !== 'http:') return false;
+    const host = url.hostname.toLowerCase();
+    return host === 'localhost' || host === '::1' || host.endsWith('.ts.net')
+      || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
+      || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host);
+  } catch { return false; }
+}
+
+// Validate only self-hosted org keys. Managed tenants must never be able to
+// redirect core traffic to an arbitrary external endpoint through this broker.
 async function resolveOrg(apiKey) {
   if (!apiKey) return null;
   const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
-  const { rows } = await pool.query('SELECT org_id FROM api_keys WHERE key_hash = $1 AND (revoked_at IS NULL) LIMIT 1', [hash]);
+  const { rows } = await pool.query(
+    `SELECT k.org_id FROM api_keys k
+       JOIN organizations o ON o.id = k.org_id
+      WHERE k.key_hash = $1 AND k.revoked_at IS NULL AND o.hosting_mode = 'self_host'
+      LIMIT 1`,
+    [hash],
+  );
   return rows[0]?.org_id || null;
 }
 
@@ -57,6 +76,7 @@ http.createServer(async (req, res) => {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });
       if (!body.agentUrl || !body.agentToken) return send(res, 400, { error: 'agentUrl + agentToken required' });
+      if (!isSecureAgentUrl(body.agentUrl)) return send(res, 400, { error: 'agentUrl must use HTTPS, or HTTP only over private/Tailscale/LAN networking' });
       const reg = loadReg();
       reg[orgId] = { url: body.agentUrl.replace(/\/$/, ''), token: body.agentToken };
       saveReg(reg);
@@ -76,6 +96,7 @@ http.createServer(async (req, res) => {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });
       if (!body.instanceUrl && !body.pgUrl) return send(res, 400, { error: 'instanceUrl or pgUrl required' });
+      if (body.instanceUrl && !isSecureAgentUrl(body.instanceUrl)) return send(res, 400, { error: 'instanceUrl must use HTTPS, or HTTP only over private/Tailscale/LAN networking' });
       const reg = loadReg();
       reg[orgId] = {
         url: (body.instanceUrl || '').replace(/\/$/, ''),

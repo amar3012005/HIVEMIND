@@ -26,3 +26,10 @@
 ### Next Phase
 - Map BYOD broker authentication/TLS and expose it only through a named Caddy route.
 - Enable a restrictive host firewall after confirming SSH access and the complete public ingress inventory.
+
+## Phase 2 - BYOD Broker Boundary (2026-07-10)
+
+### Change
+- Restricted broker enrollment keys to organizations with `hosting_mode = self_host`.
+- Rejected public cleartext agent and instance URLs; HTTPS is required unless the address is loopback, private LAN, or Tailscale.
+- Bound the broker host port to loopback. Public enrollment must be routed through Caddy over HTTPS.

@@ -216,7 +216,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "${BROKER_PORT:-8790}:8790"
+      - "127.0.0.1:${BROKER_PORT:-8790}:8790"
 
   # ── Voice agent (TARA) — buildable from this repo ──
   tara:

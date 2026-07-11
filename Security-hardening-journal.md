@@ -196,3 +196,8 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 ### Remaining Risk
 
 - PostgreSQL and Qdrant backups are still stored on the production host. Off-host object storage credentials/destination are not configured, so host-loss resilience remains incomplete.
+
+### Freshness Monitoring
+
+- Added one host check for PostgreSQL/Qdrant age and root-disk pressure: stale after 26 hours, disk warning at 80%, critical at 90%.
+- Security Center status now distinguishes verified local backup/restore controls from the still-open off-host requirement.

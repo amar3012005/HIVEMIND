@@ -185,3 +185,14 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Added a locked native full-snapshot job covering every Qdrant collection.
 - Verifies Qdrant's plaintext SHA-256 before encryption, encrypts with the shared PBKDF2 policy, verifies decryption against the server checksum, and retains seven copies.
 - Removes the temporary plaintext snapshot from both backup directory and Qdrant after completion; only encrypted archives remain.
+
+### Production Evidence
+
+- Native full snapshot covered 15 collections and produced a 25 MB encrypted archive.
+- Server checksum, encrypted-file checksum, and decrypt-to-server-checksum verification passed.
+- No plaintext or partial snapshots remained; freshness marker exists.
+- Scheduled daily at 04:15, after the 03:30 PostgreSQL backup.
+
+### Remaining Risk
+
+- PostgreSQL and Qdrant backups are still stored on the production host. Off-host object storage credentials/destination are not configured, so host-loss resilience remains incomplete.

@@ -1,5 +1,24 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Private canary embedding proof and deploy override
+
+### Evidence
+
+- A private loopback smoke using the canary data plane plus host-provided
+  provider variables resolved `litellm` primary with `openrouter` fallback.
+- It passed core health, Qdrant collection verification, bounded-ingest boot,
+  and emitted neither embedding authorization failures nor Qdrant version
+  warnings. The temporary container and environment file were removed.
+
+### Deployment Control
+
+- Added `infra/docker-compose.next.embedding.yml`, a secret-free Compose
+  override that maps existing host provider variables only into canary core and
+  maintenance services. It is designed to merge with the isolated vNext Compose
+  stack and does not change primary services or data volumes.
+- Promote B2B first with a rollback tag; retain B2C unchanged until B2B health,
+  authenticated ingest, recall, and logs are clean.
+
 ## 2026-07-11 - Canary embedding provider failover
 
 ### Finding

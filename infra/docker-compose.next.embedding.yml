@@ -1,0 +1,20 @@
+# Apply with docker-compose.next.yml using the existing production env file.
+# It supplies credentials already present on the host to the isolated vNext
+# memory services; no values belong in this file.
+services:
+  core-b2b: &embedding-env
+    environment:
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-litellm}
+      EMBEDDING_FALLBACK_PROVIDER: ${EMBEDDING_FALLBACK_PROVIDER:-openrouter}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:?set LITELLM_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+
+  core-b2c:
+    <<: *embedding-env
+
+  maintenance-b2b:
+    <<: *embedding-env
+
+  maintenance-b2c:
+    <<: *embedding-env

@@ -73,3 +73,18 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 
 - Do not describe BYOD as PQC protected until the Box transport is migrated to Tailscale/WireGuard or a public HTTPS edge with a verified hybrid-PQC-capable TLS stack.
 - Add an optional Box signing keypair and signature verification protocol for write/audit envelopes, with key rotation and backward-compatible staged rollout.
+
+## 2026-07-11 - Control-plane request containment
+
+### Scope
+
+- Added one shared JSON body reader with a 2 MiB default ceiling, configurable through `CONTROL_PLANE_MAX_BODY_BYTES`.
+- Malformed JSON now fails explicitly with `400`; oversized bodies fail with `413`.
+- Added a single top-level request error boundary so parser errors cannot become unhandled promise rejections or blank connections.
+- Stripe raw-body verification uses the same byte ceiling while preserving exact bytes for signature validation.
+
+### Evidence
+
+- `node --check core/src/control-plane-server.js` passed.
+- `node --test core/tests/unit/read-json-body.test.js` passed: valid JSON, malformed JSON, and oversized payload coverage.
+- `git diff --check` passed.

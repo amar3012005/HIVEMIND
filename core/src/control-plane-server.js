@@ -26,6 +26,7 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
+import { readBodyBuffer, readJsonBody } from './http/read-json-body.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -692,28 +693,13 @@ function parseCookies(req) {
 }
 
 async function parseBody(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
-  if (!chunks.length) {
-    return {};
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    return {};
-  }
+  return readJsonBody(req, Number(process.env.CONTROL_PLANE_MAX_BODY_BYTES || 2 * 1024 * 1024));
 }
 
 /** Same as parseBody but returns the raw Buffer + parsed JSON. Stripe webhook
  *  signature verification requires the exact raw bytes. */
 async function parseBodyWithRaw(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
-  const raw = chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+  const raw = await readBodyBuffer(req, Number(process.env.CONTROL_PLANE_MAX_BODY_BYTES || 2 * 1024 * 1024));
   let parsed = {};
   try { parsed = raw.length ? JSON.parse(raw.toString('utf8')) : {}; } catch { /* keep parsed={} */ }
   return { raw, parsed };
@@ -1574,7 +1560,7 @@ async function syncPersonalStripeSubscription({ org, subscription, plansMod }) {
   return updated;
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   applyCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
@@ -9223,6 +9209,15 @@ Write the persona now.`;
   }
 
   return jsonResponse(res, { error: 'Not found' }, 404);
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    if (res.headersSent) return res.destroy();
+    const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    if (status === 500) console.error('[control-plane] unhandled request error:', error?.message);
+    jsonResponse(res, { error: status === 500 ? 'Internal server error' : error.message }, status);
+  });
 });
 
 server.listen(CONFIG.port, '0.0.0.0', () => {

@@ -30,7 +30,7 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@noble/post-quantum": "^0.6.1",
     "@prisma/client": "^5.22.0",
-    "@qdrant/js-client-rest": "^1.11.0",
+    "@qdrant/js-client-rest": "1.13.0",
     "@tavily/core": "^0.7.2",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",

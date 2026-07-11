@@ -1,5 +1,25 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Qdrant client/server compatibility pin
+
+### Finding
+
+- Private core smoke exposed `@qdrant/js-client-rest` `1.17.0` talking to the
+  Compose-pinned Qdrant server `1.12.4`. The client reports that the minor gap
+  exceeds its supported compatibility window.
+
+### Change
+
+- Replaced loose `^1.11.0` dependency resolution with exact client `1.13.0`,
+  the newest published release within one minor of server `1.12`.
+- Did not upgrade the stateful Qdrant server or touch tenant vector volumes.
+
+### Evidence
+
+- Manifest, lockfile, and installed client all resolve to `1.13.0`.
+- Vector/recall tests passed; one external semantic-recall integration test is
+  intentionally skipped without its external prerequisite.
+
 ## 2026-07-11 - Isolated memory-admission release artifact
 
 ### Evidence

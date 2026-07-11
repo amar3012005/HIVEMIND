@@ -143,3 +143,16 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Applied the index first to canary, then production, with explicit `hivemind` schema selection because these databases are not Prisma-baselined.
 - On each database, two exact runtime-shaped upserts produced a single row with `tokens_processed=2` inside a transaction that was then rolled back.
 - Production catalog confirms `uq_api_key_usage_org_key_month_model` exists. No containers or customer rows were modified by the verification transaction.
+
+## 2026-07-11 - Audit-log immutability
+
+### Root Cause
+
+- Production protected PQC audit signatures and checkpoints, but `hivemind.audit_logs` itself had no update/delete guard.
+- Three `ON DELETE SET NULL` foreign keys could rewrite historical actor, organization, and resource identifiers.
+- Existing retention code only marked rows as archived; it did not perform the documented off-host upload, so those mutations were not valid archival evidence.
+
+### Change
+
+- Removed mutable audit foreign keys and added the existing owner-resistant append-only trigger to `audit_logs`.
+- Cold-storage archival remains a separate open phase and must export immutable rows rather than update them.

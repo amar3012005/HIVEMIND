@@ -1,5 +1,25 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Isolated memory-admission release artifact
+
+### Evidence
+
+- Built `hivemind/core-api:memory-admission-c9161abb` from clean detached
+  checkout commit `3882d23b`; the live dirty checkout was not used.
+- Parsed `src/server.js` inside the image successfully.
+- The build briefly left duplicate BuildKit clients after image export; only
+  those agent-started build processes were terminated after the image tag was
+  confirmed. No application container was changed.
+- Primary public core and control health remained `200`.
+
+### Promotion Rule
+
+- The artifact is ready for a controlled rollout, but must not replace public
+  B2B/B2C canary services while those domains receive traffic. Create a private
+  or explicitly scheduled rollout target first, retain the running image as a
+  rollback tag, then verify core health, bootstrap, and an authenticated ingest
+  smoke before primary promotion.
+
 ## 2026-07-11 - Host disk-pressure remediation
 
 ### Evidence

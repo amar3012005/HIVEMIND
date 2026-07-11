@@ -88,3 +88,9 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - `node --check core/src/control-plane-server.js` passed.
 - `node --test core/tests/unit/read-json-body.test.js` passed: valid JSON, malformed JSON, and oversized payload coverage.
 - `git diff --check` passed.
+
+### Canary Correction
+
+- The first canary probe found ten legacy route-local `.catch()` handlers swallowing parser errors, causing oversized requests to fall through as empty bodies and return route-level `400` responses.
+- Removed those local catches so the global request boundary is authoritative and `413` cannot be downgraded or hidden.
+- The initial canary image remains isolated from production until rebuilt and re-probed.

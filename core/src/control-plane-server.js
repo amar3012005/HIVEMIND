@@ -1602,7 +1602,7 @@ async function handleRequest(req, res) {
   // endpoints (Postgres + Qdrant). We record them in the shared registry file the core reads, so core
   // routes that org's memory data to the customer's box. Global user/org info stays in central PG.
   if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register') && req.method === 'POST') {
-    const body = await parseBody(req).catch(() => null);
+    const body = await parseBody(req);
     const apiKey = (body?.apiKey || '').toString();
     if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
     const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
@@ -1682,7 +1682,7 @@ async function handleRequest(req, res) {
   // POST { apiKey } (key in body, never the URL). Resolves org → reads the shared registry → reports
   // whether an agent is registered and (best-effort) reachable.
   if (pathname === '/v1/selfhost/status' && req.method === 'POST') {
-    const body = await parseBody(req).catch(() => null);
+    const body = await parseBody(req);
     const apiKey = (body?.apiKey || '').toString();
     // Resolve org by API key (onboarding poll) OR by session (Settings, no raw key on hand).
     let statusOrgId = null;
@@ -2016,7 +2016,7 @@ async function handleRequest(req, res) {
   // the real token, without ever having it in the FE's URL bar.
   // Single-use — once consumed the code is invalidated.
   if (pathname === '/auth/cli/exchange' && req.method === 'POST') {
-    const reqBody = await parseBody(req).catch(() => null);
+    const reqBody = await parseBody(req);
     const code = (reqBody?.code || '').toString();
     if (!code) {
       return jsonResponse(res, { error: 'code required' }, 400);
@@ -5879,7 +5879,7 @@ Write the persona now.`;
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const store = await _getEmployeeStore();
     const empId = empMetricsMatch[1];
-    const body = await parseBody(req).catch(() => ({}));
+    const body = await parseBody(req);
     const clamp = (v) => Math.max(0, Math.floor(Number(v) || 0));
     const tokens = clamp(body?.tokens);
     const messages = clamp(body?.messages);
@@ -5907,7 +5907,7 @@ Write the persona now.`;
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const store = await _getEmployeeStore();
     const empId = empEvalMatch[1];
-    const body = await parseBody(req).catch(() => ({}));
+    const body = await parseBody(req);
     const query = String(body?.query || '');
     const response = String(body?.response || '');
     if (!query || !response) return jsonResponse(res, { error: 'query and response required' }, 400);
@@ -6274,7 +6274,7 @@ Write the persona now.`;
     }
     let body = null;
     if (req.method !== 'GET' && req.method !== 'DELETE') {
-      body = await parseBody(req).catch(() => ({}));
+      body = await parseBody(req);
       if (injectOrg && body && typeof body === 'object') {
         body.org_id = current.session.orgId;
         body.requested_by = current.session.userId;
@@ -7722,7 +7722,7 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return true;
       const roomId = roomApproveMatch[1];
-      const body = await parseBody(req).catch(() => ({}));
+      const body = await parseBody(req);
       const approvalId = String(body.approval_id || '').trim();
       const decision = String(body.decision || '').trim().toLowerCase();
       if (!approvalId || !['approve', 'deny'].includes(decision)) {
@@ -7804,7 +7804,7 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return true;
       const roomId = roomSendEmailMatch[1];
-      const body = await parseBody(req).catch(() => ({}));
+      const body = await parseBody(req);
       const to = String(body.to || '').trim();
       const subject = String(body.subject || '').trim();
       const bodyMd = String(body.body_md || '').trim();
@@ -8189,7 +8189,7 @@ Write the persona now.`;
       const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
       const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
       if (apiKey !== masterKey) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-      const body = await parseBody(req).catch(() => null);
+      const body = await parseBody(req);
       if (!body?.turn_id || !body?.event) return jsonResponse(res, { error: 'turn_id and event are required' }, 400);
       try {
         const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
@@ -8452,7 +8452,7 @@ Write the persona now.`;
       if (!billingMod.isEnabled()) {
         return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
       }
-      const body = await parseBody(req).catch(() => ({}));
+      const body = await parseBody(req);
       const targetPlanId = String(body.plan || '').trim();
       if (plansMod.isEnterpriseWorkspace(org)) {
         return jsonResponse(res, {

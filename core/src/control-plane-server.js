@@ -7395,30 +7395,73 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const task = (company.tasks || []).find((x) => x.id === taskId);
         if (!task) return jsonResponse(res, { error: 'task not found' }, 404);
-        // Optimized kickoff query — the FE posts this as the room's first turn
-        // (idempotency-keyed) so the swarm starts working the task immediately.
-        const kickoff = [
+        // The browser only sees a concise task request. The full execution
+        // brief stays server-side and is passed directly to the sidecar.
+        const visibleKickoff = `Start task: ${task.title}.`;
+        const executionBrief = [
           `You are the ${company.company} team. Execute this task now.`,
           `TASK [${task.tag}]: ${task.title}`,
           task.detail ? `SCOPE: ${task.detail}` : '',
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
           'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
         ].filter(Boolean).join('\n');
+        const startTaskKickoff = async (taskRoom) => {
+          const idempotencyKey = `task-kickoff-${task.id}-${taskRoom.id}`.slice(0, 64);
+          const turn = await prisma.$transaction(async (tx) => {
+            const existingTurn = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+            if (existingTurn) return existingTurn;
+            const last = await tx.hyperTurn.findFirst({ where: { roomId: taskRoom.id }, orderBy: { seq: 'desc' }, select: { seq: true } });
+            return tx.hyperTurn.create({
+              data: {
+                roomId: taskRoom.id,
+                seq: (last?.seq ?? 0) + 1,
+                userMessage: visibleKickoff,
+                status: 'live',
+                idempotencyKey,
+                lines: [],
+              },
+            });
+          });
+          // Fire-and-forget: navigation must not wait on the sidecar, but the
+          // work is now independent of the client remaining on this page.
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
+          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+            method: 'POST',
+            headers: { 'X-API-Key': MASTER_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              room_id: taskRoom.id,
+              turn_id: turn.id,
+              user_id: current.session.userId,
+              org_id: current.session.orgId,
+              user_message: executionBrief,
+              participant_ids: taskRoom.participantIds || [],
+              project_id: taskRoom.projectId || null,
+              room_goal: taskRoom.goal || '',
+              callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+            }),
+          }).catch((error) => console.warn('[hyper-tasks] sidecar kick failed:', error.message));
+          return turn;
+        };
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
-            select: { id: true, name: true },
+            select: { id: true, name: true, participantIds: true, projectId: true, goal: true },
           }).catch(() => null);
           if (existing) {
             // A task room can exist with ZERO turns (created before the kickoff
             // feature, or the kick was lost) — it sat idle in chat forever. Ship
             // the kickoff again whenever the room has no turns; the FE's stable
             // idempotency key makes a double-post harmless.
-            const turnCount = await prisma.hyperTurn.count({ where: { roomId: existing.id } }).catch(() => 1);
-            return jsonResponse(res, {
-              room: existing, task,
-              ...(turnCount === 0 ? { kickoff_message: kickoff } : {}),
-            });
+            const latestTurn = await prisma.hyperTurn.findFirst({
+              where: { roomId: existing.id },
+              orderBy: { seq: 'desc' },
+              select: { lines: true, startedAt: true },
+            }).catch(() => null);
+            const hasOutput = (latestTurn?.lines || []).some((line) => ['line', 'seal', 'error'].includes(line?.t));
+            const isStaleEmptyTurn = latestTurn && !hasOutput
+              && new Date(latestTurn.startedAt).getTime() < Date.now() - 30_000;
+            const turn = !latestTurn || isStaleEmptyTurn ? await startTaskKickoff(existing) : null;
+            return jsonResponse(res, { room: existing, task, ...(turn ? { turn_id: turn.id } : {}) });
           }
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
@@ -7445,7 +7488,8 @@ Write the persona now.`;
             JSON.stringify({ _company: company }), row.id,
           );
         } catch { /* state best-effort */ }
-        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
+        const turn = await startTaskKickoff({ ...taskRoom, goal });
+        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, turn_id: turn.id }, 201);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

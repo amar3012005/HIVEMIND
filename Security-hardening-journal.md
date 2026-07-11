@@ -94,3 +94,9 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - The first canary probe found ten legacy route-local `.catch()` handlers swallowing parser errors, causing oversized requests to fall through as empty bodies and return route-level `400` responses.
 - Removed those local catches so the global request boundary is authoritative and `413` cannot be downgraded or hidden.
 - The initial canary image remains isolated from production until rebuilt and re-probed.
+
+### Canary and Production Evidence
+
+- Corrected image `hivemind/control-plane:security-565b6fda` passed on both isolated B2B/B2C control planes: health `200`, malformed JSON `400`, oversized JSON `413`.
+- The same immutable image was promoted to `hm-control`; public health and bootstrap returned `200`, malformed JSON returned `400`, and a 3 MiB request returned `413`.
+- Production rollback image: `hivemind/control-plane:rollback-request-limits-20260711-093837`.

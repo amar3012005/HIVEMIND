@@ -114,3 +114,14 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 
 - `node --check` passed for control-plane and remote backend modules.
 - `node --test core/tests/unit/agent-url-policy.test.js` passed for public HTTPS, Tailscale, loopback, metadata, and credential cases.
+
+### Canary and Production Evidence
+
+- Both isolated B2B/B2C core and control services were healthy on immutable images tagged `security-428929ba`.
+- The same images were promoted together; public core health, control health, and bootstrap returned `200`.
+- The registered self-host Box remained reachable through its Tailscale URL: authenticated `/v1/stats` returned `200` with numeric memory and relationship counts.
+- Rollback images: `hivemind/core-api:rollback-ssrf-20260711-094600` and `hivemind/control-plane:rollback-ssrf-20260711-094600`.
+
+### New Finding
+
+- Core logs show usage-tracker upserts failing with PostgreSQL `42P10` because the deployed table lacks the unique/exclusion constraint required by its `ON CONFLICT` target. This is a separate metering-integrity risk and must be fixed with an additive, production-baselined migration before claiming quota accounting complete.

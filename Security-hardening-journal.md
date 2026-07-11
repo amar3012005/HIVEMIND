@@ -224,3 +224,11 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Replaced the committed master-key value in tracked instructions, journals, setup docs, and frontend references with a non-secret placeholder.
 - Executable probes, SDK examples, phase-zero tests, and local Compose now require environment-provided credentials instead of silently using a fallback.
 - Current root and frontend tracked trees no longer match the leaked master-key pattern. Git history still contains it, so live rotation remains mandatory.
+
+### Production Rotation Evidence
+
+- Generated a new random `hm_live_` master key on the production host without printing or transferring it.
+- Atomically recreated core, control, employees, TARA AaaS, and TARA Deepgram with the new credential.
+- Core/control/TARA/Deepgram health returned `200`; the new key authenticated to the protected PQC endpoint and the revoked key returned `401`.
+- Removed stopped rollback containers and 18 host files containing the revoked key; no running container retains it.
+- Git history still contains the revoked value, but it no longer grants runtime access. Remaining rotation drills: Stripe webhook secret, BYOD agent token, and PQC signing keys.

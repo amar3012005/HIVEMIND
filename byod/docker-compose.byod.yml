@@ -23,6 +23,8 @@ services:
     volumes:
       - ./data/pg:/var/lib/postgresql/data        # content hydration store — on the customer disk
     expose: ["5432"]
+    mem_limit: 1g
+    pids_limit: 256
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind} -d ${POSTGRES_DB:-hivemind}"]
       interval: 10s
@@ -38,6 +40,8 @@ services:
     volumes:
       - ./data/qdrant:/qdrant/storage             # vector backup persisted on the customer disk
     expose: ["6333"]
+    mem_limit: 1g
+    pids_limit: 256
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333'"]
       interval: 10s
@@ -61,6 +65,17 @@ services:
       - ./data/mneme:/data/mneme                    # .amr persisted on the customer disk
     ports:
       - "${AGENT_BIND:-0.0.0.0}:${AGENT_PORT:-8787}:8787"
+    mem_limit: 512m
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on:
       postgres: { condition: service_healthy }
       qdrant: { condition: service_started }

@@ -29,6 +29,8 @@ function tokenOk(header) {
 }
 const PORT = Number(process.env.AGENT_PORT || 8787);
 const DIM = Number(process.env.MNEME_DIM || 1024);
+const MAX_BODY_BYTES = Number(process.env.AGENT_MAX_BODY_BYTES || 2 * 1024 * 1024);
+const RATE_LIMIT_PER_MINUTE = Number(process.env.AGENT_RATE_LIMIT_PER_MINUTE || 600);
 const SCHEMA_VERSION = 1; // bump when the agent's local schema changes
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
@@ -266,8 +268,24 @@ function payloadOf(rec) {
   };
 }
 
-const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
+const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(obj)); };
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0; const chunks = [];
+  req.on('data', (chunk) => { size += chunk.length; if (size <= MAX_BODY_BYTES) chunks.push(chunk); });
+  req.on('end', () => {
+    if (size > MAX_BODY_BYTES) return reject(Object.assign(new Error('payload too large'), { status: 413 }));
+    try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); }
+    catch { reject(Object.assign(new Error('invalid json'), { status: 400 })); }
+  });
+  req.on('error', reject);
+});
+const rateWindows = new Map();
+function rateAllowed(req) {
+  const key = req.socket.remoteAddress || 'unknown'; const now = Date.now();
+  const window = rateWindows.get(key);
+  if (!window || now - window.startedAt >= 60_000) { rateWindows.set(key, { startedAt: now, count: 1 }); return true; }
+  window.count += 1; return window.count <= RATE_LIMIT_PER_MINUTE;
+}
 
 const routes = {
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
@@ -1024,6 +1042,7 @@ http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
+  if (!rateAllowed(req)) return send(res, 429, { error: 'rate_limited' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
   // is calling the agent → reject (CSRF/SSRF guard). If ALLOWED_ENGINE_ORIGIN is set, it must match.
   const origin = req.headers.origin || req.headers.referer;
@@ -1037,5 +1056,9 @@ http.createServer(async (req, res) => {
   // agent also hard-scopes every query to ORG server-side regardless).
   if (req.headers['x-org-id'] && req.headers['x-org-id'] !== ORG) return send(res, 403, { error: 'org mismatch' });
   try { send(res, 200, await routes[req.url](await readBody(req))); }
-  catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, 500, { error: e.message }); }
+  catch (e) {
+    const status = Number.isInteger(e.status) ? e.status : 500;
+    console.error(`[hm-agent] ${req.url} failed:`, e.message);
+    send(res, status, { error: status === 500 ? 'internal_error' : e.message });
+  }
 }).listen(PORT, () => console.log(`[hm-agent] listening :${PORT} (org ${ORG})`));

@@ -7,19 +7,23 @@
 // Env: DATABASE_URL, MNEME_AGENT_REGISTRY_FILE, BROKER_PORT (default 8790).
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, chmodSync } from 'node:fs';
 import Pg from 'pg';
 
 const PORT = Number(process.env.BROKER_PORT || 8790);
 const REG = process.env.MNEME_AGENT_REGISTRY_FILE || die('MNEME_AGENT_REGISTRY_FILE required');
 const pool = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'), max: 4 });
+const MAX_BODY_BYTES = Number(process.env.BROKER_MAX_BODY_BYTES || 64 * 1024);
+const RATE_LIMIT_PER_MINUTE = Number(process.env.BROKER_RATE_LIMIT_PER_MINUTE || 30);
 
 function die(m) { console.error(`[hm-broker] ${m}`); process.exit(1); }
-const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const readBody = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
+const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(obj)); };
+const readBody = (req) => new Promise((resolve, reject) => { let size = 0; const chunks = []; req.on('data', (chunk) => { size += chunk.length; if (size <= MAX_BODY_BYTES) chunks.push(chunk); }); req.on('end', () => { if (size > MAX_BODY_BYTES) return reject(Object.assign(new Error('payload too large'), { status: 413 })); try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(Object.assign(new Error('invalid json'), { status: 400 })); } }); req.on('error', reject); });
+const rateWindows = new Map();
+function rateAllowed(req) { const key = req.socket.remoteAddress || 'unknown'; const now = Date.now(); const window = rateWindows.get(key); if (!window || now - window.startedAt >= 60_000) { rateWindows.set(key, { startedAt: now, count: 1 }); return true; } window.count += 1; return window.count <= RATE_LIMIT_PER_MINUTE; }
 
 function loadReg() { try { return existsSync(REG) ? JSON.parse(readFileSync(REG, 'utf8')) : {}; } catch { return {}; } }
-function saveReg(o) { writeFileSync(REG, JSON.stringify(o), 'utf8'); }
+function saveReg(o) { const tmp = `${REG}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(o), { encoding: 'utf8', mode: 0o600 }); renameSync(tmp, REG); chmodSync(REG, 0o600); }
 
 // Validate an org API key → { orgId } or null. Matches sha256(key) against api_keys.key_hash.
 async function resolveOrg(apiKey) {
@@ -32,8 +36,9 @@ async function resolveOrg(apiKey) {
 http.createServer(async (req, res) => {
   if (req.url === '/health') return send(res, 200, { ok: true });
   if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
-  const body = await readBody(req);
   try {
+    if (!rateAllowed(req)) return send(res, 429, { error: 'rate_limited' });
+    const body = await readBody(req);
     if (req.url === '/v1/byod/enroll') {
       const orgId = await resolveOrg(body.apiKey);
       if (!orgId) return send(res, 401, { error: 'invalid api key' });
@@ -78,6 +83,6 @@ http.createServer(async (req, res) => {
     return send(res, 404, { error: 'not found' });
   } catch (e) {
     console.error('[hm-broker]', e.message);
-    return send(res, 500, { error: e.message });
+    return send(res, Number.isInteger(e.status) ? e.status : 500, { error: Number.isInteger(e.status) ? e.message : 'internal_error' });
   }
 }).listen(PORT, () => console.log(`[hm-broker] listening :${PORT} → registry ${REG}`));

@@ -24,3 +24,25 @@
 ### Next Phase
 
 Merge or rebase onto `codex/production-hardening-runtime`, then verify referral onboarding, entitlement phase transitions, per-feature usage gates, and tenant-scoped project access end to end.
+
+## 2026-07-11 - BYOD transport and customer-box containment
+
+### Scope
+
+- Bounded BYOD agent request bodies to 2 MiB by default and broker enrollment bodies to 64 KiB.
+- Added per-source fixed-window rate limits to the agent and broker, returning `429` rather than allowing unbounded request work.
+- Added no-store and content-type-sniffing protections to JSON responses.
+- Changed broker registry writes to atomic replace with mode `0600`, reducing token exposure from partial writes and permissive files.
+- Added customer-box Compose memory/PID ceilings, no-new-privileges, capability drop, and an agent health check.
+
+### Evidence
+
+- `node --check byod/agent/server.mjs` passed.
+- `node --check byod/broker/server.mjs` passed.
+- `docker compose -f byod/docker-compose.byod.yml config` passed with the new resource and health controls rendered.
+
+### Remaining Work
+
+- Enforce SSRF-safe agent URL policy consistently in the standalone broker, control plane, and core remote client without breaking Tailscale/private transport.
+- Add authenticated audit events for enrollment, registration, rotation, and disenrollment without logging credentials.
+- Add versioned PostgreSQL/Qdrant snapshot jobs, off-host delivery, restore verification, and alerting after measuring the live host and confirming the active Compose stack.

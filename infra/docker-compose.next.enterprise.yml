@@ -1,0 +1,11 @@
+# Server-only enterprise onboarding configuration for the isolated vNext stack.
+# An empty allow-list intentionally makes enterprise creation return 403.
+x-enterprise-env: &enterprise-env
+  ENTERPRISE_SELF_SERVICE_CODES: ${ENTERPRISE_SELF_SERVICE_CODES:-}
+  ENTERPRISE_ONBOARDING_DAYS: ${ENTERPRISE_ONBOARDING_DAYS:-14}
+
+services:
+  control-b2b:
+    environment: *enterprise-env
+  control-b2c:
+    environment: *enterprise-env

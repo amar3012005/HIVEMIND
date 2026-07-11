@@ -378,3 +378,21 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Core/control/TARA/Deepgram health returned `200`; the new key authenticated to the protected PQC endpoint and the revoked key returned `401`.
 - Removed stopped rollback containers and 18 host files containing the revoked key; no running container retains it.
 - Git history still contains the revoked value, but it no longer grants runtime access. Remaining rotation drills: Stripe webhook secret, BYOD agent token, and PQC signing keys.
+
+## 2026-07-11 - Enterprise self-service admission
+
+### Root Cause
+
+- The public onboarding flow could submit `plan=enterprise`, while the control plane accepted that value from any authenticated caller.
+- The UI promised a 14-day enterprise onboarding phase, but newly created enterprise organizations had no `trialEndsAt`, so billing classified them as runway immediately.
+
+### Change
+
+- Enterprise organization creation now requires a code from the server-only `ENTERPRISE_SELF_SERVICE_CODES` allow-list and compares it with `crypto.timingSafeEqual`.
+- A valid code is retained through OAuth and a manual retry without putting it in source, database records, or logs.
+- New enterprise organizations receive a bounded 14-day onboarding window by default (`ENTERPRISE_ONBOARDING_DAYS`, valid range 1-90) and the API returns its end timestamp.
+
+### Release Requirement
+
+- Set one long random, single-client code in production before releasing the control plane; send it only in that customer's HTTPS onboarding URL and rotate/remove it after onboarding.
+- Do not expose the generic Enterprise selector as an entitlement path: it must return `403` without that code.

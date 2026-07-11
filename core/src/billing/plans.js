@@ -162,6 +162,12 @@ export function getEnterpriseBillingPhase(org, now = new Date()) {
   return onboardingEndsAt && onboardingEndsAt > now ? 'onboarding' : 'runway';
 }
 
+export function getEnterpriseOnboardingEndsAt(now = new Date(), configuredDays = process.env.ENTERPRISE_ONBOARDING_DAYS) {
+  const days = Number(configuredDays || 14);
+  const safeDays = Number.isInteger(days) && days >= 1 && days <= 90 ? days : 14;
+  return new Date(now.getTime() + safeDays * 24 * 60 * 60 * 1000);
+}
+
 export function getPlan(planId) {
   return PLANS[planId] || PLANS.free;
 }

@@ -5,6 +5,7 @@ import {
   getAllPlans,
   getPersonalPlans,
   getEnterpriseBillingPhase,
+  getEnterpriseOnboardingEndsAt,
   isEnterpriseWorkspace,
   isFeatureEnabled,
   getLimit,
@@ -25,6 +26,13 @@ describe('Plans', () => {
     assert.equal(isEnterpriseWorkspace({ plan: 'enterprise' }), true);
     assert.equal(getEnterpriseBillingPhase({ plan: 'enterprise', trialEndsAt: future }), 'onboarding');
     assert.equal(getEnterpriseBillingPhase({ plan: 'enterprise', trialEndsAt: new Date(0) }), 'runway');
+  });
+
+  it('creates a bounded default enterprise onboarding window', () => {
+    const now = new Date('2026-07-11T00:00:00.000Z');
+    assert.equal(getEnterpriseOnboardingEndsAt(now, 14).toISOString(), '2026-07-25T00:00:00.000Z');
+    assert.equal(getEnterpriseOnboardingEndsAt(now, 0).toISOString(), '2026-07-25T00:00:00.000Z');
+    assert.equal(getEnterpriseOnboardingEndsAt(now, 91).toISOString(), '2026-07-25T00:00:00.000Z');
   });
 
   it('free plan has correct limits', () => {

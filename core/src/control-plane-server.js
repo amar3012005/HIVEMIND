@@ -14,7 +14,8 @@ import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } fro
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
-import { PLANS } from './billing/plans.js';
+import { PLANS, getEnterpriseOnboardingEndsAt } from './billing/plans.js';
+import { isEnterpriseAccessCodeAllowed } from './billing/enterprise-access.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -2397,6 +2398,9 @@ async function handleRequest(req, res) {
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
+    if (requestedPlan === 'enterprise' && !isEnterpriseAccessCodeAllowed(body.enterprise_access_code)) {
+      return jsonResponse(res, { error: 'A valid enterprise onboarding link is required.' }, 403);
+    }
 
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
@@ -2404,6 +2408,9 @@ async function handleRequest(req, res) {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
+    const enterpriseOnboardingEndsAt = requestedPlan === 'enterprise'
+      ? getEnterpriseOnboardingEndsAt()
+      : null;
     const companyProfile = sanitizeCompanyProfile(body.company_profile, { fallbackName: body.name });
     const org = await prisma.organization.create({
       data: {
@@ -2413,6 +2420,8 @@ async function handleRequest(req, res) {
         plan: requestedPlan,
         hostingMode,
         companyProfile,
+        trialEndsAt: enterpriseOnboardingEndsAt,
+        subscriptionStatus: enterpriseOnboardingEndsAt ? 'trialing' : null,
       }
     });
 
@@ -2488,7 +2497,8 @@ async function handleRequest(req, res) {
         name: org.name,
         slug: org.slug,
         plan: org.plan || requestedPlan,
-        hosting_mode: org.hostingMode || hostingMode
+        hosting_mode: org.hostingMode || hostingMode,
+        onboarding_ends_at: org.trialEndsAt?.toISOString() || null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)

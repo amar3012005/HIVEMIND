@@ -115,6 +115,14 @@ const CONFIG = {
   allowedOrigins: defaultAllowedOrigins
 };
 
+const MASTER_API_KEY = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || '';
+if (process.env.NODE_ENV === 'production') {
+  if (!MASTER_API_KEY) throw new Error('HIVEMIND_MASTER_API_KEY is required in production');
+  if (!CONFIG.sessionSecret || CONFIG.sessionSecret === 'change-me') {
+    throw new Error('SESSION_SECRET is required in production');
+  }
+}
+
 const prisma = getPrismaClient();
 
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
@@ -166,7 +174,7 @@ if (prisma) {
         fetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': MASTER_API_KEY,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -282,7 +290,7 @@ if (prisma && HYPER_CYCLE_ENABLED) {
         const roomRow = await prisma.hyperRoom.findUnique({ where: { id: roomId }, select: { participantIds: true, goal: true, projectId: true } });
         fetch(`${process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060'}/internal/hyper/room-turn`, {
           method: 'POST',
-          headers: { 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811', 'Content-Type': 'application/json' },
+          headers: { 'X-API-Key': MASTER_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
             user_message: kickoff, participant_ids: roomRow?.participantIds || [],
@@ -349,7 +357,7 @@ const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-ch
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
 async function callCoreChatAsUser({ userId, orgId, message, history = [] }) {
-  const apiKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+  const apiKey = MASTER_API_KEY;
   const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/chat`, {
     method: 'POST',
     headers: {
@@ -1440,7 +1448,7 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     if (query) coreUrl.search = query;
 
     const headers = {
-      'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+      'X-API-Key': MASTER_API_KEY,
       'X-HM-User-Id': session.userId || '',
       'X-HM-Org-Id': session.orgId || '',
     };
@@ -1526,7 +1534,7 @@ async function invalidateCorePlanCache(orgId) {
   const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/billing/plan/refresh`, {
     method: 'POST',
     headers: {
-      'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+      'X-API-Key': MASTER_API_KEY,
       'X-HM-Org-Id': orgId,
     },
     signal: AbortSignal.timeout(10_000),
@@ -5501,7 +5509,7 @@ async function handleRequest(req, res) {
       try {
         const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': MASTER_API_KEY },
           body: JSON.stringify({ query_context: 'company business, industry, products, market, brand, strategy', org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
         });
         if (rr.ok) {
@@ -5562,7 +5570,7 @@ Write the persona now.`;
     try {
       const rr = await fetch(`${CONFIG.coreApiBaseUrl}/api/recall`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': MASTER_API_KEY },
         body: JSON.stringify({ query_context: `company business, industry, ${field} needs, products, market`, org_id: current.session.orgId, user_id: current.session.userId, max_memories: 6 }),
       });
       if (rr.ok) {
@@ -6620,7 +6628,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': MASTER_API_KEY,
               'x-hm-user-id': userId,
               'x-hm-org-id': orgId,
             },
@@ -6642,7 +6650,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': MASTER_API_KEY,
               'x-hm-user-id': userId,
               'x-hm-org-id': orgId,
             },
@@ -6663,7 +6671,7 @@ Write the persona now.`;
       // pipeline continues (onboarding must never wedge on one search).
       const coreHeaders = {
         'Content-Type': 'application/json',
-        'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+        'X-API-Key': MASTER_API_KEY,
         'x-hm-user-id': userId,
         'x-hm-org-id': orgId,
       };
@@ -7095,7 +7103,7 @@ Write the persona now.`;
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': MASTER_API_KEY,
               'x-hm-user-id': current.session.userId,
               'x-hm-org-id': current.session.orgId,
             },
@@ -7397,7 +7405,7 @@ Write the persona now.`;
         fetch(`${process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060'}/internal/hyper/prewarm`, {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': MASTER_API_KEY,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -7607,7 +7615,7 @@ Write the persona now.`;
         const resp = await fetch(url.toString(), {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': MASTER_API_KEY,
             'X-HM-User-Id': current.session.userId,
             'X-HM-Org-Id': current.session.orgId,
             'Content-Type': 'application/json',
@@ -7684,7 +7692,7 @@ Write the persona now.`;
         fetch(`${sidecarBase}/internal/hyper/room-turn`, {
           method: 'POST',
           headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-API-Key': MASTER_API_KEY,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -7721,7 +7729,7 @@ Write the persona now.`;
       if (!approvalId || !['approve', 'deny'].includes(decision)) {
         return jsonResponse(res, { error: 'approval_id and decision (approve|deny) required' }, 400);
       }
-      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      const MASTER = MASTER_API_KEY;
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7816,7 +7824,7 @@ Write the persona now.`;
           mime: String(a.mime).slice(0, 60),
           data_b64: String(a.data_b64).slice(0, 2_000_000),
         }));
-      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      const MASTER = MASTER_API_KEY;
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7921,7 +7929,7 @@ Write the persona now.`;
           fetch(`${sidecarBase}/internal/hyper/room-turn`, {
             method: 'POST',
             headers: {
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': MASTER_API_KEY,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
@@ -8044,7 +8052,7 @@ Write the persona now.`;
           fetch(`${sidecarBase}/internal/hyper/room-turn`, {
             method: 'POST',
             headers: {
-              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'X-API-Key': MASTER_API_KEY,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
@@ -8180,7 +8188,7 @@ Write the persona now.`;
     // the row and let any open SSE subscriber pick it up on next poll.
     if (pathname === '/internal/hyper/turn-event' && req.method === 'POST') {
       const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
-      const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      const masterKey = MASTER_API_KEY;
       if (apiKey !== masterKey) return jsonResponse(res, { error: 'Unauthorized' }, 401);
       const body = await parseBody(req);
       if (!body?.turn_id || !body?.event) return jsonResponse(res, { error: 'turn_id and event are required' }, 400);

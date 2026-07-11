@@ -201,3 +201,20 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 
 - Added one host check for PostgreSQL/Qdrant age and root-disk pressure: stale after 26 hours, disk warning at 80%, critical at 90%.
 - Security Center status now distinguishes verified local backup/restore controls from the still-open off-host requirement.
+
+## 2026-07-11 - Production secret fail-closed startup
+
+### Root Cause
+
+- Control-plane source contained repeated fallback use of a committed master API key.
+- Session signing could start in production with the literal fallback `change-me`.
+
+### Change and Evidence
+
+- Centralized internal master-key use on one runtime-only value and removed every source fallback in the control plane.
+- Production now refuses startup when the master API key is absent or the session secret is absent/default.
+- Focused process tests proved each missing-secret condition exits with the expected failure; syntax and diff checks passed.
+
+### Rotation Requirement
+
+- Credential-shaped values remain in tracked docs/examples and Git history. Removing current-tree copies is not rotation; the live master key must be replaced after all consumers are inventoried and updated atomically.

@@ -136,3 +136,10 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 ### Change
 
 - Added an idempotent, additive four-column unique index matching the runtime `ON CONFLICT` target exactly.
+
+### Canary and Production Evidence
+
+- Canary and production duplicate audits found zero conflicting four-column keys.
+- Applied the index first to canary, then production, with explicit `hivemind` schema selection because these databases are not Prisma-baselined.
+- On each database, two exact runtime-shaped upserts produced a single row with `tokens_processed=2` inside a transaction that was then rolled back.
+- Production catalog confirms `uq_api_key_usage_org_key_month_model` exists. No containers or customer rows were modified by the verification transaction.

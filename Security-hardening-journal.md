@@ -1,5 +1,25 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Host disk-pressure remediation
+
+### Evidence
+
+- Primary core, control, and production frontend endpoints returned `200` before
+  and after the operation.
+- The host had 29 active containers. B2B/B2C canary frontends had real recent
+  requests, and their maintenance workers are active against canary data stores;
+  no runtime containers or volumes were stopped or removed.
+- The specific removable pressure was BuildKit cache: approximately 108.8 GB.
+  Targeted cleanup removed only cache entries older than 24 hours; Docker images,
+  rollback tags, containers, and data volumes were retained.
+- Root disk use fell from 85% (46 GB free) to 80% (60 GB free).
+
+### Follow-Through
+
+- Keep image rollback tags until the documented service-retirement gate is met.
+- Retire canary routes/services only after an explicit traffic cutover and a
+  data/rollback review. Do not use generic Docker system prune on this host.
+
 ## 2026-07-11 - Memory ingestion admission and raw-ingest isolation
 
 ### Scope

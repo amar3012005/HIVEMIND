@@ -125,3 +125,14 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 ### New Finding
 
 - Core logs show usage-tracker upserts failing with PostgreSQL `42P10` because the deployed table lacks the unique/exclusion constraint required by its `ON CONFLICT` target. This is a separate metering-integrity risk and must be fixed with an additive, production-baselined migration before claiming quota accounting complete.
+
+## 2026-07-11 - API-key metering upsert integrity
+
+### Root Cause
+
+- Production and canary had only `uq_api_key_usage_org_key_month_model_feature`; runtime aggregates on `org_id, api_key_id, month, model` and PostgreSQL could not infer that five-column index.
+- Both databases had zero duplicate four-column keys, so the missing unique index can be added without destructive deduplication.
+
+### Change
+
+- Added an idempotent, additive four-column unique index matching the runtime `ON CONFLICT` target exactly.

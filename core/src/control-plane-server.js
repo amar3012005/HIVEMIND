@@ -2404,26 +2404,34 @@ async function handleRequest(req, res) {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
-    if (requestedPlan === 'enterprise') {
-      const allowed = await claimEnterpriseOnboardingCode(prisma, body.enterprise_access_code, current.session.userId, hostingMode);
-      if (!allowed) return jsonResponse(res, { error: 'A valid enterprise onboarding link is required.' }, 403);
-    }
     const enterpriseOnboardingEndsAt = requestedPlan === 'enterprise'
       ? getEnterpriseOnboardingEndsAt()
       : null;
     const companyProfile = sanitizeCompanyProfile(body.company_profile, { fallbackName: body.name });
-    const org = await prisma.organization.create({
-      data: {
-        zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
-        name: body.name,
-        slug,
-        plan: requestedPlan,
-        hostingMode,
-        companyProfile,
-        trialEndsAt: enterpriseOnboardingEndsAt,
-        subscriptionStatus: enterpriseOnboardingEndsAt ? 'trialing' : null,
+    const organizationData = {
+      zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
+      name: body.name, slug, plan: requestedPlan, hostingMode, companyProfile,
+      trialEndsAt: enterpriseOnboardingEndsAt,
+      subscriptionStatus: enterpriseOnboardingEndsAt ? 'trialing' : null,
+    };
+    let org;
+    try {
+      org = await prisma.$transaction(async (tx) => {
+        if (requestedPlan === 'enterprise' && !await claimEnterpriseOnboardingCode(tx, body.enterprise_access_code, current.session.userId, hostingMode)) {
+          throw new Error('enterprise_onboarding_code_invalid');
+        }
+        const created = await tx.organization.create({ data: organizationData });
+        await tx.userOrganization.create({ data: {
+          userId: current.session.userId, orgId: created.id, role: 'owner', joinedAt: new Date(),
+        }});
+        return created;
+      });
+    } catch (err) {
+      if (err?.message === 'enterprise_onboarding_code_invalid') {
+        return jsonResponse(res, { error: 'A valid enterprise onboarding link is required.' }, 403);
       }
-    });
+      throw err;
+    }
 
     // .amr-by-default for NEW personal orgs (flag: MNEME_PERSONAL_DEFAULT=1, default off):
     // register the org in the agent registry with url 'local:' — every memory-domain seam then
@@ -2474,15 +2482,6 @@ async function handleRequest(req, res) {
           console.error('[org-create] managed agent provisioning failed', { orgId: org.id, error: err?.message })
         );
     }
-
-    await prisma.userOrganization.create({
-      data: {
-        userId: current.session.userId,
-        orgId: org.id,
-        role: 'owner',
-        joinedAt: new Date()
-      }
-    });
 
     await sessionStore.destroySession(current.sessionId);
     const sessionId = await sessionStore.createSession({

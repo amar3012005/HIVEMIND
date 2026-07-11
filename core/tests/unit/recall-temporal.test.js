@@ -33,14 +33,16 @@ test('temporal comparison recall widens candidate pools and lowers vector thresh
       user_id: '00000000-0000-4000-8000-000000000121',
       org_id: '00000000-0000-4000-8000-000000000122',
       project: 'bench/test-project',
-      max_memories: 5
+      max_memories: 5,
+      entity_filter_mode: 'off',
+      query_expansion: false
     });
 
     assert.equal(lexicalCalls.length, 1);
-    assert.equal(lexicalCalls[0].n_results, 40);
+    assert.equal(lexicalCalls[0].n_results, 150);
     assert.equal(vectorCalls.length, 1);
-    assert.equal(vectorCalls[0].limit, 40);
-    assert.equal(vectorCalls[0].score_threshold, 0.18);
+    assert.equal(vectorCalls[0].limit, 150);
+    assert.equal(vectorCalls[0].score_threshold, 0.15);
   } finally {
     client.isConnected = originalIsConnected;
     client.hybridSearch = originalHybridSearch;

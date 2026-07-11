@@ -1065,7 +1065,11 @@ export class MemoryGraphEngine {
           }
         }
 
-        const shouldSkipRelationshipClassification = input.skip_relationship_classification === true && !input.relationship;
+        // Raw/bulk ingest must not invoke relationship inference. Callers can still
+        // provide an explicit relationship when they have one.
+        const shouldSkipRelationshipClassification = !input.relationship && (
+          input.skipProcessing === true || input.skip_relationship_classification === true
+        );
         const classification = shouldSkipRelationshipClassification
           ? { operation: 'created', relationship: null }
           : input.relationship

@@ -1,5 +1,32 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Memory ingestion admission and raw-ingest isolation
+
+### Scope
+
+- Bounded asynchronous core ingestion admission: six active jobs by default and
+  48 queued jobs by default. Saturation now rejects new work with retryable
+  `503` and `Retry-After` instead of accumulating an unbounded in-process queue.
+- Preserved FIFO queueing and the existing safety release for hung jobs.
+- Corrected `skipProcessing` so raw/bulk ingest skips relationship inference as
+  well as fact extraction, while explicit caller-provided relationships still
+  work.
+- Updated temporal recall coverage to pin the current intentional wide-pool
+  behavior and disable unrelated optional entity/query expansion in that unit.
+
+### Evidence
+
+- `node --check core/src/server.js` passed.
+- Focused admission, ingestion, recall, tenant URL, and relationship semantics
+  tests passed.
+
+### Operational Finding
+
+- Production primary core/control/frontend endpoints are healthy. B2B/B2C
+  canary routes remain publicly configured in Caddy, so their containers are
+  not safe to prune until route retirement, rollback, and data-volume checks
+  are completed.
+
 ## 2026-07-10 - Privileged AI authorization
 
 ### Scope

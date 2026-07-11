@@ -60,3 +60,16 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 
 - Add a production-safe backup runner with explicit destination/secret configuration, health/freshness checks, and a restore verification procedure.
 - Before changing Compose limits or removing canaries, capture `docker inspect` limits, active Caddy routes, image rollback tags, and data-volume ownership.
+
+## 2026-07-11 - BYOD PQC verification
+
+### Result
+
+- Central `hm-core` has both ML-DSA memory and SLH-DSA audit keypairs configured; central PQC integrity is active.
+- The central Caddy runtime is v2.11.4, but the BYOD bundle does not include a Caddy/TLS terminator or PQC signer.
+- One externally registered self-host Box uses `http` transport. It is bearer-authenticated, but it does not inherit hybrid PQC TLS and its local records are not independently ML-DSA signed.
+
+### Required Remediation
+
+- Do not describe BYOD as PQC protected until the Box transport is migrated to Tailscale/WireGuard or a public HTTPS edge with a verified hybrid-PQC-capable TLS stack.
+- Add an optional Box signing keypair and signature verification protocol for write/audit envelopes, with key rotation and backward-compatible staged rollout.

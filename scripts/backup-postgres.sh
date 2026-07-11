@@ -25,6 +25,7 @@ BACKUP_RETENTION_MONTHS="${BACKUP_RETENTION_MONTHS:-12}"
 # Encryption configuration (AES-256-CBC)
 ENCRYPTION_ENABLED="${ENCRYPTION_ENABLED:-true}"
 ENCRYPTION_KEY="${BACKUP_ENCRYPTION_KEY:-}"
+PBKDF2_ITERATIONS="${BACKUP_PBKDF2_ITERATIONS:-200000}"
 
 # S3 configuration (Scaleway compatible)
 S3_ENABLED="${S3_ENABLED:-false}"
@@ -143,7 +144,7 @@ perform_backup() {
         openssl enc -aes-256-cbc \
             -salt \
             -pbkdf2 \
-            -iter 100000 \
+            -iter "${PBKDF2_ITERATIONS}" \
             -in "${temp_file}" \
             -out "${final_file}" \
             -pass pass:"${ENCRYPTION_KEY}"
@@ -293,7 +294,7 @@ verify_backup() {
         log_info "Testing decryption..."
         if openssl enc -aes-256-cbc -d \
             -pbkdf2 \
-            -iter 100000 \
+            -iter "${PBKDF2_ITERATIONS}" \
             -in "${backup_file}" \
             -pass pass:"${ENCRYPTION_KEY}" \
             | gzip -t 2>/dev/null; then

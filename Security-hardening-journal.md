@@ -163,3 +163,17 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - In each database, a rollback-only transaction inserted a synthetic audit row and proved both UPDATE and DELETE raise the append-only guard.
 - Production catalog exposes `audit_logs_append_only` for both UPDATE and DELETE.
 - Verification left no synthetic audit rows and required no service restart.
+
+## 2026-07-11 - PostgreSQL backup restore drill
+
+### Evidence
+
+- Production cron creates encrypted PostgreSQL backups daily at 03:30 and retains seven local copies.
+- Latest backup decrypted and passed gzip integrity with the production PBKDF2 setting of 200,000 iterations.
+- Restored into a disposable database and verified 102 `hivemind` tables, 9 users, 7 organizations, and 341 memories; the verification database was dropped automatically.
+
+### Fix and Remaining Risk
+
+- Repository backup/restore scripts previously hard-coded 100,000 iterations while production used 200,000; both now share configurable `BACKUP_PBKDF2_ITERATIONS` defaulting to 200,000.
+- Restore no longer incorrectly requires `pg_restore` for a plain-SQL dump consumed by `psql`.
+- Backups remain local-only and Qdrant snapshot scheduling/freshness alerting remains open; host loss would still remove local backups.

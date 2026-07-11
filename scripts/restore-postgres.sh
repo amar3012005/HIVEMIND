@@ -23,6 +23,7 @@ RESTORE_FROM="${RESTORE_FROM:-}"  # Path to backup file or 'latest'
 # Encryption configuration
 ENCRYPTION_ENABLED="${ENCRYPTION_ENABLED:-true}"
 ENCRYPTION_KEY="${BACKUP_ENCRYPTION_KEY:-}"
+PBKDF2_ITERATIONS="${BACKUP_PBKDF2_ITERATIONS:-200000}"
 
 # S3 configuration
 S3_ENABLED="${S3_ENABLED:-false}"
@@ -102,7 +103,7 @@ check_requirements() {
     
     local missing=()
     
-    for cmd in pg_restore psql gzip openssl; do
+    for cmd in psql gzip openssl; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -249,7 +250,7 @@ decrypt_backup() {
     
     openssl enc -aes-256-cbc -d \
         -pbkdf2 \
-        -iter 100000 \
+        -iter "${PBKDF2_ITERATIONS}" \
         -in "${encrypted_file}" \
         -out "${decrypted_file}" \
         -pass pass:"${ENCRYPTION_KEY}"

@@ -21,4 +21,10 @@ describe('HyperAgents task kickoff contract', () => {
     assert.match(source, /COALESCE\("agent_connectors", '\{\}'::jsonb\) \? '_company'/);
     assert.equal((source.match(/getHyperRoomCapacity\(/g) || []).length >= 4, true);
   });
+
+  it('persists task tags for sidecar capability packs', async () => {
+    const source = await readFile(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
+    assert.match(source, /_task_tag/);
+    assert.match(source, /task_tag: task\.tag \|\| 'GENERAL'/);
+  });
 });

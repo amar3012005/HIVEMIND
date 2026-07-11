@@ -915,6 +915,23 @@ def _persona_fields(emp: Dict[str, Any]) -> tuple[str, str, str]:
     return name, str(lane), str(sysp)[:1000]
 
 
+# Business-function packs shape how a room works; they never grant connector
+# permissions. Those remain controlled by the room and organisation policies.
+CAPABILITY_PACKS = {
+    "RESEARCH": "Focus: evidence, source comparison, and confidence. Final sections: Executive finding; Evidence and sources; Confidence and caveats; Implications; Next research actions.",
+    "OUTREACH": "Focus: ICP fit, personalization, and ready-to-send outreach. Final sections: Target segments; Personalization angles; Outreach sequence; Objections and replies; Owner and next action.",
+    "MARKETING": "Focus: positioning, campaign assets, and measurable experiments. Final sections: ICP; Message hierarchy; Campaign plan; Asset briefs; Channels and metrics; Experiment backlog.",
+    "STRATEGY": "Focus: decisions, trade-offs, sequencing, and accountability. Final sections: Decision; Options and trade-offs; Risks; KPI; Owner and deadline.",
+    "FEATURE": "Focus: customer value, scope, delivery, and validation. Final sections: Problem; Users and jobs; Requirements; Acceptance criteria; Risks; Rollout and measurement.",
+    "GENERAL": "Focus: a clear, actionable institutional outcome. Final sections: Recommendation or answer; Evidence; Actions; Owner and next step; Open questions.",
+}
+
+
+def capability_pack(task_tag: str) -> tuple[str, str]:
+    tag = str(task_tag or "GENERAL").upper()
+    return tag if tag in CAPABILITY_PACKS else "GENERAL", CAPABILITY_PACKS.get(tag, CAPABILITY_PACKS["GENERAL"])
+
+
 class Director:
     """One director session for a single room turn. Stateful (blackboard +
     transcript) but instance-scoped — safe for concurrent multi-tenant turns."""
@@ -942,6 +959,7 @@ class Director:
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
         company_brief: str = "",
         intended_output: str = "answer",
+        task_tag: str = "GENERAL",
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -958,6 +976,7 @@ class Director:
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
+        self.task_tag, self.capability_pack = capability_pack(task_tag)
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
@@ -1495,10 +1514,11 @@ class Director:
         tmpl = (f"\nThis is a '{self.room_template}' room — frame the discussion and the final output to "
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
+        capability = f"\nBUSINESS FUNCTION PACK [{self.task_tag}]: {self.capability_pack}"
         return (
             _now_block() +
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
-            "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
+            "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + capability + "\n"
             "FORMAT THE DELIVERABLE FOR QUALITY:\n"
             "• Lead with the answer / recommendation up front, then support it.\n"
             "• Structure with '## <Section>' headings; '- ' bullets for lists, '1. ' for ordered steps.\n"
@@ -1518,7 +1538,8 @@ class Director:
             "flag anything you cannot verify as UNVERIFIED and collect open items under a short "
             "'## Gaps to confirm'.\n"
             "• When a debate happened, close with a one-line synthesis citing who argued what.\n"
-            "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs."
+                "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs.\n"
+                "• Use the BUSINESS FUNCTION PACK's final sections as headings when they fit the requested deliverable."
         )
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
@@ -1746,6 +1767,7 @@ class Director:
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED." + _fmt)
+        sysp += f"\n\nFINAL SYNTHESIS CONTRACT [{self.task_tag}]: {self.capability_pack}"
         _org = (self.company_brief or "").strip()
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "
                       f"and market; make every specific concrete to this company, not generic):\n{_org[:1500]}\n\n"
@@ -1996,6 +2018,7 @@ async def run_director(
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
     company_brief: str = "",
     intended_output: str = "answer",
+    task_tag: str = "GENERAL",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2008,5 +2031,6 @@ async def run_director(
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
         company_brief=company_brief,
         intended_output=intended_output,
+        task_tag=task_tag,
     )
     return await director.run()

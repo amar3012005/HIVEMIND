@@ -300,6 +300,10 @@ if (prisma && HYPER_CYCLE_ENABLED) {
           roomId = taskRoom.id;
           const goal = `${task.title}\n${task.detail || ''}\nCompany: ${state.company} — ${state.mission || ''}`.slice(0, 2000);
           await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, roomId).catch(() => {});
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = COALESCE("agent_connectors", \'{}\'::jsonb) || $1::jsonb WHERE "id" = $2::uuid',
+            JSON.stringify({ _task_tag: String(task.tag || 'GENERAL').toUpperCase() }), roomId,
+          ).catch(() => {});
         }
         const kickoff = [
           `You are the ${state.company} team. Execute this task now.`,
@@ -327,6 +331,7 @@ if (prisma && HYPER_CYCLE_ENABLED) {
             room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
             user_message: kickoff, participant_ids: roomRow?.participantIds || [],
             project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
+            task_tag: task.tag || 'GENERAL',
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }),
         }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
@@ -7459,6 +7464,7 @@ Write the persona now.`;
               participant_ids: taskRoom.participantIds || [],
               project_id: taskRoom.projectId || null,
               room_goal: taskRoom.goal || '',
+              task_tag: task.tag || 'GENERAL',
               callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
             }),
           }).catch((error) => console.warn('[hyper-tasks] sidecar kick failed:', error.message));
@@ -7470,6 +7476,10 @@ Write the persona now.`;
             select: { id: true, name: true, participantIds: true, projectId: true, goal: true },
           }).catch(() => null);
           if (existing) {
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = COALESCE("agent_connectors", \'{}\'::jsonb) || $1::jsonb WHERE "id" = $2::uuid',
+              JSON.stringify({ _task_tag: String(task.tag || 'GENERAL').toUpperCase() }), existing.id,
+            ).catch(() => {});
             // A task room can exist with ZERO turns (created before the kickoff
             // feature, or the kick was lost) — it sat idle in chat forever. Ship
             // the kickoff again whenever the room has no turns; the FE's stable
@@ -7512,6 +7522,10 @@ Write the persona now.`;
             JSON.stringify({ _company: company }), row.id,
           );
         } catch { /* state best-effort */ }
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = COALESCE("agent_connectors", \'{}\'::jsonb) || $1::jsonb WHERE "id" = $2::uuid',
+          JSON.stringify({ _task_tag: String(task.tag || 'GENERAL').toUpperCase() }), taskRoom.id,
+        ).catch(() => {});
         const turn = await startTaskKickoff({ ...taskRoom, goal });
         return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, turn_id: turn.id }, 201);
       } catch (err) {

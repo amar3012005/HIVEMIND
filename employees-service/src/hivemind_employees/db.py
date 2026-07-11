@@ -560,6 +560,27 @@ async def get_room_enabled_connectors(room_id: str, org_id: Optional[str] = None
     return []
 
 
+async def get_room_task_tag(room_id: str, org_id: Optional[str] = None) -> str:
+    """Read the task-function tag persisted by the control plane. GENERAL is safe fallback."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT agent_connectors->>'_task_tag' AS task_tag FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT agent_connectors->>'_task_tag' AS task_tag FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
+            return str(row["task_tag"] or "GENERAL").upper() if row else "GENERAL"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_task_tag fallback: %s", exc)
+    return "GENERAL"
+
+
 async def get_trust_scores(org_id: str, employee_ids: List[str]) -> Dict[str, float]:
     """A4: return {employee_id: trust_score} for given ids. Missing rows = 0.5."""
     if not employee_ids:

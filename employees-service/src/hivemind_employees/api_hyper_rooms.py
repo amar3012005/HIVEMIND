@@ -61,6 +61,7 @@ from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_enabled_connectors,
+    get_room_task_tag,
     get_room_quality_mode,
     get_room_sim_mode,
     get_room_sim_agents,
@@ -1687,6 +1688,7 @@ class RoomTurnRequest(BaseModel):
     # only; when unset the env default applies. Lets the model battery A/B without
     # restarting the sidecar.
     agentic_model: Optional[str] = None
+    task_tag: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -2805,6 +2807,9 @@ async def _orchestrate_single_agent(
         log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
                  intended_output, req.room_id, conns)
         intended_output = "answer"
+    task_tag = str(req.task_tag or "").upper()
+    if not task_tag:
+        task_tag = await get_room_task_tag(req.room_id, org_id=req.org_id)
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2818,6 +2823,7 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
+            task_tag=task_tag,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

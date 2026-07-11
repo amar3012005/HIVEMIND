@@ -156,3 +156,10 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 
 - Removed mutable audit foreign keys and added the existing owner-resistant append-only trigger to `audit_logs`.
 - Cold-storage archival remains a separate open phase and must export immutable rows rather than update them.
+
+### Canary and Production Evidence
+
+- Applied first to canary, then production with explicit `hivemind` schema selection.
+- In each database, a rollback-only transaction inserted a synthetic audit row and proved both UPDATE and DELETE raise the append-only guard.
+- Production catalog exposes `audit_logs_append_only` for both UPDATE and DELETE.
+- Verification left no synthetic audit rows and required no service restart.

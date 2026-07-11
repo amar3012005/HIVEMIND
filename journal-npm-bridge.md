@@ -104,7 +104,7 @@ npm run build
       "args": ["-y", "@hivemind/mcp-bridge"],
       "env": {
         "HIVEMIND_API_URL": "https://hivemind.davinciai.eu",
-        "HIVEMIND_API_KEY": "hm_master_key_99228811",
+        "HIVEMIND_API_KEY": "<HIVEMIND_API_KEY>",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
       }
     }

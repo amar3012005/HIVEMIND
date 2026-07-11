@@ -95,7 +95,7 @@ Verify embedding pipeline is working.
 ```bash
 # Save a test memory
 curl -X POST "http://localhost:3000/api/memories" \
-  -H "X-API-Key: hm_master_key_99228811" \
+  -H "X-API-Key: <HIVEMIND_API_KEY>" \
   -d '{"content": "Test memory for embedding verification"}'
 
 # Check it appears in Qdrant

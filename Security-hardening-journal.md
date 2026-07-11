@@ -218,3 +218,9 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 ### Rotation Requirement
 
 - Credential-shaped values remain in tracked docs/examples and Git history. Removing current-tree copies is not rotation; the live master key must be replaced after all consumers are inventoried and updated atomically.
+
+### Current-Tree Remediation
+
+- Replaced the committed master-key value in tracked instructions, journals, setup docs, and frontend references with a non-secret placeholder.
+- Executable probes, SDK examples, phase-zero tests, and local Compose now require environment-provided credentials instead of silently using a fallback.
+- Current root and frontend tracked trees no longer match the leaked master-key pattern. Git history still contains it, so live rotation remains mandatory.

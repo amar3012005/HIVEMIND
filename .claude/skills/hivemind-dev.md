@@ -114,7 +114,7 @@ Database migration workflow.
 
 ## API Keys
 
-- **Master API Key**: `hm_master_key_99228811` (in .env, never commit)
+- **Master API Key**: `<HIVEMIND_API_KEY>` (in .env, never commit)
 - **Qdrant Cloud**: Configured in .env
 - **Groq API**: Configured in .env for LLM inference
 

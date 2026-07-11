@@ -412,7 +412,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
 # HIVEMIND Development
 HIVEMIND_HOME=/opt/HIVEMIND
-HIVEMIND_API_KEY=hm_master_key_99228811
+HIVEMIND_API_KEY=<HIVEMIND_API_KEY>
 HIVEMIND_API_URL=https://hivemind.davinciai.eu
 
 # Qdrant
@@ -439,7 +439,7 @@ HETZNER_HEALTH_URL=https://hivemind.davinciai.eu/health
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "HIVEMIND_HOME": "/opt/HIVEMIND",
-    "HIVEMIND_API_KEY": "hm_master_key_99228811"
+    "HIVEMIND_API_KEY": "<HIVEMIND_API_KEY>"
   },
   "permissions": {
     "defaultMode": "default"

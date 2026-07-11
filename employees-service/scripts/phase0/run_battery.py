@@ -8,7 +8,7 @@ restarts the sidecar between models and calls this once per model.
 
 Env:
   SIDECAR_URL      default http://localhost:8060
-  MASTER_KEY       master API key (default hm_master_key_99228811 fallback)
+  MASTER_KEY       master API key (required; HIVEMIND_MASTER_API_KEY also accepted)
   ROOM_ID          a real hyper-room id (with Google connector enabled for
                    doc/sheet/email tasks)
   PARTICIPANT_IDS  comma-separated employee ids on that room
@@ -29,7 +29,9 @@ import urllib.error
 import uuid
 
 SIDECAR = os.environ.get("SIDECAR_URL", "http://localhost:8060").rstrip("/")
-MASTER_KEY = os.environ.get("MASTER_KEY") or os.environ.get("HIVEMIND_MASTER_API_KEY") or "hm_master_key_99228811"
+MASTER_KEY = os.environ.get("MASTER_KEY") or os.environ.get("HIVEMIND_MASTER_API_KEY")
+if not MASTER_KEY:
+    raise RuntimeError("MASTER_KEY or HIVEMIND_MASTER_API_KEY is required")
 ROOM_ID = os.environ.get("ROOM_ID", "")
 PARTICIPANT_IDS = [p for p in os.environ.get("PARTICIPANT_IDS", "").split(",") if p.strip()]
 USER_ID = os.environ.get("USER_ID", "")

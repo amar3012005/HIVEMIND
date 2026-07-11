@@ -223,7 +223,7 @@ These are debug/utility endpoints that don't affect the critical production memo
 ### Production Status
 
 **Domain**: https://hivemind.davinciai.eu:8050
-**API Key**: hm_master_key_99228811
+**API Key**: <HIVEMIND_API_KEY>
 **Container**: s0k0s0k40wo44w4w8gcs8ow0-230246199607 (node:20)
 **Restarted**: 2026-03-18 19:41 UTC
 
@@ -289,7 +289,7 @@ case 'hivemind_list_memories': {
 ### Production Status
 
 **Domain**: https://hivemind.davinciai.eu:8050
-**API Key**: hm_master_key_99228811
+**API Key**: <HIVEMIND_API_KEY>
 **Container**: s0k0s0k40wo44w4w8gcs8ow0-230246199607
 **Redeployed**: 2026-03-19 (with HIVEMIND_MCP_DEBUG=true, HIVEMIND_BASE_URL=http://localhost:3000)
 
@@ -334,7 +334,7 @@ After testing multiple transport methods, the **hybrid stdio** approach was sele
         "https://hivemind.davinciai.eu:8050"
       ],
       "env": {
-        "HIVEMIND_API_KEY": "hm_master_key_99228811",
+        "HIVEMIND_API_KEY": "<HIVEMIND_API_KEY>",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
         "NODE_NO_WARNINGS": "1"
       }
@@ -407,7 +407,7 @@ Changed DATABASE_URL in `docker-compose.local-stack.yml`:
 ### Verification
 ```bash
 curl -X POST http://localhost:3000/api/memories \
-  -H "X-API-Key: hm_master_key_99228811" \
+  -H "X-API-Key: <HIVEMIND_API_KEY>" \
   -d '{"title": "Test", "content": "Test", ...}'
 
 Response: {"id": "621055dd-d40f-4864-8f1a-eeeb74d5d546", ...}
@@ -498,7 +498,7 @@ Response: {"id": "621055dd-d40f-4864-8f1a-eeeb74d5d546", ...}
 
 **Local Test Results:**
 - **Endpoint**: `http://localhost:3000/api/mcp/servers/{userId}`
-- **Auth**: HIVEMIND_MASTER_API_KEY=hm_master_key_99228811
+- **Auth**: HIVEMIND_MASTER_API_KEY=<HIVEMIND_API_KEY>
 - **Status**: ✅ Working - Returns complete MCP server configuration
 
 **Response includes:**
@@ -590,9 +590,9 @@ Response: {"id": "621055dd-d40f-4864-8f1a-eeeb74d5d546", ...}
 
 ## 2026-03-17 - API Key Fix
 - **Issue**: SDK receiving 401 Unauthorized despite using correct master key.
-- **Cause**: UI and SDK were using `hm_master_key_99228811`, but the server's `HIVEMIND_MASTER_API_KEY` was set to a different value.
-- **Fix**: Synchronized `HIVEMIND_MASTER_API_KEY` with `hm_master_key_99228811` in the Coolify environment and recreated the container.
-- **Verification**: ✅ Confirmed authorized access with `X-API-Key: hm_master_key_99228811`.
+- **Cause**: UI and SDK were using `<HIVEMIND_API_KEY>`, but the server's `HIVEMIND_MASTER_API_KEY` was set to a different value.
+- **Fix**: Synchronized `HIVEMIND_MASTER_API_KEY` with `<HIVEMIND_API_KEY>` in the Coolify environment and recreated the container.
+- **Verification**: ✅ Confirmed authorized access with `X-API-Key: <HIVEMIND_API_KEY>`.
 
 ## 2026-03-17 17:37:00 UTC - PostgreSQL Connection Fixed (P1010 Error Resolution)
 
@@ -664,7 +664,7 @@ Prisma throwing `Error P1010: User hivemind_user was denied access on database h
 - **Migrations**: ✅ All 8 applied successfully
 - **API Health**: ✅ `http://localhost:3000/health` returns OK
 - **Memory Writes**: ✅ Confirmed working with response containing memory ID
-- **API Key**: `hm_master_key_99228811`
+- **API Key**: `<HIVEMIND_API_KEY>`
 
 ### Files Modified
 - `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env` - DATABASE_URL fixed
@@ -851,7 +851,7 @@ URL: https://www.npmjs.com/package/@amar_528/mcp-bridge
    - command: node
    - args: [/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js]
    - HIVEMIND_API_URL: https://hivemind.davinciai.eu:8050
-   - HIVEMIND_API_KEY: hm_master_key_99228811
+   - HIVEMIND_API_KEY: <HIVEMIND_API_KEY>
 3. Restart Claude Desktop
 
 **Docs**: See /opt/HIVEMIND/packages/mcp-bridge/ANTIGRAVITY_SETUP.md
@@ -875,7 +875,7 @@ args = ["/Users/amar/HIVE-MIND/packages/mcp-bridge/dist/cli.js", "hosted", "--ur
 enabled = true
 
 [mcp_servers.hivemind.env]
-HIVEMIND_API_KEY = "hm_master_key_99228811"
+HIVEMIND_API_KEY = "<HIVEMIND_API_KEY>"
 HIVEMIND_USER_ID = "00000000-0000-4000-8000-000000000001"
 ```
 

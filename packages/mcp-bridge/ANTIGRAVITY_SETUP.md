@@ -44,7 +44,7 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
         "00000000-0000-4000-8000-000000000001"
       ],
       "env": {
-        "HIVEMIND_API_KEY": "hm_master_key_99228811",
+        "HIVEMIND_API_KEY": "<HIVEMIND_API_KEY>",
         "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
         "HIVEMIND_ORG_ID": "00000000-0000-4000-8000-000000000002",
@@ -70,7 +70,7 @@ Ask Claude: "What MCP tools are available?" or try "Save this to my memory: [som
 ### "Connection failed"
 1. Check API URL includes port 8050: `https://hivemind.davinciai.eu:8050`
 2. Verify server is running: `curl -k https://hivemind.davinciai.eu:8050/health`
-3. Check API key is correct: `hm_master_key_99228811`
+3. Check API key is correct: `<HIVEMIND_API_KEY>`
 4. Confirm the descriptor resolves to the public host, not `localhost`
 
 ### Tools not appearing

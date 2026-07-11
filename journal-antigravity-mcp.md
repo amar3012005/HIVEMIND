@@ -25,7 +25,7 @@ Edit `claude_desktop_config.json`:
       "args": ["/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
       "env": {
         "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
-        "HIVEMIND_API_KEY": "hm_master_key_99228811",
+        "HIVEMIND_API_KEY": "<HIVEMIND_API_KEY>",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
       }
     }

@@ -8,7 +8,7 @@ import { HiveMindClient } from '../src/index.js';
 // Configuration
 const config = {
   url: process.env.HIVEMIND_URL || 'https://hivemind.davinciai.eu:8050',
-  apiKey: process.env.HIVEMIND_API_KEY || 'hm_master_key_99228811',
+  apiKey: process.env.HIVEMIND_API_KEY,
   userId: 'demo-user',
   orgId: 'demo-org'
 };

@@ -177,3 +177,11 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Repository backup/restore scripts previously hard-coded 100,000 iterations while production used 200,000; both now share configurable `BACKUP_PBKDF2_ITERATIONS` defaulting to 200,000.
 - Restore no longer incorrectly requires `pg_restore` for a plain-SQL dump consumed by `psql`.
 - Backups remain local-only and Qdrant snapshot scheduling/freshness alerting remains open; host loss would still remove local backups.
+
+## 2026-07-11 - Qdrant encrypted snapshots
+
+### Scope
+
+- Added a locked native full-snapshot job covering every Qdrant collection.
+- Verifies Qdrant's plaintext SHA-256 before encryption, encrypts with the shared PBKDF2 policy, verifies decryption against the server checksum, and retains seven copies.
+- Removes the temporary plaintext snapshot from both backup directory and Qdrant after completion; only encrypted archives remain.

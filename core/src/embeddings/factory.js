@@ -103,6 +103,25 @@ function buildService(provider) {
   return getMistralEmbedService();
 }
 
+export function resolveEmbeddingProviders(env = process.env) {
+  const explicitPrimary = env.EMBEDDING_PROVIDER?.trim();
+  const primary = explicitPrimary || (
+    env.LITELLM_API_KEY ? 'litellm'
+      : env.OPENROUTER_API_KEY ? 'openrouter'
+      : 'mistral'
+  );
+  const explicitFallback = env.EMBEDDING_FALLBACK_PROVIDER?.trim();
+
+  return {
+    primary,
+    fallback: explicitFallback || (
+      !explicitPrimary && primary === 'litellm' && env.OPENROUTER_API_KEY
+        ? 'openrouter'
+        : undefined
+    )
+  };
+}
+
 let _instance = null;
 
 /**
@@ -114,8 +133,7 @@ let _instance = null;
 export function getEmbedService() {
   if (_instance) return _instance;
 
-  const primaryProvider = process.env.EMBEDDING_PROVIDER || 'mistral';
-  const fallbackProvider = process.env.EMBEDDING_FALLBACK_PROVIDER;
+  const { primary: primaryProvider, fallback: fallbackProvider } = resolveEmbeddingProviders();
 
   const primary = buildService(primaryProvider);
 

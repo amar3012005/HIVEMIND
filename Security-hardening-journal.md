@@ -1,5 +1,25 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Canary embedding provider failover
+
+### Finding
+
+- Public B2B/B2C canary core services had an OpenRouter credential but no
+  `EMBEDDING_PROVIDER`; the old default selected Mistral and logs showed repeated
+  unauthorized embedding failures. Primary core explicitly uses LiteLLM with
+  OpenRouter fallback and did not show the error.
+
+### Change
+
+- Explicit embedding configuration remains authoritative. When unset, the
+  factory now selects the first configured provider: LiteLLM, then OpenRouter,
+  then Mistral; LiteLLM automatically gets OpenRouter as fallback when present.
+- No secret or production environment file was copied or committed.
+
+### Evidence
+
+- Provider-selection, admission, and temporal recall unit tests passed.
+
 ## 2026-07-11 - Qdrant client/server compatibility pin
 
 ### Finding

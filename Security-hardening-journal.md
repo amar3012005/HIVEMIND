@@ -46,3 +46,17 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Enforce SSRF-safe agent URL policy consistently in the standalone broker, control plane, and core remote client without breaking Tailscale/private transport.
 - Add authenticated audit events for enrollment, registration, rotation, and disenrollment without logging credentials.
 - Add versioned PostgreSQL/Qdrant snapshot jobs, off-host delivery, restore verification, and alerting after measuring the live host and confirming the active Compose stack.
+
+## 2026-07-11 - Production host resilience baseline
+
+### Measured State
+
+- The 16 GB host had 11 GB available memory and low CPU load during the check; there was no justification for disruptive cleanup.
+- Root disk was 85% used (243 GB of 301 GB, 46 GB free). Disk exhaustion is therefore the immediate availability risk.
+- Both the primary `hm-*` stack and the isolated `hivemind-next-*` B2B/B2C canary stack were running. The canary must be retired only after a documented route, rollback, and data-safety check.
+- No application PostgreSQL/Qdrant backup timer was discovered; only the OS package database timer was scheduled. Existing backup/restore scripts and an encryption key file exist, but scheduled off-host backup and a restore drill are not yet evidenced.
+
+### Next Phase
+
+- Add a production-safe backup runner with explicit destination/secret configuration, health/freshness checks, and a restore verification procedure.
+- Before changing Compose limits or removing canaries, capture `docker inspect` limits, active Caddy routes, image rollback tags, and data-volume ownership.

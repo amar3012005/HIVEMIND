@@ -7663,11 +7663,12 @@ Write the persona now.`;
       if (room) {
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, "agent_connectors"->>\'_task_tag\' AS task_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
+          room.taskTag = gr?.[0]?.task_tag || 'GENERAL';
         } catch {
           room.goal = '';
         }

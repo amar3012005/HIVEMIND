@@ -162,6 +162,13 @@ export function getEnterpriseBillingPhase(org, now = new Date()) {
   return onboardingEndsAt && onboardingEndsAt > now ? 'onboarding' : 'runway';
 }
 
+export function getEnterpriseBillingAction(org, now = new Date()) {
+  if (!isEnterpriseWorkspace(org) || !org?.commercialTerms) return null;
+  const phase = getEnterpriseBillingPhase(org, now);
+  if (phase === 'onboarding') return ['onboarding_paid', 'active', 'trialing'].includes(org.subscriptionStatus) ? null : 'onboarding_payment_required';
+  return ['active', 'trialing'].includes(org.subscriptionStatus) ? null : 'runway_payment_required';
+}
+
 export function getEnterpriseOnboardingEndsAt(now = new Date(), configuredDays = process.env.ENTERPRISE_ONBOARDING_DAYS) {
   const days = Number(configuredDays || 14);
   const safeDays = Number.isInteger(days) && days >= 1 && days <= 90 ? days : 14;

@@ -14,8 +14,9 @@ import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } fro
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
-import { PLANS, getEnterpriseOnboardingEndsAt } from './billing/plans.js';
+import { PLANS, getEnterpriseBillingAction, getEnterpriseBillingPhase, getEnterpriseOnboardingEndsAt } from './billing/plans.js';
 import { claimEnterpriseOnboardingCode } from './billing/enterprise-access.js';
+import { claimPromotionCode, hashPromotionCode, normalizePromotionOffer, resolvePromotionCode } from './billing/promotion-codes.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -353,7 +354,10 @@ function _releaseShotSlot() {
   if (next) next();
 }
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
-const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
+const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || '';
+if (process.env.NODE_ENV === 'production' && !ADMIN_SECRET) {
+  throw new Error('HIVEMIND_ADMIN_SECRET is required in production');
+}
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -593,8 +597,35 @@ function getConnectorCallbackUrl(provider) {
   return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
 }
 
-function isAdminAuthorized(req, url) {
-  return req.headers['x-admin-secret'] === ADMIN_SECRET || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+const ADMIN_COOKIE = 'hm_platform_admin';
+const ADMIN_TTL_SECONDS = 15 * 60;
+const adminUnlockAttempts = new Map();
+
+function safeEqual(left, right) {
+  const a = Buffer.from(String(left || ''));
+  const b = Buffer.from(String(right || ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function signAdminToken(expiresAt) {
+  const payload = `${expiresAt}.${crypto.randomBytes(16).toString('hex')}`;
+  const signature = crypto.createHmac('sha256', CONFIG.sessionSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifyAdminToken(token) {
+  const [expiresAt, nonce, signature] = String(token || '').split('.');
+  if (!expiresAt || !nonce || !signature || Number(expiresAt) <= Date.now()) return false;
+  const expected = crypto.createHmac('sha256', CONFIG.sessionSecret).update(`${expiresAt}.${nonce}`).digest('base64url');
+  return safeEqual(signature, expected);
+}
+
+function isAdminAuthorized(req) {
+  return verifyAdminToken(parseCookies(req)[ADMIN_COOKIE]);
+}
+
+function adminCookie(token) {
+  return `${ADMIN_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/admin/api; SameSite=Strict; Secure; Max-Age=${ADMIN_TTL_SECONDS}`;
 }
 
 function buildAdminServiceSnapshot() {
@@ -999,6 +1030,9 @@ async function buildBootstrapPayload(user) {
       plan: org.plan || 'free',
       hosting_mode: org.hostingMode || 'managed',
       company_profile: org.companyProfile || {},
+      commercial_terms: org.commercialTerms || null,
+      billing_phase: org.plan === 'enterprise' ? getEnterpriseBillingPhase(org) : null,
+      billing_action_required: Boolean(getEnterpriseBillingAction(org)),
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -1116,10 +1150,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         // Dependent tables — none of these touch each other, so run them
         // concurrently. Cuts batch wall time from sum to max.
         await Promise.all([
-          prisma.auditLog.updateMany({
-            where: { resourceId: { in: batch } },
-            data: { resourceId: null },
-          }),
           prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
           prisma.codeMemoryMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
           prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: batch } } }),
@@ -1158,11 +1188,9 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await prisma.userOrganization.deleteMany({ where: { userId } });
     emit(85, 'Deleted org memberships');
 
-    await prisma.auditLog.updateMany({
-      where: { userId },
-      data: { userId: null },
-    });
-    emit(88, 'Anonymized audit logs');
+    // Audit logs are append-only evidence. Their foreign keys were deliberately
+    // removed, so historical user/resource IDs remain after this erasure.
+    emit(88, 'Preserved append-only audit trail');
 
     // Delete or detach createdBy FK rows that block user delete.
     // createdBy is NOT NULL on DigitalEmployee + Team + Project +
@@ -1592,8 +1620,151 @@ async function handleRequest(req, res) {
     return jsonResponse(res, { container, logs });
   }
 
+  if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
+    const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+    const now = Date.now();
+    const recent = (adminUnlockAttempts.get(ip) || []).filter((at) => now - at < 15 * 60 * 1000);
+    if (recent.length >= 5) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
+    const body = await parseBody(req);
+    if (!ADMIN_SECRET || !safeEqual(body?.passkey, ADMIN_SECRET)) {
+      recent.push(now); adminUnlockAttempts.set(ip, recent);
+      return jsonResponse(res, { error: 'Invalid passkey' }, 401);
+    }
+    adminUnlockAttempts.delete(ip);
+    const expiresAt = now + ADMIN_TTL_SECONDS * 1000;
+    return jsonResponse(res, { ok: true, expires_at: new Date(expiresAt).toISOString() }, 200, {
+      'Set-Cookie': adminCookie(signAdminToken(expiresAt)),
+    });
+  }
+
+  if (pathname === '/admin/api/platform/users' && req.method === 'GET') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const q = String(url.searchParams.get('q') || '').trim();
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+    const users = await prisma.user.findMany({
+      where: q ? { OR: [
+        { email: { contains: q, mode: 'insensitive' } },
+        { displayName: { contains: q, mode: 'insensitive' } },
+      ] } : undefined,
+      include: { organizations: { where: { isActive: true }, include: { org: true } }, _count: { select: { memories: true } } },
+      orderBy: { lastActiveAt: { sort: 'desc', nulls: 'last' } }, take: limit,
+    });
+    const activeCutoff = Date.now() - 30 * 86400000;
+    const rows = users.map((user) => {
+      const enterprise = user.organizations.some((membership) => membership.org?.plan === 'enterprise');
+      return {
+        id: user.id, email: user.email, displayName: user.displayName, lastActiveAt: user.lastActiveAt,
+        user_type: enterprise ? 'enterprise' : 'personal', tier: enterprise ? 'enterprise' : 'personal',
+        filesystem: enterprise ? 'hybrid' : 'amr', memory_storage_modes: enterprise ? ['PostgreSQL', 'Qdrant'] : ['.amr'],
+        memory_count: user._count.memories, organization_count: user.organizations.length,
+        active: Boolean(user.lastActiveAt && user.lastActiveAt.getTime() >= activeCutoff),
+      };
+    });
+    return jsonResponse(res, { total: rows.length, summary: {
+      b2b: rows.filter((row) => row.user_type === 'enterprise').length,
+      b2c: rows.filter((row) => row.user_type === 'personal').length,
+      active: rows.filter((row) => row.active).length,
+      sleeping: rows.filter((row) => !row.active).length,
+    }, users: rows });
+  }
+
+  if (pathname === '/admin/api/platform/metrics' && req.method === 'GET') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    let filesystem = { state: 'unknown' };
+    try {
+      const stat = fs.statfsSync('/app/data');
+      const total = Number(stat.blocks) * Number(stat.bsize);
+      const free = Number(stat.bavail) * Number(stat.bsize);
+      const usedPercent = total ? Math.round(((total - free) / total) * 1000) / 10 : null;
+      filesystem = { total_mib: Math.round(total / 1048576), used_mib: Math.round((total - free) / 1048576), used_percent: usedPercent, state: usedPercent >= 85 ? 'critical' : usedPercent >= 70 ? 'warning' : 'healthy', source: '/app/data' };
+    } catch (error) { filesystem = { state: 'unknown', error: error.message }; }
+    const dbRows = await prisma.$queryRaw`SELECT pg_database_size(current_database())::bigint AS bytes`;
+    const usage = process.memoryUsage();
+    return jsonResponse(res, {
+      observed_at: new Date().toISOString(), filesystem,
+      postgres: { database_mib: Math.round(Number(dbRows?.[0]?.bytes || 0) / 1048576) },
+      core: { rss_mib: Math.round(usage.rss / 1048576), heap_used_mib: Math.round(usage.heapUsed / 1048576), uptime_seconds: Math.round(process.uptime()) },
+      load_average: { one_minute: null }, recommendations: [],
+    });
+  }
+
+  if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const control = getRecentLogs({ service: 'control-plane', limit: 250 })
+      .map((entry) => typeof entry === 'string' ? entry : JSON.stringify(entry));
+    return jsonResponse(res, { logs: { mixed: control, control, core: [] } });
+  }
+
+  if (pathname === '/admin/api/platform/promotions' && req.method === 'GET') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const promotions = await prisma.promotionCode.findMany({ orderBy: { createdAt: 'desc' }, take: 200 });
+    return jsonResponse(res, { promotions: promotions.map((row) => ({
+      id: row.id, code_hint: row.codeHint, name: row.name, audience: row.audience, offer: row.offer,
+      max_redemptions: row.maxRedemptions, redemption_count: row.redemptionCount,
+      expires_at: row.expiresAt, revoked_at: row.revokedAt, created_at: row.createdAt,
+    })) });
+  }
+
+  if (pathname === '/admin/api/platform/promotions' && req.method === 'POST') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const body = await parseBody(req);
+    const audience = String(body?.audience || '').toLowerCase();
+    let offer;
+    try { offer = normalizePromotionOffer(audience, body?.offer); }
+    catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+    const code = String(body?.code || crypto.randomBytes(12).toString('base64url')).trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{6,64}$/.test(code)) return jsonResponse(res, { error: 'Code must be 6-64 letters, numbers, underscores, or hyphens.' }, 400);
+    const expiresAt = body?.expires_at ? new Date(body.expires_at) : null;
+    if (expiresAt && (!Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date())) return jsonResponse(res, { error: 'expires_at must be in the future' }, 400);
+    const maxRedemptions = body?.max_redemptions == null ? null : Number(body.max_redemptions);
+    if (maxRedemptions != null && (!Number.isInteger(maxRedemptions) || maxRedemptions < 1 || maxRedemptions > 1_000_000)) {
+      return jsonResponse(res, { error: 'max_redemptions must be an integer from 1 to 1000000' }, 400);
+    }
+    try {
+      const promotion = await prisma.promotionCode.create({ data: {
+        codeHash: hashPromotionCode(code), codeHint: `${code.slice(0, 4)}…${code.slice(-4)}`,
+        name: String(body?.name || 'Promotion').trim().slice(0, 255), audience, offer,
+        maxRedemptions,
+        expiresAt,
+      }});
+      let stripeCouponId = null;
+      if (offer.personal) {
+        try {
+          const billingMod = await import('./billing/stripe.js');
+          stripeCouponId = (await billingMod.createPromotionCoupon(offer.personal, promotion.name, promotion.maxRedemptions, promotion.expiresAt)).id;
+          await prisma.promotionCode.update({ where: { id: promotion.id }, data: { stripeCouponId } });
+        } catch (error) {
+          await prisma.promotionCode.delete({ where: { id: promotion.id } }).catch(() => {});
+          return jsonResponse(res, { error: `Stripe coupon creation failed: ${error.message}` }, 502);
+        }
+      }
+      console.log(JSON.stringify({ event: 'admin.promotion_created', promotion_id: promotion.id, audience }));
+      return jsonResponse(res, { promotion: { id: promotion.id, code, name: promotion.name, audience, offer, stripe_coupon_id: stripeCouponId } }, 201);
+    } catch (error) {
+      if (error?.code === 'P2002') return jsonResponse(res, { error: 'Promotion code already exists' }, 409);
+      throw error;
+    }
+  }
+
+  const promotionRevokeMatch = pathname.match(/^\/admin\/api\/platform\/promotions\/([0-9a-f-]{36})\/revoke$/);
+  if (promotionRevokeMatch && req.method === 'POST') {
+    if (!isAdminAuthorized(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const promotion = await prisma.promotionCode.findUnique({ where: { id: promotionRevokeMatch[1] } });
+    if (!promotion || promotion.revokedAt) return jsonResponse(res, { error: 'Promotion not found or already revoked' }, 404);
+    if (promotion.stripeCouponId) {
+      const billingMod = await import('./billing/stripe.js');
+      await billingMod.deletePromotionCoupon(promotion.stripeCouponId).catch((error) => {
+        console.warn('[admin] Stripe coupon revocation failed:', error.message);
+      });
+    }
+    const result = await prisma.promotionCode.updateMany({ where: { id: promotionRevokeMatch[1], revokedAt: null }, data: { revokedAt: new Date() } });
+    if (!result.count) return jsonResponse(res, { error: 'Promotion not found or already revoked' }, 404);
+    console.log(JSON.stringify({ event: 'admin.promotion_revoked', promotion_id: promotionRevokeMatch[1] }));
+    return jsonResponse(res, { ok: true });
+  }
+
   if (pathname === '/admin/api/logs' && req.method === 'GET') {
-    if (!isAdminAuthorized(req, url)) {
+    if (!isAdminAuthorized(req)) {
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
     return jsonResponse(res, buildAdminServiceSnapshot());
@@ -2404,21 +2575,28 @@ async function handleRequest(req, res) {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
-    const enterpriseOnboardingEndsAt = requestedPlan === 'enterprise'
-      ? getEnterpriseOnboardingEndsAt()
-      : null;
+    let claimedPromotion = null;
+    const enterpriseOnboardingEndsAt = requestedPlan === 'enterprise' ? getEnterpriseOnboardingEndsAt() : null;
     const companyProfile = sanitizeCompanyProfile(body.company_profile, { fallbackName: body.name });
     const organizationData = {
       zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
       name: body.name, slug, plan: requestedPlan, hostingMode, companyProfile,
       trialEndsAt: enterpriseOnboardingEndsAt,
-      subscriptionStatus: enterpriseOnboardingEndsAt ? 'trialing' : null,
+      subscriptionStatus: enterpriseOnboardingEndsAt ? 'onboarding' : null,
     };
     let org;
     try {
       org = await prisma.$transaction(async (tx) => {
-        if (requestedPlan === 'enterprise' && !await claimEnterpriseOnboardingCode(tx, body.enterprise_access_code, current.session.userId, hostingMode)) {
-          throw new Error('enterprise_onboarding_code_invalid');
+        if (requestedPlan === 'enterprise') {
+          claimedPromotion = await claimPromotionCode(tx, body.enterprise_access_code, 'enterprise', { hostingMode });
+          const legacyAllowed = claimedPromotion ? false : await claimEnterpriseOnboardingCode(tx, body.enterprise_access_code, current.session.userId, hostingMode);
+          if (!claimedPromotion && !legacyAllowed) throw new Error('enterprise_onboarding_code_invalid');
+          if (claimedPromotion) {
+            const terms = claimedPromotion.offer.enterprise;
+            organizationData.trialEndsAt = new Date(Date.now() + terms.onboarding_days * 86400000);
+            organizationData.commercialTerms = terms;
+            organizationData.promotionCodeId = claimedPromotion.id;
+          }
         }
         const created = await tx.organization.create({ data: organizationData });
         await tx.userOrganization.create({ data: {
@@ -2498,6 +2676,9 @@ async function handleRequest(req, res) {
         plan: org.plan || requestedPlan,
         hosting_mode: org.hostingMode || hostingMode,
         onboarding_ends_at: org.trialEndsAt?.toISOString() || null,
+        commercial_terms: org.commercialTerms || null,
+        billing_phase: requestedPlan === 'enterprise' ? getEnterpriseBillingPhase(org) : null,
+        billing_action_required: Boolean(getEnterpriseBillingAction(org)),
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -3781,6 +3962,22 @@ async function handleRequest(req, res) {
     }
 
     console.log('[account-delete] ✓ Validation passed — starting deletion');
+
+    // This must be an INSERT before deleting the identity. Historical audit
+    // records intentionally retain their identifiers after the user is gone.
+    const { AuditLogger } = await import('./audit/audit-logger.js');
+    await new AuditLogger(prisma).log({
+      userId: user.id,
+      eventType: 'account.erase_requested',
+      eventCategory: 'compliance',
+      action: 'delete',
+      resourceType: 'account',
+      resourceId: user.id,
+      metadata: { deletion_mode: 'immediate_identity_removal' },
+      processingBasis: 'GDPR Article 17',
+      sessionId: current.sessionId,
+      ..._reqMeta(req),
+    });
 
     // Check if client wants SSE streaming (Accept: text/event-stream)
     const wantsSSE = (req.headers.accept || '').includes('text/event-stream') || body.stream === true;
@@ -8439,6 +8636,8 @@ Write the persona now.`;
           phase: plansMod.getEnterpriseBillingPhase(org),
           hosting_mode: org.hostingMode || 'managed',
           onboarding_ends_at: org.trialEndsAt?.toISOString() || null,
+          commercial_terms: org.commercialTerms || null,
+          billing_action: plansMod.getEnterpriseBillingAction(org),
         } : null,
         usage,
         warnings: limitCheck.warnings || [],
@@ -8473,6 +8672,11 @@ Write the persona now.`;
       if (!plansMod.isPersonalPlan(targetPlanId) || !priceId) {
         return jsonResponse(res, { error: `Plan "${targetPlanId}" is not available for self-serve checkout` }, 400);
       }
+      const referralCode = String(body.referral_code || '').trim();
+      const promotion = referralCode ? await resolvePromotionCode(prisma, referralCode, 'personal') : null;
+      if (referralCode && (!promotion || !promotion.offer?.personal?.plans?.includes(targetPlanId) || !promotion.stripeCouponId)) {
+        return jsonResponse(res, { error: 'Promotion code is invalid, expired, exhausted, or not eligible for this plan.' }, 400);
+      }
 
       // Lookup the org owner's email so Stripe Customer has something useful.
       const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
@@ -8488,7 +8692,8 @@ Write the persona now.`;
           orgId,
           userId,
           planId: targetPlanId,
-          referralCode: String(body.referral_code || '').trim(),
+          referralCode,
+          stripeCouponId: promotion?.stripeCouponId || null,
         });
         audit({
           organizationId: orgId, userId,
@@ -8500,6 +8705,16 @@ Write the persona now.`;
       } catch (err) {
         return jsonResponse(res, { error: `Stripe checkout failed: ${err.message}` }, 502);
       }
+    }
+
+    if (pathname === '/v1/billing/enterprise-checkout' && req.method === 'POST') {
+      if (!plansMod.isEnterpriseWorkspace(org) || !org.commercialTerms) return jsonResponse(res, { error: 'Enterprise commercial terms are not configured.' }, 409);
+      if (!billingMod.isEnabled()) return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+      const phase = plansMod.getEnterpriseBillingPhase(org);
+      const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+      const customerId = await billingMod.ensureCustomer(prisma, org, owner?.email || null);
+      const session = await billingMod.createEnterpriseCheckout({ customerId, orgId, userId, phase, terms: org.commercialTerms });
+      return jsonResponse(res, { checkout_url: session.url, session_id: session.id, phase });
     }
 
     // POST /v1/billing/reconcile — recover the authoritative Stripe state
@@ -8663,11 +8878,27 @@ Write the persona now.`;
             });
           }
           if (org && obj.payment_status === 'paid') {
+            const enterprisePhase = obj.metadata?.hivemind_enterprise_phase;
+            if (plansMod.isEnterpriseWorkspace(org) && enterprisePhase) {
+              const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(obj);
+              await prisma.organization.update({ where: { id: org.id }, data: {
+                subscriptionStatus: enterprisePhase === 'onboarding' ? 'onboarding_paid' : 'active',
+                ...(subscriptionId ? { stripeSubscriptionId: subscriptionId } : {}),
+              }});
+              break;
+            }
             const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(obj);
             if (subscriptionId) {
               const stripe = await billingMod.getStripe();
               const subscription = await stripe.subscriptions.retrieve(subscriptionId);
               org = await syncPersonalStripeSubscription({ org, subscription, plansMod }) || org;
+            }
+            const referralCode = obj.metadata?.hivemind_referral_code;
+            if (referralCode) {
+              await prisma.promotionCode.updateMany({
+                where: { codeHash: hashPromotionCode(referralCode), revokedAt: null },
+                data: { redemptionCount: { increment: 1 } },
+              });
             }
           }
           break;
@@ -8676,12 +8907,27 @@ Write the persona now.`;
         case 'customer.subscription.updated':
         case 'customer.subscription.resumed': {
           if (!org) break;
+          if (plansMod.isEnterpriseWorkspace(org)) {
+            await prisma.organization.update({ where: { id: org.id }, data: {
+              stripeSubscriptionId: obj.id, subscriptionStatus: obj.status,
+              currentPeriodEnd: obj.current_period_end ? new Date(obj.current_period_end * 1000) : null,
+            }});
+            break;
+          }
           org = await syncPersonalStripeSubscription({ org, subscription: obj, plansMod }) || org;
           break;
         }
         case 'customer.subscription.deleted':
         case 'customer.subscription.paused': {
           if (!org) break;
+          if (plansMod.isEnterpriseWorkspace(org)) {
+            await prisma.organization.update({ where: { id: org.id }, data: {
+              stripeSubscriptionId: null,
+              subscriptionStatus: event.type === 'customer.subscription.paused' ? 'paused' : 'canceled',
+              currentPeriodEnd: null,
+            }});
+            break;
+          }
           await prisma.organization.update({
             where: { id: org.id },
             data: {

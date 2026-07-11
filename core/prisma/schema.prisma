@@ -73,6 +73,8 @@ model Organization {
   currentPeriodEnd             DateTime?          @map("current_period_end") @db.Timestamptz(6)
   trialEndsAt                  DateTime?          @map("trial_ends_at") @db.Timestamptz(6)
   billingEmail                 String?            @map("billing_email") @db.VarChar(255)
+  commercialTerms             Json?              @map("commercial_terms")
+  promotionCodeId             String?            @map("promotion_code_id") @db.Uuid
   defaultProjectPolicy         String             @default("private") @map("default_project_policy") @db.VarChar(50)
   memorySavePolicy             String             @default("private") @map("memory_save_policy") @db.VarChar(50)
   // Cognition scope toggles (workspace-admin choices). Default OFF — the
@@ -139,6 +141,25 @@ model EnterpriseOnboardingCode {
   @@index([expiresAt])
   @@index([usedAt])
   @@map("enterprise_onboarding_codes")
+}
+
+model PromotionCode {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codeHash        String    @unique @map("code_hash") @db.Char(64)
+  codeHint        String    @map("code_hint") @db.VarChar(12)
+  name            String    @db.VarChar(255)
+  audience        String    @db.VarChar(20)
+  offer           Json
+  stripeCouponId  String?   @map("stripe_coupon_id") @db.VarChar(64)
+  maxRedemptions  Int?      @map("max_redemptions")
+  redemptionCount Int       @default(0) @map("redemption_count")
+  expiresAt       DateTime? @map("expires_at") @db.Timestamptz(6)
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([audience])
+  @@index([expiresAt])
+  @@map("promotion_codes")
 }
 
 /// Junction table for user-organization many-to-many relationship

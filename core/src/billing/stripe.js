@@ -127,7 +127,7 @@ export async function ensureCustomer(prisma, org, ownerEmail) {
  * the user is redirected to. The webhook handler is what finalises the
  * subscription state after payment succeeds.
  */
-export async function createCheckoutSession({ customerId, priceId, orgId, userId, planId = '', referralCode = '' }) {
+export async function createCheckoutSession({ customerId, priceId, orgId, userId, planId = '', referralCode = '', stripeCouponId = null }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const urls = resolveHostedBillingUrls();
@@ -138,7 +138,7 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: urls.success,
     cancel_url: urls.cancel,
-    allow_promotion_codes: true,
+    ...(stripeCouponId ? { discounts: [{ coupon: stripeCouponId }] } : { allow_promotion_codes: true }),
     billing_address_collection: 'auto',
     ...(isAutomaticTaxEnabled() ? { automatic_tax: { enabled: true } } : {}),
     customer_update: { address: 'auto', name: 'auto' },
@@ -146,6 +146,44 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
       metadata,
     },
     metadata,
+  });
+}
+
+export async function createPromotionCoupon(personalOffer, name, maxRedemptions, expiresAt) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  return stripe.coupons.create({
+    name,
+    duration: 'forever',
+    ...(personalOffer.percent_off ? { percent_off: personalOffer.percent_off } : { amount_off: personalOffer.amount_off_cents, currency: 'eur' }),
+    ...(maxRedemptions ? { max_redemptions: maxRedemptions } : {}),
+    ...(expiresAt ? { redeem_by: Math.floor(expiresAt.getTime() / 1000) } : {}),
+  });
+}
+
+export async function deletePromotionCoupon(couponId) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  return stripe.coupons.del(couponId);
+}
+
+export async function createEnterpriseCheckout({ customerId, orgId, userId, phase, terms }) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  const urls = resolveHostedBillingUrls();
+  const onboarding = phase === 'onboarding';
+  const amount = onboarding ? terms.onboarding_price_cents : terms.runway_monthly_cents;
+  return stripe.checkout.sessions.create({
+    mode: onboarding ? 'payment' : 'subscription', customer: customerId,
+    line_items: [{ quantity: 1, price_data: {
+      currency: String(terms.currency || 'EUR').toLowerCase(), unit_amount: amount,
+      product_data: { name: onboarding ? 'SINGULANCE Enterprise onboarding' : 'SINGULANCE Enterprise runway' },
+      ...(!onboarding ? { recurring: { interval: 'month' } } : {}),
+    }}],
+    success_url: `${urls.success}&enterprise_phase=${phase}`,
+    cancel_url: urls.cancel,
+    metadata: { hivemind_org_id: orgId, hivemind_user_id: userId, hivemind_enterprise_phase: phase },
+    ...(!onboarding ? { subscription_data: { metadata: { hivemind_org_id: orgId, hivemind_enterprise_phase: phase } } } : {}),
   });
 }
 

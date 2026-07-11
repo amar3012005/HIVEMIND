@@ -14,6 +14,7 @@ const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 //      enrollments without a restart and without the broker touching the core process.
 //   3. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { normalizeAgentUrl } from '../../selfhost/agent-url-policy.js';
 
 const _registry = new Map();
 // Default to a path on the shared core↔control volume. Self-host activates simply by the file existing
@@ -88,10 +89,11 @@ async function _call(orgId, path, body) {
     const { dispatch } = await import('./embedded-agent.mjs');
     return dispatch(orgId, path, body);
   }
+  const agentUrl = normalizeAgentUrl(a.url);
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${a.url}${path}`, {
+    const res = await fetch(`${agentUrl}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${a.token}`, 'x-org-id': orgId },
       body: JSON.stringify(body),

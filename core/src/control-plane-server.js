@@ -27,6 +27,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { readBodyBuffer, readJsonBody } from './http/read-json-body.js';
+import { normalizeAgentUrl } from './selfhost/agent-url-policy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1621,20 +1622,12 @@ async function handleRequest(req, res) {
     // a PUBLIC host would expose memory content + the bearer token on the wire → reject.
     const _agentUrl = (body.agentUrl || body.instanceUrl || '').trim();
     if (_agentUrl) {
-      let secure = false;
       try {
-        const u = new URL(_agentUrl);
-        if (u.protocol === 'https:') secure = true;
-        else if (u.protocol === 'http:') {
-          const h = u.hostname;
-          const oct = h.split('.').map(Number);
-          const isLoopback = h === 'localhost' || h === '::1' || oct[0] === 127;
-          const isTailscale = h.endsWith('.ts.net') || (oct[0] === 100 && oct[1] >= 64 && oct[1] <= 127); // CGNAT 100.64.0.0/10
-          const isRfc1918 = oct[0] === 10 || (oct[0] === 192 && oct[1] === 168) || (oct[0] === 172 && oct[1] >= 16 && oct[1] <= 31);
-          secure = isLoopback || isTailscale || isRfc1918;
-        }
-      } catch { secure = false; }
-      if (!secure) return jsonResponse(res, { error: 'agentUrl must be https:// (or http only over a private/Tailscale/LAN address). Cleartext http to a public host is rejected — it would expose memory content and the agent token.', code: 'INSECURE_AGENT_URL' }, 400);
+        body.agentUrl = normalizeAgentUrl(_agentUrl);
+        body.instanceUrl = body.agentUrl;
+      } catch (error) {
+        return jsonResponse(res, { error: error.message, code: 'INSECURE_AGENT_URL' }, 400);
+      }
     }
     try {
       const fs = await import('node:fs');

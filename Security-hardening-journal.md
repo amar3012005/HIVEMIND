@@ -100,3 +100,17 @@ Merge or rebase onto `codex/production-hardening-runtime`, then verify referral 
 - Corrected image `hivemind/control-plane:security-565b6fda` passed on both isolated B2B/B2C control planes: health `200`, malformed JSON `400`, oversized JSON `413`.
 - The same immutable image was promoted to `hm-control`; public health and bootstrap returned `200`, malformed JSON returned `400`, and a 3 MiB request returned `413`.
 - Production rollback image: `hivemind/control-plane:rollback-request-limits-20260711-093837`.
+
+## 2026-07-11 - BYOD SSRF boundary
+
+### Scope
+
+- Centralized agent URL validation for self-host registration and every remote agent call.
+- Public agents require HTTPS; cleartext HTTP is limited to Tailscale CGNAT or `.ts.net` endpoints.
+- Rejected loopback, RFC1918 LAN, link-local metadata, embedded credentials, fragments, paths, queries, and unsupported schemes.
+- Existing production Box endpoint (`100.109.148.14:8787`) remains valid as Tailscale transport.
+
+### Evidence
+
+- `node --check` passed for control-plane and remote backend modules.
+- `node --test core/tests/unit/agent-url-policy.test.js` passed for public HTTPS, Tailscale, loopback, metadata, and credential cases.

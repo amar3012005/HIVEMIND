@@ -127,6 +127,30 @@ if (process.env.NODE_ENV === 'production') {
 
 const prisma = getPrismaClient();
 
+// Company HQ is a system workspace created by onboarding; plan limits apply to
+// user-created task rooms, not the required HQ itself.
+async function getHyperRoomCapacity(orgId) {
+  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+  const plan = PLANS[org?.plan] || PLANS.free;
+  const limit = plan?.limits?.maxHyperRooms ?? -1;
+  if (limit === -1) return { allowed: true, limit, current: 0, plan };
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT COUNT(*)::int AS count FROM "hivemind"."hyper_rooms"
+      WHERE org_id = $1::uuid AND archived_at IS NULL
+        AND NOT (COALESCE("agent_connectors", '{}'::jsonb) ? '_company')`,
+    orgId,
+  );
+  const current = Number(rows?.[0]?.count || 0);
+  return { allowed: current < limit, limit, current, plan };
+}
+
+function hyperRoomLimitResponse(capacity) {
+  return {
+    error: `HyperAgents room limit reached (${capacity.plan.name} plan: ${capacity.limit} ${capacity.limit === 1 ? 'room' : 'rooms'}). Archive a room or upgrade.`,
+    code: 'PLAN_LIMIT', limit: capacity.limit, current: capacity.current,
+  };
+}
+
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
 // The room-turn kick to the employees sidecar is fire-and-forget and can be
 // dropped (the sidecar holds the connection open for the whole synchronous
@@ -259,6 +283,12 @@ if (prisma && HYPER_CYCLE_ENABLED) {
         // Room: reuse the task's room or provision one (same shape as tasks/open).
         let roomId = task.room_id;
         if (!roomId) {
+          const capacity = await getHyperRoomCapacity(hq.org_id);
+          if (!capacity.allowed) {
+            console.warn(`[hyper-cycle] org ${hq.org_id} reached room limit (${capacity.current}/${capacity.limit}) — skipped`);
+            await persist();
+            continue;
+          }
           const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
           const taskRoom = await prisma.hyperRoom.create({
             data: {
@@ -6661,16 +6691,8 @@ Write the persona now.`;
         : [];
       if (!name) return jsonResponse(res, { error: 'name is required' }, 400);
       if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
-      // Plan limit — HyperAgents rooms per org (heaviest LLM feature; cap by tier).
-      try {
-        const _org = await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { plan: true } });
-        const _plan = PLANS[_org?.plan] || PLANS.free;
-        const _lim = _plan?.limits?.maxHyperRooms ?? -1;
-        if (_lim !== -1) {
-          const _n = await prisma.hyperRoom.count({ where: { orgId: current.session.orgId } });
-          if (_n >= _lim) return jsonResponse(res, { error: `HyperAgents room limit reached (${_plan.name} plan: ${_lim} ${_lim === 1 ? 'room' : 'rooms'}). Archive a room or upgrade.`, code: 'PLAN_LIMIT', limit: _lim, current: _n }, 402);
-        }
-      } catch { /* never block creation on a metering hiccup */ }
+      const capacity = await getHyperRoomCapacity(current.session.orgId);
+      if (!capacity.allowed) return jsonResponse(res, hyperRoomLimitResponse(capacity), 402);
       try {
         // Restrict participants to employees in this org
         const valid = participantIds.length
@@ -7464,6 +7486,8 @@ Write the persona now.`;
             return jsonResponse(res, { room: existing, task, ...(turn ? { turn_id: turn.id } : {}) });
           }
         }
+        const capacity = await getHyperRoomCapacity(current.session.orgId);
+        if (!capacity.allowed) return jsonResponse(res, hyperRoomLimitResponse(capacity), 402);
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
         const taskRoom = await prisma.hyperRoom.create({
           data: {

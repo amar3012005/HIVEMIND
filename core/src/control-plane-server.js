@@ -15,7 +15,7 @@ import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { PLANS, getEnterpriseOnboardingEndsAt } from './billing/plans.js';
-import { isEnterpriseAccessCodeAllowed } from './billing/enterprise-access.js';
+import { claimEnterpriseOnboardingCode } from './billing/enterprise-access.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -2398,16 +2398,16 @@ async function handleRequest(req, res) {
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
-    if (requestedPlan === 'enterprise' && !isEnterpriseAccessCodeAllowed(body.enterprise_access_code)) {
-      return jsonResponse(res, { error: 'A valid enterprise onboarding link is required.' }, 403);
-    }
-
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
     const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
+    if (requestedPlan === 'enterprise') {
+      const allowed = await claimEnterpriseOnboardingCode(prisma, body.enterprise_access_code, current.session.userId, hostingMode);
+      if (!allowed) return jsonResponse(res, { error: 'A valid enterprise onboarding link is required.' }, 403);
+    }
     const enterpriseOnboardingEndsAt = requestedPlan === 'enterprise'
       ? getEnterpriseOnboardingEndsAt()
       : null;

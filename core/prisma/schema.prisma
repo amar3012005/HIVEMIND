@@ -123,6 +123,24 @@ model Organization {
   @@map("organizations")
 }
 
+/// Sales-issued capability for one Enterprise workspace. The plaintext value
+/// never enters the database; it is delivered once in the customer's URL.
+model EnterpriseOnboardingCode {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codeHash    String    @unique @map("code_hash") @db.Char(64)
+  label       String    @db.VarChar(255)
+  hostingMode String?   @map("hosting_mode") @db.VarChar(20)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt      DateTime? @map("used_at") @db.Timestamptz(6)
+  usedBy      String?   @map("used_by") @db.Uuid
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@index([usedAt])
+  @@map("enterprise_onboarding_codes")
+}
+
 /// Junction table for user-organization many-to-many relationship
 /// roles[] is the authoritative multi-role array (P0-4 RBAC).
 /// role (single) is kept for backward compatibility; new code reads roles[].

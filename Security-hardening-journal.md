@@ -1,5 +1,25 @@
 # HIVEMIND Security Hardening Journal
 
+## 2026-07-11 - Maintenance worker packaging repair
+
+### Finding
+
+- The new core image did not contain the worker path still referenced by the
+  canary Compose file. Recreating `maintenance-b2b` exposed the failure; core
+  itself stayed healthy. The original worker image was restored immediately.
+
+### Change
+
+- Restored `src/workers/memory-maintenance-worker.js` from the known-good
+  worker implementation.
+- Restored the maintenance runtime branch in `server.js`: it initializes shared
+  memory/Qdrant work but does not bind the HTTP or deep-research listeners.
+
+### Evidence
+
+- Core server and worker syntax checks passed.
+- Focused embedding, admission, and temporal-recall tests passed.
+
 ## 2026-07-11 - Private canary embedding proof and deploy override
 
 ### Evidence

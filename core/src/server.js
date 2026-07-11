@@ -23475,7 +23475,12 @@ async function warmUpRecall() {
 }
 
 const PORT = process.env.PORT || 3000;
+const runtimeRole = process.env.HIVEMIND_RUNTIME_ROLE || 'app';
 
+if (runtimeRole === 'maintenance') {
+  console.log('[runtime] HTTP server disabled for role=maintenance');
+  ensureQdrantSearchIndexes();
+} else {
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
@@ -23537,3 +23542,4 @@ server.listen(PORT, () => {
     }
   })();
 });
+}

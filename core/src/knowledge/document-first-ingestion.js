@@ -12,7 +12,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { memoryChatFetch } from '../llm/groq-fallback.js';
+import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
@@ -33,6 +33,39 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
+
+const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
+
+export function normalizeUnifiedClaims(rawFacts, content, maxFacts) {
+  return (Array.isArray(rawFacts) ? rawFacts : [])
+    .filter((item) => item && typeof item.f === 'string' && item.f.trim().length >= 4
+      && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
+      && typeof item.source_quote === 'string' && item.source_quote.length >= 4
+      && content.includes(item.source_quote))
+    .slice(0, maxFacts)
+    .map((item) => {
+      const start = content.indexOf(item.source_quote);
+      const rated = Number(item.importance);
+      return {
+        t: (typeof item.t === 'string' && item.t.trim() && !isGarbageTitle(item.t))
+          ? item.t.trim().slice(0, 80)
+          : cleanTitleFrom(item.f, 48),
+        f: item.f.trim(),
+        memory_type: item.memory_type,
+        source_quote: item.source_quote,
+        source_start: start,
+        source_end: start + item.source_quote.length,
+        importance: Number.isFinite(rated) && rated > 0
+          ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
+          : 0.55,
+        entities: (Array.isArray(item.entities) ? item.entities : [])
+          .filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8),
+        rels: (Array.isArray(item.rels) ? item.rels : [])
+          .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
+      };
+    });
+}
 
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
@@ -599,20 +632,25 @@ Output the JSON object and nothing else.`;
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
   async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '' } = {}) {
-    const apiKey = process.env.GROQ_API_KEY;
-    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const route = memoryLLMRoute();
+    const apiKey = route?.key || process.env.GROQ_API_KEY;
+    const model = process.env.KB_UNIFIED_MODEL || route?.model || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
     const content = (window.content || '').slice(0, 6000);
     if (!apiKey || content.trim().length < 40) {
-      // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
-      return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
-        .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
+      // Evidence is already recall-ready. Never guess durable claims with a
+      // language-specific sentence splitter when enrichment is unavailable.
+      return [];
     }
-    const REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates'];
-    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, the RELATIONSHIPS between facts, and each fact's IMPORTANCE. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","importance":<0.0-1.0>,"entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
+    const REL_TYPES = INTRA_WINDOW_REL_TYPES;
+    const MEMORY_TYPES = DURABLE_EXTRACT_TYPES;
+    const sys = `You are a precise multilingual knowledge-extraction engine. From the SECTION below, select only reusable durable organizational claims and extract in ONE pass: memory type, atomic claim, exact source quote, canonical entities, relationships, and importance. Return ONLY JSON: {"facts":[{"t":"<short source-language topic>","f":"<complete standalone claim in the source language>","memory_type":"<fact|preference|decision|lesson|goal|event>","source_quote":"<verbatim contiguous substring copied exactly from SECTION>","importance":<0.0-1.0>,"entities":["Canonical Name", ...],"rels":[{"to":<index of another claim in THIS list>,"type":"<Extends|Mentions|Contradicts>"}, ...]}, ...]}.
 
 FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
 - "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize. Keep it SPECIFIC to THIS document — concrete subjects, real figures, named parties — not a generic restatement.
-- Extract only decision-relevant stated information (names, roles, products, specs, numbers, dates, decisions, events, causal claims). NON-REDUNDANT — never restate the same point; keep the single most specific.
+- Extract only reusable claims: stable facts/requirements/KPIs/specifications/policies, approved decisions, explicit preferences, commitments/goals, dated events, or validated lessons. Ordinary explanation, tentative language, questions, raw chat, and ambiguous content stay as evidence and MUST NOT be emitted.
+- "memory_type" must describe the claim itself. A relationship is never a memory type. Do not emit summaries or syntheses from one window.
+- "source_quote" MUST be a contiguous verbatim substring copied from SECTION with identical characters. It is provenance, not a paraphrase. If no exact quote supports the claim, omit the claim.
+- NON-REDUNDANT — never restate the same point; keep the single most specific.
 - SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
 - At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
 
@@ -627,8 +665,9 @@ ENTITY rules — ONE canonical name per real-world thing (so it never forks):
 - Use the FULL canonical name, not a partial — "Amar Sai Gadde" not "Amar"; "B&B Sinn für Marken" not "B&B" — and reuse that EXACT form for every mention.
 - Source language as written (do not translate); singular; drop legal suffixes; prefer full term over acronym unless the acronym is the proper name. 3-7 high-signal entities per fact max.
 
-RELATIONSHIP rules — only between facts in THIS list, only when genuinely related:
-- "Extends": one fact adds detail/nuance to another (same subject, complementary). "Mentions": two facts share a key entity but are otherwise distinct. "Contradicts": two facts state conflicting values for the same thing. "Updates": one fact supersedes another (rare within one section).
+RELATIONSHIP rules — only between claims in THIS list, only when genuinely related:
+- "Extends": one claim adds detail/nuance to another (same subject, complementary). "Mentions": two claims share a key entity but are otherwise distinct. "Contradicts": two claims state conflicting values for the same thing.
+- Never emit Updates here. Updates is a version transition and is created only by the atomic update operator after comparison with prior durable memory.
 - Reference the OTHER fact by its 0-based index in "facts". Omit "rels" or use [] when a fact stands alone. Do NOT invent edges to force connectivity.
 
 Output the JSON object and nothing else.`;
@@ -636,9 +675,11 @@ Output the JSON object and nothing else.`;
     const SCHEMA = {
       type: 'object', additionalProperties: false, required: ['facts'],
       properties: { facts: { type: 'array', items: {
-        type: 'object', additionalProperties: false, required: ['t', 'f', 'importance', 'entities', 'rels'],
+        type: 'object', additionalProperties: false, required: ['t', 'f', 'memory_type', 'source_quote', 'importance', 'entities', 'rels'],
         properties: {
           t: { type: 'string' }, f: { type: 'string' },
+          memory_type: { type: 'string', enum: MEMORY_TYPES },
+          source_quote: { type: 'string' },
           importance: { type: 'number' },
           entities: { type: 'array', items: { type: 'string' } },
           rels: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['to', 'type'],
@@ -668,27 +709,7 @@ Output the JSON object and nothing else.`;
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    return rawFacts
-      .filter((x) => x && typeof x.f === 'string' && x.f.trim().length >= 20)
-      .slice(0, maxFacts)
-      .map((x) => ({
-        t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim().slice(0, 80) : cleanTitleFrom(x.f, 48),
-        f: x.f.trim(),
-        // LLM-rated salience in the SAME pass (no extra call). Clamp 0.1-1.0;
-        // fall back to a content-signal heuristic if the model omitted/garbled it.
-        importance: (() => {
-          const n = Number(x.importance);
-          if (Number.isFinite(n) && n > 0) return Math.max(0.1, Math.min(1.0, Number(n.toFixed(3))));
-          const f = x.f || '';
-          let s = 0.55;
-          if (/\d/.test(f)) s += 0.1;                                  // has a number/date/figure
-          if (/(decision|deadline|budget|price|contract|agreed|will |must |launch|signed|€|\$|%)/i.test(f)) s += 0.12;
-          if ((Array.isArray(x.entities) ? x.entities.length : 0) >= 3) s += 0.08;
-          return Math.max(0.1, Math.min(0.95, Number(s.toFixed(3))));
-        })(),
-        entities: (Array.isArray(x.entities) ? x.entities : []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8),
-        rels: (Array.isArray(x.rels) ? x.rels : []).filter((r) => r && Number.isInteger(r.to) && REL_TYPES.includes(r.type)).slice(0, 5),
-      }));
+    return normalizeUnifiedClaims(rawFacts, content, maxFacts);
   }
 
   /**
@@ -698,6 +719,9 @@ Output the JSON object and nothing else.`;
    * (ingestMemory → agent, createRelationship → amrAddEdge for remote).
    */
   async _ingestUnifiedWindow(window, { userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '' }) {
+    if (!window?.segmentId) return [];
+    const extractionModel = process.env.KB_UNIFIED_MODEL || memoryLLMRoute()?.model
+      || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
     let facts = [];
     try {
       facts = await this._extractUnified(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
@@ -710,6 +734,8 @@ Output the JSON object and nothing else.`;
     const idByIdx = new Array(facts.length).fill(null);
     const factObjs = [];
     const embedPending = [];
+    const evidenceLinks = [];
+    const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
@@ -720,7 +746,8 @@ Output the JSON object and nothing else.`;
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
-        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(fact.memory_type === 'fact' ? ['extracted-fact'] : []),
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);
@@ -730,11 +757,18 @@ Output the JSON object and nothing else.`;
           scope: metadata.scope, visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           document_date: metadata.document_date || null,
           source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
-          metadata: { document_id: documentId, segment_id: window.segmentId || null, distill_agent: 'kb_unified_v1' },
+          metadata: {
+            document_id: documentId,
+            segment_id: window.segmentId || null,
+            source_start: fact.source_start,
+            source_end: fact.source_end,
+            source_quote: fact.source_quote,
+            distill_agent: 'kb_unified_v2',
+          },
           skip_fact_extraction: true, defer_entity_linking: true,
           skipSmartRouting: true, skipPredictCalibrate: true, skipAdvisoryLock: true,
           skip_relationship_classification: true, skip_contradiction_detection: true,
@@ -742,8 +776,12 @@ Output the JSON object and nothing else.`;
         const id = res?.memoryId || res?.id || null;
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
-        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: 'fact', tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null });
-        embedPending.push({ id, fact: fact.f, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: fact.memory_type, tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null });
+        embedPending.push({ id, fact: fact.f, memory_type: fact.memory_type, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        if (!orgIsRemote(orgId)) {
+          evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
+          derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
+        }
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
@@ -756,10 +794,14 @@ Output the JSON object and nothing else.`;
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
+    }
+    if (evidenceLinks.length) {
+      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
+      await this.db.memoryDerivation.createMany({ data: derivations, skipDuplicates: true });
     }
     // Intra-window typed edges (from the SAME structured call — coherent, no recall race).
     for (let i = 0; i < facts.length; i++) {
@@ -771,7 +813,7 @@ Output the JSON object and nothing else.`;
         try {
           await this.memoryGraphEngine.store.createRelationship({
             id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type, confidence: 0.85,
-            metadata: { created_by: 'kb_unified_v1', document_id: documentId, intra_window: true },
+            metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true },
           });
         } catch { /* best-effort; dup/FK tolerated */ }
       }
@@ -2240,6 +2282,8 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     const distillTargets = [];    // big-doc deferred fact distillation (P6) — fed after commit
     const evidenceLinkRows = []; // #6 — batched provenance inserts (was per-section)
     const derivationRows = [];
+    const unifiedEnabled = String(process.env.KB_UNIFIED_EXTRACT ?? 'true').toLowerCase() !== 'false'
+      && String(process.env.KB_UNIFIED_EXTRACT ?? 'true') !== '0';
 
     // Strategy: diversity-sampled promotion
     // 1. Always include first + last (document boundaries)
@@ -2251,15 +2295,16 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // Remove repeated page furniture (running header/footer) from the in-memory
     // segments BEFORE titling/promotion/distill — evidence (already persisted) is
     // untouched. Fixes identical "page-header" titles + header-polluted embeddings.
-    stripRepeatedFurniture(segments);
+    if (!unifiedEnabled) stripRepeatedFurniture(segments);
     const promotableSegments = (() => {
       if (!Array.isArray(segments) || segments.length === 0) return [];
       // P3 quality gate FIRST: drop boilerplate (imprint/masthead/ToC/page
       // furniture) and non-prose fragments BEFORE any selection, so boundary/
       // heading/sampling picks come from the clean pool. Fallback to the raw
       // list when the filter is too aggressive (tiny or unusual docs).
-      const cleanPool = segments.filter((s) =>
-        !isBoilerplateSegment(s.content, s.metadata?.heading) && isQualityContent(s.content));
+      const cleanPool = unifiedEnabled
+        ? segments.filter((segment) => String(segment?.content || '').trim().length >= 40)
+        : segments.filter((s) => !isBoilerplateSegment(s.content, s.metadata?.heading) && isQualityContent(s.content));
       const pool = cleanPool.length >= Math.min(MIN_PROMOTE, segments.length) ? cleanPool : segments;
       if (pool.length !== segments.length) {
         this.logger.info?.(`[kb-quality] ${documentId.slice(0, 8)}: ${segments.length - pool.length}/${segments.length} segments dropped as boilerplate/low-quality`);
@@ -2328,12 +2373,14 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       // isn't starved by a single front-loaded window.
       const fullText = promotableSegments.map((s) => (s.content || '').trim()).filter(Boolean).join('\n\n');
       let winChunks = [];
-      try {
-        const { chunkText } = await import('./document-chunker.js');
-        winChunks = (chunkText(fullText, { targetSize: WIN, maxSize: Math.round(WIN * 1.6), minSize: 200, overlapSize: 0 }) || [])
-          .map((c) => (c && c.text ? c.text : '')).filter((t) => t && t.trim().length >= 40);
-      } catch (e) {
-        this.logger.warn?.(`[kb-facts-only] re-window failed, using segments: ${e.message}`);
+      if (!unifiedEnabled) {
+        try {
+          const { chunkText } = await import('./document-chunker.js');
+          winChunks = (chunkText(fullText, { targetSize: WIN, maxSize: Math.round(WIN * 1.6), minSize: 200, overlapSize: 0 }) || [])
+            .map((c) => (c && c.text ? c.text : '')).filter((t) => t && t.trim().length >= 40);
+        } catch (e) {
+          this.logger.warn?.(`[kb-facts-only] re-window failed, using segments: ${e.message}`);
+        }
       }
       if (!winChunks.length) winChunks = promotableSegments.map((s) => s.content).filter(Boolean);
       const targets = winChunks.map((content, i) => ({
@@ -2351,28 +2398,27 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       // emits facts + canonical entities + intra-window relationships TOGETHER (coherent, low-noise,
       // alias-collapsed, ~1 call/window). The recall co-mention pass below then adds CROSS-DOC/TIME edges
       // only (no batch peers → no duplicate intra-doc edges).
-      if (String(process.env.KB_UNIFIED_EXTRACT ?? 'false').toLowerCase() === 'true' || String(process.env.KB_UNIFIED_EXTRACT ?? '') === '1') {
+      if (unifiedEnabled) {
         const docTitle = metadata.documentTitle || metadata.filename || '';
         const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
         const DOC_CAP = Number(process.env.KB_UNIFIED_DOC_CAP || 30); // rich-but-bounded total facts/doc
-        // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
-        // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
-        const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
+        // Preserve the source segment identity for exact span citations. The old
+        // full-text re-window assigned chunks to segments by array position,
+        // which could cite the wrong evidence row.
         const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 11);
-        let uWindows = targets;
-        try {
-          const { chunkText } = await import('./document-chunker.js');
-          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 0 }) || [])
-            .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
-          if (uc.length) uWindows = uc.map((content, i) => ({
-            segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
-            content, heading: null, page: null,
-            maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * UFPK))),
-            scope: metadata.scope, visibility: metadata.visibility,
+        const uWindows = promotableSegments
+          .filter((segment) => segment?.id && String(segment.content || '').trim().length >= 40)
+          .map((segment) => ({
+            segmentId: segment.id,
+            content: String(segment.content).slice(0, 6000),
+            heading: segment.metadata?.heading || null,
+            page: segment.startPage || segment.metadata?.page || null,
+            maxFacts: Math.max(1, Math.min(12, Math.round((String(segment.content).length / 1000) * UFPK))),
+            scope: metadata.scope,
+            visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           }));
-        } catch { /* keep targets */ }
         const uFacts = [];
         let wi = 0;
         // RESERVE the budget synchronously BEFORE each window's async call. The old code clamped

@@ -51,6 +51,36 @@ const HOP3_LIVE_LIMIT          = 5;
 // beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
 const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
 
+// Server-owned normalization for the additive recall contract. Legacy modes
+// retain their current behavior; only fact/explain/full opt into the new plan.
+// This keeps HTTP and MCP callers on the same public endpoint while preventing
+// callers from bypassing bounded retrieval with arbitrary plan fields.
+export function resolveRecallPlan(input = {}) {
+  const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
+  const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
+  const mode = explicit ? requested : 'fact';
+  const temporal = input.temporal === 'known_at' || input.valid_at ? 'known_at' : 'current';
+  const budget = mode === 'full' ? 24_000 : mode === 'explain' ? 8_000 : 2_000;
+
+  return {
+    mode,
+    requested_mode: requested,
+    legacy: !explicit,
+    temporal,
+    max_graph_hops: mode === 'fact' ? 0 : 1,
+    context_budget: budget,
+    // Existing mode values retain their event-driven behavior. New modes are
+    // deliberate: fact is fast-only; explain/full permit evidence expansion.
+    expand_evidence: !explicit
+      ? requested === 'auto' || requested === 'hybrid' || requested === 'evidence'
+      : mode !== 'fact',
+    include_live: explicit && mode === 'fact'
+      ? false
+      : (!explicit ? input.include_live !== false : input.include_live === true),
+    latency_budget_ms: mode === 'full' ? 3_000 : mode === 'explain' ? 2_000 : null,
+  };
+}
+
 // Event-time ranking boost: when the query carries a temporal token
 // (today/yesterday/last week/ISO date/month-name), multiplicatively lift
 // candidates whose `ts:YYYY-MM-DD` / `time:*` tags fall in the window.

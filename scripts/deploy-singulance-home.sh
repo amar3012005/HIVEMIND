@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deploy the committed Da-vinci frontend revision that serves singulancelabs.com
-# and next.singulancelabs.com/hivemind. It only replaces hm-fe.
+# Deploy the committed Da-vinci frontend revision behind
+# next.singulancelabs.com/hivemind. It only recreates the compose frontend.
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -11,8 +11,8 @@ SHA="$(git -C "$FRONTEND" rev-parse --verify "$REF")"
 SHORT_SHA="${SHA:0:12}"
 BRANCH="$(git -C "$FRONTEND" symbolic-ref --quiet --short HEAD)"
 REMOTE="root@$HOST"
-WORKDIR="/root/singulance-home-$SHORT_SHA"
-CANDIDATE="hivemind/fe:home-candidate-$SHORT_SHA"
+WORKDIR="/root/singulance-frontend-$SHORT_SHA"
+CANDIDATE="hivemind/fe:candidate-$SHORT_SHA-single"
 
 git -C "$FRONTEND" fetch origin --quiet
 git -C "$FRONTEND" cat-file -e "$SHA^{commit}"
@@ -26,29 +26,29 @@ CANDIDATE="$3"
 REPO="https://github.com/amar3012005/Da-vinci.git"
 
 rm -rf "$WORKDIR"
-trap 'docker rm -f hm-fe-home-smoke >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
+trap 'docker rm -f hm-frontend-smoke >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
 git clone --quiet "$REPO" "$WORKDIR"
 git -C "$WORKDIR" checkout --quiet "$SHA"
 
 docker build -t "$CANDIDATE" "$WORKDIR"
-docker run -d --name hm-fe-home-smoke --rm -p 127.0.0.1:18088:80 "$CANDIDATE" >/dev/null
+docker run -d --name hm-frontend-smoke --rm -p 127.0.0.1:18088:80 "$CANDIDATE" >/dev/null
 sleep 2
 test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18088/hivemind)" = "200"
 
-PREVIOUS="$(docker inspect hm-fe --format '{{.Image}}')"
-docker tag "$PREVIOUS" hivemind/fe:home-stable
-docker tag "$CANDIDATE" hivemind/fe:home-latest
-docker rm -f hm-fe >/dev/null
+PREVIOUS="$(docker inspect hivemind-next-frontend-1 --format '{{.Image}}')"
+docker tag "$PREVIOUS" hivemind/fe:stable-single
+docker tag "$CANDIDATE" hivemind/fe:latest-single
 
-if ! docker run -d --name hm-fe --restart unless-stopped -p 8088:80 hivemind/fe:home-latest >/dev/null; then
-  docker run -d --name hm-fe --restart unless-stopped -p 8088:80 "$PREVIOUS" >/dev/null
+if ! (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend); then
+  docker tag "$PREVIOUS" hivemind/fe:latest-single
+  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
   exit 1
 fi
 
 sleep 2
-if ! test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/hivemind)" = "200"; then
-  docker rm -f hm-fe >/dev/null
-  docker run -d --name hm-fe --restart unless-stopped -p 8088:80 "$PREVIOUS" >/dev/null
+if ! test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:2388/hivemind)" = "200"; then
+  docker tag "$PREVIOUS" hivemind/fe:latest-single
+  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
   exit 1
 fi
 

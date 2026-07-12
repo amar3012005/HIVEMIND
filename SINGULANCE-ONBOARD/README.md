@@ -24,12 +24,14 @@ identity at the top left changes with the active area: HIVEMIND, HyperAgents, or
 
 ## Read In This Order
 
-1. [SESSION-START.md](SESSION-START.md) - mandatory orientation and safety checks.
+1. [SKILL.md](SKILL.md) - mandatory production release, rollback, and image-retention rules.
+2. [SESSION-START.md](SESSION-START.md) - mandatory orientation and safety checks.
 2. [PRODUCTS.md](PRODUCTS.md) - user-facing scope and ownership boundaries.
 3. [ARCHITECTURE.md](ARCHITECTURE.md) - services, data planes, and request flow.
 4. [MEMORY-LAYER.md](MEMORY-LAYER.md) - the critical ingestion/recall substrate.
 5. [OPERATIONS.md](OPERATIONS.md) - deployment rules and safe container retirement.
 6. [SECURITY.md](SECURITY.md) - hardened controls, open risks, and next security work.
+7. [RELEASE-POLICY.md](RELEASE-POLICY.md) - stable/latest service map and retention policy.
 
 ## Non-Negotiable Principles
 

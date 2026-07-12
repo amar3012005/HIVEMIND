@@ -18,7 +18,8 @@ production work, and untraced tenant-boundary changes.
 
 ## Production Safety
 
-- Production host: `root@singulancelabs.com`.
+- Production host: `root@singulance`; if the Tailscale route is unavailable,
+  verify public DNS first and use `root@46.224.4.164`. Do not use `myserver`.
 - `/root/hivemind` is intentionally dirty. Never pull, reset, or build from it.
 - Build from the clean deployment checkout specified in
   [`.claude/INSTRUCTIONS.md`](../.claude/INSTRUCTIONS.md).

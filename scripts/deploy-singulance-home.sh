@@ -39,16 +39,16 @@ PREVIOUS="$(docker inspect hivemind-next-frontend-1 --format '{{.Image}}')"
 docker tag "$PREVIOUS" hivemind/fe:stable-single
 docker tag "$CANDIDATE" hivemind/fe:latest-single
 
-if ! (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend); then
+if ! (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose -f docker-compose.next.yml --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend); then
   docker tag "$PREVIOUS" hivemind/fe:latest-single
-  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
+  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose -f docker-compose.next.yml --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
   exit 1
 fi
 
 sleep 2
 if ! test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:2388/hivemind)" = "200"; then
   docker tag "$PREVIOUS" hivemind/fe:latest-single
-  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
+  (cd /root/hivemind-next/infra && NEXT_VERSION=latest docker compose -f docker-compose.next.yml --env-file /root/hivemind-next/.env.embedding-canary-runtime --profile single up -d --no-deps --force-recreate frontend)
   exit 1
 fi
 

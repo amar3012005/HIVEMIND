@@ -273,6 +273,7 @@ function payloadOf(org, rec) {
 // ── per-org context, LRU-capped ─────────────────────────────────────────────────────────────────
 // Map preserves insertion order; re-inserting on access implements LRU eviction (evict oldest key).
 const ctxCache = new Map();
+const ctxPending = new Map();
 
 async function getCtx(orgId) {
   if (ctxCache.has(orgId)) {
@@ -280,24 +281,29 @@ async function getCtx(orgId) {
     ctxCache.delete(orgId); ctxCache.set(orgId, c); // bump to MRU
     return c;
   }
-  if (!schemaEnsured) schemaEnsured = ensureSchema();
-  await schemaEnsured;
-  const org = orgId;
-  const qcoll = `org_${org}`.replace(/[^a-zA-Z0-9]/g, '_');
-  await ensureQdrant(qcoll);
-  const amr = new AmrMemoryStore({ dataRoot: DATA_ROOT, org, dim: DIM });
-  const ctx = { org, amr, qcoll, routes: null };
-  ctx.routes = routesFor(ctx);
-  ctxCache.set(orgId, ctx);
-  ready = true;
-  console.log(`[embedded-agent] shard open org=${org} live=${amr.liveCount()}`);
-  if (ctxCache.size > MAX_OPEN) {
-    const oldestKey = ctxCache.keys().next().value;
-    const oldest = ctxCache.get(oldestKey);
-    ctxCache.delete(oldestKey);
-    try { oldest.amr.flush(); } catch { /* best-effort */ }
-  }
-  return ctx;
+  if (ctxPending.has(orgId)) return ctxPending.get(orgId);
+  const opening = (async () => {
+    if (!schemaEnsured) schemaEnsured = ensureSchema();
+    await schemaEnsured;
+    const org = orgId;
+    const qcoll = `org_${org}`.replace(/[^a-zA-Z0-9]/g, '_');
+    await ensureQdrant(qcoll);
+    const amr = new AmrMemoryStore({ dataRoot: DATA_ROOT, org, dim: DIM });
+    const ctx = { org, amr, qcoll, routes: null };
+    ctx.routes = routesFor(ctx);
+    ctxCache.set(orgId, ctx);
+    ready = true;
+    console.log(`[embedded-agent] shard open org=${org} live=${amr.liveCount()}`);
+    if (ctxCache.size > MAX_OPEN) {
+      const oldestKey = ctxCache.keys().next().value;
+      const oldest = ctxCache.get(oldestKey);
+      ctxCache.delete(oldestKey);
+      try { oldest.amr.flush(); } catch { /* best-effort */ }
+    }
+    return ctx;
+  })();
+  ctxPending.set(orgId, opening);
+  try { return await opening; } finally { ctxPending.delete(orgId); }
 }
 
 // ── route table, built once per ctx ─────────────────────────────────────────────────────────────

@@ -306,6 +306,71 @@ export class EvidenceRetrievalService {
   }
 
   /**
+   * Hydrate a bounded, ordered window around matched source segments.
+   * This is used only by explicit full recall; matched evidence remains the
+   * fallback when a remote store cannot enumerate document order.
+   */
+  async hydrateAdjacentEvidence({ anchors, userId, orgId, perDocument = 3, total = 12 }) {
+    const matched = (anchors || []).filter((item) =>
+      item?.documentId && Number.isInteger(item?.metadata?.segmentIndex));
+    if (!matched.length || orgIsRemote(orgId)) return matched.slice(0, total);
+
+    const windows = new Map();
+    for (const item of matched) {
+      if (windows.has(item.documentId)) continue;
+      const index = item.metadata.segmentIndex;
+      const before = Math.floor((perDocument - 1) / 2);
+      windows.set(item.documentId, {
+        gte: Math.max(0, index - before),
+        lte: index + (perDocument - before - 1),
+      });
+    }
+
+    const segments = await this.db.knowledgeSegment.findMany({
+      where: {
+        userId,
+        orgId,
+        OR: [...windows].map(([documentId, range]) => ({
+          documentId,
+          segmentIndex: range,
+        })),
+      },
+      include: {
+        document: {
+          select: {
+            id: true,
+            title: true,
+            documentType: true,
+            sourcePlatform: true,
+            sourceUrl: true,
+            documentDate: true,
+          },
+        },
+      },
+      orderBy: [{ documentId: 'asc' }, { segmentIndex: 'asc' }],
+      take: total,
+    });
+
+    const scoreByDocument = new Map(matched.map((item) => [item.documentId, item.score ?? null]));
+    return segments.map((segment) => ({
+      type: 'evidence_segment',
+      segmentId: segment.id,
+      documentId: segment.documentId,
+      content: segment.content,
+      snippet: segment.content,
+      score: scoreByDocument.get(segment.documentId),
+      document: segment.document,
+      metadata: {
+        segmentType: segment.segmentType,
+        segmentIndex: segment.segmentIndex,
+        wordCount: segment.wordCount,
+        startPage: segment.startPage,
+        endPage: segment.endPage,
+      },
+    }));
+  }
+
+  /**
    * Get all evidence for a document
    * @param {string} documentId
    * @param {string} userId

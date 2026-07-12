@@ -19109,6 +19109,8 @@ exit \$RC
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
             try {
+              const { resolveRecallPlan } = await import('./memory/recall-router.js');
+              const recallPlan = resolveRecallPlan(body);
               // Apply dynamic weights from Operator Layer if available
               let recallWeights = body.weights;
               if (cognitiveOperator && !recallWeights) {
@@ -19208,7 +19210,7 @@ exit \$RC
                 preferred_source_platforms: body.preferred_source_platforms || [],
                 preferred_tags: body.preferred_tags || [],
                 date_range: body.date_range || temporalExpansion.dateRange || null,
-                max_memories: body.max_memories || 5,
+                max_memories: recallPlan.legacy ? (body.max_memories || 5) : recallPlan.max_memories,
                 weights: recallWeights,
                 // Type-specific filters (exposed for retrieval routing)
                 is_latest: body.is_latest,              // boolean — filter to latest versions only
@@ -19400,8 +19402,6 @@ exit \$RC
               // and only delegates the evidence/live fan-out to the unified
               // router so HTTP callers get the same memory-first behavior as
               // the agent tool (no regex classifier, anchors come from tags).
-              const { resolveRecallPlan } = await import('./memory/recall-router.js');
-              const recallPlan = resolveRecallPlan(body);
               const wantEvidence = recallPlan.expand_evidence;
               const memoryHits = Array.isArray(result.memories) ? result.memories : [];
               // Additive response metadata. Existing callers can ignore it;
@@ -19452,14 +19452,20 @@ exit \$RC
                 //    Replaces the old "sparseMemories || citationIntent" regex
                 //    heuristic with the tag-driven inspection logic.
                 try {
-                  const { recallEnhance } = await import('./memory/recall-router.js');
+                  const { recallEnhance, buildEvidencePacket } = await import('./memory/recall-router.js');
+                  const expansionBudgetMs = recallPlan.latency_budget_ms
+                    ? Math.max(25, recallPlan.latency_budget_ms - (Date.now() - _recallT0))
+                    : null;
                   const enhanced = await recallEnhance({
                     memories: memoryHits,
                     query: body.query_context || body.context || '',
-                    ctx: { userId, orgId },
+                    ctx: { userId, orgId, projectId: recallProjectId, accessContext: recallAccessCtx },
                     evidenceService: evidenceRetrieval,
                     prisma,
                     includeLive: recallPlan.include_live,
+                    includeGraph: !recallPlan.legacy && recallPlan.max_graph_hops === 1,
+                    includeAdjacent: recallPlan.mode === 'full',
+                    deadlineMs: expansionBudgetMs,
                   });
                   // Dedup evidence against inline-attached links (same segment
                   // can't show up twice in the result).
@@ -19472,8 +19478,22 @@ exit \$RC
                   result.live = enhanced.live || [];
                   result.live_count = result.live.length;
                   result.recall_trace = enhanced.trace;
-                  const reasons = [enhanced.trace?.evidence_trigger, enhanced.trace?.live_trigger];
+                  const reasons = [enhanced.trace?.evidence_trigger, enhanced.trace?.live_trigger, enhanced.trace?.graph_trigger, enhanced.trace?.adjacent_trigger];
                   if (reasons.includes('timeout')) result.cutoff_reason = 'latency_budget';
+                  if (recallPlan.latency_budget_ms && Date.now() - _recallT0 >= recallPlan.latency_budget_ms) {
+                    result.cutoff_reason = 'latency_budget';
+                  }
+                  if (!recallPlan.legacy) {
+                    result.evidence_packet = buildEvidencePacket({
+                      memories: memoryHits,
+                      evidence: [...memoryHits.flatMap((m) => m.evidence || []), ...(enhanced.evidence || [])],
+                      graph: enhanced.graph || [],
+                      live: enhanced.live || [],
+                      plan: recallPlan,
+                      trace: enhanced.trace,
+                      cutoffReason: result.cutoff_reason || null,
+                    });
+                  }
                 } catch (enhErr) {
                   console.warn(`[recall] router enhance failed: ${enhErr.message}`);
                   result.evidence = [];

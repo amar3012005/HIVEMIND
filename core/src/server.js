@@ -19400,12 +19400,16 @@ exit \$RC
               // and only delegates the evidence/live fan-out to the unified
               // router so HTTP callers get the same memory-first behavior as
               // the agent tool (no regex classifier, anchors come from tags).
-              const mode = body.mode || 'auto';
-              const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
+              const { resolveRecallPlan } = await import('./memory/recall-router.js');
+              const recallPlan = resolveRecallPlan(body);
+              const wantEvidence = recallPlan.expand_evidence;
               const memoryHits = Array.isArray(result.memories) ? result.memories : [];
-              result.mode_used = mode;
+              // Additive response metadata. Existing callers can ignore it;
+              // new surfaces can render coverage/cutoff state from one source.
+              result.mode_used = body.mode || 'auto';
+              result.recall_plan = recallPlan;
 
-              if (wantEvidence && mode !== 'memory') {
+              if (wantEvidence) {
                 // 1. Inline evidence_links per memory (SQL join — independent
                 //    of vector search; required for citation UI).
                 try {
@@ -19455,7 +19459,7 @@ exit \$RC
                     ctx: { userId, orgId },
                     evidenceService: evidenceRetrieval,
                     prisma,
-                    includeLive: body.include_live !== false,
+                    includeLive: recallPlan.include_live,
                   });
                   // Dedup evidence against inline-attached links (same segment
                   // can't show up twice in the result).
@@ -19468,6 +19472,8 @@ exit \$RC
                   result.live = enhanced.live || [];
                   result.live_count = result.live.length;
                   result.recall_trace = enhanced.trace;
+                  const reasons = [enhanced.trace?.evidence_trigger, enhanced.trace?.live_trigger];
+                  if (reasons.includes('timeout')) result.cutoff_reason = 'latency_budget';
                 } catch (enhErr) {
                   console.warn(`[recall] router enhance failed: ${enhErr.message}`);
                   result.evidence = [];

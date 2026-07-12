@@ -68,6 +68,7 @@ export function resolveRecallPlan(input = {}) {
     legacy: !explicit,
     temporal,
     max_graph_hops: mode === 'fact' ? 0 : 1,
+    max_memories: 5,
     context_budget: budget,
     // Existing mode values retain their event-driven behavior. New modes are
     // deliberate: fact is fast-only; explain/full permit evidence expansion.
@@ -781,28 +782,68 @@ export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) 
 // @returns {Promise<{ evidence, live, trace }>}
 export async function recallEnhance({
   memories, query, ctx, evidenceService, prisma, includeLive = true,
+  includeGraph = false, includeAdjacent = false, deadlineMs = null,
 }) {
   const startedAt = Date.now();
   const inspection = inspectMemories(memories || []);
+  const cap = (normal) => deadlineMs ? Math.min(normal, deadlineMs) : normal;
 
-  const [hop2, hop3] = await Promise.all([
+  const [hop2, hop3, graph] = await Promise.all([
     withTimeout(
       hop2Evidence({ evidenceService, query, ctx, inspection, prisma }),
-      HOP2_TIMEOUT_MS,
+      cap(HOP2_TIMEOUT_MS),
       { items: [], reason: 'timeout' },
     ),
     !includeLive
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : withTimeout(
+          hop3Live({ prisma, query, ctx, inspection }),
+          cap(HOP3_TIMEOUT_MS),
+          { items: [], reason: 'timeout' },
+        ),
+    !includeGraph
       ? Promise.resolve({ items: [], reason: 'disabled' })
       : withTimeout(
-          hop3Live({ prisma, query, ctx, inspection }),
-          HOP3_TIMEOUT_MS,
+          loadTypedGraphEvidence({
+            prisma,
+            memoryIds: (memories || []).map((m) => m.id).filter(Boolean),
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            accessContext: ctx.accessContext,
+          }),
+          cap(700),
           { items: [], reason: 'timeout' },
         ),
   ]);
 
+  let evidence = hop2.items;
+  let adjacentReason = 'disabled';
+  if (includeAdjacent && evidence.length && evidenceService?.hydrateAdjacentEvidence) {
+    const elapsed = Date.now() - startedAt;
+    const remaining = deadlineMs ? Math.max(1, deadlineMs - elapsed) : 900;
+    const adjacent = await withTimeout(
+      evidenceService.hydrateAdjacentEvidence({
+        anchors: evidence,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        perDocument: 3,
+        total: 12,
+      }),
+      Math.min(900, remaining),
+      null,
+    );
+    if (adjacent) {
+      evidence = adjacent;
+      adjacentReason = 'ordered-window';
+    } else {
+      adjacentReason = 'timeout';
+    }
+  }
+
   return {
-    evidence: hop2.items,
+    evidence,
     live:     hop3.items,
+    graph:    graph.items,
     trace: {
       sparse:            inspection.sparse,
       anchors: {
@@ -813,8 +854,104 @@ export async function recallEnhance({
       },
       evidence_trigger:  hop2.reason,
       live_trigger:      hop3.reason,
+      graph_trigger:     graph.reason,
+      adjacent_trigger:  adjacentReason,
       latency_ms:        { enhance: Date.now() - startedAt },
     },
+  };
+}
+
+export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {} }) {
+  if (!prisma?.relationship || !memoryIds.length || !orgId) return { items: [], reason: null };
+  const rows = await prisma.relationship.findMany({
+    where: {
+      OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }],
+      fromMemory: { orgId, deletedAt: null },
+      toMemory: { orgId, deletedAt: null },
+    },
+    select: {
+      fromId: true, toId: true, type: true, confidence: true, metadata: true, createdAt: true,
+      fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, memoryProjects: { select: { projectId: true } } } },
+      toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, memoryProjects: { select: { projectId: true } } } },
+    },
+    take: 24,
+  });
+  const projectIds = new Set(accessContext?.projectIds || []);
+  const teamIds = new Set(accessContext?.teamIds || []);
+  const visible = (m) => {
+    if (!m) return false;
+    if (m.scope === 'personal') return m.userId === userId;
+    if (m.scope === 'project') {
+      const ids = [m.projectId, ...(m.memoryProjects || []).map((p) => p.projectId)].filter(Boolean);
+      return ids.some((id) => projectIds.has(id));
+    }
+    if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
+    return true;
+  };
+  return {
+    reason: rows.length ? 'typed-one-hop' : null,
+    items: rows.filter((r) => visible(r.fromMemory) && visible(r.toMemory)).map((r) => ({
+      type: r.type,
+      from_id: r.fromId,
+      to_id: r.toId,
+      confidence: r.confidence,
+      created_at: r.createdAt,
+      metadata: r.metadata || {},
+      related: [r.fromMemory, r.toMemory]
+        .filter((m) => !memoryIds.includes(m.id))
+        .map((m) => ({ id: m.id, title: m.title, content: String(m.content || '').slice(0, 400), is_latest: m.isLatest })),
+    })),
+  };
+}
+
+export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], plan, trace, cutoffReason = null }) {
+  const full = plan?.mode === 'full';
+  const totalCap = full ? 12 : 8;
+  const perDocCap = 3;
+  const perDoc = new Map();
+  const sourceSections = [];
+  for (const item of evidence) {
+    const documentId = item.documentId || item.document_id || item.document?.id || null;
+    const key = documentId || 'unknown';
+    if ((perDoc.get(key) || 0) >= perDocCap || sourceSections.length >= totalCap) continue;
+    perDoc.set(key, (perDoc.get(key) || 0) + 1);
+    sourceSections.push({
+      segment_id: item.segmentId || item.segment_id || null,
+      document_id: documentId,
+      document_title: item.document?.title || item.document_title || null,
+      source_platform: item.document?.sourcePlatform || item.source_platform || null,
+      content: String(item.content || item.snippet || item.excerpt || '').slice(0, full ? 2400 : 900),
+      score: item.score ?? null,
+      page: item.metadata?.startPage || item.page || null,
+      segment_index: item.metadata?.segmentIndex ?? null,
+    });
+  }
+  const citations = [];
+  const seen = new Set();
+  for (const section of sourceSections) {
+    const key = section.segment_id || `${section.document_id}:${section.page || ''}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    citations.push({ segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
+  }
+  const conflicts = graph.filter((edge) => String(edge.type).toLowerCase() === 'contradicts');
+  return {
+    mode: plan?.mode || 'fact',
+    anchors: memories.slice(0, 5).map((m) => ({ id: m.id, title: m.title || null, score: m.score ?? null })),
+    facts: memories.slice(0, 5),
+    source_sections: sourceSections,
+    graph_evidence: graph,
+    conflicts,
+    live_evidence: live,
+    citations,
+    source_coverage: {
+      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
+      segments: sourceSections.length,
+      graph_edges: graph.length,
+      live_items: live.length,
+    },
+    cutoff_reason: cutoffReason,
+    trace,
   };
 }
 

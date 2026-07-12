@@ -125,6 +125,10 @@ function isGroqChatUrl(url) {
 }
 
 function logFallback(model, reason) {
+  if (reason === 'openrouter-primary') {
+    console.log(`[llm-route] OpenRouter primary model=${model}`);
+    return;
+  }
   // warn (not log): a Groq outage is an operational signal worth surfacing.
   console.warn(`[groq-fallback] Groq failed (${reason}) → OpenRouter replay model=${model}`);
 }

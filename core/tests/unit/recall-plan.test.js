@@ -15,6 +15,7 @@ test('explicit fact stays on the fast recall path', () => {
   assert.equal(plan.expand_evidence, false);
   assert.equal(plan.include_live, false);
   assert.equal(plan.max_graph_hops, 0);
+  assert.equal(plan.max_memories, 5);
   assert.equal(plan.context_budget, 2_000);
   assert.equal(plan.temporal, 'known_at');
 });

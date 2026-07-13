@@ -167,12 +167,14 @@ export async function deletePromotionCoupon(couponId) {
   return stripe.coupons.del(couponId);
 }
 
-export async function createEnterpriseCheckout({ customerId, orgId, userId, phase, terms }) {
-  const stripe = await getStripe();
+export async function createEnterpriseCheckout({ customerId, orgId, userId, phase, terms, stripeClient = null }) {
+  // The optional client keeps Checkout payloads unit-testable without network I/O.
+  const stripe = stripeClient || await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const urls = resolveHostedBillingUrls();
   const onboarding = phase === 'onboarding';
   const amount = onboarding ? terms.onboarding_price_cents : terms.runway_monthly_cents;
+  const metadata = { hivemind_org_id: orgId, hivemind_user_id: userId, hivemind_enterprise_phase: phase };
   return stripe.checkout.sessions.create({
     mode: onboarding ? 'payment' : 'subscription', customer: customerId,
     line_items: [{ quantity: 1, price_data: {
@@ -182,8 +184,11 @@ export async function createEnterpriseCheckout({ customerId, orgId, userId, phas
     }}],
     success_url: `${urls.success}&enterprise_phase=${phase}`,
     cancel_url: urls.cancel,
-    metadata: { hivemind_org_id: orgId, hivemind_user_id: userId, hivemind_enterprise_phase: phase },
-    ...(!onboarding ? { subscription_data: { metadata: { hivemind_org_id: orgId, hivemind_enterprise_phase: phase } } } : {}),
+    metadata,
+    // Payment-mode Checkout does not copy session metadata to the resulting
+    // PaymentIntent. Add it explicitly so payment_intent.succeeded can be
+    // reconciled without guessing from a customer or amount.
+    ...(onboarding ? { payment_intent_data: { metadata } } : { subscription_data: { metadata } }),
   });
 }
 

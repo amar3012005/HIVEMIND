@@ -61,4 +61,22 @@ describe('stripe billing urls and metadata', () => {
     assert.equal(stripeMod.isEntitledSubscriptionStatus('trialing'), true);
     assert.equal(stripeMod.isEntitledSubscriptionStatus('past_due'), false);
   });
+
+  it('copies enterprise onboarding identity to the PaymentIntent metadata', async () => {
+    const stripeMod = await loadStripeModule();
+    let payload;
+    const session = await stripeMod.createEnterpriseCheckout({
+      customerId: 'cus_test', orgId: 'org_123', userId: 'user_123', phase: 'onboarding',
+      terms: { onboarding_price_cents: 100000, runway_monthly_cents: 250000, currency: 'EUR' },
+      stripeClient: { checkout: { sessions: { create: async (value) => { payload = value; return { id: 'cs_test' }; } } } },
+    });
+
+    assert.equal(session.id, 'cs_test');
+    assert.equal(payload.mode, 'payment');
+    assert.deepEqual(payload.payment_intent_data.metadata, {
+      hivemind_org_id: 'org_123',
+      hivemind_user_id: 'user_123',
+      hivemind_enterprise_phase: 'onboarding',
+    });
+  });
 });

@@ -8806,14 +8806,34 @@ Write the persona now.`;
       if (!billingMod.isEnabled()) {
         return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
       }
-      if (plansMod.isEnterpriseWorkspace(org)) {
-        return jsonResponse(res, { error: 'Enterprise billing is managed outside self-serve checkout' }, 409);
-      }
       if (!org.stripeCustomerId) {
         return jsonResponse(res, { reconciled: false, reason: 'no_customer' }, 412);
       }
       try {
         const stripe = await billingMod.getStripe();
+        if (plansMod.isEnterpriseWorkspace(org)) {
+          const phase = plansMod.getEnterpriseBillingPhase(org);
+          const sessions = await stripe.checkout.sessions.list({ customer: org.stripeCustomerId, limit: 20 });
+          const paid = sessions.data.find((session) => (
+            session.payment_status === 'paid'
+            && session.metadata?.hivemind_org_id === orgId
+            && session.metadata?.hivemind_enterprise_phase === phase
+          ));
+          if (!paid) return jsonResponse(res, { reconciled: false, reason: 'no_paid_enterprise_checkout' }, 409);
+          const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(paid);
+          const status = phase === 'onboarding' ? 'onboarding_paid' : 'active';
+          await prisma.organization.update({ where: { id: orgId }, data: {
+            subscriptionStatus: status,
+            ...(subscriptionId ? { stripeSubscriptionId: subscriptionId } : {}),
+          }});
+          audit({
+            organizationId: orgId, userId,
+            eventType: 'billing.enterprise_reconciled', eventCategory: 'billing', action: 'update',
+            resourceType: 'checkout_session', resourceId: paid.id,
+            metadata: { phase, payment_status: paid.payment_status }, ..._reqMeta(req),
+          });
+          return jsonResponse(res, { reconciled: true, plan: 'enterprise', phase, subscription_status: status });
+        }
         const subscriptions = await stripe.subscriptions.list({
           customer: org.stripeCustomerId,
           status: 'all',
@@ -8983,6 +9003,20 @@ Write the persona now.`;
                 data: { redemptionCount: { increment: 1 } },
               });
             }
+          }
+          break;
+        }
+        case 'payment_intent.succeeded': {
+          const enterprisePhase = obj.metadata?.hivemind_enterprise_phase;
+          if (
+            org
+            && plansMod.isEnterpriseWorkspace(org)
+            && (enterprisePhase === 'onboarding' || enterprisePhase === 'runway')
+            && obj.metadata?.hivemind_org_id === org.id
+          ) {
+            await prisma.organization.update({ where: { id: org.id }, data: {
+              subscriptionStatus: enterprisePhase === 'onboarding' ? 'onboarding_paid' : 'active',
+            }});
           }
           break;
         }

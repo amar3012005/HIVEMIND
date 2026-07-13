@@ -604,6 +604,139 @@ export const GOOGLE_TOOLS = {
       return { spreadsheetId: id, range: r.range || range, rows };
     },
   },
+
+  // ── Google Calendar toolkit — global (HyperAgents rooms + TARA voice both
+  //    call these via /api/connectors/google/exec). Calendar REST v3. ──────────
+  calendar_list_calendars: {
+    provider: 'google-calendar',
+    description: 'List the connected account\'s calendars. args: {}. Returns { calendars: [{id, summary, primary, timeZone}] }.',
+    run: async (token) => {
+      const r = await g('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50', token);
+      return { calendars: (r.items || []).map(c => ({ id: c.id, summary: c.summary, primary: !!c.primary, timeZone: c.timeZone })) };
+    },
+  },
+  calendar_list_events: {
+    provider: 'google-calendar',
+    description: "List upcoming events. args: { calendarId (default 'primary'), timeMin (ISO, default now), timeMax (ISO), max (default 20), q (optional text search) }. Returns { events: [{id, summary, start, end, attendees, status, location}] }.",
+    run: async (token, a) => {
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      const p = new URLSearchParams({
+        singleEvents: 'true', orderBy: 'startTime',
+        maxResults: String(Math.min(Number(a.max) || 20, 50)),
+        timeMin: a.timeMin || new Date().toISOString(),
+      });
+      if (a.timeMax) p.set('timeMax', a.timeMax);
+      if (a.q) p.set('q', String(a.q));
+      const r = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events?${p}`, token);
+      return { events: (r.items || []).map(e => ({
+        id: e.id, summary: e.summary || '', start: e.start, end: e.end, status: e.status,
+        location: e.location || '',
+        attendees: (e.attendees || []).map(x => ({ email: x.email, responseStatus: x.responseStatus })),
+      })) };
+    },
+  },
+  calendar_get_event: {
+    provider: 'google-calendar',
+    description: "Get one event by id. args: { eventId, calendarId (default 'primary') }.",
+    run: async (token, a) => {
+      if (!a.eventId) return { error: 'eventId required' };
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      const e = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events/${encodeURIComponent(a.eventId)}`, token);
+      return { id: e.id, summary: e.summary, description: e.description, start: e.start, end: e.end,
+               location: e.location, status: e.status, htmlLink: e.htmlLink,
+               attendees: (e.attendees || []).map(x => ({ email: x.email, responseStatus: x.responseStatus })) };
+    },
+  },
+  calendar_freebusy: {
+    provider: 'google-calendar',
+    description: "Check availability. args: { timeMin (ISO), timeMax (ISO), calendarIds (array, default ['primary']) }. Returns { busy: {calendarId: [{start,end}]} } — empty arrays mean FREE.",
+    run: async (token, a) => {
+      if (!a.timeMin || !a.timeMax) return { error: 'timeMin and timeMax required' };
+      const ids = Array.isArray(a.calendarIds) && a.calendarIds.length ? a.calendarIds : ['primary'];
+      const r = await g('https://www.googleapis.com/calendar/v3/freeBusy', token, {
+        method: 'POST',
+        body: JSON.stringify({ timeMin: a.timeMin, timeMax: a.timeMax, items: ids.map(id => ({ id })) }),
+      });
+      const busy = {};
+      for (const [id, cal] of Object.entries(r.calendars || {})) busy[id] = cal.busy || [];
+      return { busy };
+    },
+  },
+  calendar_create_event: {
+    provider: 'google-calendar',
+    description: "Create an event (books the meeting; attendees get an email invite). args: { summary, start (ISO), end (ISO), calendarId (default 'primary'), description?, location?, attendees? (array of emails), timeZone? }. Returns { id, htmlLink, start, end }.",
+    run: async (token, a) => {
+      if (!a.summary || !a.start || !a.end) return { error: 'summary, start, end required' };
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      const tz = a.timeZone || 'Europe/Berlin';
+      const body = {
+        summary: String(a.summary).slice(0, 200),
+        description: a.description ? String(a.description).slice(0, 2000) : undefined,
+        location: a.location || undefined,
+        start: { dateTime: a.start, timeZone: tz },
+        end: { dateTime: a.end, timeZone: tz },
+        attendees: Array.isArray(a.attendees) ? a.attendees.filter(Boolean).map(e => ({ email: String(e) })) : undefined,
+      };
+      const e = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events?sendUpdates=all`, token,
+        { method: 'POST', body: JSON.stringify(body) });
+      return { id: e.id, htmlLink: e.htmlLink, summary: e.summary, start: e.start, end: e.end };
+    },
+  },
+  calendar_update_event: {
+    provider: 'google-calendar',
+    description: "Update an event (reschedule/rename). args: { eventId, calendarId (default 'primary'), summary?, start? (ISO), end? (ISO), description?, location?, timeZone? }.",
+    run: async (token, a) => {
+      if (!a.eventId) return { error: 'eventId required' };
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      const tz = a.timeZone || 'Europe/Berlin';
+      const patch = {};
+      if (a.summary) patch.summary = String(a.summary).slice(0, 200);
+      if (a.description) patch.description = String(a.description).slice(0, 2000);
+      if (a.location) patch.location = a.location;
+      if (a.start) patch.start = { dateTime: a.start, timeZone: tz };
+      if (a.end) patch.end = { dateTime: a.end, timeZone: tz };
+      const e = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events/${encodeURIComponent(a.eventId)}?sendUpdates=all`, token,
+        { method: 'PATCH', body: JSON.stringify(patch) });
+      return { id: e.id, htmlLink: e.htmlLink, summary: e.summary, start: e.start, end: e.end };
+    },
+  },
+  calendar_delete_event: {
+    provider: 'google-calendar',
+    description: "Delete/cancel an event. args: { eventId, calendarId (default 'primary') }.",
+    run: async (token, a) => {
+      if (!a.eventId) return { error: 'eventId required' };
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events/${encodeURIComponent(a.eventId)}?sendUpdates=all`, token,
+        { method: 'DELETE' });
+      return { ok: true, deleted: a.eventId };
+    },
+  },
+  calendar_respond: {
+    provider: 'google-calendar',
+    description: "Respond to an invitation as the connected account. args: { eventId, response ('accepted'|'declined'|'tentative'), calendarId (default 'primary'), comment? }.",
+    run: async (token, a) => {
+      if (!a.eventId || !a.response) return { error: 'eventId and response required' };
+      const cal = encodeURIComponent(a.calendarId || 'primary');
+      // Find self in attendees, patch own responseStatus.
+      const e = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events/${encodeURIComponent(a.eventId)}`, token);
+      const attendees = (e.attendees || []).map(x => x.self
+        ? { ...x, responseStatus: a.response, comment: a.comment || x.comment }
+        : x);
+      const u = await g(`https://www.googleapis.com/calendar/v3/calendars/${cal}/events/${encodeURIComponent(a.eventId)}?sendUpdates=all`, token,
+        { method: 'PATCH', body: JSON.stringify({ attendees }) });
+      return { id: u.id, summary: u.summary, response: a.response };
+    },
+  },
+  calendar_current_time: {
+    provider: 'google-calendar',
+    description: "Current date/time in the primary calendar's timezone. args: {}.",
+    run: async (token) => {
+      const c = await g('https://www.googleapis.com/calendar/v3/calendars/primary', token);
+      const tz = c.timeZone || 'Europe/Berlin';
+      return { now: new Date().toISOString(), timeZone: tz,
+               local: new Date().toLocaleString('en-GB', { timeZone: tz }) };
+    },
+  },
 };
 
 export function listGoogleTools() {
@@ -621,6 +754,7 @@ export function listGoogleTools() {
 const GOOGLE_PROVIDER_FALLBACKS = {
   'google-sheets': ['google-sheets', 'google-docs', 'gmail'],
   'google-docs': ['google-docs', 'google-sheets', 'gmail'],
+  'google-calendar': ['google-calendar', 'gmail', 'google-docs'],
   'gmail': ['gmail'],
 };
 

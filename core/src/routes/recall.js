@@ -1,5 +1,12 @@
 import crypto from 'node:crypto';
 
+function resolveWithinDeadline(promise, timeoutMs, fallback) {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
+  ]);
+}
+
 export async function handleRecallRoute(ctx = {}) {
   const {
     req,
@@ -80,6 +87,58 @@ export async function handleRecallRoute(ctx = {}) {
       } else {
         return jsonResponse(res, { error: 'Project not found or access denied', project_id: recallProjectId }, 403);
       }
+    }
+
+    const { resolveRecallPlan, RecallRouter } = await import('../memory/recall-router.js');
+    const recallPlan = resolveRecallPlan(body);
+    if (!recallPlan.legacy) {
+      const { buildRecallPacket } = await import('../memory/recall-packet.js');
+      const query = body.query_context || body.context || '';
+      if (!query || typeof query !== 'string') {
+        return jsonResponse(res, { error: 'query_context is required' }, 400);
+      }
+      const router = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+      const remainingMs = Math.max(1, recallPlan.latency_budget_ms - (Date.now() - _recallT0));
+      const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
+      const bounded = await resolveWithinDeadline(router.recall(query, {
+        mode: recallPlan.mode,
+        include_live: body.include_live === true,
+        live_intent: body.live_intent === true,
+        surface_policy_allows_live: body.surface_policy_allows_live !== false,
+        project: recallProject,
+        project_id: recallProjectId,
+        tags: body.tags || [],
+        source_document_id: body.source_document_id || null,
+        source_title: body.source_title || null,
+        valid_at: body.valid_at,
+        date_range: body.date_range || temporalExpansion.dateRange || null,
+      }, {
+        userId,
+        orgId,
+        projectId: recallProjectId,
+        accessContext: recallAccessCtx,
+      }), remainingMs, timeoutResult);
+      const cutoffReason = bounded.trace?.timeout || Date.now() - _recallT0 >= recallPlan.latency_budget_ms
+        ? 'latency_budget'
+        : bounded.trace?.cutoff_reason || null;
+      const packet = buildRecallPacket({
+        facts: bounded.memories || [],
+        sourceSections: bounded.evidence || [],
+        liveEvidence: bounded.live || [],
+        plan: recallPlan,
+        cutoffReason,
+      });
+      if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
+      return jsonResponse(res, {
+        memories: bounded.memories || [],
+        evidence: bounded.evidence || [],
+        live: bounded.live || [],
+        mode_used: recallPlan.mode,
+        recall_plan: recallPlan,
+        evidence_packet: packet,
+        cutoff_reason: cutoffReason,
+        latency_ms: Date.now() - _recallT0,
+      });
     }
 
     let recallAuthorId = null;

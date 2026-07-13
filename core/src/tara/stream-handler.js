@@ -397,14 +397,32 @@ export class TaraStreamHandler {
     // ── Default path: full semantic recall (matches MCP) ──
     if (!useFastPath && typeof this.recallFn === 'function' && this.memoryStore) {
       try {
+        // VOICE-LITE recall (TARA_VOICE_LITE_RECALL, default ON): a live spoken
+        // turn must ground in <400ms, not run the full research pipeline. We keep
+        // the accuracy-critical stages (vector + lexical fetch, contradiction /
+        // supersession scoring — relationshipCounts are still built from the edge
+        // fetch) but drop the latency-heavy ones voice does not need:
+        //   • graph_expansion_depth 2→0  — skip the 2-hop neighbour walk + its
+        //     per-neighbour PG fetches (the warm hotspot); scoring indexes stay.
+        //   • query_expansion / cross_rerank OFF — no extra LLM / cross-encoder
+        //     round-trips mid-call.
+        //   • max_memories 8→6 — Tara speaks ~5; a smaller pool means a smaller
+        //     candidate pool (max_memories*4) → less scoring.
+        // Set TARA_VOICE_LITE_RECALL=false to restore the full pipeline.
+        const voiceLite = String(process.env.TARA_VOICE_LITE_RECALL ?? 'true').toLowerCase() !== 'false';
         const recall = await this.recallFn(this.memoryStore, {
           query_context: query,
           user_id: userId,
           org_id: orgId,
-          max_memories: 8,
+          max_memories: voiceLite ? 6 : 8,
           // Multi-tier scope (projectIds/teamIds) so project/team/org-shared
           // memories surface — parity with /api/recall + Talk-to-HIVE chat.
           access_context: accessContext,
+          ...(voiceLite ? {
+            graph_expansion_depth: 0,
+            query_expansion: false,
+            cross_rerank: false,
+          } : {}),
         });
         const rows = recall?.combined || recall?.memories || recall || [];
         return rows.slice(0, 8).map(r => ({

@@ -2,7 +2,7 @@
 
 How any session should build a feature and ship it so it is **durable** (survives a
 container recreate) and **safe** (default-off, tested, no regression). Grounded in the
-real topology — verified 2026-06-30.
+real topology — verified 2026-07-13.
 
 ---
 
@@ -10,8 +10,12 @@ real topology — verified 2026-06-30.
 
 | Box (ssh alias) | What it is | Key bits |
 |---|---|---|
-| `singulance` | self-host deployment (singulancelabs.com) — FULL stack | compose project `hivemind`, file `/root/hivemind/infra/docker-compose.hetzner.yml` |
-| `myserver` | managed/davinci deployment (api.hivemind.davinciai.eu) + **central Nango** | byod agent + `hivemind-nango` + dedicated `nango` DB |
+| `singulance` | Production SINGULANCE engine for `*.singulancelabs.com` | compose project `hivemind`, file `/root/hivemind/infra/docker-compose.hetzner.yml`; vNext frontend compose file `/root/hivemind-next/infra/docker-compose.next.yml` |
+
+Do not deploy SINGULANCE production changes to `myserver`. It is not part of
+the current production release path. BYOD customer agents are separate remote
+data planes and are upgraded through their authenticated agent release process,
+not by treating another central box as production.
 
 - **Core**: image `hivemind/core-api:latest`, compose service `core` (container `hm-core`),
   `build: { context: .., dockerfile: Dockerfile.production }`, `env_file: [../.env]`
@@ -21,12 +25,28 @@ real topology — verified 2026-06-30.
   `/app/logs` volumes — NO src bind-mount). → **code changes require an image REBUILD**,
   not just a restart/pull.
 - **Control-plane**: compose service `control-plane` (container `hm-control`), internal
-  port 3000, external 8040.
-- **Frontend**: separate repo `frontend/Da-vinci` (its own git, branch `main`) →
-  `make deploy-fe` → builds + recreates `hm-fe` (port 8088). Baked URLs via Dockerfile ARGs.
-- **Remote-org memory** (self-host orgs like b30ead1b) lives on the **byod agent**
-  (`myserver` `hm-byod-postgres`, schema `hm`). Central orgs in `singulance` `hm-postgres`
-  schema `hivemind`.
+  port 3000, loopback port 2027, publicly routed through
+  `https://api.singulancelabs.com`.
+- **Frontend**: separate repo `frontend/Da-vinci`; deploy the exact committed SHA
+  with `scripts/deploy-singulance-home.sh <sha>`. It builds in an isolated clone,
+  smoke-tests the candidate, tags the prior image `hivemind/fe:stable-single`,
+  tags the candidate `hivemind/fe:latest-single`, and recreates only
+  `hivemind-next-frontend-1` on loopback port 2388.
+- **Remote-org memory** lives on each customer's authenticated BYOD agent. Managed
+  organization memory lives in `singulance` PostgreSQL schema `hivemind`, with
+  Qdrant as rebuildable retrieval acceleration.
+
+### Image channels
+
+Every running production service keeps two named channels:
+
+- `latest`: the currently deployed, health-gated candidate.
+- `stable`: the immediately previous known-good image retained for rollback.
+
+For the vNext frontend the channel names are `latest-single` and
+`stable-single`. Before replacing `latest`, tag its current digest as `stable`;
+never move `stable` after a failed health or feature gate. Commit-specific and
+timestamped rollback tags may be retained in addition to these two channels.
 
 ---
 

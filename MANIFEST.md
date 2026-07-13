@@ -108,7 +108,7 @@ Recall is memory-first and event-driven. It must not depend on an
 English-language regex classifier.
 
 1. Resolve the caller, tenant, role, projects, teams, and allowed scopes.
-2. Build a bounded recall plan (`fast`, `explain`, or `full`).
+2. Build a bounded recall plan (`fact`, `explain`, or `full`).
 3. Retrieve current durable candidates with tenant, scope, project, lifecycle,
    temporal, and source filters applied before delivery.
 4. Use lexical/vector candidates only as candidates; hydrate canonical records
@@ -118,9 +118,37 @@ English-language regex classifier.
 6. Return source links, contradictions, recall trace, and cutoff metadata.
 7. Build a bounded evidence packet for `/chat`, HyperAgents, and TARA.
 
-`fast` favors current facts and low latency. `explain` includes linked evidence
+`fact` favors current facts and low latency. `explain` includes linked evidence
 and decisions. `full` may hydrate source windows and graph context, but must
 state when latency or token budgets prevent complete hydration.
+
+### Retrieval And Endpoint Compatibility
+
+The public endpoints are stable and must not be renamed or forked:
+
+| Consumer contract | Canonical core endpoint | Behavior |
+| --- | --- | --- |
+| Knowledge ingestion | `POST /api/knowledge/upload` | Stores source/document/segments first, then queues selective enrichment |
+| Direct retrieval | `POST /api/recall` | Legacy requests retain the rich wide-to-narrow result shape; explicit `fact`, `explain`, or `full` requests return bounded source-grounded context additively |
+| Answer orchestration | `POST /api/chat` | Uses the shared recall tool and returns an answer plus server-owned source metadata |
+| Browser/mobile frontend | `/v1/proxy/knowledge/upload`, `/v1/proxy/chat` | Authenticated control-plane proxy to the canonical core endpoints |
+| MCP, HyperAgents, and TARA | Shared internal recall service or `/api/recall` | Same tenant scope and canonical hydration rules; surface-specific latency mode |
+
+The established precision pipeline remains active. It retrieves a wide pool
+(default floor 150) across concurrent vector, lexical, entity, temporal, and
+relationship lanes; fuses and scores candidates; applies lifecycle,
+contradiction, score-floor, duplicate, cluster, and MMR controls; optionally
+cross-encoder reranks the wide window; then delivers a narrow result set.
+Evidence and live/graph expansion are separate bounded lanes. Explicit
+`explain` and `full` start tenant-scoped evidence retrieval in parallel with
+memory retrieval so a slow fact-promotion path cannot hide an already durable
+source document.
+
+`/api/chat` is the orchestration layer, not a second memory implementation. Its
+agent calls the shared `RecallRouter`; the legacy chat implementation remains
+only as a rollback/failure path. The additive chat shadow measurement may stay
+enabled or disabled independently, but it does not replace the user-visible
+agent recall call.
 
 ## Security And Tenant Isolation
 
@@ -176,8 +204,10 @@ The current implementation and deployment work has established:
   permitted surface plus a retrieved source anchor or explicit live intent;
   `full` reports `latency_budget` when enrichment cannot complete in time.
 - deployed server-owned `RecallPacket` and grounded-claim validator with stable
-  citation IDs. It is wired into `/chat` only as a disabled-by-default shadow
-  measurement path; existing chat retrieval and answers remain authoritative.
+  citation IDs. Explicit `/api/recall` modes return this packet, and the live
+  `/api/chat` agent uses the same `RecallRouter` through its recall tool. The
+  previous chat implementation remains available as a rollback/failure path;
+  shadow measurement is additive telemetry only.
 
 ## Required Acceptance Gates
 
@@ -210,9 +240,9 @@ Before any memory-engine feature is declared complete:
 - Complete canonical entity migration with organization-scoped uniqueness,
   additive links, consumer cutover, and safe backfill before enabling broader
   autonomous cognition.
-- Run the recall shadow path for an isolated enterprise canary, prove packet
-  coverage and citation parity without duplicate connector calls, then switch
-  one organization at a time behind the existing rollback flag.
+- Complete structured claim-level citation enforcement for the final chat
+  answer model, then canary that stricter rendering per organization while
+  preserving the existing agent and legacy rollback paths.
 
 ## Supporting Documents
 

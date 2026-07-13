@@ -1012,6 +1012,7 @@ export class RecallRouter {
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;
     let explicitSourceDocuments = [];
+    let explicitSourceHydration = null;
     if (recallPlan.mode === 'full' && this.evidence?.resolveSourceDocuments
       && (options.source_document_id || options.source_title)) {
       explicitSourceDocuments = await withTimeout(
@@ -1024,6 +1025,20 @@ export class RecallRouter {
         Math.min(350, remainingBudget()),
         [],
       );
+      if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+        explicitSourceHydration = withTimeout(
+          this.evidence.hydrateSourceDocuments({
+            documents: explicitSourceDocuments,
+            query,
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            perDocument: 8,
+            total: 16,
+          }),
+          Math.min(2_200, remainingBudget()),
+          null,
+        );
+      }
     }
     // Source ingestion is immediately recallable. For explicit explain/full,
     // start the tenant-scoped evidence lane alongside memory recall instead of
@@ -1173,20 +1188,8 @@ export class RecallRouter {
       if (docId && !memoryByDocId.has(docId)) memoryByDocId.set(docId, m.id);
     }
     let selectedEvidence = hop2.items || [];
-    if (recallPlan.mode === 'full' && explicitSourceDocuments.length
-      && this.evidence?.hydrateSourceDocuments) {
-      const hydrated = await withTimeout(
-        this.evidence.hydrateSourceDocuments({
-          documents: explicitSourceDocuments,
-          query,
-          userId: ctx.userId,
-          orgId: ctx.orgId,
-          perDocument: 8,
-          total: 16,
-        }),
-        Math.min(1_000, remainingBudget()),
-        null,
-      );
+    if (explicitSourceHydration) {
+      const hydrated = await explicitSourceHydration;
       if (hydrated?.length) selectedEvidence = hydrated;
       else if (Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
     }

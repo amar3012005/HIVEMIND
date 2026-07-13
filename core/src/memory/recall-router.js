@@ -976,6 +976,22 @@ export class RecallRouter {
     const recallPlan = resolveRecallPlan(options);
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;
+    // Source ingestion is immediately recallable. For explicit explain/full,
+    // start the tenant-scoped evidence lane alongside memory recall instead of
+    // waiting for asynchronous fact promotion to provide an anchor.
+    const sourceFirstEvidence = recallPlan.expand_evidence
+      ? withTimeout(
+        hop2Evidence({
+          evidenceService: this.evidence,
+          query,
+          ctx,
+          inspection: inspectMemories([]),
+          prisma: this.prisma,
+        }),
+        Math.min(2_300, remainingBudget()),
+        { items: [], reason: 'timeout' },
+      )
+      : null;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
@@ -1024,7 +1040,7 @@ export class RecallRouter {
     const [hop2, hop3] = await Promise.all([
       !recallPlan.expand_evidence
         ? Promise.resolve({ items: [], reason: 'disabled' })
-        : withTimeout(
+        : sourceFirstEvidence || withTimeout(
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),

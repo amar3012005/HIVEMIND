@@ -294,6 +294,34 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso, pri
     const notes = (meeting?.notes || '').toString().slice(0, 4000);
     const actions = (Array.isArray(ins.action_items) ? ins.action_items : [])
       .map((a) => (typeof a === 'string' ? a : (a?.task || a?.text || ''))).filter(Boolean).slice(0, 12);
+    // Provenance catalog: every recalled memory/meeting that feeds the synthesis
+    // gets a short ref label (S1, S2…) mapped to its real id + title + date. The
+    // judge cites ref labels per point; we resolve them back afterwards, so a
+    // point's sources are ALWAYS real ids (the model can't hallucinate an id it
+    // was never given). This is what turns strategic points into dot-connections
+    // the user can click back to the exact memory.
+    const _catalog = [];
+    const _pushSrc = (id, title, when, kind) => {
+      if (!title) return null;
+      const ref = `S${_catalog.length + 1}`;
+      _catalog.push({ ref, id: id || null, title: String(title).slice(0, 140), when: when ? String(when).slice(0, 10) : null, kind });
+      return ref;
+    };
+    const entityBriefsSrc = entities.filter((e) => e.brief).slice(0, 8).map((e) => ({
+      name: e.name, brief: e.brief, ref: _pushSrc((e.memory_ids || [])[0], e.name, null, 'entity'),
+    }));
+    const continuitySrc = cont.slice(0, 8).map((c) => ({
+      decision: c.decision, relation: c.relation, reason: c.reason,
+      ref: _pushSrc(c.prior_memory_id, c.prior || c.decision, c.prior_when, 'prior-decision'),
+    }));
+    const openLoopsSrc = loops.slice(0, 8).map((l) => ({
+      text: l.text, status: l.status,
+      ref: _pushSrc(l.memory_id || l.source_memory_id, l.source_title || l.text, l.when || l.created_at, 'open-loop'),
+    }));
+    const relatedSrc = related.slice(0, 8).map((r) => ({
+      text: (r.title || r.content || '').toString().slice(0, 160),
+      ref: _pushSrc(r.id, r.title || r.content, r.created_at, 'memory'),
+    })).filter((r) => r.text);
     const payload = {
       task: 'synthesis',
       notes,
@@ -301,20 +329,33 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso, pri
       decisions: (Array.isArray(ins.decisions) ? ins.decisions : []).slice(0, 12),
       actions,
       risks: (Array.isArray(ins.risks) ? ins.risks : []).slice(0, 8),
-      entity_briefs: entities.map((e) => ({ name: e.name, brief: e.brief })).filter((e) => e.brief).slice(0, 8),
-      continuity: cont.map((c) => ({ decision: c.decision, relation: c.relation, reason: c.reason })).slice(0, 8),
-      open_loops: loops.map((l) => ({ text: l.text, status: l.status })).slice(0, 8),
-      related: related.map((r) => (r.title || r.content || '').toString().slice(0, 160)).filter(Boolean).slice(0, 8),
+      entity_briefs: entityBriefsSrc.map((e) => ({ name: e.name, brief: e.brief, source_ref: e.ref })),
+      continuity: continuitySrc.map((c) => ({ decision: c.decision, relation: c.relation, reason: c.reason, source_ref: c.ref })),
+      open_loops: openLoopsSrc.map((l) => ({ text: l.text, status: l.status, source_ref: l.ref })),
+      related: relatedSrc.map((r) => ({ text: r.text, source_ref: r.ref })),
+      // The full ref → {title, when} map so the judge knows what each S# is.
+      sources: _catalog.map((c) => ({ ref: c.ref, title: c.title, when: c.when })),
     };
     const hasSignal = payload.entity_briefs.length || payload.continuity.length || payload.open_loops.length || payload.related.length || notes.length > 20;
     if (hasSignal && typeof judge === 'function') {
       const out = await judge(payload);
       const s = out && out.synthesis;
       if (s && typeof s === 'object' && (s.headline || (Array.isArray(s.strategic_points) && s.strategic_points.length))) {
+        const _byRef = new Map(_catalog.map((c) => [c.ref, c]));
+        // Resolve a point (string OR {text, source_refs[]}) into {text, sources[]}.
+        // sources are real catalog entries — never model-invented ids.
+        const _resolve = (p) => {
+          const text = typeof p === 'string' ? p : (p && typeof p.text === 'string' ? p.text : '');
+          if (!text) return null;
+          const refs = (p && Array.isArray(p.source_refs)) ? p.source_refs : [];
+          const sources = refs.map((r) => _byRef.get(String(r).trim())).filter(Boolean)
+            .map((c) => ({ id: c.id, title: c.title, when: c.when, kind: c.kind }));
+          return { text, sources };
+        };
         synthesis = {
           headline: typeof s.headline === 'string' ? s.headline : '',
-          strategic_points: Array.isArray(s.strategic_points) ? s.strategic_points.filter((x) => typeof x === 'string') : [],
-          whats_changed: Array.isArray(s.whats_changed) ? s.whats_changed.filter((x) => typeof x === 'string') : [],
+          strategic_points: (Array.isArray(s.strategic_points) ? s.strategic_points : []).map(_resolve).filter(Boolean),
+          whats_changed: (Array.isArray(s.whats_changed) ? s.whats_changed : []).map(_resolve).filter(Boolean),
           risks_opportunities: Array.isArray(s.risks_opportunities)
             ? s.risks_opportunities.filter((x) => x && typeof x.text === 'string').map((x) => ({ type: x.type === 'opportunity' ? 'opportunity' : 'risk', text: x.text })).slice(0, 8)
             : [],

@@ -172,6 +172,20 @@ test('named source hydration returns ordered raw segments around evidence anchor
   assert.equal(rows[0].document.title, 'Board Notes.pdf');
 });
 
+test('named source hydration falls back to canonical segments when vector search hangs', async () => {
+  const service = new EvidenceRetrievalService({
+    db: { knowledgeSegment: { findMany: async () => [{ id: 's0', documentId: 'doc-1', content: 'raw', segmentIndex: 0 }] } },
+    qdrantClient: null,
+  });
+  service.retrieveEvidence = () => new Promise(() => {});
+  const started = Date.now();
+  const rows = await service.hydrateSourceDocuments({
+    documents: [{ id: 'doc-1', title: 'Source' }], query: 'query', userId: 'u', orgId: 'o',
+  });
+  assert.equal(rows.length, 1);
+  assert.ok(Date.now() - started < 800);
+});
+
 function edge(fromScope, toScope, { toUserId = 'user-1', projectId = null, suffix = 'base' } = {}) {
   const memory = (id, scope, userId) => ({
     id, scope, userId, title: id, content: id, projectId,

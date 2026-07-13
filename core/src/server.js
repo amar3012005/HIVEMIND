@@ -19280,6 +19280,8 @@ exit \$RC
                     project: recallProject,
                     project_id: recallProjectId,
                     tags: body.tags || [],
+                    source_document_id: body.source_document_id || null,
+                    source_title: body.source_title || null,
                     valid_at: body.valid_at,
                     date_range: body.date_range || temporalExpansion.dateRange || null,
                   }, {

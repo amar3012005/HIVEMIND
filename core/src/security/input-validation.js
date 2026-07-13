@@ -291,7 +291,7 @@ export const RegisterSchema = z.object({
 // Memory creation schema
 export const MemorySchema = z.object({
   content: z.string().min(1).max(10000),
-  memoryType: z.enum(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']).optional().default('fact'),
+  memoryType: z.enum(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'synthesis', 'summary', 'conversation']).optional().default('fact'),
   title: z.string().max(500).optional(),
   tags: z.array(z.string().max(50)).optional(),
   sourcePlatform: z.string().max(50).optional(),
@@ -306,7 +306,7 @@ export const MemorySchema = z.object({
 // Memory update schema
 export const MemoryUpdateSchema = z.object({
   content: z.string().max(10000).optional(),
-  memoryType: z.enum(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']).optional(),
+  memoryType: z.enum(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'synthesis', 'summary', 'conversation']).optional(),
   title: z.string().max(500).optional(),
   tags: z.array(z.string().max(50)).optional(),
   visibility: z.enum(['private', 'organization', 'public']).optional(),

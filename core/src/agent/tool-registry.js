@@ -117,6 +117,14 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'hivemind_workspace_summary',
+      description: 'Return a tenant-scoped inventory of the caller\'s visible current memories and documents. Use when they ask what HIVEMIND knows or remembers about them or their workspace. This is an inventory, not semantic search.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_delete_memory',
       description: 'User explicitly says "forget X". Confirm before calling on anything consequential.',
       parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -662,6 +670,59 @@ const TOOL_HANDLERS = {
     return { count: list.length, memories: list.map((m) => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.created_at })) };
   },
 
+  async hivemind_workspace_summary(_args, ctx) {
+    if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
+
+    // Use the same membership-aware visibility contract as normal recall; this
+    // inventory must never become an org-wide bypass for a project guest.
+    const listed = await ctx.persistentMemoryStore.listMemories({
+      user_id: ctx.userId,
+      org_id: ctx.orgId,
+      scope: 'visible',
+      access_context: ctx.accessContext,
+      limit: 16,
+    });
+    const rows = Array.isArray(listed) ? listed : (listed.memories || []);
+    const total = Array.isArray(listed) ? rows.length : (listed.total ?? rows.length);
+
+    // Documents are source artifacts owned by the caller. They are not used to
+    // grant access to anyone else, and titles are rendered from this server data.
+    const documents = ctx.prisma?.knowledgeDocument
+      ? await ctx.prisma.knowledgeDocument.findMany({
+          where: { userId: ctx.userId, orgId: ctx.orgId, archivedAt: null },
+          select: { id: true, title: true, documentType: true, documentDate: true },
+          orderBy: { createdAt: 'desc' },
+          take: 12,
+        })
+      : [];
+    const documentCount = ctx.prisma?.knowledgeDocument
+      ? await ctx.prisma.knowledgeDocument.count({
+          where: { userId: ctx.userId, orgId: ctx.orgId, archivedAt: null },
+        })
+      : documents.length;
+
+    return {
+      memory_count: total,
+      document_count: documentCount,
+      memories: rows.map((memory) => ({
+        id: memory.id,
+        title: memory.title,
+        content: (memory.content || '').slice(0, 600),
+        tags: memory.tags || [],
+        memory_type: memory.memory_type,
+        scope: memory.scope,
+        created_at: memory.created_at,
+        document_date: memory.document_date,
+      })),
+      documents: documents.map((document) => ({
+        id: document.id,
+        title: document.title || 'Untitled document',
+        document_type: document.documentType,
+        document_date: document.documentDate,
+      })),
+    };
+  },
+
   async hivemind_delete_memory(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
     await ctx.persistentMemoryStore.deleteMemory({ id: args.id, user_id: ctx.userId, org_id: ctx.orgId });
@@ -966,6 +1027,7 @@ const TOOL_TIMEOUTS_MS = {
   hivemind_delete_memory:    5_000,
   hivemind_get_memory:       3_000,
   hivemind_list_memories:    6_000,
+  hivemind_workspace_summary: 4_000,
   hivemind_list_projects:    3_000,
   hivemind_web_search:       3_000,  // job submit only
   hivemind_web_crawl:        3_000,

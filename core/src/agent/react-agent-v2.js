@@ -465,6 +465,14 @@ const ROUTER_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'workspace_summary',
+      description: 'Return a grounded inventory of what HIVEMIND currently knows from the caller\'s visible workspace memories and their uploaded documents. Use ONLY when the user asks what HIVEMIND knows/remembers about them, their profile, or their workspace as a whole.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'recall',
       description: 'Search the organisation memory. Use for ANY question about specific facts, the org, its people, products, projects, documents, history, numbers, or the world. When in doubt, recall — never answer specific questions from your own knowledge.',
       parameters: {
@@ -529,13 +537,14 @@ async function routerPlan({ message, history, language, assistantName, orgName, 
     intent_kind: 'lookup', user_message: message, action_intent: null, intents: [],
     sub_queries: [], named_entities: [], needs_traverse: false, needs_time_travel: false,
     time_travel: null, needs_web: false, save_intent: null, auto_save_intent: null,
-    ask_for_project: false, update_intent: null, recall_mode: 'fact', expected_evidence_types: [],
+    ask_for_project: false, update_intent: null, recall_mode: 'fact', expected_evidence_types: [], workspace_summary: false,
   };
 
   const name = assistantName || 'HIVE';
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
   const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
 - Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
+- Call workspace_summary ONLY when the user asks what you know or remember about them/their workspace as a whole. Do not use semantic recall for this inventory request.
 - Call remember(content) when the user asks to save/remember something OR STATES a durable fact about their own world (org/people/products/projects/decisions/plans — "X is now Y", "we decided Z", "launch is March 2026"). NOT for questions, opinions, or general world knowledge.
 - Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
 - Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
@@ -600,6 +609,11 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
     const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
     onEvent?.({ type: 'plan', routed: 'act', provider });
     return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
+  }
+
+  if (fn === 'workspace_summary') {
+    onEvent?.({ type: 'plan', routed: 'workspace_summary' });
+    return { plan: { ...basePlan, workspace_summary: true, recall_mode: 'explain' }, usage };
   }
 
   if (fn === 'remember') {
@@ -745,6 +759,40 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
     ...(derivedDateRange ? { date_range: derivedDateRange } : {}),
   };
+
+  if (plan.workspace_summary) {
+    try {
+      startTool('hivemind_workspace_summary', {});
+      const summary = await dispatchTool('hivemind_workspace_summary', {}, ctx);
+      const memoryRows = summary?.memories || [];
+      for (const memory of memoryRows) {
+        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+      }
+      for (const document of (summary?.documents || [])) {
+        evidenceItems.push({
+          id: `document:${document.id}`,
+          document_id: document.id,
+          document_title: document.title,
+          document_type: document.document_type,
+          document_date: document.document_date,
+          content: 'Source document available for explicit full-context retrieval.',
+        });
+      }
+      evidenceItems.unshift({
+        id: 'workspace-inventory',
+        document_title: 'Workspace inventory',
+        content: `Visible current memories: ${summary?.memory_count || 0}. Documents uploaded by the caller: ${summary?.document_count || 0}.`,
+      });
+      recordTool(
+        'hivemind_workspace_summary',
+        {},
+        `${summary?.memory_count || 0} visible memories + ${summary?.document_count || 0} documents`,
+        summary,
+      );
+    } catch (err) {
+      recordTool('hivemind_workspace_summary', {}, `error: ${err.message}`, null);
+    }
+  }
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
   // default, insight for relation queries, panorama for time/history).
@@ -2395,7 +2443,7 @@ export async function runReactAgentV2({
     // Skip the evidence-gated answer step — its grounding rules cause
     // the model to refuse / return empty for self-contained questions
     // like '2+2' that have no recall context to lean on.
-    if (plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
+    if (plan.sub_queries.length === 0 && !plan.workspace_summary && !plan.save_intent && !plan.needs_web) {
       // No-recall direct answer is user-facing → FINAL_MODEL
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,

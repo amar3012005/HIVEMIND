@@ -69,17 +69,18 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
   });
 
   const stored = await store.getMemory(derived.memoryId);
-  const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
+  const deriveJobs = store.derivationJobs.filter(job => job.target_memory_id === derived.memoryId);
 
-  assert.equal(derived.operation, 'derived');
+  assert.equal(derived.operation, 'derivation_queued');
   assert.equal(stored.metadata.semantic_relationship.type, 'Derives');
   assert.deepEqual(stored.metadata.semantic_relationship.sourceIds.sort(), [sourceA.memoryId, sourceB.memoryId].sort());
-  assert.equal(deriveEdges.length, 2);
-  assert.ok(deriveEdges.every(edge => edge.metadata.semantic_relationship.type === 'Derives'));
+  assert.equal(deriveJobs.length, 2);
+  assert.ok(deriveJobs.every(job => job.status === 'queued'));
 });
 
 test('LLM co-mention linker preserves Derives edge type', async () => {
   const originalFetch = globalThis.fetch;
+  const originalGroqKey = process.env.GROQ_API_KEY;
   const store = new InMemoryGraphStore();
   const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
   const userId = '00000000-0000-4000-8000-000000009201';
@@ -128,15 +129,18 @@ test('LLM co-mention linker preserves Derives edge type', async () => {
     }],
   }), { status: 200, headers: { 'content-type': 'application/json' } });
 
+  process.env.GROQ_API_KEY = 'test-key';
   try {
     await engine._attachEntityCoMentionEdges(derived, store, [source]);
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalGroqKey === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = originalGroqKey;
   }
 
-  const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
-  assert.equal(deriveEdges.length, 1);
-  assert.equal(deriveEdges[0].from_id, derived.id);
-  assert.equal(deriveEdges[0].to_id, source.id);
-  assert.equal(deriveEdges[0].metadata.classification_source, 'llm');
+  const deriveJobs = store.derivationJobs;
+  assert.equal(deriveJobs.length, 1);
+  assert.equal(deriveJobs[0].source_memory_id, source.id);
+  assert.equal(deriveJobs[0].target_memory_id, derived.id);
+  assert.equal(deriveJobs[0].status, 'queued');
 });

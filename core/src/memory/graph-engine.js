@@ -2818,6 +2818,25 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       const edgeType = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
       const isSupersede = edgeType === 'Updates';
 
+      // Derived claims require the asynchronous verifier. Never let an
+      // ingest-time LLM response create a Derives edge directly.
+      if (edgeType === 'Derives') {
+        await writeStore.enqueueDerivationJob({
+          id: uuidv4(),
+          source_memory_id: cand.id,
+          target_memory_id: baseMemory.id,
+          confidence,
+          status: 'queued',
+          metadata: {
+            reason: (l.reason || '').slice(0, 200),
+            created_by: 'entity_co_mention_llm',
+            shared_entities: [l.entity],
+          },
+          created_at: nowIso(),
+        });
+        continue;
+      }
+
       try {
         await writeStore.createRelationship({
           id: uuidv4(),

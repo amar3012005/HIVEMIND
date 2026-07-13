@@ -117,6 +117,7 @@ const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-stre
 captureLogs('hm-core');
 
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
+const { startDerivationWorker } = await import('./memory/derivation-worker.js');
 const { getEnrichmentQueue } = await import('./memory/enrichment-queue.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { CognitiveOperator, detectQueryIntent, computeDynamicWeights, getMemoryTypeBoost } = await import('./memory/operator-layer.js');
@@ -1342,6 +1343,14 @@ if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
 // (fire-and-forget) — drives event-driven early dreams in the scheduler.
 if (persistentMemoryEngine && typeof persistentMemoryEngine.setClusterIndex === 'function') {
   persistentMemoryEngine.setClusterIndex(new ClusterIndex({ prisma }));
+}
+if (persistentMemoryEngine && prisma && process.env.DERIVATION_WORKER_ENABLED !== 'false') {
+  startDerivationWorker({
+    prisma,
+    engine: persistentMemoryEngine,
+    intervalMs: Number(process.env.DERIVATION_WORKER_INTERVAL_MS || 5_000),
+    limit: Number(process.env.DERIVATION_WORKER_BATCH || 10),
+  });
 }
 
 // Inject qdrantClient into the scheduler-bound SyncEngine (constructed
@@ -17715,6 +17724,7 @@ exit \$RC
                 document_date: validation.data.document_date,
                 event_dates: validation.data.event_dates,
                 relationship,
+                relationship_explicit: Boolean(rawRelationship),
                 skipPredictCalibrate: body.skipPredictCalibrate === true,
                 skipProcessing: body.skipProcessing === true,
                 factAugmentOnly: body.factAugmentOnly === true,

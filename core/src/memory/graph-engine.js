@@ -300,7 +300,25 @@ export class InMemoryGraphStore {
   }
 
   async transaction(fn) {
-    return fn(this);
+    const snapshot = {
+      memories: new Map([...this.memories].map(([id, memory]) => [id, { ...memory }])),
+      relationships: this.relationships.map((edge) => ({ ...edge })),
+      versions: this.versions.map((version) => ({ ...version })),
+      sources: this.sources.map((source) => ({ ...source })),
+      codeMetadata: this.codeMetadata.map((metadata) => ({ ...metadata })),
+      derivationJobs: this.derivationJobs.map((job) => ({ ...job })),
+    };
+    try {
+      return await fn(this);
+    } catch (error) {
+      this.memories = snapshot.memories;
+      this.relationships = snapshot.relationships;
+      this.versions = snapshot.versions;
+      this.sources = snapshot.sources;
+      this.codeMetadata = snapshot.codeMetadata;
+      this.derivationJobs = snapshot.derivationJobs;
+      throw error;
+    }
   }
 
   async createMemory(memory) {
@@ -389,6 +407,14 @@ export class InMemoryGraphStore {
     };
     this.relationships.push({ ...normalized });
     return { ...normalized };
+  }
+
+  async getRelationships(memoryId, type = null) {
+    const normalizedType = type ? (normalizeRelationshipType(type) || type) : null;
+    return this.relationships
+      .filter((edge) => edge.from_id === memoryId || edge.to_id === memoryId)
+      .filter((edge) => !normalizedType || (normalizeRelationshipType(edge.type) || edge.type) === normalizedType)
+      .map((edge) => ({ ...edge }));
   }
 
   async createMemoryVersion(version) {
@@ -502,6 +528,9 @@ export class MemoryGraphEngine {
   }
 
   async ingestMemory(input) {
+    const explicitRelationship = input?.relationship_explicit === true && input?.relationship
+      ? { ...input.relationship }
+      : null;
     // Full data residency: run the whole ingest inside this org's context so every nested
     // getPrismaClient() resolves to the org's store (customer Postgres for a self-host org). Re-entrancy
     // guard: enter the context once, then proceed. Undefined org → central (managed), unchanged.
@@ -556,6 +585,9 @@ export class MemoryGraphEngine {
         // user's data still lands. Surface the error for ops visibility.
         console.warn('[graph-engine] smart-router fallback:', routeErr.message);
       }
+    }
+    if (explicitRelationship) {
+      input = { ...input, relationship: explicitRelationship, relationship_explicit: true };
     }
 
     // Stamp ingest timestamp on EVERY memory regardless of source:
@@ -1295,9 +1327,11 @@ export class MemoryGraphEngine {
           // overlap, not LLM confidence alone.
           const updatesTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
-          let entityOverlapOk = false;
+          const explicitUpdate = input.relationship_explicit === true
+            && (input.relationship?.type === 'Updates' || input.relationship?.type === 'update');
+          let entityOverlapOk = explicitUpdate;
           let targetMem = null; // hoisted: also read by the H1 synthesis-guard below
-          if (Number(updateConf) >= 0.85 && updatesTargetId) {
+          if (!explicitUpdate && Number(updateConf) >= 0.85 && updatesTargetId) {
             try {
               targetMem = await store.getMemory(updatesTargetId);
               if (targetMem) {
@@ -1338,7 +1372,7 @@ export class MemoryGraphEngine {
             && (targetMem?.memory_type === 'synthesis' || targetMem?.memoryType === 'synthesis')
           ) {
             console.log(`[graph-engine] H1: synthesis→synthesis Updates SKIPPED: ${baseMemory.id.slice(0,8)} → ${updatesTargetId.slice(0,8)} (cognition-loop owns synthesis demotion)`);
-          } else if (Number(updateConf) >= 0.85 && entityOverlapOk && updatesTargetId) {
+          } else if ((explicitUpdate || Number(updateConf) >= 0.85) && entityOverlapOk && updatesTargetId) {
             Object.assign(result, await this.applyUpdate(baseMemory.id, updatesTargetId, {
               store,
               user_id: baseMemory.user_id,
@@ -1392,13 +1426,19 @@ export class MemoryGraphEngine {
             : deriveSources;
 
           if (sourceIds.length > 0) {
-            Object.assign(result, await this.applyDerivesFromSources(sourceIds, baseMemory.id, {
-              store,
-              user_id: baseMemory.user_id,
-              org_id: baseMemory.org_id,
-              confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
-              startedAt,
-            }));
+            const deriveConfidence = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
+            for (const sourceId of sourceIds) {
+              await store.enqueueDerivationJob({
+                id: uuidv4(), source_memory_id: sourceId, target_memory_id: baseMemory.id,
+                confidence: deriveConfidence, status: 'queued',
+                metadata: { reason: 'Derives', created_by: 'graph-engine' }, created_at: nowIso(),
+              });
+            }
+            result.operation = 'derivation_queued';
+            result.processingMs = Date.now() - startedAt;
+            await this._recordVersionSnapshot(store, baseMemory, {
+              reason: 'created', is_latest: true, related_memory_id: sourceIds[0] || null,
+            });
           } else {
             // sourceIds missing from both semanticRelationship and deriveSources —
             // skip the apply to avoid a no-op call; record a plain version snapshot instead.
@@ -2986,13 +3026,13 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         }
       }
 
-      if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
-        throw new Error('Tenant scope violation in applyUpdate');
-      }
+      this._assertRelationshipScope(source, target, { user_id, org_id, operation: 'applyUpdate' });
 
+      const supersededAt = nowIso();
       await store.updateMemory(targetId, {
         is_latest: false,
-        updated_at: nowIso()
+        superseded_at: supersededAt,
+        updated_at: supersededAt,
       });
 
       const nextVersion = (target.version || 1) + 1;
@@ -3040,7 +3080,25 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         edgesCreated: [edge],
         processingMs: Date.now() - startedAt
       };
-    });
+    }, org_id);
+  }
+
+  _assertRelationshipScope(source, target, { user_id, org_id, operation = 'relationship' } = {}) {
+    if (!source || !target || source.org_id !== org_id || target.org_id !== org_id
+      || source.user_id !== user_id || target.user_id !== user_id) {
+      throw new Error(`Tenant scope violation in ${operation}`);
+    }
+    const sourceProjects = new Set([source.project_id, ...(source.project_ids || [])].filter(Boolean));
+    const targetProjects = new Set([target.project_id, ...(target.project_ids || [])].filter(Boolean));
+    if (source.scope === 'project' || target.scope === 'project') {
+      const shared = [...sourceProjects].some((id) => targetProjects.has(id));
+      if (!shared) throw new Error(`Project scope violation in ${operation}`);
+    }
+    if (source.scope === 'team' || target.scope === 'team') {
+      if (!source.primary_team_id || source.primary_team_id !== target.primary_team_id) {
+        throw new Error(`Team scope violation in ${operation}`);
+      }
+    }
   }
 
   async applyExtends(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {
@@ -3052,9 +3110,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       if (!source || !target) {
         throw new Error('applyExtends requires source and target memories');
       }
-      if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
-        throw new Error('Tenant scope violation in applyExtends');
-      }
+      this._assertRelationshipScope(source, target, { user_id, org_id, operation: 'applyExtends' });
 
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
@@ -3096,14 +3152,15 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         edgesCreated: [edge],
         processingMs: Date.now() - startedAt
       };
-    });
+    }, org_id);
   }
 
   async applyDerives(sourceId, targetId, options = {}) {
     return this.applyDerivesFromSources([sourceId], targetId, options);
   }
 
-  async applyDerivesFromSources(sourceIds, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now(), reason = 'Derives' } = {}) {
+  async applyDerivesFromSources(sourceIds, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now(), reason = 'Derives', async_verified = false } = {}) {
+    if (!async_verified) throw new Error('Derives requires verified asynchronous processing');
     const uniqueSourceIds = [...new Set((sourceIds || []).filter(Boolean))];
     if (confidence < this.deriveThreshold) {
       return {
@@ -3124,9 +3181,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         throw new Error('applyDerives requires source and target memories');
       }
       for (const source of sources) {
-        if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
-          throw new Error('Tenant scope violation in applyDerives');
-        }
+        this._assertRelationshipScope(source, target, { user_id, org_id, operation: 'applyDerives' });
       }
 
       const edges = [];
@@ -3176,7 +3231,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         edgesCreated: edges,
         processingMs: Date.now() - startedAt
       };
-    });
+    }, org_id);
   }
 
   _buildMemoryRecord(input) {
@@ -3300,19 +3355,15 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
   }
 
   async _findLatestReplacement(store, target, source) {
-    const latest = await store.listLatestMemories({
-      user_id: target.user_id,
-      org_id: target.org_id,
-      project: target.project || source.project || null
-    });
-
-    return latest
-      .filter(candidate => candidate.id !== source.id)
-      .map(candidate => ({
-        memory: candidate,
-        similarity: computeTokenSimilarity(target.content, candidate.content)
-      }))
-      .filter(candidate => candidate.similarity >= 0.6)
-      .sort((left, right) => right.similarity - left.similarity)[0]?.memory || null;
+    if (!store.getRelationships) return null;
+    const edges = await store.getRelationships(target.id, 'Updates');
+    const replacementIds = (edges || [])
+      .filter((edge) => edge.to_id === target.id && edge.from_id !== source.id)
+      .map((edge) => edge.from_id);
+    for (const id of replacementIds) {
+      const replacement = await store.getMemory(id);
+      if (replacement?.is_latest !== false) return replacement;
+    }
+    return null;
   }
 }

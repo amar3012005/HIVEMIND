@@ -444,6 +444,7 @@ model Memory {
   sourceUrl                                                   String?              @map("source_url")
   isLatest                                                    Boolean?             @default(true) @map("is_latest")
   supersedesId                                                String?              @map("supersedes_id") @db.Uuid
+  supersededAt                                                DateTime?            @map("superseded_at") @db.Timestamptz(6)
   strength                                                    Float?               @default(1.0) @db.Real
   recallCount                                                 Int?                 @default(0) @map("recall_count")
   importanceScore                                             Float?               @default(0.5) @map("importance_score") @db.Real
@@ -2121,7 +2122,9 @@ model CanonicalEntity {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizationId String   @map("organization_id") @db.Uuid
   canonicalName  String   @map("canonical_name")
+  normalizedName String   @map("normalized_name")
   entityKind     String   @map("entity_kind") @db.VarChar(40)
+  identityKey    String?  @map("identity_key") @db.VarChar(500)
   aliases        String[] @default([])
   primaryEmail   String?  @map("primary_email") @db.VarChar(255)
   emailDomains   String[] @default([]) @map("email_domains")
@@ -2136,6 +2139,8 @@ model CanonicalEntity {
   memoryLinks MemoryEntityLink[]
 
   @@index([organizationId, entityKind])
+  @@index([organizationId, entityKind, normalizedName], map: "canonical_entities_org_kind_normalized_idx")
+  @@unique([organizationId, entityKind, identityKey], map: "canonical_entities_org_kind_identity_key")
   @@index([aliases], type: Gin)
   @@index([emailDomains], type: Gin)
   @@index([primaryEmail])

@@ -27,6 +27,8 @@ test('Updates transitions old node to is_latest=false', async () => {
     org_id: '00000000-0000-4000-8000-000000000022',
     project: 'alpha',
     content: 'Updated: the API now listens on port 3010',
+    relationship_explicit: true,
+    relationship: { type: 'Updates', target_id: base.memoryId, confidence: 1 },
     source_metadata: { source_type: 'manual' }
   });
 
@@ -37,6 +39,71 @@ test('Updates transitions old node to is_latest=false', async () => {
   assert.equal(oldMemory.is_latest, false);
   assert.equal(newMemory.is_latest, true);
   assert.equal(store.relationships.filter(edge => edge.type === 'Updates').length, 1);
+});
+
+test('explicit Updates does not depend on inferred entity tags', async () => {
+  const { store, engine } = createEngine();
+  const identity = {
+    user_id: '00000000-0000-4000-8000-000000000411',
+    org_id: '00000000-0000-4000-8000-000000000422',
+  };
+  const prior = await engine.ingestMemory({ ...identity, content: 'Port 3000 is active.', smartIngest: false });
+  const result = await engine.ingestMemory({
+    ...identity,
+    content: 'Port 3010 is active.',
+    smartIngest: false,
+    relationship_explicit: true,
+    relationship: { type: 'Updates', target_id: prior.memoryId, confidence: 1 },
+  });
+
+  assert.equal(result.operation, 'updated');
+  const oldMemory = await store.getMemory(prior.memoryId);
+  assert.equal(oldMemory.is_latest, false);
+  assert.ok(oldMemory.superseded_at);
+  assert.equal(store.relationships.filter((edge) => edge.type === 'Updates').length, 1);
+  assert.equal(store.versions.filter((version) => version.reason === 'Updates').length, 2);
+});
+
+test('atomic update rolls back replacement creation and predecessor demotion on edge failure', async () => {
+  const { store, engine } = createEngine();
+  const identity = {
+    user_id: '00000000-0000-4000-8000-000000000511',
+    org_id: '00000000-0000-4000-8000-000000000522',
+  };
+  const prior = await engine.ingestMemory({ ...identity, content: 'The approved region is Europe.', smartIngest: false });
+  store.createRelationship = async () => { throw new Error('edge write failed'); };
+
+  await assert.rejects(() => engine.ingestMemory({
+    ...identity,
+    content: 'The approved region is Asia.',
+    smartIngest: false,
+    relationship_explicit: true,
+    relationship: { type: 'Updates', target_id: prior.memoryId, confidence: 1 },
+  }), /edge write failed/);
+
+  assert.equal(store.memories.size, 1);
+  assert.equal((await store.getMemory(prior.memoryId)).is_latest, true);
+  assert.equal(store.versions.filter((version) => version.reason === 'Updates').length, 0);
+});
+
+test('explicit update rejects a target outside the source project', async () => {
+  const { engine } = createEngine();
+  const identity = {
+    user_id: '00000000-0000-4000-8000-000000000611',
+    org_id: '00000000-0000-4000-8000-000000000622',
+  };
+  const prior = await engine.ingestMemory({
+    ...identity, content: 'Project A uses PostgreSQL.', scope: 'project', project_ids: ['project-a'], smartIngest: false,
+  });
+  await assert.rejects(() => engine.ingestMemory({
+    ...identity,
+    content: 'Project B uses Qdrant.',
+    scope: 'project',
+    project_ids: ['project-b'],
+    smartIngest: false,
+    relationship_explicit: true,
+    relationship: { type: 'Updates', target_id: prior.memoryId, confidence: 1 },
+  }), /Project scope violation/);
 });
 
 test('Extends keeps both nodes latest', async () => {
@@ -82,15 +149,23 @@ test('Derives enforces confidence threshold', async () => {
     source_metadata: { source_type: 'manual' }
   });
 
+  await assert.rejects(() => engine.applyDerives(source.memoryId, target.memoryId, {
+    user_id: '00000000-0000-4000-8000-000000000211',
+    org_id: '00000000-0000-4000-8000-000000000222',
+    confidence: 0.9,
+  }), /requires verified asynchronous processing/);
+
   const low = await engine.applyDerives(source.memoryId, target.memoryId, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
-    confidence: 0.5
+    confidence: 0.5,
+    async_verified: true,
   });
   const high = await engine.applyDerives(source.memoryId, target.memoryId, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
-    confidence: 0.82
+    confidence: 0.82,
+    async_verified: true,
   });
 
   assert.equal(low.edgesCreated.length, 0);
@@ -125,6 +200,7 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
       org_id: '00000000-0000-4000-8000-000000000322',
       project: 'alpha',
       content: 'Updated: current production port is 3010',
+      relationship_explicit: true,
       relationship: { type: 'Updates', target_id: base.memoryId },
       source_metadata: { source_type: 'manual' }
     }),
@@ -133,6 +209,7 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
       org_id: '00000000-0000-4000-8000-000000000322',
       project: 'alpha',
       content: 'Updated: current production port is 3020',
+      relationship_explicit: true,
       relationship: { type: 'Updates', target_id: base.memoryId },
       source_metadata: { source_type: 'manual' }
     })

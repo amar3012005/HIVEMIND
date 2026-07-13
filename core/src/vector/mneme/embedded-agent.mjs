@@ -61,6 +61,7 @@ async function ensureSchema() {
       tags text[] NOT NULL DEFAULT '{}',
       memory_type text,
       is_latest boolean NOT NULL DEFAULT true,
+      superseded_at timestamptz,
       layer text NOT NULL DEFAULT 'memory',
       cognitive_layer_role text,
       confidence real,
@@ -85,6 +86,7 @@ async function ensureSchema() {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS recall_count int NOT NULL DEFAULT 0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1.0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
@@ -341,6 +343,14 @@ function routesFor(ctx) {
     '/v1/update': async (b) => {
       if (!b.id) return { ok: false, error: 'id required' };
       amr.patchUpdate(b.id, b);
+      const sets = []; const args = [b.id, org];
+      if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
+      if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
+      if (Array.isArray(b.tags)) { args.push(b.tags); sets.push(`tags=$${args.length}::text[]`); }
+      if (b.superseded_at !== undefined) { args.push(b.superseded_at || null); sets.push(`superseded_at=$${args.length}::timestamptz`); }
+      if (sets.length) {
+        await db().query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
+      }
       return { ok: true };
     },
     '/v1/delete': async (b) => {

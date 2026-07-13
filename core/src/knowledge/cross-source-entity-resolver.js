@@ -1,36 +1,15 @@
 /**
- * CrossSourceEntityResolver — merges entities representing the same real-world
- * thing across providers. Runs as part of hygiene scanner cron.
- *
- * Strategy:
- *   1. For each entityType, group entities sharing aliases (canonical names
- *      OR alias strings overlap).
- *   2. Score similarity: name match + alias overlap + email-domain match.
- *   3. If score >= threshold, merge: pick row with highest mentionCount as
- *      canonical, append aliases, repoint entity_mentions, mark merged.
+ * CrossSourceEntityResolver — merges entities only when providers supply the
+ * same stable external identifier. Names, aliases, and domains are evidence
+ * for review, never identity proof.
  */
 
-const MERGE_THRESHOLD = 0.85;
-
-function normalize(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9@._-]/g, ''); }
-
-function aliasSet(entity) {
-  const set = new Set();
-  set.add(normalize(entity.canonicalName));
-  for (const a of entity.aliases || []) set.add(normalize(a));
-  return set;
-}
-
-function jaccard(a, b) {
-  if (a.size === 0 && b.size === 0) return 0;
-  let i = 0;
-  for (const x of a) if (b.has(x)) i++;
-  return i / (a.size + b.size - i);
-}
-
-function emailDomain(s) {
-  const m = /^[^@]+@([a-z0-9.-]+)/i.exec(String(s || ''));
-  return m ? m[1].toLowerCase().split('.')[0] : null;
+function stableExternalIds(entity) {
+  const ids = entity?.externalIds && typeof entity.externalIds === 'object'
+    ? entity.externalIds : {};
+  return new Set(Object.entries(ids)
+    .filter(([key, value]) => key !== 'email' && key !== 'email_domain' && typeof value === 'string' && value.trim())
+    .map(([key, value]) => `${key}:${value.trim()}`));
 }
 
 export class CrossSourceEntityResolver {
@@ -52,17 +31,13 @@ export class CrossSourceEntityResolver {
         for (let i = 0; i < entities.length; i++) {
           if (merged.has(entities[i].id)) continue;
           const a = entities[i];
-          const aSet = aliasSet(a);
+          const aIds = stableExternalIds(a);
+          if (!aIds.size) continue;
           for (let j = i + 1; j < entities.length; j++) {
             if (merged.has(entities[j].id)) continue;
             const b = entities[j];
-            const bSet = aliasSet(b);
-            const sim = jaccard(aSet, bSet);
-            // Email-domain heuristic: same domain → strong signal
-            const aDomain = [...aSet].map(emailDomain).find(Boolean);
-            const bDomain = [...bSet].map(emailDomain).find(Boolean);
-            const domainBoost = (aDomain && bDomain && aDomain === bDomain) ? 0.25 : 0;
-            if (sim + domainBoost >= MERGE_THRESHOLD) {
+            const bIds = stableExternalIds(b);
+            if ([...aIds].some((id) => bIds.has(id))) {
               try {
                 await this._mergeInto(a, b);
                 merged.add(b.id);
@@ -102,3 +77,5 @@ export class CrossSourceEntityResolver {
     ]);
   }
 }
+
+export { stableExternalIds };

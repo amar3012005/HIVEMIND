@@ -96,6 +96,7 @@ function mapAgentRow(r) {
     created_at: r.created_at,
     updated_at: r.created_at,
     valid_from: r.valid_from || null,
+    superseded_at: r.superseded_at || null,
     document_date: r.document_date || null,
     metadata: r.metadata || {},
     // Provenance is folded into the agent's `metadata` jsonb on write (createMemory
@@ -148,6 +149,7 @@ function mapMemoryRecord(record) {
     is_latest: record.isLatest,
     importance_score: record.importanceScore,
     supersedes_id: record.supersedesId,
+    superseded_at: record.supersededAt instanceof Date ? record.supersededAt.toISOString() : (record.supersededAt || null),
     version: record.versions?.[0]?.version || 1,
     created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
     updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
@@ -515,6 +517,8 @@ export class PrismaGraphStore {
       if (patch.tags !== undefined) remotePatch.tags = normalizeTagsArray(patch.tags);
       const rIsLatest = patch.isLatest ?? patch.is_latest;
       if (rIsLatest !== undefined) remotePatch.is_latest = rIsLatest;
+      const rSupersededAt = patch.supersededAt ?? patch.superseded_at;
+      if (rSupersededAt !== undefined) remotePatch.superseded_at = rSupersededAt;
       if (patch.memoryType !== undefined) remotePatch.memory_type = patch.memoryType;
       if (Object.keys(remotePatch).length) await amrUpdate(_remoteUpdOrg, id, remotePatch);
       return this.getMemory(id);
@@ -530,6 +534,8 @@ export class PrismaGraphStore {
     if (patch.source_metadata?.source_id) data.sourceMessageId = patch.source_metadata.source_id;
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
+    const supersededAtVal = patch.supersededAt ?? patch.superseded_at;
+    if (supersededAtVal !== undefined) data.supersededAt = supersededAtVal ? new Date(supersededAtVal) : null;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
 
     await this.client.memory.update({
@@ -1168,9 +1174,30 @@ export class PrismaGraphStore {
 
   async createRelationship(edge) {
     const type = normalizeRelationshipType(edge.type) || edge.type;
+    const _edgeOrg = edge.org_id || currentOrg();
+    const endpoints = await this.getMemories([edge.from_id, edge.to_id]);
+    const from = endpoints.get(edge.from_id);
+    const to = endpoints.get(edge.to_id);
+    if (!from || !to || !from.org_id || from.org_id !== to.org_id || (_edgeOrg && from.org_id !== _edgeOrg)) {
+      throw new Error('Tenant scope violation in createRelationship');
+    }
+    if ((from.scope === 'personal' || to.scope === 'personal') && from.user_id !== to.user_id) {
+      throw new Error('Personal scope violation in createRelationship');
+    }
+    if (from.scope === 'project' || to.scope === 'project') {
+      const fromProjects = new Set([from.project_id, ...(from.project_ids || [])].filter(Boolean));
+      const toProjects = new Set([to.project_id, ...(to.project_ids || [])].filter(Boolean));
+      if (![...fromProjects].some((id) => toProjects.has(id))) {
+        throw new Error('Project scope violation in createRelationship');
+      }
+    }
+    if ((from.scope === 'team' || to.scope === 'team')
+      && (!from.primary_team_id || from.primary_team_id !== to.primary_team_id)) {
+      throw new Error('Team scope violation in createRelationship');
+    }
     // RESIDENCY: remote-org edges live on the agent (no central memory rows to FK to). Push the typed
     // edge to the agent and skip the central upsert. Managed/personal → central upsert below.
-    const _remoteOrg = edge.org_id || currentOrg();
+    const _remoteOrg = _edgeOrg || from.org_id;
     if (orgIsRemote(_remoteOrg)) {
       amrAddEdge({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
       return mapRelationshipRecord({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });

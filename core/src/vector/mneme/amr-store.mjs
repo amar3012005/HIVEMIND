@@ -415,6 +415,7 @@ export class AmrMemoryStore {
       if (Array.isArray(patch.tags)) rec.tags = patch.tags;
       if (patch.is_latest !== undefined) rec.is_latest = !!patch.is_latest;
       if (patch.memory_type !== undefined) rec.memory_type = patch.memory_type;
+      if (patch.superseded_at !== undefined) rec.superseded_at = patch.superseded_at;
     });
     if (ok) this.store.flush();
     return ok;

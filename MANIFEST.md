@@ -171,6 +171,13 @@ The current implementation and deployment work has established:
   onboarding payment state from plan access;
 - current production correction: LLM co-mention `Derives` now enqueue a
   verification job rather than writing a graph edge inline.
+- deployed bounded recall foundation: explicit `fact`, `explain`, and `full`
+  plans have 1.5s, 3s, and 3s retrieval budgets; live expansion requires a
+  permitted surface plus a retrieved source anchor or explicit live intent;
+  `full` reports `latency_budget` when enrichment cannot complete in time.
+- deployed server-owned `RecallPacket` and grounded-claim validator with stable
+  citation IDs. It is wired into `/chat` only as a disabled-by-default shadow
+  measurement path; existing chat retrieval and answers remain authoritative.
 
 ## Required Acceptance Gates
 
@@ -203,6 +210,9 @@ Before any memory-engine feature is declared complete:
 - Complete canonical entity migration with organization-scoped uniqueness,
   additive links, consumer cutover, and safe backfill before enabling broader
   autonomous cognition.
+- Run the recall shadow path for an isolated enterprise canary, prove packet
+  coverage and citation parity without duplicate connector calls, then switch
+  one organization at a time behind the existing rollback flag.
 
 ## Supporting Documents
 

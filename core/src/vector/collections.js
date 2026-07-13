@@ -155,6 +155,10 @@ const MEMORIES_PAYLOAD_INDEXES = [
   }
 ];
 
+// Payload indexes are schema setup, not query-path work. Keep successful
+// initialization per process and share concurrent first requests per tenant.
+const memoryIndexReady = new Map();
+
 // Org-container HNSW/quant contract — MUST match the bge-m3 1024 migration
 // (UWE_BERGER, CEYDA_SARIOGLU, AMAR_SAI, SEBASTIAN_GARN, HIVEMIND_PERSONAL).
 // m=32/ef_construct=256, int8 always-RAM quant, on_disk vectors + payload.
@@ -326,7 +330,6 @@ export class QdrantCollections {
 
     if (await this.collectionExists(collectionName)) {
       logger.info(`Org container ${collectionName} already exists`);
-      await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
       return true;
     }
 
@@ -360,6 +363,7 @@ export class QdrantCollections {
 
     logger.info(`Org container ${collectionName} created — installing payload indexes`);
     await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+    memoryIndexReady.set(collectionName, Promise.resolve());
     logger.info(`Org container ${collectionName} ready`);
     return true;
   }
@@ -441,12 +445,26 @@ export class QdrantCollections {
    * Ensure payload indexes exist for an already-created memories collection.
    */
   async ensureMemoriesCollectionIndexes(collectionName = CONFIG.collections.memories) {
-    if (!(await this.collectionExists(collectionName))) {
-      logger.warn(`Collection ${collectionName} does not exist yet; skipping index sync`);
-      return;
-    }
+    const ready = memoryIndexReady.get(collectionName);
+    if (ready) return ready;
 
-    await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+    const initialization = (async () => {
+      if (!(await this.collectionExists(collectionName))) {
+        logger.warn(`Collection ${collectionName} does not exist yet; skipping index sync`);
+        return;
+      }
+
+      await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+    })();
+
+    memoryIndexReady.set(collectionName, initialization);
+    try {
+      await initialization;
+    } catch (error) {
+      // A failed setup must be retryable rather than poisoning this process.
+      memoryIndexReady.delete(collectionName);
+      throw error;
+    }
   }
 
   /**

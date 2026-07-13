@@ -3211,6 +3211,47 @@ function isAdminRequest(req) {
   return req.headers['x-admin-secret'] === ADMIN_SECRET;
 }
 
+// Shadow-only recall contract validation. This never participates in answer
+// generation, never calls live connectors, and emits counts only. It is the
+// acceptance signal for a future per-org canary, not a second chat path.
+function startChatRecallShadow({ message, userId, orgId, projectId, accessContext, persistentMemoryStore, evidenceRetrieval, prisma, mode }) {
+  if (process.env.HIVEMIND_CHAT_RECALL_SHADOW !== 'true' || !persistentMemoryStore || !orgId) return;
+  setImmediate(async () => {
+    const startedAt = Date.now();
+    try {
+      const [{ RecallRouter, resolveRecallPlan }, { buildRecallPacket }] = await Promise.all([
+        import('./memory/recall-router.js'),
+        import('./memory/recall-packet.js'),
+      ]);
+      const resolvedAccessContext = accessContext || await buildAccessContext(userId, orgId);
+      const plan = resolveRecallPlan({ mode });
+      const router = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+      const result = await router.recall(message, {
+        mode: plan.mode,
+        // Shadow must never duplicate a connector side effect or live query.
+        include_live: false,
+      }, { userId, orgId, projectId, accessContext: resolvedAccessContext });
+      const packet = buildRecallPacket({
+        facts: result.memories || [],
+        sourceSections: result.evidence || [],
+        graphEvidence: result.graph || [],
+        liveEvidence: [],
+        plan,
+        cutoffReason: Date.now() - startedAt >= plan.latency_budget_ms ? 'latency_budget' : null,
+      });
+      console.info('[chat-recall-shadow]', JSON.stringify({
+        mode: plan.mode,
+        latency_ms: Date.now() - startedAt,
+        cutoff_reason: packet.cutoff_reason,
+        coverage: packet.coverage,
+        citations: packet.citations.length,
+      }));
+    } catch (error) {
+      console.warn('[chat-recall-shadow] failed:', error.message);
+    }
+  });
+}
+
 function isAdminAuthorized(req, url) {
   return isAdminRequest(req) || url.searchParams.get('admin_secret') === ADMIN_SECRET;
 }
@@ -5598,7 +5639,11 @@ exit \$RC
         const participantsBlock = participantNames.length
           ? `PARTICIPANTS (real names of attendees — use these to map SPEAKER_xx diarization labels to real people in speaker_names):\n${participantNames.join(', ')}\n\n`
           : '';
-        const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
+        const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sections": [{"heading": string, "bullets": string[]}], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. '
+          + 'THE "sections" FIELD IS THE PRIMARY DELIVERABLE — a structured, Notion-style breakdown. AUTO-DERIVE 3-7 topic sections from what was actually discussed (do NOT use a fixed template): each "heading" is a specific, descriptive topic phrase drawn from the meeting (e.g. "Agency Architecture & Project Separation", "Blake Core + Hivemind MCP Integration", "Tender/Pitch Processing Feature", "Access & Testing") — NOT generic labels like "Discussion" or "Topic 1". Each section\'s "bullets" (2-6) explain that topic with substance, and MUST wrap the key term, name, figure, date, product or decision in **double asterisks** (markdown bold). Order sections by importance. Cover the whole meeting — every major thread becomes a section. '
+          + 'speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. '
+          + 'LANGUAGE: write title, summary, sections, key_points, decisions and next_steps in the DOMINANT language actually spoken in the transcript (e.g. German if the meeting was mostly German); keep quotes verbatim in their original language. '
+          + 'Be faithful — never invent facts; if a section would be thin, merge it or drop it rather than padding. Use empty arrays/objects when none.';
         // P3 — entity canonicalization. Feed the org's existing global entities so
         // the model maps STT variants/misspellings ("Amar"/"Amer" → "Amar Sai Gadde")
         // to the canonical name in entities/owners/speakers. Central only (remote
@@ -22001,6 +22046,23 @@ exit \$RC
             if (!groqKey) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
             }
+
+            // Additive contract proof. Current agent/legacy answers remain
+            // authoritative until shadow parity and enterprise canary gates pass.
+            const requestedRecallMode = ['fact', 'explain', 'full'].includes(String(body?.recall_mode || '').toLowerCase())
+              ? String(body.recall_mode).toLowerCase()
+              : 'fact';
+            startChatRecallShadow({
+              message,
+              userId,
+              orgId,
+              projectId: requestProjectId,
+              accessContext: null,
+              persistentMemoryStore,
+              evidenceRetrieval,
+              prisma,
+              mode: requestedRecallMode,
+            });
 
             // ─── Two-Loop ReAct Agent (default path) ─────────────────────
             // The agent uses Groq tool-calling to pick from ~19 HIVEMIND

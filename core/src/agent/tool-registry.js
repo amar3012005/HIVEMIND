@@ -341,7 +341,7 @@ const TOOL_HANDLERS = {
     // Single entry point — RecallRouter owns tier orchestration.
     // Memory-first, event-driven, no regex classifier. Memory layer's tags
     // are the routing oracle for evidence + live workspace lookups.
-    const { RecallRouter } = await import('../memory/recall-router.js');
+    const { RecallRouter, resolveRecallPlan, buildEvidencePacket } = await import('../memory/recall-router.js');
     const router = new RecallRouter({
       persistentMemoryStore: ctx.persistentMemoryStore,
       evidenceRetrieval:     ctx.evidenceRetrieval,
@@ -359,7 +359,8 @@ const TOOL_HANDLERS = {
       // document_date OR created_at falls in window. Used by agent's
       // today/yesterday/this-week shortcuts.
       date_range:     args.date_range,
-      include_live:   args.include_live,
+      include_live:   args.include_live === true,
+      live_intent:    args.live_intent === true,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
@@ -367,6 +368,17 @@ const TOOL_HANDLERS = {
       accessContext: ctx.accessContext,
     });
 
+    const graph = [];
+    const cutoffReason = result.trace?.cutoff_reason || null;
+    const evidencePacket = buildEvidencePacket({
+      memories: result.memories,
+      evidence: result.evidence,
+      graph,
+      live: result.live,
+      plan: recallPlan,
+      trace: result.trace,
+      cutoffReason,
+    });
     // P2 salience feedback: reinforce every recalled memory (agent + MCP
     // surface). Mirrors the /api/recall tap — bump recall_count + nudge
     // strength + stamp lastAccessedAt. Fire-and-forget, never blocks the

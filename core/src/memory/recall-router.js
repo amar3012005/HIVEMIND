@@ -923,7 +923,7 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
 export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], plan, trace, cutoffReason = null }) {
   const full = plan?.mode === 'full';
   const totalCap = full ? 12 : 8;
-  const perDocCap = 3;
+  const perDocCap = full ? 8 : 3;
   const perDoc = new Map();
   const sourceSections = [];
   for (const item of evidence) {
@@ -1011,6 +1011,20 @@ export class RecallRouter {
     const recallPlan = resolveRecallPlan(options);
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;
+    let explicitSourceDocuments = [];
+    if (recallPlan.mode === 'full' && this.evidence?.resolveSourceDocuments
+      && (options.source_document_id || options.source_title)) {
+      explicitSourceDocuments = await withTimeout(
+        this.evidence.resolveSourceDocuments({
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          documentId: options.source_document_id || null,
+          title: options.source_title || null,
+        }),
+        Math.min(350, remainingBudget()),
+        [],
+      );
+    }
     // Source ingestion is immediately recallable. For explicit explain/full,
     // start the tenant-scoped evidence lane alongside memory recall instead of
     // waiting for asynchronous fact promotion to provide an anchor.
@@ -1158,7 +1172,25 @@ export class RecallRouter {
       const docId = m.source_metadata?.document_id;
       if (docId && !memoryByDocId.has(docId)) memoryByDocId.set(docId, m.id);
     }
-    const evidenceWithLineage = (hop2.items || []).map((e) => ({
+    let selectedEvidence = hop2.items || [];
+    if (recallPlan.mode === 'full' && explicitSourceDocuments.length
+      && this.evidence?.hydrateSourceDocuments) {
+      const hydrated = await withTimeout(
+        this.evidence.hydrateSourceDocuments({
+          documents: explicitSourceDocuments,
+          query,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          perDocument: 8,
+          total: 16,
+        }),
+        Math.min(1_000, remainingBudget()),
+        null,
+      );
+      if (hydrated?.length) selectedEvidence = hydrated;
+      else if (Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
+    }
+    const evidenceWithLineage = selectedEvidence.map((e) => ({
       ...e,
       linked_memory_id: memoryByDocId.get(e.documentId) || null,
     }));
@@ -1255,6 +1287,10 @@ export class RecallRouter {
           doc_hashes: inspection.docHashes,
           doc_ids:    inspection.docIds,
           platforms:  inspection.platforms,
+          explicit_source_documents: explicitSourceDocuments.map((document) => ({
+            id: document.id,
+            title: document.title || null,
+          })),
         },
         evidence_trigger: hop2.reason,
         live_trigger:     hop3.reason,

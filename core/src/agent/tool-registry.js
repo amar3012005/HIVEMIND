@@ -32,6 +32,8 @@ export const TOOL_SCHEMAS = [
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
           source_type: { type: 'string', enum: ['text', 'code', 'conversation', 'documentation', 'decision'] },
+          source_document_id: { type: 'string', description: 'Known KnowledgeDocument id. Use with mode=full.' },
+          source_title: { type: 'string', description: 'Exact or partial source filename/title. Use with mode=full when the user asks about a specific source.' },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
         },
@@ -354,6 +356,8 @@ const TOOL_HANDLERS = {
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
+      source_document_id: args.source_document_id,
+      source_title:   args.source_title,
       valid_at:       args.valid_at,
       // Date range — { start, end } ISO timestamps. Filters memories whose
       // document_date OR created_at falls in window. Used by agent's

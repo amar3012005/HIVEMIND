@@ -19316,6 +19316,9 @@ exit \$RC
                   evidence_packet: packet,
                   cutoff_reason: cutoffReason,
                   latency_ms: Date.now() - _recallT0,
+                  ...(body.debug === true && req.headers['x-api-key'] === MASTER_API_KEY
+                    ? { trace: bounded.trace || null }
+                    : {}),
                 });
               }
 

@@ -293,14 +293,17 @@ export class EvidenceRetrievalService {
   async hydrateSourceDocuments({ documents, query, userId, orgId, perDocument = 8, total = 16 }) {
     if (orgIsRemote(orgId) || !this.db?.knowledgeSegment || !documents?.length) return [];
     const documentIds = documents.map((document) => document.id).filter(Boolean);
-    const anchors = await this.retrieveEvidence({
-      query,
-      userId,
-      orgId,
-      documentIds,
-      limit: Math.min(total, Math.max(documentIds.length * 3, 6)),
-      scoreThreshold: 0.1,
-    });
+    const anchors = await Promise.race([
+      this.retrieveEvidence({
+        query,
+        userId,
+        orgId,
+        documentIds,
+        limit: Math.min(total, Math.max(documentIds.length * 3, 6)),
+        scoreThreshold: 0.1,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve([]), 450)),
+    ]);
     const anchorIndexes = new Map();
     for (const anchor of anchors) {
       if (!Number.isInteger(anchor?.metadata?.segmentIndex)) continue;

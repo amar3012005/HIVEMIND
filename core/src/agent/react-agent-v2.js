@@ -661,10 +661,10 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
-    onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
     onEvent?.({ type: 'tool_result', name: tool, summary });
     return payload;
   };
+  const startTool = (tool, args) => onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
 
   // Deterministic temporal+connector extraction from user's FULL message.
   // Sub_queries are short bag-of-keywords ("slack messages") and lose the
@@ -760,7 +760,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: recallLimit, ...recallExtras }, ctx);
+          const args = { query: q, mode: recallMode, limit: recallLimit, ...recallExtras };
+          startTool('hivemind_recall', args);
+          const r = await dispatchTool('hivemind_recall', args, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -770,7 +772,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
           if (liveCount > 0) parts.push(`${liveCount} live`);
           if (evCount > 0) parts.push(`${evCount} evidence`);
           const summary = parts.join(' + ');
-          recordTool('hivemind_recall', { query: q, ...recallExtras, mode: recallMode }, summary, r);
+          recordTool('hivemind_recall', args, summary, r);
           return r;
         } catch (err) {
           recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);
@@ -864,6 +866,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         query: plan.sub_queries[0] || plan.user_message || 'recent',
         ...(connectorTag ? { tags: [connectorTag] } : {}),
       };
+      startTool('hivemind_at', args);
       const r = await dispatchTool('hivemind_at', args, ctx);
       recordTool('hivemind_at', args, `${(r?.memories?.length || 0)} historical memories`, r);
       for (const m of (r?.memories || [])) {
@@ -919,6 +922,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       traversedIds.add(seed.id);
       try {
         const args = { memory_id: seed.id, depth: 2, relationship: 'all' };
+        startTool('hivemind_traverse_graph', args);
         const r = await dispatchTool('hivemind_traverse_graph', args, ctx);
         const found = r?.related || r?.memories || r?.nodes || [];
         const edges = Array.isArray(r?.edges) ? r.edges : [];
@@ -1019,6 +1023,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
           const cfg = READ_CONNECTOR_TRIGGERS[provider];
           const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
           if (!cfg.requires || cfg.requires(arg)) {
+            startTool(cfg.tool, arg);
             const resp = await tk.execute(cfg.tool, arg, {
               userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
               persistentMemoryEngine: ctx.persistentMemoryEngine,
@@ -1044,6 +1049,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   if (plan.needs_web && memoriesById.size < 2 && plan.sub_queries.length > 0) {
     try {
       const args = { query: plan.sub_queries[0], limit: 5 };
+      startTool('hivemind_web_search', args);
       const r = await dispatchTool('hivemind_web_search', args, ctx);
       webJob = r;
       recordTool('hivemind_web_search', args, r?.job_id ? `job ${(r.job_id || '').slice(0, 8)}` : 'submitted', r);

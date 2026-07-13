@@ -975,6 +975,7 @@ export class RecallRouter {
     const startedAt = Date.now();
     const recallPlan = resolveRecallPlan(options);
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
+    let cutoffReason = null;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
@@ -1053,10 +1054,14 @@ export class RecallRouter {
     // Fire in try/catch — never block recall on boost failure.
     if (this.clusterIndex && ctx.orgId) {
       try {
-        rankedMemories = await crossClusterEntityBoost(rankedMemories, {
-          clusterIndex:   this.clusterIndex,
-          organizationId: ctx.orgId,
-        });
+        rankedMemories = await withTimeout(
+          crossClusterEntityBoost(rankedMemories, {
+            clusterIndex: this.clusterIndex,
+            organizationId: ctx.orgId,
+          }),
+          Math.min(250, remainingBudget()),
+          rankedMemories,
+        );
       } catch (boostErr) {
         console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
       }
@@ -1118,7 +1123,7 @@ export class RecallRouter {
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
     let deliverN = RECALL_DELIVER_LIMIT;
     try {
-      const cfg = await getRetrievalConfig(ctx.orgId);
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(100, remainingBudget()), null);
       if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
@@ -1144,7 +1149,12 @@ export class RecallRouter {
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
-    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+    const deliverMemories = await withTimeout(
+      rerank(query, rankedMemories, { topN: deliverN }),
+      Math.min(300, remainingBudget()),
+      rankedMemories.slice(0, deliverN),
+    );
+    if (Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
 
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
@@ -1206,6 +1216,7 @@ export class RecallRouter {
         },
         evidence_trigger: hop2.reason,
         live_trigger:     hop3.reason,
+        cutoff_reason:    cutoffReason,
         tiers_fired:      tiersFired,
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
       },

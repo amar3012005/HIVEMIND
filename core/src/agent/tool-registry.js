@@ -341,9 +341,7 @@ const TOOL_HANDLERS = {
     // Single entry point — RecallRouter owns tier orchestration.
     // Memory-first, event-driven, no regex classifier. Memory layer's tags
     // are the routing oracle for evidence + live workspace lookups.
-    const {
-      RecallRouter, resolveRecallPlan, recallEnhance, buildEvidencePacket,
-    } = await import('../memory/recall-router.js');
+    const { RecallRouter, resolveRecallPlan, buildEvidencePacket } = await import('../memory/recall-router.js');
     const router = new RecallRouter({
       persistentMemoryStore: ctx.persistentMemoryStore,
       evidenceRetrieval:     ctx.evidenceRetrieval,
@@ -354,7 +352,7 @@ const TOOL_HANDLERS = {
     const mode = normalizeAgentRecallMode(requestedMode);
     const recallPlan = resolveRecallPlan({ ...args, mode });
     const result = await router.recall(args.query, {
-      mode: 'fact',
+      mode,
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
@@ -363,7 +361,8 @@ const TOOL_HANDLERS = {
       // document_date OR created_at falls in window. Used by agent's
       // today/yesterday/this-week shortcuts.
       date_range:     args.date_range,
-      include_live:   false,
+      include_live:   args.include_live === true,
+      live_intent:    args.live_intent === true,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
@@ -371,36 +370,8 @@ const TOOL_HANDLERS = {
       accessContext: ctx.accessContext,
     });
 
-    let graph = [];
-    let cutoffReason = null;
-    if (recallPlan.expand_evidence) {
-      try {
-        const enhanced = await recallEnhance({
-          memories: result.memories,
-          query: args.query,
-          ctx: {
-            userId: ctx.userId,
-            orgId: ctx.orgId,
-            projectId: ctx.projectId,
-            accessContext: ctx.accessContext,
-          },
-          evidenceService: ctx.evidenceRetrieval,
-          prisma: ctx.prisma,
-          includeLive: recallPlan.include_live,
-          includeGraph: recallPlan.max_graph_hops === 1,
-          includeAdjacent: recallPlan.mode === 'full',
-          deadlineMs: recallPlan.latency_budget_ms,
-        });
-        result.evidence = enhanced.evidence || [];
-        result.live = enhanced.live || [];
-        graph = enhanced.graph || [];
-        result.trace = { ...result.trace, expansion: enhanced.trace };
-        if (Object.values(enhanced.trace || {}).includes('timeout')) cutoffReason = 'latency_budget';
-      } catch (error) {
-        cutoffReason = 'expansion_failed';
-        result.trace = { ...result.trace, expansion_error: String(error.message || error).slice(0, 200) };
-      }
-    }
+    const graph = [];
+    const cutoffReason = result.trace?.cutoff_reason || null;
     const evidencePacket = buildEvidencePacket({
       memories: result.memories,
       evidence: result.evidence,

@@ -3906,8 +3906,11 @@ const server = http.createServer(async (req, res) => {
         evidence_retrieval: !!evidenceRetrieval,
         docling_adapter: !!doclingAdapter,
         docling_reachable: doclingOk,
-        evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
-        memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null,
+        // Do not expose the retired global default collection here. Managed
+        // tenants resolve to org_<orgId>; memory and evidence are separated by
+        // payload layer within that tenant collection.
+        vector_layout: 'per_tenant_org_collection',
+        evidence_layout: 'layer:evidence',
       },
       schedulers: {
         sync_scheduler: !!syncScheduler,
@@ -23153,8 +23156,8 @@ ${injectionText}`;
               document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && !!documentFirstIngestion,
               evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true' && !!evidenceRetrieval,
               memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
-              evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
-              memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null
+              vector_layout: 'per_tenant_org_collection',
+              evidence_layout: 'layer:evidence',
             });
           }
           break;

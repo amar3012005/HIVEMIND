@@ -29,9 +29,9 @@ const MEMORY_TYPE_ALIASES = {
   todo: 'goal',
   task: 'goal',
   reminder: 'goal',
-  contact: 'relationship',
-  person: 'relationship',
-  user: 'relationship',
+  contact: 'fact',
+  person: 'fact',
+  user: 'fact',
   meeting: 'event',
   appointment: 'event',
   deadline: 'event',
@@ -50,7 +50,6 @@ export const memoryTypeEnum = z.preprocess(
     'lesson',
     'goal',
     'event',
-    'relationship',
     // Cognition-loop outputs ("dreams") — written with these memory_types by the
     // synthesis layer. They must be valid FILTER values so the Memories page
     // "🌙 Dreams" filter (memory_type=synthesis) doesn't 400.

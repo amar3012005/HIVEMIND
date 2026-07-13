@@ -77,7 +77,9 @@ export function resolveRecallPlan(input = {}) {
     include_live: explicit && mode === 'fact'
       ? false
       : (!explicit ? input.include_live !== false : input.include_live === true),
-    latency_budget_ms: mode === 'full' ? 3_000 : mode === 'explain' ? 2_000 : null,
+    // These are end-to-end retrieval budgets. A full request degrades to the
+    // completed explain-grade packet at the deadline; it never extends chat.
+    latency_budget_ms: mode === 'fact' ? 1_500 : 3_000,
   };
 }
 
@@ -163,6 +165,17 @@ const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN ||
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
 ]);
+
+// Live data is expensive and may be broader than the source evidence already
+// selected for an answer. It is therefore a bounded expansion only: an
+// explicit live intent, or a retrieved connector/source anchor, plus surface
+// policy. No query-language heuristic decides this across languages.
+export function isLiveExpansionEligible({ includeLive, inspection, liveIntent = false, surfacePolicyAllowsLive = true }) {
+  if (!includeLive || !surfacePolicyAllowsLive) return false;
+  return liveIntent
+    || inspection?.docIds?.length > 0
+    || inspection?.platforms?.some((platform) => WORKSPACE_PLATFORMS.has(platform));
+}
 
 // ── Utility: with-timeout wrapper ───────────────────────────────────────────
 
@@ -748,18 +761,20 @@ export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) 
 export async function recallEnhance({
   memories, query, ctx, evidenceService, prisma, includeLive = true,
   includeGraph = false, includeAdjacent = false, deadlineMs = null,
+  liveIntent = false, surfacePolicyAllowsLive = true,
 }) {
   const startedAt = Date.now();
   const inspection = inspectMemories(memories || []);
   const cap = (normal) => deadlineMs ? Math.min(normal, deadlineMs) : normal;
 
+  const liveEligible = isLiveExpansionEligible({ includeLive, inspection, liveIntent, surfacePolicyAllowsLive });
   const [hop2, hop3, graph] = await Promise.all([
     withTimeout(
       hop2Evidence({ evidenceService, query, ctx, inspection, prisma }),
       cap(HOP2_TIMEOUT_MS),
       { items: [], reason: 'timeout' },
     ),
-    !includeLive
+    !liveEligible
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
           hop3Live({ prisma, query, ctx, inspection }),
@@ -819,6 +834,7 @@ export async function recallEnhance({
       },
       evidence_trigger:  hop2.reason,
       live_trigger:      hop3.reason,
+      live_eligible:     liveEligible,
       graph_trigger:     graph.reason,
       adjacent_trigger:  adjacentReason,
       latency_ms:        { enhance: Date.now() - startedAt },
@@ -897,7 +913,7 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
     const key = section.segment_id || `${section.document_id}:${section.page || ''}`;
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    citations.push({ segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
+    citations.push({ id: `C${citations.length + 1}`, segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
   }
   const conflicts = graph.filter((edge) => String(edge.type).toLowerCase() === 'contradicts');
   return {
@@ -905,13 +921,23 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
     anchors: memories.slice(0, 5).map((m) => ({ id: m.id, title: m.title || null, score: m.score ?? null })),
     facts: memories.slice(0, 5),
     source_sections: sourceSections,
+    sourceSections,
     graph_evidence: graph,
+    graphEvidence: graph,
     conflicts,
     live_evidence: live,
+    liveEvidence: live,
     citations,
     source_coverage: {
       documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
       segments: sourceSections.length,
+      graph_edges: graph.length,
+      live_items: live.length,
+    },
+    coverage: {
+      facts: Math.min(memories.length, 5),
+      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
+      source_sections: sourceSections.length,
       graph_edges: graph.length,
       live_items: live.length,
     },
@@ -948,12 +974,13 @@ export class RecallRouter {
     const traceLatency = {};
     const startedAt = Date.now();
     const recallPlan = resolveRecallPlan(options);
+    const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
     let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
-      HOP1_TIMEOUT_MS,
+      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
     // Project-scope fallback: if user has a project active but recall came
@@ -979,7 +1006,7 @@ export class RecallRouter {
       };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
-        HOP1_TIMEOUT_MS,
+        Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
         [],
       );
       projectFallbackFired = memories.length > 0;
@@ -1000,14 +1027,19 @@ export class RecallRouter {
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
-        HOP2_TIMEOUT_MS,
+        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
         { items: [], reason: 'timeout' },
       ),
-      !recallPlan.include_live
+      !isLiveExpansionEligible({
+        includeLive: recallPlan.include_live,
+        inspection,
+        liveIntent: options.live_intent === true,
+        surfacePolicyAllowsLive: options.surface_policy_allows_live !== false,
+      })
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
-            HOP3_TIMEOUT_MS,
+            Math.min(HOP3_TIMEOUT_MS, remainingBudget()),
             { items: [], reason: 'timeout' },
           ),
     ]);

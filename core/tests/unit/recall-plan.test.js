@@ -44,3 +44,9 @@ test('live expansion requires a surface policy and an evidence anchor or explici
     surfacePolicyAllowsLive: false,
   }), false);
 });
+
+test('explicit explain and full are source-first while fact remains anchor-only', () => {
+  assert.equal(resolveRecallPlan({ mode: 'fact' }).expand_evidence, false);
+  assert.equal(resolveRecallPlan({ mode: 'explain' }).expand_evidence, true);
+  assert.equal(resolveRecallPlan({ mode: 'full' }).expand_evidence, true);
+});

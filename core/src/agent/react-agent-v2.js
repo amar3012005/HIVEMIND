@@ -218,7 +218,7 @@ Output STRICT JSON (no prose, no code fence):
                                   // imperative verb is ALWAYS 'lookup'. Never 'save' just because the user
                                   // dropped a filename — they want to RECALL it, not store it again.
   "intents": ["..."],            // 1-3 short phrases describing what the user actually wants
-  "sub_queries": ["..."],        // 1-4 English recall queries, each focused on ONE entity/concept
+  "sub_queries": ["..."],        // 1-4 recall queries in the user's language, each focused on ONE entity/concept
   "named_entities": ["..."],     // proper nouns the user mentioned (people, projects, files, brands)
   "needs_traverse": false,        // true if recall should follow graph edges to find related memories
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
@@ -238,7 +238,7 @@ Output STRICT JSON (no prose, no code fence):
                                   //   here is WRONG; emit action_intent and let the action path handle it.
   "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
-  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Threshold confidence >= 0.70 fires the save.
+  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}. Relationships are typed graph edges, never memory objects. Threshold confidence >= 0.70 fires the save.
                                   // MOOD IS THE PRIMARY SIGNAL: an INTERROGATIVE ("what is X?", "who is Y?", "tell me about Z") → recall ONLY, never save. A DECLARATIVE assertion (a statement, no question mark, not a question word) that teaches a durable fact → recall to check existing AND emit auto_save_intent for the new fact. When the user TELLS you something true about their world, you SAVE it; when they ASK, you recall.
                                   // THIRD-PERSON DECLARATIVES FIRE TOO — not just first-person "I" narration. Any statement asserting a NEW STATE or RELATIONSHIP about a company, product, project, org, or person the user works with MUST fire: "X is Y", "X is now Y", "X is the parent/owner/subsidiary of Y", "we renamed/rebranded X to Y", "X acquired/merged with Y", "X replaced Y", "X reports to Y", "X moved to Y". These are the user teaching the system durable structural facts and are the MOST important to capture.
                                   // DO NOT fire on: pure questions ("What is X?"), recall requests ("tell me about Y"), hypotheticals ("what if I did X"), or opinions / general-knowledge about the OUTSIDE world ("AI is overhyped", "Paris is in France"). CRITICAL: a factual declaration about the USER's OWN company / org / products / projects / people is NEVER an "external topic" — it fires even when phrased encyclopedically ("Acme is now a subsidiary of Globex"). If in doubt whether a declarative is about the user's world, FIRE (over-saving is cheap; smart-ingest dedups).
@@ -332,7 +332,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
         title: rawAS.title.trim().slice(0, 200),
         content: rawAS.content.trim().slice(0, 4000),
         tags: Array.isArray(rawAS.tags) ? rawAS.tags.filter(t => typeof t === 'string').slice(0, 12) : [],
-        memory_type: ['fact','decision','preference','event','goal','lesson','relationship'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
+        memory_type: ['fact','decision','preference','event','goal','lesson'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
         confidence: rawAS.confidence,
       };
     }
@@ -470,8 +470,8 @@ const ROUTER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 search queries, ALWAYS written in ENGLISH — translate the user\'s wording even when they wrote in another language (German "Umsatz"→"revenue", "Gründer"→"founder", "Mitarbeiter"→"employees", "Preis"→"price"). Memory is stored in English and recall ranks far better in English. Each query = the entity name + the specific attribute asked (e.g. "Solvis revenue 2021").' },
-          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], description: 'quick = direct lookup (default); panorama = timeline/history; insight = relationships between things' },
+          queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 semantic search queries. Preserve names and meaning in the user\'s language; multilingual retrieval handles them directly.' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full'], description: 'fact = cheap current answer; explain = evidence and typed relations; full = explicit source reconstruction only when the user asks for complete context.' },
         },
         required: ['queries'],
       },
@@ -529,7 +529,7 @@ async function routerPlan({ message, history, language, assistantName, orgName, 
     intent_kind: 'lookup', user_message: message, action_intent: null, intents: [],
     sub_queries: [], named_entities: [], needs_traverse: false, needs_time_travel: false,
     time_travel: null, needs_web: false, save_intent: null, auto_save_intent: null,
-    ask_for_project: false, update_intent: null, recall_mode: 'quick', expected_evidence_types: [],
+    ask_for_project: false, update_intent: null, recall_mode: 'fact', expected_evidence_types: [],
   };
 
   const name = assistantName || 'HIVE';
@@ -615,7 +615,7 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
         intent_kind: 'save',
         save_intent: { title, content, tags },
         sub_queries: [content.slice(0, 120)],
-        recall_mode: 'quick',
+        recall_mode: 'fact',
       },
       usage,
     };
@@ -629,13 +629,13 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
     onEvent?.({ type: 'plan', routed: 'live_lookup', providers });
     // Run memory recall on the query AND fetch live from the chosen connected
     // apps (gatherEvidence honours plan.live_providers). Combined evidence.
-    return { plan: { ...basePlan, sub_queries: [q], recall_mode: 'quick', live_providers: providers }, usage };
+    return { plan: { ...basePlan, sub_queries: [q], recall_mode: 'fact', live_providers: providers }, usage };
   }
 
   // Default: recall (also the safe catch-all for an unknown tool name).
   const queries = (Array.isArray(args.queries) ? args.queries : [])
     .filter(q => typeof q === 'string' && q.trim()).slice(0, 3);
-  const mode = ['quick', 'panorama', 'insight'].includes(args.mode) ? args.mode : 'quick';
+  const mode = ['fact', 'explain', 'full'].includes(args.mode) ? args.mode : 'fact';
   onEvent?.({ type: 'plan', routed: 'recall', queries });
   return { plan: { ...basePlan, sub_queries: queries.length ? queries : [message], recall_mode: mode }, usage };
 }
@@ -657,6 +657,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // memories. Passed to answerStep so the LLM can cite synth claims AND
   // their source rows in the same answer.
   const synthesisChains = new Map(); // key = synthesis_id → chain
+  const recallPackets = [];
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -754,7 +755,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
   // smaller set and downstream dedup carries less.
-  const recallLimit = recallMode === 'panorama' ? 14 : recallMode === 'insight' ? 12 : 8;
+  const recallLimit = recallMode === 'full' || recallMode === 'panorama'
+    ? 14
+    : recallMode === 'explain' || recallMode === 'insight'
+      ? 12
+      : 8;
   const evidenceSeen = new Set();
   if (plan.sub_queries.length > 0) {
     const recallResults = await Promise.all(
@@ -799,6 +804,12 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         evidenceSeen.add(k);
         evidenceItems.push(ev);
       }
+      for (const edge of (r?.relationships || [])) {
+        if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
+        const key = `${edge.from_id}|${edge.to_id}|${edge.type}`;
+        if (!edgesByKey.has(key)) edgesByKey.set(key, edge);
+      }
+      if (r?.evidence_packet) recallPackets.push(r.evidence_packet);
       // Synthesis evidence chains — pulled when recall_mode='insight'.
       // Each chain: { synthesis_id, synthesis_title, conf, rev, evidence[] }
       for (const chain of (r?.synthesis_evidence_chains || [])) {
@@ -1099,6 +1110,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     relationships: [...edgesByKey.values()],
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
+    recall_packets: recallPackets,
     steps,
     webJob,
   };
@@ -2004,7 +2016,7 @@ Decide ONE thing: is the user TEACHING a new durable fact about THEIR OWN world 
 
 If YES, extract a self-contained THIRD-PERSON note. If NO, return {"save": false}.
 Output JSON only:
-{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}
+{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}
 OR {"save": false}`;
   try {
     const { parsed, usage } = await callJsonLLM({ messages: [{ role: 'user', content: prompt }], model, apiKey, maxTokens: 400, signal });
@@ -2013,7 +2025,7 @@ OR {"save": false}`;
         title: String(parsed.title).slice(0, 200),
         content: String(parsed.content).slice(0, 2000),
         tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 12) : [],
-        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson', 'relationship'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
+        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
         confidence: Number(parsed.confidence),
         _rescued: true,
       };
@@ -2464,7 +2476,7 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'reflect', extra_queries: reflect.extra_queries, reason: reflect.reason });
           const extras = await Promise.all(reflect.extra_queries.map(async (q) => {
             try {
-              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
+              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
               steps.push({ tool: 'hivemind_recall', args: { query: q }, result_summary: `${r?.memories?.length || 0} memories` });
               onEvent?.({ type: 'tool_call', name: 'hivemind_recall', arguments: JSON.stringify({ query: q }) });
               onEvent?.({ type: 'tool_result', name: 'hivemind_recall', summary: `${r?.memories?.length || 0} memories` });
@@ -2506,7 +2518,7 @@ export async function runReactAgentV2({
         const gapQueries = answer.gaps.filter(g => typeof g === 'string' && g.trim().length > 0).slice(0, 2);
         const extra = await Promise.all(gapQueries.map(async (q) => {
           try {
-            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
+            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
             recordTool('hivemind_recall', { query: q, mode: 'retry' }, `${r?.memories?.length || 0} memories`, r);
             return r;
           } catch { return null; }
@@ -2599,6 +2611,7 @@ export async function runReactAgentV2({
       })),
       // Synthesis chains (insight-mode only) — FE renders claim + sources tree.
       synthesis_chains: (evidence.synthesis_chains || []).slice(0, 5),
+      evidence_packets: (evidence.recall_packets || []).slice(0, 3),
       steps,
       evidence_used: answer.evidence_used,
       confidence:    answer.confidence,

@@ -1282,6 +1282,7 @@ export class RecallRouter {
       })),
       live: hop3.items,
       trace: {
+        recall_plan:     recallPlan,
         hop1_count:      memories.length,
         sparse:          inspection.sparse,
         top_score:       Number(inspection.topScore.toFixed(3)),

@@ -28,7 +28,7 @@ export const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Natural-language query.' },
-          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
           source_type: { type: 'string', enum: ['text', 'code', 'conversation', 'documentation', 'decision'] },
@@ -53,7 +53,7 @@ export const TOOL_SCHEMAS = [
           title: { type: 'string', description: '3-8 words, searchable.' },
           content: { type: 'string', description: 'The fact, one claim per memory.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
-          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship'] },
+          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson'] },
           project_id: {
             type: 'string',
             description: 'Project UUID. Use when you already know it (e.g. from a prior hivemind_list_projects call).',
@@ -343,16 +343,20 @@ const TOOL_HANDLERS = {
     // Single entry point — RecallRouter owns tier orchestration.
     // Memory-first, event-driven, no regex classifier. Memory layer's tags
     // are the routing oracle for evidence + live workspace lookups.
-    const { RecallRouter } = await import('../memory/recall-router.js');
+    const {
+      RecallRouter, resolveRecallPlan, recallEnhance, buildEvidencePacket,
+    } = await import('../memory/recall-router.js');
     const router = new RecallRouter({
       persistentMemoryStore: ctx.persistentMemoryStore,
       evidenceRetrieval:     ctx.evidenceRetrieval,
       prisma:                ctx.prisma,
     });
 
-    const mode = args.mode || 'quick';
+    const requestedMode = args.mode || 'fact';
+    const mode = normalizeAgentRecallMode(requestedMode);
+    const recallPlan = resolveRecallPlan({ ...args, mode });
     const result = await router.recall(args.query, {
-      mode,
+      mode: 'fact',
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
@@ -363,12 +367,52 @@ const TOOL_HANDLERS = {
       // document_date OR created_at falls in window. Used by agent's
       // today/yesterday/this-week shortcuts.
       date_range:     args.date_range,
-      include_live:   args.include_live,
+      include_live:   false,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
       projectId:     ctx.projectId,
       accessContext: ctx.accessContext,
+    });
+
+    let graph = [];
+    let cutoffReason = null;
+    if (recallPlan.expand_evidence) {
+      try {
+        const enhanced = await recallEnhance({
+          memories: result.memories,
+          query: args.query,
+          ctx: {
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            projectId: ctx.projectId,
+            accessContext: ctx.accessContext,
+          },
+          evidenceService: ctx.evidenceRetrieval,
+          prisma: ctx.prisma,
+          includeLive: recallPlan.include_live,
+          includeGraph: recallPlan.max_graph_hops === 1,
+          includeAdjacent: recallPlan.mode === 'full',
+          deadlineMs: recallPlan.latency_budget_ms,
+        });
+        result.evidence = enhanced.evidence || [];
+        result.live = enhanced.live || [];
+        graph = enhanced.graph || [];
+        result.trace = { ...result.trace, expansion: enhanced.trace };
+        if (Object.values(enhanced.trace || {}).includes('timeout')) cutoffReason = 'latency_budget';
+      } catch (error) {
+        cutoffReason = 'expansion_failed';
+        result.trace = { ...result.trace, expansion_error: String(error.message || error).slice(0, 200) };
+      }
+    }
+    const evidencePacket = buildEvidencePacket({
+      memories: result.memories,
+      evidence: result.evidence,
+      graph,
+      live: result.live,
+      plan: recallPlan,
+      trace: result.trace,
+      cutoffReason,
     });
 
     // P2 salience feedback: reinforce every recalled memory (agent + MCP
@@ -396,7 +440,7 @@ const TOOL_HANDLERS = {
     // mode already returns the top synthesis + 2 evidence ids; insight mode
     // expands ALL synthesis rows up to 4 evidence ids each. Bound by ctx.prisma.
     let synthEvidenceChains = null;
-    if (mode === 'insight' && ctx.prisma) {
+    if ((mode === 'explain' || mode === 'full') && ctx.prisma) {
       const synthRows = (result.memories || []).filter(m => {
         const srcType = m.source_metadata?.source_type;
         const tags = m.tags || [];
@@ -437,13 +481,17 @@ const TOOL_HANDLERS = {
     }
 
     return {
-      mode,
+      mode: requestedMode,
+      mode_used: mode,
+      recall_plan: recallPlan,
       count:          result.memories.length,
       memories:       result.memories,
       live_count:     result.live.length,
       live:           result.live,
       evidence_count: result.evidence.length,
       evidence:       result.evidence,
+      relationships:  graph,
+      evidence_packet: evidencePacket,
       ...(synthEvidenceChains ? { synthesis_evidence_chains: synthEvidenceChains } : {}),
       trace:          result.trace,
     };
@@ -456,12 +504,12 @@ const TOOL_HANDLERS = {
     // Coerce memory_type to a valid Prisma enum value. Models routinely
     // emit 'note', 'observation', 'todo' etc — they're sensible English
     // but not in our locked enum. Map known synonyms; fall back to 'fact'.
-    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship']);
+    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson']);
     const TYPE_ALIAS = {
       note: 'fact', observation: 'fact', todo: 'goal', task: 'goal',
       reminder: 'goal', insight: 'lesson', learning: 'lesson',
       idea: 'fact', knowledge: 'fact', context: 'fact',
-      contact: 'relationship', person: 'relationship', user: 'relationship',
+      contact: 'fact', person: 'fact', user: 'fact', relationship: 'fact',
       meeting: 'event', appointment: 'event',
       synthesis: 'fact', summary: 'fact', // canonical-summary cognition rows
     };
@@ -924,6 +972,12 @@ const TOOL_HANDLERS = {
     };
   },
 };
+
+export function normalizeAgentRecallMode(mode) {
+  const value = String(mode || 'fact').toLowerCase();
+  return ({ quick: 'fact', panorama: 'explain', insight: 'explain' })[value]
+    || (['fact', 'explain', 'full'].includes(value) ? value : 'fact');
+}
 
 // ── Dispatch entry ───────────────────────────────────────────────────────────
 

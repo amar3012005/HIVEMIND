@@ -17,6 +17,7 @@ import { registerGmailTools } from './connector-toolkits/gmail-tools.js';
 import { registerGdocsTools } from './connector-toolkits/gdocs-tools.js';
 import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
 import { registerSlackTools } from './connector-toolkits/slack-tools.js';
+import { listGoogleTools, runGoogleTool } from '../connectors/google-native.js';
 
 // MCP-backed groups (run via persistent client pool).
 // 'slack' moved OUT of this list: Slack OAuth is native (PlatformIntegration
@@ -89,6 +90,30 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
       });
       const activeProviders = new Set(connections.map(c => c.providerKey));
       const pool = getPool(prisma);
+
+      // One native Google surface for chat and HyperAgents. The provider
+      // fallback chain resolves the user's actual grant at execution time.
+      const hasGoogle = [...activeProviders].some((provider) =>
+        ['gmail', 'google-docs', 'google-sheets', 'google-calendar'].includes(provider));
+      if (hasGoogle) {
+        tk.createToolGroup({
+          name: 'google',
+          description: 'Connected Google workspace tools (Gmail, Docs, Sheets, Calendar).',
+          active: false,
+          notes: 'Google tools use the same native registry as HyperAgents. Activate only for explicit connected-workspace intent.',
+        });
+        for (const tool of listGoogleTools()) {
+          const write = /(^|_)(create|update|delete|respond|send|append|clear)(_|$)/.test(tool.name);
+          tk.registerToolFunction({
+            name: tool.name,
+            description: tool.description,
+            parameters: { type: 'object', additionalProperties: true },
+            groupName: 'google',
+            readOnly: !write,
+            handler: (args) => runGoogleTool(tool.name, args, { user_id: userId, org_id: orgId }, prisma),
+          });
+        }
+      }
 
       // (a) MCP groups.
       for (const provider of MCP_CONNECTOR_GROUPS) {

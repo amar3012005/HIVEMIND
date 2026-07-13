@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildEvidencePacket, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
 import { EvidenceRetrievalService } from '../../src/knowledge/evidence-retrieval.js';
 
-test('full evidence packet enforces total and per-document caps', () => {
+test('full evidence packet preserves a bounded raw source window', () => {
   const evidence = Array.from({ length: 20 }, (_, i) => ({
     segmentId: `s${i}`,
     documentId: `d${Math.floor(i / 5)}`,
@@ -17,7 +17,7 @@ test('full evidence packet enforces total and per-document caps', () => {
   });
   assert.equal(packet.source_sections.length, 12);
   const counts = packet.source_sections.reduce((m, s) => m.set(s.document_id, (m.get(s.document_id) || 0) + 1), new Map());
-  assert.ok([...counts.values()].every((count) => count <= 3));
+  assert.ok([...counts.values()].every((count) => count <= 8));
   assert.equal(packet.citations.length, 12);
 });
 
@@ -121,6 +121,55 @@ test('full recall keeps matched evidence when adjacent hydration exceeds its dea
   });
   assert.equal(enhanced.trace.adjacent_trigger, 'timeout');
   assert.equal(enhanced.evidence[0].content, 'matched');
+});
+
+test('named source resolution is tenant scoped', async () => {
+  let query;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: {
+        findMany: async (args) => { query = args; return [{ id: 'doc-1', title: 'Board Notes.pdf' }]; },
+      },
+    },
+    qdrantClient: null,
+  });
+  const documents = await service.resolveSourceDocuments({
+    userId: 'user-1', orgId: 'org-1', title: 'Board Notes',
+  });
+  assert.equal(query.where.userId, 'user-1');
+  assert.equal(query.where.orgId, 'org-1');
+  assert.equal(query.where.OR.length, 2);
+  assert.equal(documents[0].id, 'doc-1');
+});
+
+test('named source hydration returns ordered raw segments around evidence anchor', async () => {
+  let segmentQuery;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        findMany: async (args) => {
+          segmentQuery = args;
+          return [3, 4].map((segmentIndex) => ({
+            id: `s${segmentIndex}`, documentId: 'doc-1', content: `raw ${segmentIndex}`,
+            segmentType: 'paragraph', segmentIndex, wordCount: 2,
+          }));
+        },
+      },
+    },
+    qdrantClient: null,
+  });
+  service.retrieveEvidence = async () => [{
+    segmentId: 's4', documentId: 'doc-1', score: 0.9, metadata: { segmentIndex: 4 },
+  }];
+  const rows = await service.hydrateSourceDocuments({
+    documents: [{ id: 'doc-1', title: 'Board Notes.pdf' }],
+    query: 'budget decision', userId: 'user-1', orgId: 'org-1', perDocument: 4, total: 4,
+  });
+  assert.deepEqual(segmentQuery.where, {
+    userId: 'user-1', orgId: 'org-1', documentId: 'doc-1', segmentIndex: { gte: 3 },
+  });
+  assert.deepEqual(rows.map((row) => row.metadata.segmentIndex), [3, 4]);
+  assert.equal(rows[0].document.title, 'Board Notes.pdf');
 });
 
 function edge(fromScope, toScope, { toUserId = 'user-1', projectId = null, suffix = 'base' } = {}) {

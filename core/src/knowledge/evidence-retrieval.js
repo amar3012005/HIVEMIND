@@ -256,6 +256,98 @@ export class EvidenceRetrievalService {
     };
   }
 
+  /** Resolve an explicitly requested source without trusting a model-supplied id. */
+  async resolveSourceDocuments({ userId, orgId, documentId = null, title = null, limit = 3 }) {
+    if (orgIsRemote(orgId)) return [];
+    if (!this.db?.knowledgeDocument || (!documentId && !title)) return [];
+
+    return this.db.knowledgeDocument.findMany({
+      where: {
+        userId,
+        orgId,
+        ...(documentId ? { id: documentId } : {}),
+        ...(!documentId && title ? {
+          OR: [
+            { title: { contains: title, mode: 'insensitive' } },
+            { sourceId: { contains: title, mode: 'insensitive' } },
+          ],
+        } : {}),
+      },
+      select: {
+        id: true,
+        title: true,
+        documentType: true,
+        sourcePlatform: true,
+        sourceUrl: true,
+        documentDate: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(1, Math.min(limit, 10)),
+    });
+  }
+
+  /**
+   * Hydrate ordered raw sections for a named source. This reads the canonical
+   * document store; evidence vectors are used only to select relevant anchors.
+   */
+  async hydrateSourceDocuments({ documents, query, userId, orgId, perDocument = 8, total = 16 }) {
+    if (orgIsRemote(orgId) || !this.db?.knowledgeSegment || !documents?.length) return [];
+    const documentIds = documents.map((document) => document.id).filter(Boolean);
+    const anchors = await this.retrieveEvidence({
+      query,
+      userId,
+      orgId,
+      documentIds,
+      limit: Math.min(total, Math.max(documentIds.length * 3, 6)),
+      scoreThreshold: 0.1,
+    });
+    const anchorIndexes = new Map();
+    for (const anchor of anchors) {
+      if (!Number.isInteger(anchor?.metadata?.segmentIndex)) continue;
+      const indexes = anchorIndexes.get(anchor.documentId) || [];
+      indexes.push(anchor.metadata.segmentIndex);
+      anchorIndexes.set(anchor.documentId, indexes);
+    }
+
+    const rows = [];
+    for (const document of documents) {
+      const indexes = anchorIndexes.get(document.id) || [];
+      const center = indexes.length ? Math.min(...indexes) : 0;
+      const start = Math.max(0, center - 1);
+      const segments = await this.db.knowledgeSegment.findMany({
+        where: {
+          userId,
+          orgId,
+          documentId: document.id,
+          segmentIndex: { gte: start },
+        },
+        orderBy: { segmentIndex: 'asc' },
+        take: Math.max(1, Math.min(perDocument, total - rows.length)),
+      });
+      const scoreById = new Map(anchors.map((anchor) => [anchor.segmentId, anchor.score]));
+      for (const segment of segments) {
+        rows.push({
+          type: 'evidence_segment',
+          segmentId: segment.id,
+          documentId: segment.documentId,
+          content: segment.content,
+          snippet: segment.content,
+          score: scoreById.get(segment.id) ?? null,
+          document,
+          metadata: {
+            segmentType: segment.segmentType,
+            segmentIndex: segment.segmentIndex,
+            wordCount: segment.wordCount,
+            startPage: segment.startPage,
+            endPage: segment.endPage,
+          },
+        });
+        if (rows.length >= total) return rows;
+      }
+    }
+    return rows;
+  }
+
   /**
    * Get evidence for a specific memory (citations/grounding)
    * @param {string} memoryId

@@ -39,6 +39,7 @@ test('hosted MCP config keeps public URLs separate from internal API URLs', asyn
     assert.equal(tokenized.connection.token, descriptor.connection.token);
     assert.equal(tokenized.clientConfig.simpleUrl, descriptor.clientConfig.simpleUrl);
     assert.equal(await hostedService.validateConnectionToken(descriptor.connection.token, userId), true);
+    assert.ok(descriptor.tools.some((tool) => tool.name === 'hivemind_chat_context'));
   } finally {
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {

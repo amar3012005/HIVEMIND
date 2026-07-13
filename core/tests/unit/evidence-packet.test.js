@@ -1,0 +1,187 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildEvidencePacket, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
+import { EvidenceRetrievalService } from '../../src/knowledge/evidence-retrieval.js';
+
+test('full evidence packet preserves a bounded raw source window', () => {
+  const evidence = Array.from({ length: 20 }, (_, i) => ({
+    segmentId: `s${i}`,
+    documentId: `d${Math.floor(i / 5)}`,
+    content: `section ${i}`,
+    metadata: { segmentIndex: i },
+  }));
+  const packet = buildEvidencePacket({
+    memories: [{ id: 'm1', title: 'Anchor' }],
+    evidence,
+    plan: { mode: 'full' },
+  });
+  assert.equal(packet.source_sections.length, 12);
+  const counts = packet.source_sections.reduce((m, s) => m.set(s.document_id, (m.get(s.document_id) || 0) + 1), new Map());
+  assert.ok([...counts.values()].every((count) => count <= 8));
+  assert.equal(packet.citations.length, 12);
+});
+
+test('packet preserves partial results and exposes latency cutoff', () => {
+  const packet = buildEvidencePacket({
+    memories: [{ id: 'm1', content: 'fast fact' }],
+    graph: [{ type: 'Contradicts', from_id: 'm1', to_id: 'm2' }],
+    plan: { mode: 'explain' },
+    cutoffReason: 'latency_budget',
+  });
+  assert.equal(packet.facts[0].content, 'fast fact');
+  assert.equal(packet.conflicts.length, 1);
+  assert.equal(packet.cutoff_reason, 'latency_budget');
+});
+
+test('typed graph expansion rejects inaccessible tenant scopes', async () => {
+  const rows = [
+    edge('organization', 'organization'),
+    edge('personal', 'personal', { toUserId: 'other-user' }),
+    edge('project', 'project', { projectId: 'other-project' }),
+    edge('project', 'project', { projectId: 'allowed-project', suffix: 'allowed' }),
+  ];
+  let where;
+  const prisma = { relationship: { findMany: async (args) => { where = args.where; return rows; } } };
+  const result = await loadTypedGraphEvidence({
+    prisma,
+    memoryIds: ['anchor'],
+    userId: 'user-1',
+    orgId: 'org-1',
+    accessContext: { projectIds: ['allowed-project'], teamIds: [] },
+  });
+  assert.equal(where.fromMemory.orgId, 'org-1');
+  assert.equal(where.toMemory.orgId, 'org-1');
+  assert.equal(result.items.length, 2);
+  assert.ok(result.items.some((item) => item.to_id === 'to-allowed'));
+});
+
+test('hung event-driven evidence returns at the deadline for fast fallback', async () => {
+  const started = Date.now();
+  const enhanced = await recallEnhance({
+    memories: [],
+    query: 'deadline test',
+    ctx: { userId: 'user-1', orgId: 'org-1' },
+    evidenceService: { retrieveEvidence: () => new Promise(() => {}) },
+    prisma: null,
+    includeLive: false,
+    deadlineMs: 25,
+  });
+  assert.equal(enhanced.trace.evidence_trigger, 'timeout');
+  assert.deepEqual(enhanced.evidence, []);
+  assert.ok(Date.now() - started < 200);
+});
+
+test('full recall hydrates a tenant-scoped ordered source window', async () => {
+  let query;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        findMany: async (args) => {
+          query = args;
+          return [2, 3, 4].map((segmentIndex) => ({
+            id: `s${segmentIndex}`,
+            documentId: 'doc-1',
+            content: `section ${segmentIndex}`,
+            segmentType: 'paragraph',
+            segmentIndex,
+            wordCount: 2,
+            startPage: 1,
+            endPage: 1,
+            document: { id: 'doc-1', title: 'Source' },
+          }));
+        },
+      },
+    },
+    qdrantClient: null,
+  });
+  const result = await service.hydrateAdjacentEvidence({
+    anchors: [{ documentId: 'doc-1', score: 0.9, metadata: { segmentIndex: 3 } }],
+    userId: 'user-1',
+    orgId: 'org-1',
+  });
+  assert.equal(query.where.userId, 'user-1');
+  assert.equal(query.where.orgId, 'org-1');
+  assert.deepEqual(query.where.OR[0], { documentId: 'doc-1', segmentIndex: { gte: 2, lte: 4 } });
+  assert.deepEqual(result.map((item) => item.metadata.segmentIndex), [2, 3, 4]);
+});
+
+test('full recall keeps matched evidence when adjacent hydration exceeds its deadline', async () => {
+  const enhanced = await recallEnhance({
+    memories: [{ id: 'm1', tags: ['doc-id:doc-1'] }],
+    query: 'source context',
+    ctx: { userId: 'user-1', orgId: 'org-1' },
+    evidenceService: {
+      retrieveEvidence: async () => [{ segmentId: 's1', documentId: 'doc-1', content: 'matched', metadata: { segmentIndex: 1 } }],
+      hydrateAdjacentEvidence: () => new Promise(() => {}),
+    },
+    prisma: null,
+    includeLive: false,
+    includeAdjacent: true,
+    deadlineMs: 25,
+  });
+  assert.equal(enhanced.trace.adjacent_trigger, 'timeout');
+  assert.equal(enhanced.evidence[0].content, 'matched');
+});
+
+test('named source resolution is tenant scoped', async () => {
+  let query;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: {
+        findMany: async (args) => { query = args; return [{ id: 'doc-1', title: 'Board Notes.pdf' }]; },
+      },
+    },
+    qdrantClient: null,
+  });
+  const documents = await service.resolveSourceDocuments({
+    userId: 'user-1', orgId: 'org-1', title: 'Board Notes',
+  });
+  assert.equal(query.where.userId, 'user-1');
+  assert.equal(query.where.orgId, 'org-1');
+  assert.equal(query.where.OR.length, 2);
+  assert.equal(documents[0].id, 'doc-1');
+});
+
+test('named source hydration returns ordered raw segments around evidence anchor', async () => {
+  let segmentQuery;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        findMany: async (args) => {
+          segmentQuery = args;
+          return [3, 4].map((segmentIndex) => ({
+            id: `s${segmentIndex}`, documentId: 'doc-1', content: `raw ${segmentIndex}`,
+            segmentType: 'paragraph', segmentIndex, wordCount: 2,
+          }));
+        },
+      },
+    },
+    qdrantClient: null,
+  });
+  service.retrieveEvidence = async () => [{
+    segmentId: 's4', documentId: 'doc-1', score: 0.9, metadata: { segmentIndex: 4 },
+  }];
+  const rows = await service.hydrateSourceDocuments({
+    documents: [{ id: 'doc-1', title: 'Board Notes.pdf' }],
+    query: 'budget decision', userId: 'user-1', orgId: 'org-1', perDocument: 4, total: 4,
+  });
+  assert.deepEqual(segmentQuery.where, {
+    userId: 'user-1', orgId: 'org-1', documentId: 'doc-1', segmentIndex: { gte: 3 },
+  });
+  assert.deepEqual(rows.map((row) => row.metadata.segmentIndex), [3, 4]);
+  assert.equal(rows[0].document.title, 'Board Notes.pdf');
+});
+
+function edge(fromScope, toScope, { toUserId = 'user-1', projectId = null, suffix = 'base' } = {}) {
+  const memory = (id, scope, userId) => ({
+    id, scope, userId, title: id, content: id, projectId,
+    primaryTeamId: null, isLatest: true,
+    memoryProjects: projectId ? [{ projectId }] : [],
+  });
+  return {
+    fromId: 'anchor', toId: `to-${suffix}`, type: 'Extends', confidence: 0.9,
+    metadata: {}, createdAt: new Date(),
+    fromMemory: memory('anchor', fromScope, 'user-1'),
+    toMemory: memory(`to-${suffix}`, toScope, toUserId),
+  };
+}

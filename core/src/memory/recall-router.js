@@ -947,6 +947,7 @@ export class RecallRouter {
 
     const traceLatency = {};
     const startedAt = Date.now();
+    const recallPlan = resolveRecallPlan(options);
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
@@ -993,14 +994,16 @@ export class RecallRouter {
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
     const t2Start = Date.now();
     const [hop2, hop3] = await Promise.all([
-      withTimeout(
+      !recallPlan.expand_evidence
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : withTimeout(
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
         HOP2_TIMEOUT_MS,
         { items: [], reason: 'timeout' },
       ),
-      options.include_live === false
+      !recallPlan.include_live
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
@@ -1159,6 +1162,7 @@ export class RecallRouter {
       })),
       live: hop3.items,
       trace: {
+        recall_plan:     recallPlan,
         hop1_count:      memories.length,
         sparse:          inspection.sparse,
         top_score:       Number(inspection.topScore.toFixed(3)),

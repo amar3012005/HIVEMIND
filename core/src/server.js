@@ -3211,6 +3211,34 @@ function isAdminRequest(req) {
   return req.headers['x-admin-secret'] === ADMIN_SECRET;
 }
 
+function resolveWithinDeadline(promise, timeoutMs, fallback) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      },
+    );
+  });
+}
+
 // Shadow-only recall contract validation. This never participates in answer
 // generation, never calls live connectors, and emits counts only. It is the
 // acceptance signal for a future per-org canary, not a second chat path.
@@ -19226,6 +19254,67 @@ exit \$RC
                 } else {
                   return jsonResponse(res, { error: 'Project not found or access denied', project_id: recallProjectId }, 403);
                 }
+              }
+
+              // Explicit source-grounded modes use the bounded router directly.
+              // Legacy callers keep the established rich pipeline below until
+              // shadow/canary evidence proves a safe per-surface migration.
+              if (!recallPlan.legacy) {
+                const [{ RecallRouter }, { buildRecallPacket }] = await Promise.all([
+                  import('./memory/recall-router.js'),
+                  import('./memory/recall-packet.js'),
+                ]);
+                const query = body.query_context || body.context || '';
+                if (!query || typeof query !== 'string') {
+                  return jsonResponse(res, { error: 'query_context is required' }, 400);
+                }
+                const router = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+                const remainingMs = Math.max(1, recallPlan.latency_budget_ms - (Date.now() - _recallT0));
+                const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
+                const bounded = await resolveWithinDeadline(
+                  router.recall(query, {
+                    mode: recallPlan.mode,
+                    include_live: body.include_live === true,
+                    live_intent: body.live_intent === true,
+                    surface_policy_allows_live: body.surface_policy_allows_live !== false,
+                    project: recallProject,
+                    project_id: recallProjectId,
+                    tags: body.tags || [],
+                    valid_at: body.valid_at,
+                    date_range: body.date_range || temporalExpansion.dateRange || null,
+                  }, {
+                    userId,
+                    orgId,
+                    projectId: recallProjectId,
+                    accessContext: recallAccessCtx,
+                  }),
+                  remainingMs,
+                  timeoutResult,
+                );
+                const cutoffReason = bounded.trace?.timeout || Date.now() - _recallT0 >= recallPlan.latency_budget_ms
+                  ? 'latency_budget'
+                  : bounded.trace?.cutoff_reason || null;
+                const packet = buildRecallPacket({
+                  facts: bounded.memories || [],
+                  sourceSections: bounded.evidence || [],
+                  timeline: [],
+                  conflicts: [],
+                  graphEvidence: [],
+                  liveEvidence: bounded.live || [],
+                  plan: recallPlan,
+                  cutoffReason,
+                });
+                if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
+                return jsonResponse(res, {
+                  memories: bounded.memories || [],
+                  evidence: bounded.evidence || [],
+                  live: bounded.live || [],
+                  mode_used: recallPlan.mode,
+                  recall_plan: recallPlan,
+                  evidence_packet: packet,
+                  cutoff_reason: cutoffReason,
+                  latency_ms: Date.now() - _recallT0,
+                });
               }
 
               // Person-filtered recall ("what did person X update today"): resolve an

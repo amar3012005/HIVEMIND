@@ -10,10 +10,15 @@
  * default. So one switch (STT_PROVIDER) picks the api reference; one env per feature
  * picks that feature's model.
  *
- * transcribeAudio() handles the two provider request shapes (Groq multipart whisper
- * / OpenRouter base64 parakeet), retries transient failures (+ Groq billing-block
- * 400s), and — when the OTHER provider's key is present — fails over once so STT
- * survives a single-provider outage or billing block.
+ * transcribeAudio() handles THREE provider request shapes:
+ *   - Groq multipart whisper (/audio/transcriptions)
+ *   - OpenRouter whisper-style STT (parakeet, /audio/transcriptions)
+ *   - OpenRouter chat-audio (Gemini / gpt-audio via /chat/completions with an
+ *     input_audio content part) — the multilingual batch path for meetings,
+ *     which transcribes mixed German+English far better than parakeet.
+ * It retries transient failures (+ Groq billing-block 400s), and — when the
+ * OTHER provider's key is present — fails over once so STT survives a
+ * single-provider outage or billing block.
  *
  * @module src/llm/stt-route
  */
@@ -26,18 +31,26 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  * given feature. featureModel wins; else global STT_MODEL; else provider default.
  * @param {string} [featureModel] - the feature's own model env value
  * @param {string} [providerOverride] - force a provider (used for failover)
- * @returns {{provider:string,url:string,key:string,model:string}}
+ * @returns {{provider:string,shape?:string,url:string,key:string,model:string}}
  */
 export function sttRoute(featureModel, providerOverride) {
   const provider = (providerOverride || process.env.STT_PROVIDER || 'groq').toLowerCase();
   if (provider === 'openrouter' && process.env.OPENROUTER_API_KEY) {
+    const model = (providerOverride ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT;
+    // Multilingual audio-LLMs (Gemini, gpt-audio) transcribe via the CHAT
+    // completions API with an input_audio content part — NOT the whisper-style
+    // /audio/transcriptions endpoint parakeet uses. Route them there and mark
+    // the shape so _post builds the chat body. This is what makes mixed
+    // German+English meetings transcribe accurately (parakeet is en-centric).
+    const isChatAudio = /^(google\/|openai\/gpt-audio)/i.test(model) || /gemini/i.test(model);
     return {
       provider: 'openrouter',
-      url: process.env.OPENROUTER_STT_URL || 'https://openrouter.ai/api/v1/audio/transcriptions',
+      shape: isChatAudio ? 'chat-audio' : 'whisper',
+      url: isChatAudio
+        ? (process.env.OPENROUTER_CHAT_URL || 'https://openrouter.ai/api/v1/chat/completions')
+        : (process.env.OPENROUTER_STT_URL || 'https://openrouter.ai/api/v1/audio/transcriptions'),
       key: process.env.OPENROUTER_API_KEY,
-      // a Groq whisper model id is meaningless to OpenRouter STT → only honor the
-      // feature model when forcing a provider that matches; otherwise parakeet.
-      model: (providerOverride ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT,
+      model,
     };
   }
   // Mirror of the openrouter branch's model guard: an OpenRouter model id
@@ -48,30 +61,61 @@ export function sttRoute(featureModel, providerOverride) {
   const _groqSafeGlobal = _globalModel && !_globalModel.includes('/') ? _globalModel : '';
   return {
     provider: 'groq',
+    shape: 'whisper',
     url: (process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '') + '/audio/transcriptions',
     key: process.env.GROQ_API_KEY || '',
     model: (providerOverride ? null : featureModel) || _groqSafeGlobal || process.env.GROQ_WHISPER_MODEL || GROQ_STT_DEFAULT,
   };
 }
 
+const _OR_HEADERS = (key) => ({
+  Authorization: `Bearer ${key}`,
+  'Content-Type': 'application/json',
+  'HTTP-Referer': 'https://hivemind.davinciai.eu',
+  'X-Title': 'HIVEMIND',
+});
+
 async function _post(route, opts, timeoutMs) {
   const { audio, filename, contentType, prompt, temperature, response_format } = opts;
   const signal = AbortSignal.timeout(timeoutMs);
+  const fmt = ((contentType || 'audio/wav').split('/')[1] || 'wav').split(';')[0];
+
   if (route.provider === 'openrouter') {
-    const fmt = ((contentType || 'audio/wav').split('/')[1] || 'wav').split(';')[0];
     const b64 = Buffer.from(audio).toString('base64');
+    // Chat-audio shape (Gemini / gpt-audio): a strict verbatim-transcription
+    // instruction + the audio as an input_audio content part. Multilingual by
+    // default — we do NOT force a language so mixed de/en is transcribed as
+    // spoken. temperature 0 for faithful transcription.
+    if (route.shape === 'chat-audio') {
+      const instr =
+        'You are a verbatim speech-to-text engine. Transcribe the audio EXACTLY as spoken, in the '
+        + 'original language(s). Meetings often mix German and English — keep each utterance in the '
+        + 'language it was actually spoken; do NOT translate. Preserve names, numbers, company and '
+        + 'product terms precisely. Start a new line when the speaker clearly changes. Output ONLY the '
+        + 'raw transcript text — no preamble, no timestamps, no commentary.'
+        + (prompt ? ` Names/terms that may appear: ${String(prompt).slice(0, 500)}` : '');
+      return fetch(route.url, {
+        method: 'POST', headers: _OR_HEADERS(route.key), signal,
+        body: JSON.stringify({
+          model: route.model,
+          temperature: temperature ?? 0,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: instr },
+              { type: 'input_audio', input_audio: { data: b64, format: fmt } },
+            ],
+          }],
+        }),
+      });
+    }
+    // Whisper-style OpenRouter STT (parakeet).
     return fetch(route.url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${route.key}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://hivemind.davinciai.eu',
-        'X-Title': 'HIVEMIND',
-      },
+      method: 'POST', headers: _OR_HEADERS(route.key), signal,
       body: JSON.stringify({ model: route.model, input_audio: { data: b64, format: fmt } }),
-      signal,
     });
   }
+
   // Groq (OpenAI-compatible whisper): multipart.
   const ext = ((contentType || 'audio/webm').split('/')[1] || 'webm').split(';')[0];
   const fd = new FormData();
@@ -91,6 +135,12 @@ async function _run(route, opts, maxAttempts, timeoutMs) {
       const r = await _post(route, opts, timeoutMs);
       if (r.ok) {
         const j = await r.json();
+        // Chat-audio returns the transcript in the chat message content; whisper
+        // shapes return { text, segments, language }.
+        if (route.shape === 'chat-audio') {
+          const text = j.choices?.[0]?.message?.content || '';
+          return { ok: true, status: 200, provider: route.provider, model: route.model, text: String(text).trim(), segments: [], language: null };
+        }
         return {
           ok: true, status: 200, provider: route.provider, model: route.model,
           text: j.text || '', segments: Array.isArray(j.segments) ? j.segments : [], language: j.language || null,
@@ -124,7 +174,7 @@ async function _run(route, opts, maxAttempts, timeoutMs) {
  * @param {string} [opts.filename]
  * @param {string} [opts.contentType]
  * @param {string} [opts.model] - the feature's model env value (e.g. MEETING_STT_MODEL)
- * @param {string} [opts.prompt] - Groq whisper context prompt (ignored by OpenRouter)
+ * @param {string} [opts.prompt] - context (names/terms); used by Groq whisper + chat-audio
  * @param {number} [opts.temperature]
  * @param {string} [opts.response_format='verbose_json']
  * @param {number} [opts.maxAttempts=3]
@@ -134,8 +184,32 @@ async function _run(route, opts, maxAttempts, timeoutMs) {
 export async function transcribeAudio(opts) {
   const { model, maxAttempts = 3, timeoutMs = 300000 } = opts;
   const primary = sttRoute(model);
-  const res = await _run(primary, opts, maxAttempts, timeoutMs);
+  let res = await _run(primary, opts, maxAttempts, timeoutMs);
   if (res.ok) return res;
+
+  // OpenRouter intermittently returns a 400 "model does not exist" for a model
+  // that DOES exist (upstream routing flake — verified: the same request
+  // succeeds on retry). _run treats 400 as non-transient, so retry chat-audio
+  // ONCE here before falling back.
+  if (!res.ok && primary.shape === 'chat-audio' && /does not exist|no (?:allowed )?providers|not a valid model/i.test(res.detail || '')) {
+    const retry = await _run(primary, opts, 1, timeoutMs);
+    if (retry.ok) return retry;
+    res = retry;
+  }
+
+  // Same-provider model fallback: a chat-audio (Gemini) model that keeps failing
+  // on OpenRouter degrades to OpenRouter's whisper-style STT (parakeet) — still
+  // multilingual-capable, always available — before we cross providers.
+  if (primary.provider === 'openrouter' && primary.shape === 'chat-audio' && process.env.OPENROUTER_API_KEY) {
+    const parakeet = sttRoute(process.env.OPENROUTER_STT_FALLBACK_MODEL || OPENROUTER_STT_DEFAULT);
+    if (parakeet.shape === 'whisper') {
+      const r1 = await _run(parakeet, opts, 2, timeoutMs);
+      if (r1.ok) {
+        r1.failedOver = `${primary.model}→${parakeet.model}`;
+        return r1;
+      }
+    }
+  }
 
   // Single-shot cross-provider failover (outage / billing block) so STT never goes dark.
   const altProvider = primary.provider === 'groq' ? 'openrouter' : 'groq';

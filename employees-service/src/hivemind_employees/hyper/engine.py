@@ -98,7 +98,11 @@ _OR_PROVIDER_PIN = {
     # 20b: Groq $0.30, proven 695ms live). Fast alternates follow for when a parallel burst
     # throttles OpenRouter's Groq capacity. Our DIRECT Groq key is delinquent — this is
     # OpenRouter's Groq host; paying the Groq bill + HYPER_OPENROUTER_PRIMARY=0 = direct (no margin).
-    "openai/gpt-oss-120b": ["Groq", "Cerebras", "Together"],
+    # Cerebras FIRST for 120b: wafer-scale serving measured ~3000 tok/s (synth
+    # 2.4k tok ≈ 2s) while Groq under load served the same call in 12-18s
+    # (logged "SLOW — fell off the fast-provider pin" on 2026-07-14). Groq stays
+    # the immediate fallback.
+    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Together"],
     # Fireworks dropped from the 20b pin — measured 13.5s and 39.3s per call live
     # (2026-07-07) vs Groq ~1.6-2.5s on the same calls; it was the plan-phase spike.
     "openai/gpt-oss-20b": ["Groq", "Together", "Cerebras"],

@@ -1678,6 +1678,45 @@ async function syncPersonalStripeSubscription({ org, subscription, plansMod }) {
 async function handleRequest(req, res) {
   applyCorsHeaders(req, res);
 
+  // Shared route helpers must be initialized before any route can call them.
+  const _getTeamStore = async () => {
+    if (!prisma) return null;
+    if (!_getTeamStore._cache) {
+      const mod = await import('./teams/team-store.js');
+      _getTeamStore._cache = {
+        store: new mod.TeamStore(prisma),
+        assertTeamPermission: mod.assertTeamPermission,
+        assertProjectPermission: mod.assertProjectPermission,
+      };
+    }
+    return _getTeamStore._cache;
+  };
+
+  const _getAuditLogger = async () => {
+    if (!prisma) return null;
+    if (!_getAuditLogger._cache) {
+      const mod = await import('./audit/audit-logger.js');
+      _getAuditLogger._cache = new mod.AuditLogger(prisma);
+    }
+    return _getAuditLogger._cache;
+  };
+
+  async function audit(entry) {
+    const a = await _getAuditLogger();
+    if (!a) return;
+    a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
+  }
+
+  function _reqMeta(req) {
+    const fwd = req.headers?.['x-forwarded-for'];
+    const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
+    return {
+      ipAddress: ip || req.socket?.remoteAddress || null,
+      userAgent: req.headers?.['user-agent'] || null,
+      platformType: 'webapp',
+    };
+  }
+
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
@@ -4693,48 +4732,6 @@ async function handleRequest(req, res) {
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 500);
     }
-  }
-
-  // ─── Teams & Projects ─────────────────────────────────────
-  // Lazy-init TeamStore once prisma is ready (module-level cache).
-  const _getTeamStore = async () => {
-    if (!prisma) return null;
-    if (!_getTeamStore._cache) {
-      const mod = await import('./teams/team-store.js');
-      _getTeamStore._cache = {
-        store: new mod.TeamStore(prisma),
-        assertTeamPermission: mod.assertTeamPermission,
-        assertProjectPermission: mod.assertProjectPermission,
-      };
-    }
-    return _getTeamStore._cache;
-  };
-
-  // Lazy AuditLogger for control-plane. Records team/project/scope mutations.
-  const _getAuditLogger = async () => {
-    if (!prisma) return null;
-    if (!_getAuditLogger._cache) {
-      const mod = await import('./audit/audit-logger.js');
-      _getAuditLogger._cache = new mod.AuditLogger(prisma);
-    }
-    return _getAuditLogger._cache;
-  };
-
-  // Fire-and-forget helper. Skips on missing prisma.
-  async function audit(entry) {
-    const a = await _getAuditLogger();
-    if (!a) return;
-    a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
-  }
-
-  function _reqMeta(req) {
-    const fwd = req.headers?.['x-forwarded-for'];
-    const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
-    return {
-      ipAddress: ip || req.socket?.remoteAddress || null,
-      userAgent: req.headers?.['user-agent'] || null,
-      platformType: 'webapp',
-    };
   }
 
   // SCIM 2.0 — Users + Groups CRUD. Bearer token verified per-request

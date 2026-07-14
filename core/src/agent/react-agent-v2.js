@@ -755,6 +755,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // quality change, but the recall-router runs MMR + score-floor over a
   // smaller set and downstream dedup carries less.
   const recallLimit = recallMode === 'panorama' ? 14 : recallMode === 'insight' ? 12 : 8;
+  const evidenceSeen = new Set();
   if (plan.sub_queries.length > 0) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
@@ -780,7 +781,6 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     // T1-3: dedup evidence + live items by id across all recall passes so
     // the render slices (.slice(0,8) DOC, .slice(0,10) LIVE) hold distinct
     // rows instead of repeats — recovers prompt tokens AND improves coverage.
-    const evidenceSeen = new Set();
     const liveSeen = new Set();
     for (const r of recallResults) {
       for (const m of (r?.memories || [])) {
@@ -826,6 +826,48 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   //   4. If hop1 returned ≤1 memory AND the query has a connector keyword
   //      → re-recall with looser filters (drop is_latest, widen tags).
   const allRecallMems = Array.from(memoriesById.values());
+
+  // A document-backed memory is an event, not a guess about user wording. If
+  // quick recall found one but returned no source evidence, make one bounded
+  // explain pass for the original question. This prevents a summary anchor
+  // from being treated as the whole document while keeping ordinary fact-only
+  // chat on its fast path.
+  const hasDocumentAnchor = allRecallMems.some((memory) => {
+    const tags = memory?.tags || [];
+    return tags.some((tag) => typeof tag === 'string' && (
+      tag.startsWith('filename:') || tag.startsWith('doc-id:') || tag.startsWith('doc-hash:')
+    )) || !!memory?.source_metadata?.document_id;
+  });
+  if (
+    process.env.HIVEMIND_CHAT_ANCHORED_EVIDENCE !== 'false'
+    && recallMode === 'quick'
+    && evidenceItems.length === 0
+    && hasDocumentAnchor
+  ) {
+    const args = { query: plan.user_message, mode: 'explain', limit: 12, ...recallExtras };
+    try {
+      const grounded = await dispatchTool('hivemind_recall', args, ctx);
+      recordTool(
+        'hivemind_recall',
+        args,
+        `${grounded?.memories?.length || 0} memories + ${grounded?.evidence_count || 0} evidence (source-grounding)`,
+        grounded,
+      );
+      for (const memory of (grounded?.memories || [])) {
+        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+      }
+      for (const evidence of (grounded?.evidence || [])) {
+        const key = evidence?.id || `${evidence?.document_title || '?'}|${evidence?.page || ''}|${(evidence?.content || evidence?.snippet || '').slice(0, 40)}`;
+        if (evidenceSeen.has(key)) continue;
+        evidenceSeen.add(key);
+        evidenceItems.push(evidence);
+      }
+      if (grounded?.evidence_packet) recallPackets.push(grounded.evidence_packet);
+    } catch (error) {
+      recordTool('hivemind_recall', args, `source-grounding error: ${error.message}`, null);
+    }
+  }
+
   const hasConnectorTagged = allRecallMems.some(m => (m.tags || []).some(t => CONNECTORS.includes(t)));
   const hasEntityTagged = allRecallMems.some(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:')));
   const TEMPORAL_HINT = /\b(latest|last|recent|today|yesterday|this week|now|currently|as of)\b/i;

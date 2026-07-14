@@ -10925,8 +10925,42 @@ exit \$RC
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {
             try {
+              if (!principal?.master && !principal?.scopes?.includes('admin')) {
+                return jsonResponse(res, { error: 'Admin access required' }, 403);
+              }
               if (!documentFirstIngestion) {
                 return jsonResponse(res, { error: 'Document-first not enabled' }, 503);
+              }
+              const documentId = typeof body.document_id === 'string' ? body.document_id : null;
+              if (documentId) {
+                const document = await prisma.knowledgeDocument.findFirst({
+                  where: { id: documentId, orgId },
+                  select: {
+                    id: true, userId: true, title: true, documentType: true, sourcePlatform: true,
+                    sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+                    segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
+                  },
+                });
+                if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
+                const unpromoted = document.segments.filter((segment) => segment.content?.trim());
+                const result = await documentFirstIngestion._promoteMemories({
+                  documentId: document.id,
+                  userId: document.userId,
+                  orgId,
+                  segments: unpromoted,
+                  metadata: {
+                    filename: document.title || '', documentTitle: document.title || '',
+                    document_type: document.documentType, source_platform: document.sourcePlatform,
+                    source_id: document.sourceId, source_url: document.sourceUrl,
+                    document_date: document.documentDate, tags: document.tags || [],
+                    ...(document.parseMetadata || {}),
+                  },
+                  promotionStrategy: 'admin_document_repair',
+                });
+                return jsonResponse(res, {
+                  success: true, document_id: document.id, scanned: unpromoted.length,
+                  promoted: (result?.memories || []).filter((memory) => memory?.id).length,
+                });
               }
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
               const limit = Math.min(Number(body.limit || 100), 500);

@@ -504,6 +504,56 @@ async def update_employee_playbook(org_id: str, slug: str, lessons: list) -> boo
     return False
 
 
+async def get_room_playbook(room_id: str, org_id: Optional[str] = None) -> list:
+    """ROOM-level learned method lessons (which skill sequences worked for this room
+    kind), written by the post-turn reflection. Empty list if missing/pre-migration
+    (graceful: the additional feature is dormant). org_id scopes the read."""
+    import json as _json
+    if not room_id:
+        return []
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT room_playbook FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT room_playbook FROM hivemind.hyper_rooms WHERE id = $1", room_id,
+                )
+            if row and row["room_playbook"]:
+                raw = row["room_playbook"]
+                pb = _json.loads(raw) if isinstance(raw, str) else list(raw)
+                if isinstance(pb, list):
+                    return [str(x) for x in pb if str(x).strip()]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_playbook fallback: %s", exc)
+    return []
+
+
+async def update_room_playbook(room_id: str, org_id: str, lessons: list) -> bool:
+    """Persist the room's learned method playbook. Best-effort (never raises) — a
+    reflection write can never break the sealed turn. org-scoped (tenant-safe)."""
+    import json as _json
+    if not room_id or not org_id or not isinstance(lessons, list):
+        return False
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            payload = _json.dumps([str(x) for x in lessons if str(x).strip()])
+            await conn.execute(
+                "UPDATE hivemind.hyper_rooms SET room_playbook = $1::jsonb, updated_at = now() "
+                "WHERE id = $2 AND org_id = $3::uuid",
+                payload, room_id, org_id,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update_room_playbook failed (non-fatal): %s", exc)
+    return False
+
+
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
     """P2 (HyperAgents×Connectors): return the room's per-character connector
     grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.

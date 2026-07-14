@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import httpx
 
 from ..config import get_settings
+from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
 from ..hivemind_client import (
     connector_exec_emulated,
     connector_inspect_emulated,
@@ -408,6 +409,15 @@ _EVO_RECALL_K = max(2, min(8, int(os.environ.get("HYPER_EVOLVE_RECALL_K", "5") o
 _EVO_CAP = max(4, min(30, int(os.environ.get("HYPER_EVOLVE_CAP", "12") or "12")))          # max lessons/employee
 _EVO_WORD = re.compile(r"[a-z0-9]{4,}")
 
+# ── Room METHOD skills (progressive disclosure) ─────────────────────────────
+# Catalog (name + one-liner) always visible to the planner; bodies loaded onto
+# the blackboard only when selected. Distinct from _SKILLS (output FORMAT).
+_METHOD_SKILLS_ENABLED = (os.environ.get("HYPER_SKILLS_ENABLED", "true").strip().lower()
+                          not in ("0", "false", "no", "off"))
+# Reactor reach (NEED: protocol in debate round 2) — off until observed live.
+_REACTOR_REACH = (os.environ.get("HYPER_REACTOR_REACH", "false").strip().lower()
+                  in ("1", "true", "yes", "on"))
+
 # ── Board digest (debate-context compression) ──────────────────────────────
 # The debate fan-out re-pays the gathered blackboard N×2 times. Compress it ONCE into a
 # goal-scoped, fact-preserving digest fed to the DEBATE only; synth keeps the raw board.
@@ -704,8 +714,9 @@ _EVO_BATCH_SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "room_lessons": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["employees"],
+    "required": ["employees", "room_lessons"],
     "additionalProperties": False,
 }
 
@@ -732,18 +743,21 @@ async def evo_reflect_and_merge(
     *, evo_playbooks: Dict[str, List[str]], transcript: List[Dict[str, Any]],
     participants: List[Dict[str, Any]], final_text: str,
     outcome: Optional[Dict[str, Any]] = None, reflect_model: Optional[str] = None,
-) -> Optional[Dict[str, List[str]]]:
+    skills_used: Optional[List[str]] = None, room_kind: str = "",
+    room_playbook: Optional[List[str]] = None,
+) -> tuple:
     """Loop 1 reflection, run by the api layer AFTER verification so it sees the real outcome.
     Reflects each debating employee's contribution (conditioned on the verifier verdict) into its
-    slug-scoped playbook; returns the FULL merged map to persist (only when something changed),
-    else None. ONE batched coach call (not N) + skips strong turns → bounded token cost. Fully
-    wrapped — any failure returns None (turn already sealed, never affected)."""
+    slug-scoped playbook. Returns (employee_playbooks_or_None, room_lessons_or_None):
+    the FULL merged per-employee map (only when changed) + method-level ROOM lessons (which
+    skill sequences worked/failed for this room kind). ONE batched coach call (not N) + skips
+    strong turns → bounded token cost. Fully wrapped — any failure returns (None, None)."""
     if not transcript or not participants:
-        return None
+        return (None, None)
     # COST GUARD: a clearly-good turn has nothing to teach → spend nothing.
     if _evo_skip_strong(outcome):
         log.info("[hyper-engine] evo: strong turn (met+grounded) — reflection skipped (0 tokens)")
-        return None
+        return (None, None)
     try:
         model = reflect_model or _EVO_REFLECT_MODEL
         playbooks = {str(k): [str(x) for x in v] for k, v in (evo_playbooks or {}).items() if isinstance(v, list)}
@@ -760,7 +774,7 @@ async def evo_reflect_and_merge(
             if c:
                 targets.append((slug, name, lane, c))
         if not targets:
-            return None
+            return (None, None)
 
         # ONE batched coach call scores+coaches ALL contributing employees at once.
         roster = "\n\n".join(
@@ -774,9 +788,13 @@ async def evo_reflect_and_merge(
             "employee return 0-2 SHORT, GENERAL, reusable operating rules (imperative, <=18 words) that would "
             "make THEM better on FUTURE, DIFFERENT questions — transferable principles, never specific to this "
             "turn's facts. Return an EMPTY lessons list for any employee already strong on every dim. Echo each "
-            "employee's exact slug. Output ONLY the schema.")
+            "employee's exact slug. ALSO return room_lessons: 0-2 METHOD-level rules for this ROOM TYPE "
+            "(which investigation methods/skill sequences helped or were missing, <=18 words each, "
+            "transferable, [] if nothing method-shaped to learn). Output ONLY the schema.")
+        _skl = (f"\nMETHOD SKILLS APPLIED THIS TURN ({room_kind or 'general'} room): "
+                f"{', '.join(skills_used)}" if skills_used else "")
         usr = (f"TEAM EMPLOYEES + CONTRIBUTIONS:\n{roster}\n\nTHE TEAM'S FINAL DELIVERABLE:\n"
-               f"{final_text[:1500]}" + _evo_outcome_brief(outcome))
+               f"{final_text[:1500]}" + _evo_outcome_brief(outcome) + _skl)
         content = await _evo_groq(
             [{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
             model=model, schema=_EVO_BATCH_SCHEMA)
@@ -800,15 +818,28 @@ async def evo_reflect_and_merge(
             if merged != playbooks.get(slug, []):
                 updates[slug] = merged
                 learned += len(lessons)
-        if not updates:
-            return None
-        full = dict(playbooks)
-        full.update(updates)
-        log.info("[hyper-engine] evo: %d employees updated, %d lessons learned", len(updates), learned)
-        return full
+        # ROOM-level method lessons: merged against the room's existing playbook with the
+        # same dedup/cap discipline as per-agent lessons. None when nothing new.
+        room_merged = None
+        rl = [str(x).strip() for x in (data.get("room_lessons") or []) if str(x).strip()][:2]
+        if rl:
+            prior = [str(x) for x in (room_playbook or [])]
+            merged_room = _evo_merge(prior, rl)
+            if merged_room != prior:
+                room_merged = merged_room
+        if not updates and room_merged is None:
+            return (None, None)
+        full = None
+        if updates:
+            full = dict(playbooks)
+            full.update(updates)
+            log.info("[hyper-engine] evo: %d employees updated, %d lessons learned", len(updates), learned)
+        if room_merged is not None:
+            log.info("[hyper-engine] evo: room playbook updated (%d lessons)", len(room_merged))
+        return (full, room_merged)
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] evo reflection pass failed (non-fatal): %s", exc)
-        return None
+        return (None, None)
 
 
 def _norm_connector(cid: str) -> str:
@@ -960,6 +991,8 @@ class Director:
         company_brief: str = "",
         intended_output: str = "answer",
         task_tag: str = "GENERAL",
+        room_kind: str = "",
+        room_playbook: Optional[List[str]] = None,
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -977,6 +1010,14 @@ class Director:
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
         self.task_tag, self.capability_pack = capability_pack(task_tag)
+        # Room METHOD skills: kind resolved from task tag / goal keywords unless the
+        # caller passed one; catalog goes to the planner, bodies load on demand.
+        self.room_kind = (str(room_kind or "").strip().lower()
+                          or resolve_room_kind(self.task_tag, room_goal or "", user_message or ""))
+        self.skills_used: List[str] = []
+        # Room-type learned lessons ("previously effective: X→Y"), written by the
+        # post-turn reflection, primed into the planner catalog block. [] = none yet.
+        self.room_playbook: List[str] = [str(x) for x in (room_playbook or []) if str(x).strip()][:6]
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
@@ -1455,12 +1496,24 @@ class Director:
                 evo_block = ("\nYOUR PLAYBOOK — operating lessons you have learned across ALL your past "
                              "work (every room, every task). Apply every one:\n"
                              + "\n".join(f"- {l}" for l in lessons))
+        # Method discipline: when the room loaded METHOD skills, hold every voice to
+        # them (bodies are on the board as SKILL[...] entries, already inside ctx).
+        skill_line = (" Follow the SKILL[...] methods on the board — evidence per claim, "
+                      "UNVERIFIED where ungrounded." if self.skills_used else "")
+        # Reactor reach (flag-gated): in round 2+ a voice may request ONE tool fill —
+        # first line 'NEED: web_search <query>' or 'NEED: skill <name>' — fulfilled
+        # below with a single refill consult. Cheap tool access without a native loop.
+        need_line = ""
+        if _REACTOR_REACH and round_no >= 2:
+            need_line = (" If ONE missing fact or method blocks your take, reply with ONLY a first line "
+                         "'NEED: web_search <query>' or 'NEED: skill <name>' and nothing else; "
+                         "otherwise answer normally.")
         _messages = [
             {"role": "system", "content": (
                 _now_block() +
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
-                f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
+                f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
         ]
         _temp = min(0.7, 0.45 + 0.1 * round_no)
@@ -1469,6 +1522,30 @@ class Director:
         if not text.strip():
             # A timed-out / empty voice used to degrade to "(no reply)" and pollute
             # the transcript + the FE. Retry once before giving up.
+            msg = await self._groq(_messages, model=self.persona_model, temp=_temp, bucket="debate")
+            text = (msg or {}).get("content") or ""
+        # Fulfil a NEED request (at most one) and refill the consult with the result.
+        m_need = re.match(r"^\s*NEED:\s*(web_search|skill)\s+(.+)$", text.strip()[:400], re.I) if (
+            _REACTOR_REACH and round_no >= 2 and text.strip()) else None
+        if m_need:
+            kind_, arg = m_need.group(1).lower(), m_need.group(2).strip()
+            filled = ""
+            try:
+                if kind_ == "skill":
+                    body = load_method_skill(arg)
+                    if body:
+                        if arg not in self.skills_used:
+                            self.skills_used.append(arg)
+                            self.blackboard.append(f"SKILL[{arg}]:\n{body}")
+                            await self.emit({"t": "skill_used", "skill": arg, "agent": emp.get("slug"),
+                                             "room_kind": self.room_kind})
+                        filled = f"SKILL[{arg}]:\n{body}"
+                elif self._web_budget > self._web_calls:
+                    filled = await self._web_search(arg[:200]) or ""
+            except Exception as exc:  # noqa: BLE001 — a failed fill never kills the voice
+                log.warning("[hyper-engine] reactor NEED fill failed: %s", exc)
+            _messages[1]["content"] += (f"\n\nYOUR REQUEST WAS FULFILLED:\n{str(filled)[:1500]}\n"
+                                        f"Now give your take (3-5 sentences).")
             msg = await self._groq(_messages, model=self.persona_model, temp=_temp, bucket="debate")
             text = (msg or {}).get("content") or ""
         empty = not text.strip()
@@ -1629,8 +1706,9 @@ class Director:
                     "required": ["name", "args_json"], "additionalProperties": False}},
                 "web_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
+                "method_skills": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate"],
+            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate", "method_skills"],
             "additionalProperties": False,
         }
         sysp = (
@@ -1652,6 +1730,18 @@ class Director:
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
         )
+        # Progressive-disclosure skill catalog: the planner pays only for names +
+        # one-liners; a chosen skill's full method body loads during gather.
+        if _METHOD_SKILLS_ENABLED:
+            cat = skill_catalog(self.room_kind)
+            if cat:
+                lessons = ("\nPreviously effective in this room type: "
+                           + " | ".join(self.room_playbook)) if self.room_playbook else ""
+                sysp += (
+                    "\n- method_skills: pick 1-2 METHOD SKILLS from this catalog that fit the task "
+                    "(their full method loads for the room); [] if none fit:\n"
+                    + "\n".join(f"  • {n} — {w}" for n, w in cat) + lessons
+                )
         _org = (self.company_brief or "").strip()
         _org_block = (
             "COMPANY CONTEXT — the organisation you are planning for. Ground every query in its identity, "
@@ -1681,6 +1771,13 @@ class Director:
         plan["connector_calls"] = ccs[:4]
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        # Method skills: keep only real catalog names; auto-load the kind default
+        # when the plan picked none (mirrors the polished-email auto-load).
+        ms = [s for s in (plan.get("method_skills") or [])
+              if isinstance(s, str) and load_method_skill(s)][:2]
+        if _METHOD_SKILLS_ENABLED and not ms:
+            ms = [default_skill_for(self.room_kind)]
+        plan["method_skills"] = ms if _METHOD_SKILLS_ENABLED else []
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         # Deterministic backstop — the model-judged gate misclassified judgment tasks as
         # lookups twice in live use ("marketing plan", "social media plan" → no debate,
@@ -1749,6 +1846,14 @@ class Director:
     async def _run_gather(self, plan: Dict[str, Any]) -> int:
         """Run every planned recall / connector read / web search CONCURRENTLY — gather
         wall-time is the slowest single call, not the sum of 7 sequential ones."""
+        # Method skills load first (instant, no I/O): bodies land on the blackboard
+        # so gather owners, the debate, and the synth all reason under the method.
+        for sname in (plan.get("method_skills") or []):
+            body = load_method_skill(sname)
+            if body and sname not in self.skills_used:
+                self.skills_used.append(sname)
+                self.blackboard.append(f"SKILL[{sname}]:\n{body}")
+                await self.emit({"t": "skill_used", "skill": sname, "room_kind": self.room_kind})
         tasks: List[Awaitable[None]] = []
         _i = 0
         for q in plan["recall_queries"]:
@@ -1806,6 +1911,26 @@ class Director:
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED." + _fmt)
         sysp += f"\n\nFINAL SYNTHESIS CONTRACT [{self.task_tag}]: {self.capability_pack}"
+        # Evidence contract: the report must show its grounding. Skills applied +
+        # per-lane evidence counts feed a citation requirement — each major section
+        # names the lane (recall/web/connector/debate) that grounded it.
+        skills_block = ""
+        if self.skills_used:
+            _lanes = Counter()
+            for line in self.blackboard:
+                if line.startswith("SKILL["):
+                    continue
+                low = line[:60].lower()
+                _lanes["web" if "web" in low else "recall" if ("recall" in low or "memory" in low)
+                       else "connector"] += 1
+            _idx = ", ".join(f"{k}×{v}" for k, v in _lanes.items()) or "none"
+            skills_block = (
+                f"\n\nMETHODS APPLIED: {', '.join(self.skills_used)} — the deliverable must visibly "
+                f"follow these methods.\nEVIDENCE INDEX: {_idx}. Each major section states in-line which "
+                f"evidence lane grounded it (recall / web / connector / debate); every recommendation "
+                f"ties to a lever + owner + measurable signal."
+            )
+        sysp += skills_block
         _org = (self.company_brief or "").strip()
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "
                       f"and market; make every specific concrete to this company, not generic):\n{_org[:1500]}\n\n"
@@ -2032,6 +2157,8 @@ class Director:
             "gather_facts": list(self.blackboard),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
+            "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)
+            "room_kind": self.room_kind,
         }
 
 
@@ -2057,6 +2184,8 @@ async def run_director(
     company_brief: str = "",
     intended_output: str = "answer",
     task_tag: str = "GENERAL",
+    room_kind: str = "",
+    room_playbook: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2070,5 +2199,6 @@ async def run_director(
         company_brief=company_brief,
         intended_output=intended_output,
         task_tag=task_tag,
+        room_kind=room_kind, room_playbook=room_playbook,
     )
     return await director.run()

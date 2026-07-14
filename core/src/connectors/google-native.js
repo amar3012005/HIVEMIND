@@ -10,13 +10,21 @@
  */
 
 import { getConnectionId, fetchBearerFromNango } from './mcp/nango-service.js';
+import { ConnectorStore } from './framework/connector-store.js';
 
 async function resolveToken(provider, { user_id, org_id }, db) {
   if (!db) throw new Error('db required for Google token resolution');
   if (!user_id) throw new Error('user_id required for Google token resolution');
   const connectionId = await getConnectionId({ userId: user_id, orgId: org_id, providerKey: provider }, { db });
-  if (!connectionId) throw new Error(`${provider} not connected for this user — connect it on the Connectors page`);
-  return fetchBearerFromNango(provider, connectionId);
+  if (connectionId) return fetchBearerFromNango(provider, connectionId);
+  // GOOGLE-NATIVE fallback: connections made through the login OAuth client
+  // (core /api/connectors/gmail/connect) live in platform_integrations, not
+  // Nango. getAccessToken handles expiry + refresh. Without this, a natively
+  // connected Gmail could READ (sync path) but every WRITE (gmail_send /
+  // gmail_create_draft) failed with "not connected".
+  const native = await new ConnectorStore(db).getAccessToken(user_id, provider).catch(() => null);
+  if (native) return native;
+  throw new Error(`${provider} not connected for this user — connect it on the Connectors page`);
 }
 
 async function g(url, token, opts = {}) {

@@ -934,7 +934,8 @@ Output the JSON object and nothing else.`;
       // is what keeps the graph EVOLVING (belief change, supersession, contradiction) without the
       // per-fact LLM. `Derives` (multi-source synthesis) is NOT produced here — it's a
       // cognition/dreaming-layer product, unaffected by this path.
-      if (typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
+      if (process.env.KB_ENABLE_ALGO_VERSION_EDGES === 'true'
+          && typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
         const cands = ranked.slice(0, Number(process.env.KB_ALGO_REL_MAX_CANDS || 8))
           .map(([pid]) => poolById.get(pid)).filter((m) => m && m.content);
         if (cands.length) {
@@ -1034,19 +1035,39 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     let parsed; try { parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}'); } catch { parsed = {}; }
     const edges = Array.isArray(parsed.edges) ? parsed.edges : [];
     let created = 0;
+    const factById = new Map(facts.map((fact) => [fact.id, fact]));
     for (const e of edges) {
       const p = pairs[Number(e.i)];
       if (!p || !e.type || e.type === 'none') continue;
       try {
-        await store.createRelationship({
-          id: crypto.randomUUID(), from_id: p.fromId, to_id: p.toId, type: e.type, confidence: 0.8,
-          metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
-        });
+        await this._applyCuratedRelationship(e.type, p, { factById, store, documentId });
         created++;
       } catch { /* dup/FK tolerated (algo may have made the same edge) */ }
     }
     if (created) this.logger.info?.(`[kb-hybrid-rel] doc ${String(documentId).slice(0, 8)}: 1 batched LLM call over ${pairs.length} gray-zone pairs → ${created} edges`);
     return created;
+  }
+
+  async _applyCuratedRelationship(type, pair, { factById, store, documentId }) {
+    if (!['Updates', 'Extends', 'Contradicts', 'Mentions'].includes(type)) {
+      throw new Error(`unsupported curated relationship: ${type}`);
+    }
+    const source = factById.get(pair.fromId);
+    if (!source?.user_id || !source?.org_id) throw new Error('curated relationship source scope missing');
+    if (type === 'Updates') {
+      return this.memoryGraphEngine.applyUpdate(pair.fromId, pair.toId, {
+        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
+      });
+    }
+    if (type === 'Extends') {
+      return this.memoryGraphEngine.applyExtends(pair.fromId, pair.toId, {
+        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
+      });
+    }
+    return store.createRelationship({
+      id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type, confidence: 0.8,
+      metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
+    });
   }
 
   /**

@@ -187,3 +187,26 @@ test('canonical entity extraction runs only over curated durable memories', asyn
   if (previous === undefined) delete process.env.ENABLE_ENTITY_EXTRACTION;
   else process.env.ENABLE_ENTITY_EXTRACTION = previous;
 });
+
+test('curated Updates use the atomic version operator', async () => {
+  const calls = [];
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      applyUpdate: async (...args) => calls.push(args),
+      applyExtends: async () => { throw new Error('wrong operator'); },
+    },
+  });
+  await service._applyCuratedRelationship('Updates', { fromId: 'new-1', toId: 'old-1' }, {
+    factById: new Map([['new-1', { user_id: 'u1', org_id: 'o1' }]]),
+    store: { createRelationship: async () => { throw new Error('direct edge write'); } },
+    documentId: 'd1',
+  });
+  assert.deepEqual(calls[0], ['new-1', 'old-1', { user_id: 'u1', org_id: 'o1', confidence: 0.8 }]);
+  await assert.rejects(
+    service._applyCuratedRelationship('Derives', { fromId: 'new-1', toId: 'old-1' }, {
+      factById: new Map(), store: {}, documentId: 'd1',
+    }),
+    /unsupported curated relationship/,
+  );
+});

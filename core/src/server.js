@@ -22143,7 +22143,11 @@ async function writeAuditLog(prisma, {
 function jsonResponse(res, data, status = 200) {
   res.setHeader('Content-Type', 'application/json');
   res.writeHead(status);
-  res.end(JSON.stringify(data));
+  // Prisma can return BigInt columns (for example SourceArtifact.sizeBytes).
+  // Convert only at the HTTP boundary so document/evidence payloads remain readable.
+  res.end(JSON.stringify(data, (_key, value) => (
+    typeof value === 'bigint' ? value.toString() : value
+  )));
 }
 
 function inferChatToneGuidance(text = '') {

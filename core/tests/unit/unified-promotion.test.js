@@ -53,6 +53,22 @@ test('unified promotion keeps ambiguity as evidence and rejects raw update edges
   assert.deepEqual(claims[0].rels, [{ to: 0, type: 'Contradicts' }]);
 });
 
+test('unified promotion retains low-salience content as evidence instead of memory', () => {
+  const source = 'The approved retention period is seven years. The office lobby is painted blue.';
+  const claims = normalizeUnifiedClaims([
+    {
+      t: 'Retention period', f: 'The approved retention period is seven years.', memory_type: 'fact',
+      source_quote: 'The approved retention period is seven years.', importance: 0.91, entities: [], rels: [],
+    },
+    {
+      t: 'Lobby color', f: 'The office lobby is painted blue.', memory_type: 'fact',
+      source_quote: 'The office lobby is painted blue.', importance: 0.35, entities: [], rels: [],
+    },
+  ], source, 8, 0.65);
+
+  assert.deepEqual(claims.map((claim) => claim.t), ['Retention period']);
+});
+
 test('unified ingestion persists the classified type and exact evidence link', async () => {
   const ingested = [];
   const links = [];

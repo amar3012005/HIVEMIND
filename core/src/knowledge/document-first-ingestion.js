@@ -37,12 +37,23 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
 
-export function normalizeUnifiedClaims(rawFacts, content, maxFacts) {
+export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance = 0) {
+  const threshold = Number.isFinite(Number(minImportance))
+    ? Math.max(0, Math.min(1, Number(minImportance)))
+    : 0;
+  const normalizedImportance = (value) => {
+    const rated = Number(value);
+    return Number.isFinite(rated) && rated > 0
+      ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
+      : 0.55;
+  };
   return (Array.isArray(rawFacts) ? rawFacts : [])
     .filter((item) => item && typeof item.f === 'string' && item.f.trim().length >= 4
       && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
       && typeof item.source_quote === 'string' && item.source_quote.length >= 4
-      && content.includes(item.source_quote))
+      && content.includes(item.source_quote)
+      // The source remains recallable even when its claim is not durable enough.
+      && normalizedImportance(item.importance) >= threshold)
     .slice(0, maxFacts)
     .map((item) => {
       const start = content.indexOf(item.source_quote);
@@ -56,9 +67,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts) {
         source_quote: item.source_quote,
         source_start: start,
         source_end: start + item.source_quote.length,
-        importance: Number.isFinite(rated) && rated > 0
-          ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
-          : 0.55,
+        importance: normalizedImportance(rated),
         entities: (Array.isArray(item.entities) ? item.entities : [])
           .filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8),
         rels: (Array.isArray(item.rels) ? item.rels : [])
@@ -709,7 +718,9 @@ Output the JSON object and nothing else.`;
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    return normalizeUnifiedClaims(rawFacts, content, maxFacts);
+    // Evidence capture is unconditional; promotion is deliberately stricter.
+    const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+    return normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance);
   }
 
   /**
@@ -1115,8 +1126,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         visibility: metadata.visibility || 'private',
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-        content: docSummary, title: docTitle, memory_type: 'fact',
-        importance_score: 0.9,                                    // the doc anchor — high salience
+        content: docSummary, title: docTitle, memory_type: 'summary',
+        // The parent is source-local navigation context, not a durable claim.
+        importance_score: 0.45,
         document_date: metadata.document_date || null,
         tags: normalizeTagsArray([
           ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',

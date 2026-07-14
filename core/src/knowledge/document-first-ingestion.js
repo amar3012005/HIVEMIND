@@ -37,6 +37,24 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
 
+function durableTitle(title, content, max = 80) {
+  const value = String(title || '').trim();
+  const languageCodeOnly = /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i.test(value);
+  return value && !languageCodeOnly && !isGarbageTitle(value)
+    ? value.slice(0, max)
+    : cleanTitleFrom(content, Math.min(max, 64));
+}
+
+function durableEntities(entities) {
+  return (Array.isArray(entities) ? entities : [])
+    .filter((entity) => typeof entity === 'string' && entity.trim())
+    // Measurements, percentages, and dates are values on claims, not graph
+    // identities. This language-agnostic structural gate drops numeric-led
+    // phrases without maintaining a domain dictionary.
+    .filter((entity) => /^\p{L}/u.test(entity.trim()))
+    .slice(0, 8);
+}
+
 export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance = 0) {
   const threshold = Number.isFinite(Number(minImportance))
     ? Math.max(0, Math.min(1, Number(minImportance)))
@@ -59,17 +77,14 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       const start = content.indexOf(item.source_quote);
       const rated = Number(item.importance);
       return {
-        t: (typeof item.t === 'string' && item.t.trim() && !isGarbageTitle(item.t))
-          ? item.t.trim().slice(0, 80)
-          : cleanTitleFrom(item.f, 48),
+        t: durableTitle(item.t, item.f),
         f: item.f.trim(),
         memory_type: item.memory_type,
         source_quote: item.source_quote,
         source_start: start,
         source_end: start + item.source_quote.length,
         importance: normalizedImportance(rated),
-        entities: (Array.isArray(item.entities) ? item.entities : [])
-          .filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8),
+        entities: durableEntities(item.entities),
         rels: (Array.isArray(item.rels) ? item.rels : [])
           .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
       };
@@ -91,13 +106,13 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     if (content.length < 12) continue;
     const importance = Math.max(...supports.map((item) => Number(item.importance || 0.5)));
     output.push({
-      t: String(memory.title || primary.t).trim().slice(0, 80),
+      t: durableTitle(memory.title || primary.t, content),
       f: content,
       memory_type: memory.memory_type,
       importance: Math.max(0.65, Math.min(1, importance)),
       // Canonical entities come only from exact-span extraction. The curator
       // may merge claims but cannot introduce a new graph identity.
-      entities: [...new Set(supports.flatMap((item) => item.entities || []))].slice(0, 12),
+      entities: [...new Set(supports.flatMap((item) => durableEntities(item.entities)))].slice(0, 12),
       rels: [],
       segmentId: primary.segmentId,
       source_quote: primary.source_quote,
@@ -836,6 +851,7 @@ Output the JSON object and nothing else.`;
             distill_agent: 'kb_unified_v2',
           },
           skip_fact_extraction: true, defer_entity_linking: true,
+          append_timestamp_to_content: false,
           skipSmartRouting: true, skipPredictCalibrate: true, skipAdvisoryLock: true,
           skip_relationship_classification: true, skip_contradiction_detection: true,
         });
@@ -1302,6 +1318,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null },
         metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, child_count: childIds.length, total_facts: totalFacts },
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
+        append_timestamp_to_content: false,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
       });
       docParentId = parentRes?.memoryId || parentRes?.id || null;

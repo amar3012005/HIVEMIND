@@ -115,3 +115,8 @@
 - **Parent:** `fix/task-kickoff-dispatch` @ `4b9f950e` off singulance-main 88017a51. FE unchanged.
 - tasks/open now creates + dispatches the kickoff turn server-side (nightly-cycle pattern) — task rooms start working the moment they open instead of sitting at 0 turns. Rooms created before this release still need one manual message (or delete + re-open the task).
 - Released via release script (control-plane only, health-gated, smoke 200×4).
+
+## prod-20260714-c24e4f8e — Kickoff idempotency fix (task auto-start WORKING)
+- **Parent:** `fix/kickoff-idempotency` @ `c24e4f8e` off singulance-main 98d9d307. FE unchanged.
+- Root cause of silent task rooms: kickoff hyperTurn.create omitted NOT NULL idempotency_key → insert failed silently. Fixed (`task-kickoff-<roomId>`, also dedupes double-clicks) + re-opening a 0-turn task room now dispatches its kickoff.
+- LIVE PROOF: re-opened task t5 ("Prepare Outreach Materials", OUTREACH) on room 61b523f5 → turn created, agents ran unprompted: 28 events incl. skill_used + plan + seal. Task auto-start verified end-to-end.

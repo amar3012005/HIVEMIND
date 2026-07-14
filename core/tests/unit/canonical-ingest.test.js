@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectMode, normalizeProvenance, validateEnvelope } from '../../src/knowledge/canonical-ingest.js';
+import {
+  canonicalMemoryType,
+  canonicalSourceType,
+  detectMode,
+  legacyPayloadToEnvelope,
+  normalizeProvenance,
+  validateEnvelope,
+} from '../../src/knowledge/canonical-ingest.js';
 
 const base = {
   userId: 'user-1', orgId: 'org-1', content: 'A durable source claim.',
@@ -22,4 +29,30 @@ test('canonical provenance accepts snake-case external source ids', () => {
 test('canonical mode keeps explicit mode authoritative', () => {
   assert.equal(detectMode({ ...base, mode: 'atomic', content: 'x'.repeat(5000) }), 'atomic');
   assert.equal(detectMode({ ...base, source: { type: 'connector' }, content: 'x'.repeat(1300) }), 'document');
+});
+
+test('legacy source payloads normalize into the canonical envelope', () => {
+  const envelope = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'A durable Slack decision.',
+    title: 'Decision', memory_type: 'note', scope: 'project', project_ids: ['project-1'],
+    source_metadata: {
+      source_platform: 'slack', source_id: 'thread-1', source_url: 'https://example.test/thread-1',
+      channel_id: 'C123', thread_ts: '171234.0001',
+    },
+  });
+  assert.equal(envelope.source.type, 'connector');
+  assert.equal(envelope.source.platform, 'slack');
+  assert.equal(envelope.source.sourceId, 'thread-1');
+  assert.equal(normalizeProvenance(envelope).sourceMetadata.channel_id, 'C123');
+  assert.equal(normalizeProvenance(envelope).sourceMetadata.thread_ts, '171234.0001');
+  assert.equal(envelope.metadata.memory_type, 'fact');
+  assert.equal(envelope.projectId, 'project-1');
+  assert.deepEqual(validateEnvelope(envelope), { ok: true });
+});
+
+test('canonical compatibility mapping never creates relationship memories', () => {
+  assert.equal(canonicalMemoryType('relationship'), 'fact');
+  assert.equal(canonicalMemoryType('commitment'), 'goal');
+  assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'talk-to-hive' } }), 'chat');
+  assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'google-drive' } }), 'connector');
 });

@@ -2131,6 +2131,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       project_ids: projectIds,
       project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
+      code_metadata: envelope.metadata?.code_metadata || undefined,
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)

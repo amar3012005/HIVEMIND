@@ -33,6 +33,7 @@ import {
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
+import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -2224,6 +2225,21 @@ async function ingestRoutedPayload(routedPayload, engine) {
   return engine.ingestMemory(cleanPayload);
 }
 
+async function ingestCanonicalPayload(payload, options = {}) {
+  const scoped = await resolveScopedIngestPayload(payload);
+  const envelope = legacyPayloadToEnvelope(scoped, options);
+  if (documentFirstIngestion?.ingestSource && envelope) {
+    const result = await documentFirstIngestion.ingestSource(envelope);
+    if (!result?.ok) throw new Error(result?.error || 'canonical ingest failed');
+    return {
+      ...result,
+      memoryId: result.memoryId || result.memoryIds?.[0] || null,
+      id: result.memoryId || result.memoryIds?.[0] || result.documentId || null,
+    };
+  }
+  throw new Error('canonical ingestion service unavailable');
+}
+
 export async function resolveScopedIngestPayload(payload, options = {}) {
   if (!payload?.user_id || !payload?.org_id) return payload;
 
@@ -3418,6 +3434,7 @@ const server = http.createServer(async (req, res) => {
       smartIngestRouter,
       buildRoutedIngestPayloads,
       ingestRoutedPayload,
+      ingestCanonicalPayload,
       webIntelligence: globalThis.webIntelligence || null,
       prisma,
       accessContext: null,
@@ -8987,29 +9004,27 @@ exit \$RC
           if (!Array.isArray(turns) || turns.length === 0) {
             return jsonResponse(res, { error: 'turns[] or transcript required' }, 400);
           }
-          const { GeminiAdapter } = await import('./connectors/providers/gemini/adapter.js');
-          const adapter = new GeminiAdapter();
-          const payloads = adapter.normalize({
-            session_id: body.session_id,
-            title: body.title,
-            model: body.model,
-            exported_at: body.exported_at,
-            turns,
-          }, { user_id: userId, org_id: orgId });
-          let imported = 0;
-          for (const p of payloads) {
-            if (p?._tree?.parent) {
-              const routed = await smartIngestRouter.route(p);
-              if (routed?.parent) {
-                const result = await persistentMemoryEngine.ingestMemoryTree(routed);
-                if (result?.parentId) imported++;
-              }
-            } else {
-              await persistentMemoryEngine.ingestMemory(p);
-              imported++;
-            }
-          }
-          return jsonResponse(res, { success: true, imported, turn_count: turns.length }, 200);
+          const sessionId = body.session_id || crypto.randomUUID();
+          const transcript = turns.map((turn, index) => {
+            const role = turn.role === 'assistant' ? 'Gemini' : 'User';
+            return `[${index + 1}] ${role}: ${String(turn.content || '').trim()}`;
+          }).join('\n\n');
+          const result = await documentFirstIngestion.ingestSource({
+            userId, orgId, content: transcript,
+            title: body.title || 'Gemini conversation',
+            occurredAt: body.exported_at || undefined,
+            mode: 'document', scope: 'personal',
+            metadata: { memory_type: 'conversation', model: body.model || null },
+            source: {
+              type: 'connector', provider: 'gemini', sourceId: sessionId,
+              title: body.title || 'Gemini conversation',
+            },
+          });
+          if (!result?.ok) throw new Error(result?.error || 'canonical Gemini ingest failed');
+          return jsonResponse(res, {
+            success: true, imported: result.promotedCount || result.memoryIds?.length || 0,
+            document_id: result.documentId, turn_count: turns.length,
+          }, 200);
         } catch (err) {
           console.warn('[gemini-ingest-paste] failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
@@ -9147,9 +9162,8 @@ exit \$RC
             },
             skip_fact_extraction: true,
           };
-          buildRoutedIngestPayloads(slackPayload, { smartIngestRouter }).then(([routed]) =>
-            persistentMemoryEngine.ingestMemory(routed)
-          ).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+          ingestCanonicalPayload(slackPayload, { sourceType: 'connector', provider: 'slack' })
+            .catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
         }
 
         return jsonResponse(res, { ok: true, result });
@@ -9184,9 +9198,7 @@ exit \$RC
               project_ids: p ? [p] : [],
               source_metadata: { source_platform: 'slack', via: 'slack-save-button' },
             };
-            const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-            if (ingestRoutedPayload) await ingestRoutedPayload(routed, persistentMemoryEngine);
-            else await persistentMemoryEngine.ingestMemory(routed);
+            await ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
             let label = 'personal';
             if (p) {
               try {
@@ -9417,10 +9429,7 @@ exit \$RC
                   project_ids: projectId ? [projectId] : [],
                   source_metadata: { source_platform: 'slack', via: 'slack-save' },
                 };
-                const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-                return ingestRoutedPayload
-                  ? ingestRoutedPayload(routed, persistentMemoryEngine)
-                  : persistentMemoryEngine.ingestMemory(routed);
+                return ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
               };
               const summarize = async (transcript) => {
                 const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
@@ -9596,6 +9605,7 @@ exit \$RC
                   smartIngestRouter,
                   buildRoutedIngestPayloads,
                   ingestRoutedPayload,
+                  ingestCanonicalPayload,
                   accessContext: accessCtx,
                   webIntelligence: globalThis.webIntelligence || null,
                 },
@@ -12901,62 +12911,43 @@ exit \$RC
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
 
-                  // Enterprise schema: multi-message threads ingest as a
-                  // tree (Thread parent + Message children) so the agent
-                  // can recall the whole thread by parent-id and each
-                  // message keeps its own entity/temporal extraction.
-                  // Detect the consolidated thread payload (type=gmail_thread)
-                  // and the per-message payloads from adapter output.
+                  // One Gmail thread is one evidence-backed source document.
+                  // Raw messages remain ordered segments; only a bounded set of
+                  // durable claims is promoted into memory.
                   const threadParent = payloads.find(p => p.metadata?.type === 'gmail_thread');
                   const messageChildren = payloads.filter(p => p.metadata?.gmail_message_id && !p.metadata?.is_thread_summary);
-                  if (threadParent && messageChildren.length >= 2) {
-                    // Stamp force_entity_linking on every child for the
-                    // canonical LLM operator + entity-co-mention pass.
-                    const children = messageChildren.map(c => ({
-                      ...c,
-                      metadata: {
-                        ...(c.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'child',
-                        parent_title: threadParent.title,
+                  if (threadParent && messageChildren.length) {
+                    const transcript = messageChildren.map((message, index) =>
+                      `[${index + 1}] ${message.title || 'Message'}\n${message.content || ''}`).join('\n\n');
+                    const canonicalResult = await documentFirstIngestion.ingestSource({
+                      userId, orgId, content: transcript,
+                      title: threadParent.title || 'Gmail thread', mode: 'document',
+                      scope: threadParent.scope || 'personal',
+                      projectId: threadParent.project_ids?.[0] || undefined,
+                      tags: [...new Set([...(threadParent.tags || []), 'gmail', 'email-thread'])],
+                      metadata: { memory_type: 'conversation', message_count: messageChildren.length },
+                      source: {
+                        type: 'connector', provider: 'gmail', sourceId: threadId,
+                        title: threadParent.title || 'Gmail thread',
                       },
-                    }));
-                    const parent = {
-                      ...threadParent,
-                      metadata: {
-                        ...(threadParent.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'parent',
-                        child_count: children.length,
-                      },
-                    };
-                    const treeResult = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+                    });
+                    if (!canonicalResult?.ok) throw new Error(canonicalResult?.error || 'canonical Gmail ingest failed');
                     treesIngested += 1;
-                    ingested += 1 + children.length;
-                    // Post-commit structured enrichment on parent thread
-                    // — fire-and-forget so HTTP response doesn't wait.
-                    // Adds summary / action_items / decisions / urgency
-                    // fields + kind:* / urgency:* / owner:* tags.
-                    if (treeResult?.parentId && enrichmentQueue) {
-                      enrichmentQueue.enqueue(treeResult.parentId, {
-                        content: parent.content,
-                        title: parent.title,
-                        tags: parent.tags,
-                        orgId: parent.org_id,
+                    ingested += canonicalResult.promotedCount || canonicalResult.memoryIds?.length || 0;
+                    const primaryId = canonicalResult.memoryId || canonicalResult.memoryIds?.[0];
+                    if (primaryId && enrichmentQueue) {
+                      enrichmentQueue.enqueue(primaryId, {
+                        content: transcript, title: threadParent.title,
+                        tags: threadParent.tags, orgId,
                       });
-                    }
-                    // Skip residual summary memory if adapter also produced one.
-                    const summary = payloads.find(p => p.metadata?.is_thread_summary);
-                    if (summary) {
-                      await persistentMemoryEngine.ingestMemory(summary);
-                      ingested += 1;
                     }
                     continue;
                   }
 
                   // Single-message thread or per-message mode → flat ingest.
                   for (const p of payloads) {
-                    const flatResult = await persistentMemoryEngine.ingestMemory(p);
+                    if (p.metadata?.is_thread_summary) continue;
+                    const flatResult = await ingestCanonicalPayload(p, { sourceType: 'connector', provider: 'gmail' });
                     ingested += 1;
                     if (flatResult?.memoryId && enrichmentQueue) {
                       enrichmentQueue.enqueue(flatResult.memoryId, {
@@ -14981,8 +14972,12 @@ exit \$RC
                   promotedMemoryIds: result.promotedMemoryIds
                 }, 202);
               } catch (phase1Err) {
-                console.error('[enterprise] Phase1 upload failed, falling back to legacy path:', phase1Err.message);
-                // Fall through to legacy path
+                console.error('[enterprise] Canonical document ingestion failed:', phase1Err.message);
+                return jsonResponse(res, {
+                  error: 'Canonical document ingestion failed',
+                  code: phase1Err.code || 'CANONICAL_INGEST_FAILED',
+                  detail: phase1Err.message,
+                }, phase1Err.statusCode || 500);
               }
             }
 
@@ -15875,8 +15870,7 @@ exit \$RC
                     crawled_at: job.created_at
                   }
                 };
-                const [routedWeb] = await buildRoutedIngestPayloads(webPayload, { smartIngestRouter });
-                const ingestResult = await persistentMemoryEngine.ingestMemory(routedWeb);
+                const ingestResult = await ingestCanonicalPayload(webPayload, { sourceType: 'connector', provider: 'web_intelligence' });
                 if (ingestResult?.memoryId) {
                   savedIds.push(ingestResult.memoryId);
                 }
@@ -16603,8 +16597,7 @@ exit \$RC
                   source_url: validation.data.source_url || null
                 }
               };
-              const [routedWebappPayload] = await buildRoutedIngestPayloads(webappPayload, { smartIngestRouter });
-              const result = await persistentMemoryEngine.ingestMemory(routedWebappPayload);
+              const result = await ingestCanonicalPayload(webappPayload, { sourceType: 'api', mode: 'atomic' });
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
@@ -17687,8 +17680,9 @@ exit \$RC
                               original_query: validation.data.query,
                             },
                           };
-                          const [routedLive] = await buildRoutedIngestPayloads(livePayload, { smartIngestRouter });
-                          await persistentMemoryEngine.ingestMemory(routedLive);
+                          await ingestCanonicalPayload(livePayload, {
+                            sourceType: 'connector', provider: item._source || 'live_query', mode: 'atomic',
+                          });
                         } catch (promoteErr) {
                           console.warn('[memory-promote] failed:', promoteErr.message);
                         }
@@ -21094,6 +21088,7 @@ exit \$RC
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
                     ingestRoutedPayload,                 // tree-aware dispatch
+                    ingestCanonicalPayload,
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                   },
@@ -21291,9 +21286,8 @@ exit \$RC
                           source_metadata: { source_platform: 'slack', channel: p.channel, via: 'talk-to-hive' },
                           skip_fact_extraction: true,
                         };
-                        buildRoutedIngestPayloads(slackPostPayload, { smartIngestRouter }).then(([routed]) =>
-                          persistentMemoryEngine.ingestMemory(routed)
-                        ).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
+                        ingestCanonicalPayload(slackPostPayload, { sourceType: 'connector', provider: 'slack' })
+                          .catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
                       }
                     } else if (a === 'slack_react') {
                       result = await bridge._call('reactions.add',
@@ -21467,9 +21461,8 @@ exit \$RC
                             },
                             skip_fact_extraction: true,
                           };
-                          buildRoutedIngestPayloads(slackFallbackPayload, { smartIngestRouter }).then(([routed]) =>
-                            persistentMemoryEngine.ingestMemory(routed)
-                          ).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
+                          ingestCanonicalPayload(slackFallbackPayload, { sourceType: 'connector', provider: 'slack' })
+                            .catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
                         }
                       }
                     }
@@ -21701,11 +21694,8 @@ ${injectionText}`;
                     source_metadata: { source_platform: 'chat' },
                     skip_fact_extraction: true,
                   };
-                  buildRoutedIngestPayloads(chatFactPayload, { smartIngestRouter }).then((routedPayloads) => {
-                    for (const routedPayload of routedPayloads) {
-                      persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
-                    }
-                  }).catch(err => console.warn('[chat] Smart routing failed:', err.message));
+                  ingestCanonicalPayload(chatFactPayload, { sourceType: 'chat', mode: 'atomic' })
+                    .catch(err => console.warn('[chat] Fact ingest failed:', err.message));
                 }
               }
 

@@ -316,6 +316,21 @@ async function recordOutboundAction({ orgId, userId, roomId, approvalId, channel
       meta ? JSON.stringify(meta) : null,
     );
   } catch (e) { console.warn('[outbound-ledger] insert failed:', e.message); }
+  // Value-action metering — same success-only trigger as the ledger row (this
+  // helper is only ever called AFTER a successful send/dial; approval emission
+  // and denies never reach here). Fire-and-forget: metering must never break
+  // the send response.
+  try {
+    const { UsageTracker } = await import('./billing/usage-tracker.js');
+    const t = new UsageTracker(prisma);
+    if (channel === 'email') {
+      t.recordEmailSend(orgId).catch(() => {});
+      t.recordDaily(orgId, 'emailSends').catch(() => {});
+    } else if (channel === 'call') {
+      t.recordTara(orgId).catch(() => {});
+      t.recordDaily(orgId, 'tara').catch(() => {});
+    }
+  } catch (e) { console.warn('[outbound-ledger] metering failed:', e.message); }
 }
 
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────

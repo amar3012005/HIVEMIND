@@ -7081,6 +7081,8 @@ exit \$RC
                 ...(pTok ? { prompt_tokens_inc: pTok } : {}), ...(cTok ? { completion_tokens_inc: cTok } : {}),
                 metadata_merge: { duration_sec: durSec } });
               if (meteredDurationSeconds > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', meteredDurationSeconds);
+              // Value-action metering: completed call on a remote (self-host) org.
+              try { const { meterTara } = await import('./billing/usage-tracker.js'); meterTara(tOrg); } catch { /* non-fatal */ }
               (async () => {
                 try {
                   const g = await amrTaraCall(tOrg, { op: 'get', session_id: String(body.session_id) });
@@ -7139,6 +7141,14 @@ exit \$RC
             const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
             await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
             if (durationMs > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', Math.ceil(durationMs / 1000));
+            // Value-action metering: one completed TARA call (OrgUsage.taraUsage
+            // was defined but never wired). Fire-and-forget, success-path only.
+            try {
+              const { meterTara } = await import('./billing/usage-tracker.js');
+              meterTara(call.orgId);
+              const { getUsageTrackerInstance } = await import('./billing/usage-tracker.js');
+              getUsageTrackerInstance()?.recordDaily?.(call.orgId, 'tara')?.catch?.(() => {});
+            } catch { /* never break call end */ }
             const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
             const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
             if (transcript.trim() && process.env.GROQ_API_KEY) {

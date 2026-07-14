@@ -66,3 +66,11 @@
 - **Acceptance:** landing hero "Run your institution as an AI company" present in main.3bfcee9e.js; sw.js hive-shell-v3 preserved; minified bundle carries the native-first routing condition; public 200 ×4; remaining davinciai strings = env-fallbacks + intentional central-Nango fallbacks only.
 - **Rollback:** fe rollback tag `rollback-20260714-152221-single`; env backups `.bak-prod-20260714-8d74e135`.
 - **ACTION REQUIRED (Google Cloud Console, cannot be done from repo):** the `…dgtg4` OAuth client must list `https://core.singulancelabs.com/api/connectors/gmail/callback` as an authorized redirect URI, or connector connects will fail with redirect_uri_mismatch. Also set the client's consent-screen app name/domain to singulancelabs.com if any davinciai branding remains there.
+
+## prod-20260714-52d388e1 — BRAIN | Operating System | VOICE navbar
+- **Parent:** `fix/nav-product-identities` @ `52d388e175b79974c3ecaecf26b4903a3b4949a1` (off singulance-main 76ece631)
+- **Frontend:** @ `ee143ebd344a5818d8837c4282d3013cf91010ea` = singulance-main FE + cherry-picks 10c0a5c/ab7cd11 (nav rename, from feature-loop/mobile-app-v2 — first commits of that line to reach prod)
+- **Images:** fe-single rebuilt `sha256:eeb283f1…`; backends retagged from 8d74e135 (unchanged).
+- **Acceptance:** served chunk 1270.4a55b4e7 carries `label:"Operating System"/"VOICE"/BRAIN`; landing hero intact in main.03a12d1c.js; public 200.
+- **Rollback:** fe tag `rollback-20260714-161534-single`; env backups `.bak-prod-20260714-52d388e1`.
+- **Note:** feature-loop/mobile-app-v2 holds ~31 further undeployed FE commits (outcomes strip, TARA room-call UI, PWA fixes) requiring the outbound backend — next reconciliation block.

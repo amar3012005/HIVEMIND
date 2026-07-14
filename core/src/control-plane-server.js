@@ -7066,8 +7066,8 @@ Write the persona now.`;
       };
       // Persist a memory through the canonical ingest front door on core.
       // Save one onboarding memory through the canonical ingest front door.
-      // memoryType drives base salience (importance_score): canonical_summary/
-      // decision=0.85, relationship=0.70, fact=0.55 — so identity+mission+
+      // memoryType drives base salience (importance_score): decision=0.85,
+      // summary=0.72, fact=0.55 — so identity+mission+
       // positioning outrank plain facts. tags carry the entity-boost lever
       // (entity:<name> stacks +0.14/match at recall) + the org-canon pin.
       const saveMemory = async ({ title, content, tags, memoryType = 'fact' }) => {
@@ -7409,9 +7409,9 @@ Write the persona now.`;
           // = the stable canon lane; pinned = never-decay; source tag = provenance.
           const canonTags = ['org-canon', 'company-profile', 'pinned', 'onboarding', 'source:hyperagents-onboarding', ...entityTags];
           const sections = [
-            { title: `${companyName} — Company profile`, memoryType: 'canonical_summary',
+            { title: `${companyName} — Company profile`, memoryType: 'summary',
               content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.` },
-            { title: `${companyName} — Mission`, memoryType: 'canonical_summary',
+            { title: `${companyName} — Mission`, memoryType: 'summary',
               content: `MISSION of ${companyName}: ${mission}` },
             { title: `${companyName} — Positioning`, memoryType: 'decision',
               content: `POSITIONING of ${companyName}: ${profile.positioning || '(n/a)'}${profile.tone ? ` Tone: ${profile.tone}.` : ''}` },
@@ -7420,18 +7420,9 @@ Write the persona now.`;
             { title: `${companyName} — Competitors & market`, memoryType: 'fact',
               content: `COMPETITORS of ${companyName}: ${(profile.competitors || []).join(', ') || '(none identified)'}.\nMARKET RESEARCH:\n${research.map((r) => `• ${r.title}: ${r.snippet}`).join('\n')}`.slice(0, 6000) },
           ];
-          for (const tm of team.slice(0, 6)) {
-            sections.push({ title: `${companyName} — Team: ${tm.name}`, memoryType: 'relationship',
-              content: `${tm.name} is a team member (AI agent) at ${companyName}.` });
+          for (const sec of sections) {
+            await saveMemory({ ...sec, tags: canonTags });
           }
-          // One ingest avoids eight independent extraction/embedding pipelines.
-          // The headings retain the same retrieval structure inside the canon.
-          await saveMemory({
-            title: `${companyName} — Company canon`,
-            memoryType: 'canonical_summary',
-            tags: canonTags,
-            content: sections.map((section) => `## ${section.title}\n${section.content}`).join('\n\n').slice(0, 12000),
-          });
 
           say('Planning your first tasks');
           let tasks = [];

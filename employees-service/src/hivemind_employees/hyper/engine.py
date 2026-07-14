@@ -1053,8 +1053,18 @@ class Director:
         # and cut the call at 25s — a timed-out voice degrades to "(no reply)"
         # instead of holding the whole debate hostage (measured 26-36s stragglers).
         if bucket == "debate" and "max_tokens" not in body:
-            body["max_tokens"] = 420
-        _to = 25.0 if bucket == "debate" else 60.0
+            body["max_tokens"] = int(os.getenv("HYPER_DEBATE_MAX_TOKENS", "700") or 700)
+        # The final report (synth) must never truncate mid-table: give it a large
+        # generation budget + a long deadline. Without an explicit cap the provider
+        # default clipped long markdown tables; the 60s deadline also cut long runs.
+        if bucket == "synth" and "max_tokens" not in body:
+            body["max_tokens"] = int(os.getenv("HYPER_SYNTH_MAX_TOKENS", "4096") or 4096)
+        if bucket == "debate":
+            _to = 40.0
+        elif bucket == "synth":
+            _to = float(os.getenv("HYPER_SYNTH_TIMEOUT_S", "90") or 90)
+        else:
+            _to = 60.0
         if _route_direct_openrouter(body.get("model")):
             j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if j is not None:
@@ -1075,7 +1085,7 @@ class Director:
         _nudged = False
         for attempt in range(max_attempts):
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(max(45.0, _to), connect=5.0)) as c:
                     r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
                 if r.status_code == 400 and _BILLING_RE.search(r.text or ""):
                     # Groq billing block: mark dead (gpt-oss routes direct to OpenRouter
@@ -1138,7 +1148,7 @@ class Director:
         # Groq exhausted/unavailable → OpenRouter failover. Groq stays primary;
         # this runs only after Groq's own 400/429/5xx retries above are spent, so
         # the healthy path is unchanged. `body` carries the same tools/schema.
-        j = await _openrouter_chat(body, timeout=httpx.Timeout(45.0, connect=5.0))
+        j = await _openrouter_chat(body, timeout=httpx.Timeout(max(45.0, _to), connect=5.0))
         if j is not None:
             u = j.get("usage") or {}
             t = int(u.get("total_tokens", 0) or 0)
@@ -1426,17 +1436,25 @@ class Director:
                 evo_block = ("\nYOUR PLAYBOOK — operating lessons you have learned across ALL your past "
                              "work (every room, every task). Apply every one:\n"
                              + "\n".join(f"- {l}" for l in lessons))
-        msg = await self._groq([
+        _messages = [
             {"role": "system", "content": (
                 _now_block() +
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
-        ], model=self.persona_model, temp=min(0.7, 0.45 + 0.1 * round_no), bucket="debate")
-        text = (msg or {}).get("content") or "(no reply)"
+        ]
+        _temp = min(0.7, 0.45 + 0.1 * round_no)
+        msg = await self._groq(_messages, model=self.persona_model, temp=_temp, bucket="debate")
+        text = (msg or {}).get("content") or ""
+        if not text.strip():
+            # A timed-out / empty voice used to degrade to "(no reply)" and pollute
+            # the transcript + the FE. Retry once before giving up.
+            msg = await self._groq(_messages, model=self.persona_model, temp=_temp, bucket="debate")
+            text = (msg or {}).get("content") or ""
+        empty = not text.strip()
         return {"slug": emp.get("slug") or emp.get("id"), "name": name, "lane": lane,
-                "is_skeptic": is_skeptic, "text": text}
+                "is_skeptic": is_skeptic, "text": text, "empty": empty}
 
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
@@ -1454,6 +1472,9 @@ class Director:
         # input identical), only the emit moved inside the per-persona task.
         async def _consult_and_emit(m: Dict[str, Any], prompt: str, rn: int, agreement_pair: tuple) -> Dict[str, Any]:
             c = await self._consult(m, prompt, rn)
+            # Drop empty voices entirely — no "(no reply)" bubble on the FE.
+            if c.get("empty"):
+                return c
             await self.emit({"t": "react", "round": rn, "agent": c["slug"],
                              "name": c["name"], "lane": c["lane"],
                              "agreement": agreement_pair[0] if c["is_skeptic"] else agreement_pair[1],
@@ -1466,13 +1487,15 @@ class Director:
             for m in members
         ])
         for c in r1:
+            if c.get("empty"):
+                continue
             self.transcript.append({"round": 1, "agent": c["name"], "text": c["text"]})
 
         # Round 2 — react/challenge each other on the shared board
         if rounds >= 2:
             self._round_seq += 1
             await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
-            prior = "\n".join(f"{c['name']}: {c['text']}" for c in r1)[:3500]
+            prior = "\n".join(f"{c['name']}: {c['text']}" for c in r1 if not c.get("empty"))[:3500]
             r2 = await asyncio.gather(*[
                 _consult_and_emit(m, (f"Your teammates said:\n{prior}\n\nREACT: whose point is weakest? Challenge "
                                       f"or build on it — be specific. Do you change your view on '{topic}'?"),
@@ -1480,6 +1503,8 @@ class Director:
                 for m in members
             ])
             for c in r2:
+                if c.get("empty"):
+                    continue
                 self.transcript.append({"round": 2, "agent": c["name"], "text": c["text"]})
 
         await self.emit({"t": "swarm_verdict", "round": self._round_seq, "converged": True})
@@ -1518,7 +1543,20 @@ class Director:
             "flag anything you cannot verify as UNVERIFIED and collect open items under a short "
             "'## Gaps to confirm'.\n"
             "• When a debate happened, close with a one-line synthesis citing who argued what.\n"
-            "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs."
+            "• Publish-ready content only — no process narration, no placeholders, no fabricated URLs.\n"
+            "ANALYTICAL DEPTH — this is a high-level executive report, not a list of facts:\n"
+            "• Open with a 2-3 sentence '## Executive Summary' stating the single most important takeaway and the "
+            "recommended action, in plain language a founder can act on immediately.\n"
+            "• Name the ONE sharpest, non-obvious insight explicitly — call it out (e.g. '**Key insight:** …'). "
+            "Prefer the second-order implication over the surface observation.\n"
+            "• RANK findings and recommendations by impact (highest first), not by the order they were discussed.\n"
+            "• Quantify wherever the gathered context allows (size, %, $, timeframe); when you can't, say so rather "
+            "than padding with vague adjectives.\n"
+            "• For every recommendation give: the lever (what to do), the owner/role, and one measurable signal that "
+            "tells you it worked. No recommendation without a way to check it.\n"
+            "• State confidence WITH the reason ('high — 3 independent sources' / 'low — single blog, UNVERIFIED').\n"
+            "• Cut filler. Every sentence must carry a fact, a judgement, or an action — delete anything that only "
+            "restates the goal or narrates process."
         )
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────

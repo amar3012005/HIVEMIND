@@ -6814,8 +6814,10 @@ Write the persona now.`;
         // (Digital-Employees rooms are collaborative; rooms carry org_id). Org
         // isolation preserved — a member never sees another org's rooms.
         let rooms = await prisma.hyperRoom.findMany({
-          where: { orgId: current.session.orgId },
-          orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
+          // One company per org: retired (archived) rooms from a prior company are
+          // hidden so re-onboarding shows only the current company's rooms.
+          where: { orgId: current.session.orgId, archivedAt: null },
+          orderBy: [{ updatedAt: 'desc' }],
           take: 200,
         });
         // Stamp project_id via raw SQL — the deployed Prisma client predates the
@@ -7093,6 +7095,21 @@ Write the persona now.`;
       // Wipe any prior onboarding memories so a re-run supersedes cleanly (no
       // duplicate profiles piling up). Scoped to this org's onboarding source tag.
       const clearPriorOnboarding = async () => {
+        // One company per org: re-onboarding REPLACES the prior company. Retire
+        // the prior company's agents + rooms so the new company's HQ room seats
+        // only its own freshly-hired team and org-wide recall/canon returns only
+        // the new company. Archive (not delete) — recoverable via archived_at.
+        // These writes are the isolation boundary for a replacement onboarding.
+        // Fail closed if either cannot complete; continuing would mix companies.
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_rooms" SET archived_at = now()
+             WHERE org_id = $1::uuid AND archived_at IS NULL`,
+          orgId,
+        );
+        await prisma.digitalEmployee.updateMany({
+          where: { orgId, archivedAt: null },
+          data: { archivedAt: new Date(), status: 'paused' },
+        });
         try {
           await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/bulk-delete-by-tag`, {
             method: 'POST',
@@ -7288,8 +7305,13 @@ Write the persona now.`;
           } catch { mission = `Build ${companyName} into the category leader.`; }
 
           say('Assembling your team');
+          // One company per org: retire the prior company's agents + rooms + canon
+          // BEFORE assembling the new team, so the fresh findMany sees an empty
+          // active roster, hires 3 new specialists, and the HQ room seats only
+          // this company's agents (no cross-company leak). Recoverable (archived).
+          await clearPriorOnboarding();
           const store = await _getEmployeeStore();
-          let team = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true, name: true, roleArchetype: true }, take: 20 }).catch(() => []);
+          let team = await prisma.digitalEmployee.findMany({ where: { orgId, archivedAt: null }, select: { id: true, name: true, roleArchetype: true }, take: 20 }).catch(() => []);
           // Legacy auto-hired generics (bare archetypes / the old Nova-Atlas-Vega
           // trio) don't count as specialists — the team must hold 3 REAL
           // marketplace professions. Generics are kept (never delete a user's
@@ -7396,7 +7418,7 @@ Write the persona now.`;
           // Generic for any org: entities derived from name/aliases/domain/team.
           say('Filing your documents');
           say('Locking in your vision');
-          await clearPriorOnboarding();  // supersede prior run — no dupes
+          // (prior company's agents/rooms/canon already retired at team-assembly)
           const lc = (s) => String(s || '').toLowerCase();
           const entityTags = Array.from(new Set([
             `entity:${lc(companyName)}`,
@@ -7437,7 +7459,7 @@ Write the persona now.`;
           let tasks = [];
           try {
             const tj = JSON.parse(await llm(
-              'Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH"}]}. Write 4-5 concrete, scoped first tasks for an AI team operating this company (market research, positioning, content, outreach prep — things doable with web research + writing). title = short imperative (<=10 words); detail = 1-2 sentences of scope; tag = one of RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY.',
+              'Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH"}]}. Write 4-5 concrete, scoped first tasks for an AI team operating this company (market research, positioning, content, outreach prep — things doable with web research + writing). title = short imperative (<=10 words); detail = 1-2 sentences of scope; tag = one of RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY. CRITICAL: never invent or name a specific competitor, product, or company that is not present in the provided profile — a competitor task must say "identify and analyze THIS company\'s real competitors via web research", never a guessed name. Refer to the company only by its real name from the profile.',
               `Company profile: ${JSON.stringify(profile)}\nMission: ${mission}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
               { json: true, maxTokens: 700 },
             ));
@@ -7591,7 +7613,7 @@ Write the persona now.`;
         if (!row?.company) return jsonResponse(res, { onboarded: false }, 404);
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const employees = await prisma.digitalEmployee.findMany({
-          where: { orgId: current.session.orgId },
+          where: { orgId: current.session.orgId, archivedAt: null },
           select: { id: true, name: true, roleArchetype: true, status: true },
           take: 12,
         }).catch(() => []);
@@ -7736,7 +7758,7 @@ Write the persona now.`;
       if (!current) return;
       const roomId = roomMetaMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
         select: { id: true },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7784,7 +7806,7 @@ Write the persona now.`;
       if (!current) return;
       const roomId = roomTurnMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
         select: { id: true },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -7804,7 +7826,7 @@ Write the persona now.`;
       const roomId = roomMetaMatch[1];
       // Org-shared read: any org member can view a room's metadata + turns.
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId },
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
       if (room) {
         try {
@@ -7894,7 +7916,7 @@ Write the persona now.`;
       const body = await parseBody(req);
       const roomId = roomMetaMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const data = {};
@@ -8014,7 +8036,7 @@ Write the persona now.`;
       if (!current) return;
       const roomId = roomMetaMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       if (room.archivedAt) return jsonResponse(res, { room });
@@ -8093,7 +8115,7 @@ Write the persona now.`;
       try {
         // Org-shared participate: any org member can continue a flyby decision.
         const room = await prisma.hyperRoom.findFirst({
-          where: { id: roomId, orgId: current.session.orgId },
+          where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
         });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
@@ -8158,7 +8180,7 @@ Write the persona now.`;
       }
       const MASTER = getInternalApiKey();
       try {
-        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId, archivedAt: null } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         // DURABLE resolve: the approval_request event (with its descriptor) is
         // persisted in the turn's lines, so this survives sidecar restarts and
@@ -8253,7 +8275,7 @@ Write the persona now.`;
         }));
       const MASTER = getInternalApiKey();
       try {
-        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId, archivedAt: null } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/google/exec`, {
           method: 'POST',
@@ -8313,7 +8335,7 @@ Write the persona now.`;
 
       // Org-shared participate: any org member can submit a turn to an org room.
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId },
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
       if (room) {
         try {
@@ -8510,7 +8532,7 @@ Write the persona now.`;
       if (!current) return;
       const [_, roomId, turnId] = roomTurnMatch;
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId },
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId } });
@@ -8696,7 +8718,7 @@ Write the persona now.`;
       if (!current) return;
       const roomId = artifactsMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const qp = new URL(req.url, 'http://x').searchParams;

@@ -13,7 +13,7 @@ const promoted = (memory_type, importance_score) => ({
 
 test('filters legacy low-salience durable KB promotions', () => {
   const useful = { id: 'useful', ...promoted('decision', 0.9) };
-  const noise = { id: 'noise', ...promoted('fact', 0.3) };
+  const noise = { id: 'noise', memory_type: 'fact', importance_score: 0.3, tags: ['distilled-from-kb'] };
   assert.deepEqual(filterLowSaliencePromotedMemories([noise, useful], 0.65), [useful]);
 });
 

@@ -142,7 +142,7 @@ export function filterLowSaliencePromotedMemories(memories, minImportance = KB_D
   return memories.filter((memory) => {
     const tags = Array.isArray(memory.tags) ? memory.tags : [];
     const type = memory.memory_type || memory.memoryType;
-    const isKbPromotion = tags.includes('promoted-memory') && tags.includes('distilled-from-kb');
+    const isKbPromotion = tags.includes('distilled-from-kb');
     if (!isKbPromotion || !DURABLE_PROMOTION_TYPES.has(type)) return true;
     const importance = Number(memory.importance_score ?? memory.importanceScore);
     return Number.isFinite(importance) && importance >= minImportance;
@@ -276,8 +276,7 @@ async function hop1Memory({ store, query, options, ctx }) {
   let mems = result.memories || [];
   const missingPromotionImportance = mems.filter((memory) => {
     const tags = Array.isArray(memory.tags) ? memory.tags : [];
-    return tags.includes('promoted-memory')
-      && tags.includes('distilled-from-kb')
+    return tags.includes('distilled-from-kb')
       && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
   });
   if (missingPromotionImportance.length && store.client?.memory?.findMany) {

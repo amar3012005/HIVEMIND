@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -279,6 +279,11 @@ export function amrUpdate(orgId, id, patch) {
 // Clear ALL memories for a remote org on its agent (memory layer only — leaves
 // KB/meetings/usage). Central orgs → null (caller uses the central hard path).
 export function amrClearMemories(orgId) { return orgIsRemote(orgId) ? remoteClearMemories(orgId) : null; }
+
+// A self-hosted agent is the tenant's complete data plane. This intentionally
+// removes its documents, evidence, memories, vectors, and graph, but never the
+// shared broker/container that carries traffic for other tenants.
+export function amrPurge(orgId) { return orgIsRemote(orgId) ? remotePurge(orgId) : null; }
 
 // Delete a remote org's memory ON ITS AGENT (tombstone; hard=true purges the row). Direct call,
 // not outboxed: callers need the definitive result and the agent-side delete is idempotent.

@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrClearMemories } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -13181,10 +13181,8 @@ exit \$RC
               }
 
               // 2. Cascade-cleanup FK references then delete rows
-              await prisma.auditLog.updateMany({
-                where: { resourceId: { in: ids } },
-                data: { resourceId: null },
-              });
+              // Audit rows are append-only. Historical resource IDs are kept
+              // after an erasure instead of rewriting the compliance trail.
               await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
               await prisma.memoryVersion.updateMany({
                 where: { relatedMemoryId: { in: ids } },
@@ -14285,8 +14283,9 @@ exit \$RC
                   prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } }));
                 await cascade('relationships', () =>
                   prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
-                await cascade('audit_log_refs', () =>
-                  prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }));
+                // Audit records are append-only compliance evidence. Keep their
+                // historical resource IDs rather than mutating them during an
+                // erasure; the production schema intentionally has no FK here.
                 // Defensive child-row purge via raw SQL: the Prisma schema says
                 // onDelete:Cascade for these, but the LIVE DB constraints have
                 // drifted on some tables (memories deleteMany failed with an FK
@@ -16654,16 +16653,24 @@ exit \$RC
 
         case '/api/memories/delete-all':
           if (req.method === 'DELETE') {
-            // Self-host (remote) orgs keep memories on their agent, not central PG.
-            // Route the clear to the agent's memory-only endpoint — hard-deletes
-            // every memory + edge + vector for the org, leaving KB/meetings and
-            // ALL usage/billing counters untouched. No central prisma work.
+            // Clear only data owned by this authenticated workspace identity.
+            // Audit entries deliberately survive as immutable compliance history.
+            // A remote agent is an org-level data plane, so its complete purge is
+            // restricted to organization owners/admins and never removes the agent.
             if (orgIsRemote(orgId)) {
               try {
-                const out = await amrClearMemories(orgId);
+                const membership = await prisma.userOrganization.findUnique({
+                  where: { userId_orgId: { userId, orgId } }, select: { role: true },
+                });
+                const canPurgeBox = principal?.master || principal?.scopes?.includes('admin')
+                  || membership?.role === 'owner' || membership?.role === 'admin';
+                if (!canPurgeBox) {
+                  return jsonResponse(res, { error: 'Only an organization owner or admin can clear a self-hosted workspace.' }, 403);
+                }
+                const out = await amrPurge(orgId);
                 if (!out) return jsonResponse(res, { error: 'Delete all failed', message: 'agent unreachable' }, 502);
                 invalidateAggregateCache({ userId, orgId, project: null });
-                return jsonResponse(res, { success: true, deleted: out.deleted || 0, remaining: 0 });
+                return jsonResponse(res, { success: true, deleted: out.shard_deleted || out.deleted || 0, remaining: 0, data_plane: 'self_hosted' });
               } catch (error) {
                 return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
               }
@@ -16671,52 +16678,86 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              // SECURITY: include orgId so a user in multiple orgs cannot
-              // wipe memories from another org with a key scoped to org A.
-              const memoryWhere = { userId, ...(orgId ? { orgId } : {}), ...(project ? { project } : {}) };
+              const ownerWhere = { userId, ...(orgId ? { orgId } : {}) };
+              const memoryWhere = { ...ownerWhere, ...(project ? { project } : {}) };
+              const [allMemories, documents] = await Promise.all([
+                prisma.memory.findMany({ where: memoryWhere, select: { id: true } }),
+                // A project-only cleanup is used by benchmark tooling. Documents
+                // are not project-addressable, so only the Settings full clear
+                // removes source evidence.
+                project ? Promise.resolve([]) : prisma.knowledgeDocument.findMany({
+                  where: ownerWhere, select: { id: true, sourceArtifactId: true },
+                }),
+              ]);
+              const memoryIds = allMemories.map((m) => m.id);
+              const documentIds = documents.map((d) => d.id);
+              const segments = documentIds.length
+                ? await prisma.knowledgeSegment.findMany({ where: { documentId: { in: documentIds }, ...ownerWhere }, select: { id: true } })
+                : [];
+              const segmentIds = segments.map((s) => s.id);
 
-              // Get all IDs first
-              const allMemories = await prisma.memory.findMany({ where: memoryWhere, select: { id: true } });
-              const ids = allMemories.map(m => m.id);
-
-              if (ids.length > 0) {
-                // Bulk Prisma: delete related tables then memories (4 queries total)
-                await prisma.auditLog.updateMany({
-                  where: { resourceId: { in: ids } },
-                  data: { resourceId: null },
+              const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+              const qdrantKey = process.env.QDRANT_API_KEY || '';
+              const deletePoints = async (collection, points) => {
+                if (!qdrantUrl || points.length === 0) return;
+                const response = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                  body: JSON.stringify({ points }),
                 });
-                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.memoryVersion.updateMany({
-                  where: { relatedMemoryId: { in: ids } },
-                  data: { relatedMemoryId: null },
-                });
-                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+                // A legacy collection may not exist; other failures must be
+                // surfaced so this endpoint never falsely reports an erasure.
+                if (!response.ok && response.status !== 404) throw new Error(`Qdrant ${collection} delete failed (${response.status})`);
+              };
+              const collections = Array.from(new Set([
+                ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                'HIVEMIND_PERSONAL',
+                process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence',
+              ]));
+              for (const collection of collections) {
+                await deletePoints(collection, memoryIds);
+                await deletePoints(collection, segmentIds);
+              }
 
-                // Bulk Qdrant: delete all points by user_id filter (1 API call)
-                try {
-                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
-                  const qdrantKey = process.env.QDRANT_API_KEY || '';
-                  if (qdrantUrl) {
-                    const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
-                    if (orgId) filter.must.push({ key: 'org_id', match: { value: orgId } });
-                    if (project) filter.must.push({ key: 'project', match: { value: project } });
-                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                      body: JSON.stringify({ filter, wait: true }),
-                    });
-                  }
-                } catch (qdrantErr) {
-                  console.warn('[delete-all] Qdrant bulk delete failed:', qdrantErr.message);
+              if (memoryIds.length) {
+                const idArr = `ARRAY[${memoryIds.map((id) => `'${id}'`).join(',')}]::uuid[]`;
+                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: memoryIds } }, data: { relatedMemoryId: null } });
+                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
+                // The audit trail is append-only. There is no live FK in the
+                // production schema, so historical resource IDs remain intact.
+                for (const sql of [
+                  `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_derivations WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_entity_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_outbox WHERE record_id = ANY(${idArr})`,
+                ]) {
+                  await prisma.$executeRawUnsafe(sql).catch((err) => {
+                    if (!/does not exist/i.test(err.message || '')) throw err;
+                  });
                 }
+                await prisma.memory.deleteMany({ where: { id: { in: memoryIds } } });
+              }
+
+              if (documentIds.length) {
+                await prisma.knowledgeDocument.deleteMany({ where: { id: { in: documentIds }, ...ownerWhere } });
+                // Artifacts hold the original raw payload. Remove only artifacts
+                // no longer referenced by any remaining document in this tenant.
+                await prisma.sourceArtifact.deleteMany({ where: { ...ownerWhere, documents: { none: {} } } });
               }
 
               invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
-              return jsonResponse(res, { success: true, deleted: ids.length, remaining: 0 });
+              return jsonResponse(res, {
+                success: true,
+                deleted: memoryIds.length,
+                deleted_documents: documentIds.length,
+                deleted_segments: segmentIds.length,
+                remaining: 0,
+              });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
             }
@@ -16774,7 +16815,8 @@ exit \$RC
                 for (let i = 0; i < ids.length; i += BATCH) {
                   const chunk = ids.slice(i, i + BATCH);
                   try {
-                    await prisma.auditLog.updateMany({ where: { resourceId: { in: chunk } }, data: { resourceId: null } });
+                    // Keep append-only audit rows unchanged; resource_id is
+                    // deliberately polymorphic and has no live FK in prod.
                     await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: chunk } } });
                     await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: chunk } }, data: { relatedMemoryId: null } });
                     await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: chunk } } });

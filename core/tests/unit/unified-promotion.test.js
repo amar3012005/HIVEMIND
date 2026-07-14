@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DocumentFirstIngestionService, normalizeUnifiedClaims } from '../../src/knowledge/document-first-ingestion.js';
+import { DocumentFirstIngestionService, normalizeCuratedClaims, normalizeUnifiedClaims } from '../../src/knowledge/document-first-ingestion.js';
 
 test('unified promotion validates multilingual exact source spans and durable types', () => {
   const source = 'Der Vorstand beschloss, das Projekt am 15. Juli zu starten. 次の会議は8月3日に東京で開催されます。';
@@ -69,6 +69,32 @@ test('unified promotion retains low-salience content as evidence instead of memo
   assert.deepEqual(claims.map((claim) => claim.t), ['Retention period']);
 });
 
+test('document curation merges support without losing source provenance', () => {
+  const candidates = [
+    { t: 'Retention', f: 'Retention is seven years.', memory_type: 'fact', importance: 0.9, entities: ['Policy'], segmentId: 's1', source_quote: 'Retention is seven years.' },
+    { t: 'Owner', f: 'The compliance officer owns reviews.', memory_type: 'fact', importance: 0.82, entities: ['Compliance Officer'], segmentId: 's2', source_quote: 'The compliance officer owns reviews.' },
+  ];
+  const claims = normalizeCuratedClaims([{
+    title: 'Retention review policy',
+    content: 'Records are retained for seven years and the compliance officer owns the reviews.',
+    memory_type: 'fact', importance: 0.94, support_indices: [0, 1], entities: ['Policy'],
+  }], candidates, 8);
+
+  assert.equal(claims.length, 1);
+  assert.deepEqual(claims[0].support_segment_ids, ['s1', 's2']);
+  assert.deepEqual(claims[0].support_quotes, [candidates[0].source_quote, candidates[1].source_quote]);
+  assert.deepEqual(claims[0].entities, ['Policy', 'Compliance Officer']);
+});
+
+test('document curation rejects unsupported references and invalid memory types', () => {
+  const candidates = [{ t: 'Launch', f: 'Launch is 15 July.', memory_type: 'event', importance: 0.9, entities: [], segmentId: 's1', source_quote: 'Launch is 15 July.' }];
+  const claims = normalizeCuratedClaims([
+    { title: 'Unsupported', content: 'Unsupported invented claim.', memory_type: 'fact', importance: 1, support_indices: [9], entities: [] },
+    { title: 'Relationship', content: 'A relationship row.', memory_type: 'relationship', importance: 1, support_indices: [0], entities: [] },
+  ], candidates, 8);
+  assert.deepEqual(claims, []);
+});
+
 test('unified ingestion persists the classified type and exact evidence link', async () => {
   const ingested = [];
   const links = [];
@@ -113,4 +139,28 @@ test('unified ingestion persists the classified type and exact evidence link', a
   });
   assert.equal(derivations[0].metadata.source_start, 10);
   assert.equal(relationships.length, 0);
+});
+
+test('document parent is a bounded summary with structural PartOf edges', async () => {
+  const ingested = [];
+  const relationships = [];
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      ingestMemory: async (payload) => { ingested.push(payload); return { memoryId: 'parent-1' }; },
+      store: { createRelationship: async (edge) => relationships.push(edge) },
+    },
+  });
+  const memories = [{ id: 'm1', title: 'Retention policy' }, { id: 'm2', title: 'Review owner' }];
+  const parentId = await service._attachDocumentParent({
+    memories, userId: 'u1', orgId: 'o1', documentId: 'd1',
+    metadata: { filename: 'policy.pdf', scope: 'organization' }, totalFacts: 2,
+    firstContent: '<html>raw source must not become the parent memory</html>',
+  });
+
+  assert.equal(parentId, 'parent-1');
+  assert.equal(ingested[0].memory_type, 'summary');
+  assert.match(ingested[0].content, /Key topics: Retention policy; Review owner/);
+  assert.doesNotMatch(ingested[0].content, /raw source/);
+  assert.deepEqual(relationships.map((edge) => edge.type), ['PartOf', 'PartOf']);
 });

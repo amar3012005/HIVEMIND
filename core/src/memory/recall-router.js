@@ -128,6 +128,26 @@ const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ 
 const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
 const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
+const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+
+const DURABLE_PROMOTION_TYPES = new Set([
+  'fact', 'decision', 'preference', 'goal', 'event', 'lesson', 'conversation',
+]);
+
+// Legacy KB promotions can receive a strong retrieval score even when their
+// ingestion importance was below today's durable-memory admission threshold.
+// Keep those rows out of normal memory recall without hiding source evidence,
+// summaries, or syntheses used for explicit source reconstruction.
+export function filterLowSaliencePromotedMemories(memories, minImportance = KB_DURABLE_MIN_IMPORTANCE) {
+  return memories.filter((memory) => {
+    const tags = Array.isArray(memory.tags) ? memory.tags : [];
+    const type = memory.memory_type || memory.memoryType;
+    const isKbPromotion = tags.includes('promoted-memory') && tags.includes('distilled-from-kb');
+    if (!isKbPromotion || !DURABLE_PROMOTION_TYPES.has(type)) return true;
+    const importance = Number(memory.importance_score ?? memory.importanceScore);
+    return Number.isFinite(importance) && importance >= minImportance;
+  });
+}
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
@@ -878,6 +898,7 @@ export class RecallRouter {
     if (!callerWantsAudit) {
       rankedMemories = rankedMemories.filter((m) => !(m.tags || []).includes('internal-audit'));
     }
+    rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
     rankedMemories = applyEventTimeBoost(rankedMemories, query);

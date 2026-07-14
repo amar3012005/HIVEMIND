@@ -83,7 +83,7 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import (run_director, evo_reflect_and_merge, run_mention_reply,
+from .hyper.engine import (_openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
                            _persona_fields, _evo_recall)
 
 log = logging.getLogger(__name__)
@@ -3028,6 +3028,33 @@ async def _orchestrate_single_agent(
                          req.room_id, ok, len(_merged), _evo_added_total, status)
         except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
             log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
+
+    # ── Next-task guidance: distill 2-3 clickable follow-up tasks from the
+    # sealed report so the user always knows the next move (one click = a new
+    # auto-run turn in this room). One cheap 120b call (Cerebras pin), wrapped —
+    # a failure never delays the seal.
+    if status == "complete" and (final_text or "").strip():
+        try:
+            _nt_body = {"model": "openai/gpt-oss-120b", "temperature": 0.4, "max_tokens": 400,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content":
+                             'From this team report, propose the 2-3 most valuable FOLLOW-UP tasks the user should run next '
+                             '(concrete, doable by AI agents with memory + web + email — e.g. "Find 10 prospect firms matching our ICP and fetch contact info", '
+                             '"Draft the 3-touch email sequence to the shortlist"). Ground them in the report\'s own gaps/next-steps. '
+                             'JSON only: {"tasks":[{"title":"<imperative, <=9 words>","detail":"<1 sentence scope>","tag":"RESEARCH|OUTREACH|MARKETING|STRATEGY"}]}'},
+                            {"role": "user", "content": f"ROOM GOAL: {req.room_goal or ''}\n\nREPORT:\n{(final_text or '')[:5000]}"},
+                        ]}
+            _nt = await _openrouter_chat(_nt_body, timeout=httpx.Timeout(12.0, connect=5.0))
+            _nt_content = ((((_nt or {}).get("choices") or [{}])[0]).get("message") or {}).get("content") or "{}"
+            _nt_tasks = (json.loads(_nt_content) or {}).get("tasks")
+            _nt_tasks = [t for t in (_nt_tasks or []) if isinstance(t, dict) and str(t.get("title", "")).strip()][:3]
+            if _nt_tasks:
+                await _emit({"t": "next_tasks", "tasks": [
+                    {"title": str(t["title"])[:80], "detail": str(t.get("detail", ""))[:220],
+                     "tag": str(t.get("tag", "RESEARCH")).upper()[:12]} for t in _nt_tasks]})
+        except Exception as exc:  # noqa: BLE001
+            log.info("[single] next-task suggestion skipped: %s", exc)
 
     _seal_ev = {"t": "seal", "cost_tokens": cost_tokens, "status": status,
                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",

@@ -31,6 +31,14 @@ export const INGEST_SCOPES = Object.freeze([
   'personal', 'organization', 'project', 'team',
 ]);
 
+// Relationship is intentionally absent: graph semantics are typed edges, not
+// user-visible memory rows. Synthesis is accepted only for trusted internal
+// producers; source extraction itself never emits it.
+export const CANONICAL_MEMORY_TYPES = Object.freeze([
+  'fact', 'preference', 'decision', 'lesson', 'goal', 'event',
+  'summary', 'synthesis', 'conversation',
+]);
+
 /** Default per-source platform label when the caller does not name one. */
 const DEFAULT_PLATFORM_BY_TYPE = Object.freeze({
   kb: 'knowledge_base',
@@ -112,6 +120,10 @@ export function validateEnvelope(env) {
   if (env.mode && env.mode !== 'document' && env.mode !== 'atomic' && env.mode !== 'evidence') {
     return { ok: false, error: 'mode must be document|atomic|evidence' };
   }
+  const memoryType = env.metadata?.memory_type || env.metadata?.memoryType;
+  if (memoryType && !CANONICAL_MEMORY_TYPES.includes(memoryType)) {
+    return { ok: false, error: `metadata.memory_type must be one of ${CANONICAL_MEMORY_TYPES.join('|')}` };
+  }
   return { ok: true };
 }
 
@@ -143,7 +155,7 @@ export function resolvePlatform(source) {
 export function normalizeProvenance(env) {
   const source = env.source || {};
   const platform = resolvePlatform(source);
-  const sourceId = source.sourceId || source.filename || null;
+  const sourceId = source.sourceId || source.source_id || source.filename || null;
   const sourceUrl = source.url || null;
   const title = env.title || source.title || source.filename || null;
 

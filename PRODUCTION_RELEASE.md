@@ -74,3 +74,13 @@
 - **Acceptance:** served chunk 1270.4a55b4e7 carries `label:"Operating System"/"VOICE"/BRAIN`; landing hero intact in main.03a12d1c.js; public 200.
 - **Rollback:** fe tag `rollback-20260714-161534-single`; env backups `.bak-prod-20260714-52d388e1`.
 - **Note:** feature-loop/mobile-app-v2 holds ~31 further undeployed FE commits (outcomes strip, TARA room-call UI, PWA fixes) requiring the outbound backend — next reconciliation block.
+
+## prod-20260714-9d91226a — Outbound closed-loop + mobile-app-v2 FE (full catch-up onto singulance-main)
+- **Parent:** `feat/outbound-closed-loop-port` @ `9d91226a649a09404cb149f12aa54c592480a11a` (off singulance-main a83f1991)
+- **Frontend:** `feat/mobile-app-v2-port` @ `9146fbf8fe536203a4e43a561dc457460f6443e0` = FE canon + merge of feature-loop/mobile-app-v2 (33 commits: outcomes strip, TARA room-call UI, PWA hive-shell-v5)
+- **Backend picks from feature-loop/outbound-closed-loop:** 8413a647 (ledger + /v1/hyper/outcomes + one-company), f5ec4f22 (gmail reply detection), 814fe230 (emailSends metering; schema conflict union — canon taraSeconds/hyperAgentRuns kept), 10f87fea (company outcomes summary), c876ae96 (call bridge), 23afd5c2 (route calls via managed Deepgram TARA — taraDeepgramBaseUrl, tara-aaas dropped), 8f049395 (control helper-order fix + unit test)
+- **Images:** core 43dd7509dd2b, control 0eff985aa7b0, tara-deepgram d227a2c2c647, fe a05557e07a6c (all rebuilt from clean worktree); employees retagged d9dfcfe7.
+- **Migrations:** 20260714120000_outbound_actions + 20260714121000_email_sends_usage applied (idempotent — partially present from the morning 8f049395 release) and recorded in schema_migrations_applied. PG backup backup-prod-20260714-9d91226a.dump (18.4MB, sha alongside).
+- **Acceptance:** all app services on the immutable tag; public 200 ×4; authenticated /v1/hyper/outcomes returns counters; /v1/hyper/company carries outcomes; FE serves hive-shell-v5, BRAIN|Operating System|VOICE, landing hero, outcomes-strip chunk; fresh fatal/uncaught: 0 (log grep excludes room= OOM false-positive).
+- **Rollback:** tags rollback-<TS> (see docker images) + env backups + DB backup.
+- **Post-release:** singulance-main fast-forwarded (both repos) — THE deploy branch from now on. Remaining un-ported: feat/mneme-foundation deep engine/recall work (separate migration project).

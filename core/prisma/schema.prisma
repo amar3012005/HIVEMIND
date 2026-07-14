@@ -427,6 +427,34 @@ model PendingWrite {
   @@map("pending_writes")
 }
 
+/// Durable ledger of outbound VALUE ACTIONS that actually left the platform
+/// (HyperAgents closed loop): an approved email send or an outbound TARA call.
+/// One row per exit; `outcome` is filled later by the tracking side (Gmail
+/// reply-matcher, TARA call-end insight). Feeds the dashboard outcomes counter
+/// and (later) value-action billing.
+model OutboundAction {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String    @map("org_id") @db.Uuid
+  userId     String?   @map("user_id") @db.Uuid
+  roomId     String?   @map("room_id") @db.Uuid // hyper_rooms.id when sent from a room
+  approvalId String?   @map("approval_id") @db.VarChar(80)
+  channel    String    @db.VarChar(20) // email | call
+  recipient  String?   @db.VarChar(320) // email address or E.164 number
+  subject    String?   @db.VarChar(500)
+  messageId  String?   @map("message_id") @db.VarChar(160) // gmail message id / telnyx call leg id
+  threadId   String?   @map("thread_id") @db.VarChar(160) // gmail thread id (reply matching)
+  status     String    @default("sent") @db.VarChar(20) // sent | failed
+  outcome    String?   @db.VarChar(40) // replied | booked | completed | bounced | no_answer
+  outcomeAt  DateTime? @map("outcome_at") @db.Timestamptz(6)
+  meta       Json?     @db.JsonB
+  sentAt     DateTime  @default(now()) @map("sent_at") @db.Timestamptz(6)
+
+  @@index([orgId, sentAt])
+  @@index([orgId, threadId])
+  @@index([orgId, outcome, sentAt])
+  @@map("outbound_actions")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

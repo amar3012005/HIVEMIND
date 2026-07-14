@@ -717,6 +717,12 @@ FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
 - SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
 - At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
 
+TYPE rules:
+- decision: approved policy, selected option, authorization rule, binding requirement, or changed threshold.
+- preference: a stated recurring choice or favored way of working, not an approval rule.
+- goal: desired future outcome or explicit commitment. event: dated occurrence. lesson: validated learning.
+- fact: stable claim/specification/metric that is not better classified above.
+
 IMPORTANCE rules — rate each fact 0.0-1.0 by how decision-critical + specific it is:
 - 0.85-1.0: a decision, commitment, deadline, price/budget figure, contract term, or a named strategic fact unique to this org/project.
 - 0.6-0.8: a concrete spec/metric/role/event with named parties or numbers.
@@ -777,11 +783,16 @@ Output the JSON object and nothing else.`;
   async _extractUnifiedReliable(window, options = {}) {
     const attempts = 1 + Math.max(0, Math.min(2, Number(process.env.KB_UNIFIED_EMPTY_RETRIES ?? 1)));
     let lastError = null;
+    let best = [];
+    const contentLength = String(window?.content || '').trim().length;
+    const maxFacts = Math.max(1, Number(options.maxFacts) || 8);
+    const expected = contentLength >= 700 ? Math.min(3, maxFacts) : 1;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         const claims = await this._extractUnified(window, options);
-        if (claims.length || attempt === attempts) return claims;
-        this.logger.warn?.(`[kb-unified] empty extraction; retrying (${attempt}/${attempts})`);
+        if (claims.length > best.length) best = claims;
+        if (claims.length >= expected || attempt === attempts) return best;
+        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); retrying (${attempt}/${attempts})`);
       } catch (error) {
         lastError = error;
         if (attempt === attempts) throw error;
@@ -789,7 +800,7 @@ Output the JSON object and nothing else.`;
       }
     }
     if (lastError) throw lastError;
-    return [];
+    return best;
   }
 
   /**

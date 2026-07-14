@@ -735,7 +735,7 @@ Output the JSON object and nothing else.`;
    * json_schema on gpt-oss-120b + salvage; per-window bounded; caps on facts/entities/rels.
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
-  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '' } = {}) {
+  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false } = {}) {
     const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
     const content = (window.content || '').slice(0, 6000);
     if (content.trim().length < 40) {
@@ -743,39 +743,13 @@ Output the JSON object and nothing else.`;
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
     }
-    const REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates'];
-    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, the RELATIONSHIPS between facts, and each fact's IMPORTANCE. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","importance":<0.0-1.0>,"entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
+    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 2 : 4));
+    const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
+{"facts":[{"t":"short topic","f":"one complete standalone claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
-FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
-- "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize. Keep it SPECIFIC to THIS document — concrete subjects, real figures, named parties — not a generic restatement.
-- Extract only decision-relevant stated information (names, roles, products, specs, numbers, dates, decisions, events, causal claims). NON-REDUNDANT — never restate the same point; keep the single most specific.
-- SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
-- At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
-
-TYPE rules:
-- decision: approved policy, selected option, authorization rule, binding requirement, or changed threshold.
-- preference: a stated recurring choice or favored way of working, not an approval rule.
-- goal: desired future outcome or explicit commitment. event: dated occurrence. lesson: validated learning.
-- fact: stable claim/specification/metric that is not better classified above.
-
-IMPORTANCE rules — rate each fact 0.0-1.0 by how decision-critical + specific it is:
-- 0.85-1.0: a decision, commitment, deadline, price/budget figure, contract term, or a named strategic fact unique to this org/project.
-- 0.6-0.8: a concrete spec/metric/role/event with named parties or numbers.
-- 0.3-0.5: supporting context, general description, or background.
-- < 0.3: near-boilerplate (you should usually SKIP these instead).
-
-ENTITY rules — ONE canonical name per real-world thing (so it never forks):
-- A SHORT noun (1-3 words): a specific person, organization, product/model, place, technology, or standard. NEVER a phrase, clause, description, or generic concept.
-- Use the FULL canonical name, not a partial — "Amar Sai Gadde" not "Amar"; "B&B Sinn für Marken" not "B&B" — and reuse that EXACT form for every mention.
-- Source language as written (do not translate); singular; drop legal suffixes; prefer full term over acronym unless the acronym is the proper name. 3-7 high-signal entities per fact max.
-
-RELATIONSHIP rules — only between facts in THIS list, only when genuinely related:
-- "Extends": one fact adds detail/nuance to another (same subject, complementary). "Mentions": two facts share a key entity but are otherwise distinct. "Contradicts": two facts state conflicting values for the same thing. "Updates": one fact supersedes another (rare within one section).
-- Reference the OTHER fact by its 0-based index in "facts". Omit "rels" or use [] when a fact stands alone. Do NOT invent edges to force connectivity.
-
-Output the JSON object and nothing else.`;
+Rules: at most ${factCap} facts; prefer decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be an exact 20-260 character substring from SECTION that supports f. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
     const parsed = await chatCompletion({
-      model, temperature: 0.2, max_tokens: 6000, json_mode: true, feature: 'kb-unified-extract',
+      model, temperature: 0, max_tokens: compact ? 900 : 1800, json_mode: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
@@ -785,7 +759,7 @@ Output the JSON object and nothing else.`;
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
     // Evidence capture is unconditional; promotion is deliberately stricter.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
-    return normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance);
+    return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
   }
 
   async _extractUnifiedReliable(window, options = {}) {
@@ -797,7 +771,14 @@ Output the JSON object and nothing else.`;
     const expected = contentLength >= 700 ? Math.min(3, maxFacts) : 1;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        const claims = await this._extractUnified(window, options);
+        // A malformed first completion should not repeat the same wide output.
+        // Retry with a smaller schema/output budget so the document remains
+        // source-first and promotion stays bounded under provider pressure.
+        const claims = await this._extractUnified(window, {
+          ...options,
+          maxFacts: attempt === 1 ? maxFacts : Math.min(maxFacts, 2),
+          compact: attempt > 1,
+        });
         if (claims.length > best.length) best = claims;
         if (claims.length >= expected || attempt === attempts) return best;
         this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); retrying (${attempt}/${attempts})`);

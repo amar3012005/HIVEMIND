@@ -136,7 +136,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   const msg = json.choices?.[0]?.message || {};
   const content = msg.content || msg.reasoning_content || '';
 
-  console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens}`);
+  console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens} completion=${usage?.completion_tokens} finish=${json.choices?.[0]?.finish_reason || 'unknown'}`);
   // METER AT THE GATEWAY — every org-context LLM call (cognition, dreamer, synthesizer, KB distill,
   // recall expansion, …) routes through here, so this single meter captures the platform's background
   // token spend that per-endpoint metering misses. orgId from AsyncLocalStorage (callers run inside
@@ -165,7 +165,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       if (m) parsed = tryParse(m[0]);
     }
     if (parsed !== null) return parsed;
-    throw new Error(`[enterprise-extract] Failed to parse JSON response: ${content.slice(0, 200)}`);
+    throw new Error(`[enterprise-extract] Failed to parse JSON response (finish=${json.choices?.[0]?.finish_reason || 'unknown'}): ${content.slice(0, 200)}`);
   }
 
   return content;

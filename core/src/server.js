@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrClearMemories } from './vector/mneme/driver.js';
+import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -33,6 +33,7 @@ import {
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
+import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -559,6 +560,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma && shouldRunConnec
     smartIngestRouter,
     externalRefStore,
     entityResolver,
+    getCanonicalIngestion: () => documentFirstIngestion,
     // qdrantClient injected post-construction (see below) — not yet defined
     // at this point in file load order.
   });
@@ -2224,6 +2226,21 @@ async function ingestRoutedPayload(routedPayload, engine) {
   return engine.ingestMemory(cleanPayload);
 }
 
+async function ingestCanonicalPayload(payload, options = {}) {
+  const scoped = await resolveScopedIngestPayload(payload);
+  const envelope = legacyPayloadToEnvelope(scoped, options);
+  if (documentFirstIngestion?.ingestSource && envelope) {
+    const result = await documentFirstIngestion.ingestSource(envelope);
+    if (!result?.ok) throw new Error(result?.error || 'canonical ingest failed');
+    return {
+      ...result,
+      memoryId: result.memoryId || result.memoryIds?.[0] || null,
+      id: result.memoryId || result.memoryIds?.[0] || result.documentId || null,
+    };
+  }
+  throw new Error('canonical ingestion service unavailable');
+}
+
 export async function resolveScopedIngestPayload(payload, options = {}) {
   if (!payload?.user_id || !payload?.org_id) return payload;
 
@@ -3418,6 +3435,7 @@ const server = http.createServer(async (req, res) => {
       smartIngestRouter,
       buildRoutedIngestPayloads,
       ingestRoutedPayload,
+      ingestCanonicalPayload,
       webIntelligence: globalThis.webIntelligence || null,
       prisma,
       accessContext: null,
@@ -8938,6 +8956,7 @@ exit \$RC
             externalRefStore,
             entityResolver,
             qdrantClient,
+            getCanonicalIngestion: () => documentFirstIngestion,
           });
 
           const incremental = body.incremental !== false;
@@ -9023,29 +9042,27 @@ exit \$RC
           if (!Array.isArray(turns) || turns.length === 0) {
             return jsonResponse(res, { error: 'turns[] or transcript required' }, 400);
           }
-          const { GeminiAdapter } = await import('./connectors/providers/gemini/adapter.js');
-          const adapter = new GeminiAdapter();
-          const payloads = adapter.normalize({
-            session_id: body.session_id,
-            title: body.title,
-            model: body.model,
-            exported_at: body.exported_at,
-            turns,
-          }, { user_id: userId, org_id: orgId });
-          let imported = 0;
-          for (const p of payloads) {
-            if (p?._tree?.parent) {
-              const routed = await smartIngestRouter.route(p);
-              if (routed?.parent) {
-                const result = await persistentMemoryEngine.ingestMemoryTree(routed);
-                if (result?.parentId) imported++;
-              }
-            } else {
-              await persistentMemoryEngine.ingestMemory(p);
-              imported++;
-            }
-          }
-          return jsonResponse(res, { success: true, imported, turn_count: turns.length }, 200);
+          const sessionId = body.session_id || crypto.randomUUID();
+          const transcript = turns.map((turn, index) => {
+            const role = turn.role === 'assistant' ? 'Gemini' : 'User';
+            return `[${index + 1}] ${role}: ${String(turn.content || '').trim()}`;
+          }).join('\n\n');
+          const result = await documentFirstIngestion.ingestSource({
+            userId, orgId, content: transcript,
+            title: body.title || 'Gemini conversation',
+            occurredAt: body.exported_at || undefined,
+            mode: 'document', scope: 'personal',
+            metadata: { memory_type: 'conversation', model: body.model || null },
+            source: {
+              type: 'connector', provider: 'gemini', sourceId: sessionId,
+              title: body.title || 'Gemini conversation',
+            },
+          });
+          if (!result?.ok) throw new Error(result?.error || 'canonical Gemini ingest failed');
+          return jsonResponse(res, {
+            success: true, imported: result.promotedCount || result.memoryIds?.length || 0,
+            document_id: result.documentId, turn_count: turns.length,
+          }, 200);
         } catch (err) {
           console.warn('[gemini-ingest-paste] failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
@@ -9183,9 +9200,8 @@ exit \$RC
             },
             skip_fact_extraction: true,
           };
-          buildRoutedIngestPayloads(slackPayload, { smartIngestRouter }).then(([routed]) =>
-            persistentMemoryEngine.ingestMemory(routed)
-          ).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+          ingestCanonicalPayload(slackPayload, { sourceType: 'connector', provider: 'slack' })
+            .catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
         }
 
         return jsonResponse(res, { ok: true, result });
@@ -9220,9 +9236,7 @@ exit \$RC
               project_ids: p ? [p] : [],
               source_metadata: { source_platform: 'slack', via: 'slack-save-button' },
             };
-            const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-            if (ingestRoutedPayload) await ingestRoutedPayload(routed, persistentMemoryEngine);
-            else await persistentMemoryEngine.ingestMemory(routed);
+            await ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
             let label = 'personal';
             if (p) {
               try {
@@ -9453,10 +9467,7 @@ exit \$RC
                   project_ids: projectId ? [projectId] : [],
                   source_metadata: { source_platform: 'slack', via: 'slack-save' },
                 };
-                const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-                return ingestRoutedPayload
-                  ? ingestRoutedPayload(routed, persistentMemoryEngine)
-                  : persistentMemoryEngine.ingestMemory(routed);
+                return ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
               };
               const summarize = async (transcript) => {
                 const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
@@ -9632,6 +9643,7 @@ exit \$RC
                   smartIngestRouter,
                   buildRoutedIngestPayloads,
                   ingestRoutedPayload,
+                  ingestCanonicalPayload,
                   accessContext: accessCtx,
                   webIntelligence: globalThis.webIntelligence || null,
                 },
@@ -10949,8 +10961,42 @@ exit \$RC
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {
             try {
+              if (!principal?.master && !principal?.scopes?.includes('admin')) {
+                return jsonResponse(res, { error: 'Admin access required' }, 403);
+              }
               if (!documentFirstIngestion) {
                 return jsonResponse(res, { error: 'Document-first not enabled' }, 503);
+              }
+              const documentId = typeof body.document_id === 'string' ? body.document_id : null;
+              if (documentId) {
+                const document = await prisma.knowledgeDocument.findFirst({
+                  where: { id: documentId, orgId },
+                  select: {
+                    id: true, userId: true, title: true, documentType: true, sourcePlatform: true,
+                    sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+                    segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
+                  },
+                });
+                if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
+                const unpromoted = document.segments.filter((segment) => segment.content?.trim());
+                const result = await documentFirstIngestion._promoteMemories({
+                  documentId: document.id,
+                  userId: document.userId,
+                  orgId,
+                  segments: unpromoted,
+                  metadata: {
+                    filename: document.title || '', documentTitle: document.title || '',
+                    document_type: document.documentType, source_platform: document.sourcePlatform,
+                    source_id: document.sourceId, source_url: document.sourceUrl,
+                    document_date: document.documentDate, tags: document.tags || [],
+                    ...(document.parseMetadata || {}),
+                  },
+                  promotionStrategy: 'admin_document_repair',
+                });
+                return jsonResponse(res, {
+                  success: true, document_id: document.id, scanned: unpromoted.length,
+                  promoted: (result?.memories || []).filter((memory) => memory?.id).length,
+                });
               }
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
               const limit = Math.min(Number(body.limit || 100), 500);
@@ -12534,6 +12580,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -12572,6 +12619,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -12638,6 +12686,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   await engine.runSync({
                     adapter,
@@ -12937,62 +12986,43 @@ exit \$RC
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
 
-                  // Enterprise schema: multi-message threads ingest as a
-                  // tree (Thread parent + Message children) so the agent
-                  // can recall the whole thread by parent-id and each
-                  // message keeps its own entity/temporal extraction.
-                  // Detect the consolidated thread payload (type=gmail_thread)
-                  // and the per-message payloads from adapter output.
+                  // One Gmail thread is one evidence-backed source document.
+                  // Raw messages remain ordered segments; only a bounded set of
+                  // durable claims is promoted into memory.
                   const threadParent = payloads.find(p => p.metadata?.type === 'gmail_thread');
                   const messageChildren = payloads.filter(p => p.metadata?.gmail_message_id && !p.metadata?.is_thread_summary);
-                  if (threadParent && messageChildren.length >= 2) {
-                    // Stamp force_entity_linking on every child for the
-                    // canonical LLM operator + entity-co-mention pass.
-                    const children = messageChildren.map(c => ({
-                      ...c,
-                      metadata: {
-                        ...(c.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'child',
-                        parent_title: threadParent.title,
+                  if (threadParent && messageChildren.length) {
+                    const transcript = messageChildren.map((message, index) =>
+                      `[${index + 1}] ${message.title || 'Message'}\n${message.content || ''}`).join('\n\n');
+                    const canonicalResult = await documentFirstIngestion.ingestSource({
+                      userId, orgId, content: transcript,
+                      title: threadParent.title || 'Gmail thread', mode: 'document',
+                      scope: threadParent.scope || 'personal',
+                      projectId: threadParent.project_ids?.[0] || undefined,
+                      tags: [...new Set([...(threadParent.tags || []), 'gmail', 'email-thread'])],
+                      metadata: { memory_type: 'conversation', message_count: messageChildren.length },
+                      source: {
+                        type: 'connector', provider: 'gmail', sourceId: threadId,
+                        title: threadParent.title || 'Gmail thread',
                       },
-                    }));
-                    const parent = {
-                      ...threadParent,
-                      metadata: {
-                        ...(threadParent.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'parent',
-                        child_count: children.length,
-                      },
-                    };
-                    const treeResult = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+                    });
+                    if (!canonicalResult?.ok) throw new Error(canonicalResult?.error || 'canonical Gmail ingest failed');
                     treesIngested += 1;
-                    ingested += 1 + children.length;
-                    // Post-commit structured enrichment on parent thread
-                    // — fire-and-forget so HTTP response doesn't wait.
-                    // Adds summary / action_items / decisions / urgency
-                    // fields + kind:* / urgency:* / owner:* tags.
-                    if (treeResult?.parentId && enrichmentQueue) {
-                      enrichmentQueue.enqueue(treeResult.parentId, {
-                        content: parent.content,
-                        title: parent.title,
-                        tags: parent.tags,
-                        orgId: parent.org_id,
+                    ingested += canonicalResult.promotedCount || canonicalResult.memoryIds?.length || 0;
+                    const primaryId = canonicalResult.memoryId || canonicalResult.memoryIds?.[0];
+                    if (primaryId && enrichmentQueue) {
+                      enrichmentQueue.enqueue(primaryId, {
+                        content: transcript, title: threadParent.title,
+                        tags: threadParent.tags, orgId,
                       });
-                    }
-                    // Skip residual summary memory if adapter also produced one.
-                    const summary = payloads.find(p => p.metadata?.is_thread_summary);
-                    if (summary) {
-                      await persistentMemoryEngine.ingestMemory(summary);
-                      ingested += 1;
                     }
                     continue;
                   }
 
                   // Single-message thread or per-message mode → flat ingest.
                   for (const p of payloads) {
-                    const flatResult = await persistentMemoryEngine.ingestMemory(p);
+                    if (p.metadata?.is_thread_summary) continue;
+                    const flatResult = await ingestCanonicalPayload(p, { sourceType: 'connector', provider: 'gmail' });
                     ingested += 1;
                     if (flatResult?.memoryId && enrichmentQueue) {
                       enrichmentQueue.enqueue(flatResult.memoryId, {
@@ -13221,10 +13251,8 @@ exit \$RC
               }
 
               // 2. Cascade-cleanup FK references then delete rows
-              await prisma.auditLog.updateMany({
-                where: { resourceId: { in: ids } },
-                data: { resourceId: null },
-              });
+              // Audit rows are append-only. Historical resource IDs are kept
+              // after an erasure instead of rewriting the compliance trail.
               await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
               await prisma.memoryVersion.updateMany({
                 where: { relatedMemoryId: { in: ids } },
@@ -13833,7 +13861,7 @@ exit \$RC
               const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
               const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient });
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion: () => documentFirstIngestion });
 
               const cursor = conn.metadata?.cursor || decoded.historyId;
               const accessToken = decryptToken(conn.access_token_encrypted);
@@ -14023,6 +14051,7 @@ exit \$RC
                 externalRefStore,
                 entityResolver,
                 qdrantClient,
+                getCanonicalIngestion: () => documentFirstIngestion,
               });
               const syncId = crypto.randomUUID();
               setImmediate(async () => {
@@ -14324,8 +14353,9 @@ exit \$RC
                   prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } }));
                 await cascade('relationships', () =>
                   prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
-                await cascade('audit_log_refs', () =>
-                  prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }));
+                // Audit records are append-only compliance evidence. Keep their
+                // historical resource IDs rather than mutating them during an
+                // erasure; the production schema intentionally has no FK here.
                 // Defensive child-row purge via raw SQL: the Prisma schema says
                 // onDelete:Cascade for these, but the LIVE DB constraints have
                 // drifted on some tables (memories deleteMany failed with an FK
@@ -15017,10 +15047,22 @@ exit \$RC
                   promotedMemoryIds: result.promotedMemoryIds
                 }, 202);
               } catch (phase1Err) {
-                console.error('[enterprise] Phase1 upload failed, falling back to legacy path:', phase1Err.message);
-                // Fall through to legacy path
+                console.error('[enterprise] Canonical document ingestion failed:', phase1Err.message);
+                return jsonResponse(res, {
+                  error: 'Canonical document ingestion failed',
+                  code: phase1Err.code || 'CANONICAL_INGEST_FAILED',
+                  detail: phase1Err.message,
+                }, phase1Err.statusCode || 500);
               }
             }
+
+            // The old schema/chunk writer is intentionally unreachable. Keeping
+            // two enterprise ingestion implementations creates divergent
+            // memories, provenance, and relationship semantics.
+            return jsonResponse(res, {
+              error: 'canonical_ingest_unavailable',
+              message: 'Enterprise document ingestion is temporarily unavailable.',
+            }, 503);
 
             try {
               const { extractSchema } = await import('./knowledge/enterprise/extractor.js');
@@ -15911,8 +15953,7 @@ exit \$RC
                     crawled_at: job.created_at
                   }
                 };
-                const [routedWeb] = await buildRoutedIngestPayloads(webPayload, { smartIngestRouter });
-                const ingestResult = await persistentMemoryEngine.ingestMemory(routedWeb);
+                const ingestResult = await ingestCanonicalPayload(webPayload, { sourceType: 'connector', provider: 'web_intelligence' });
                 if (ingestResult?.memoryId) {
                   savedIds.push(ingestResult.memoryId);
                 }
@@ -16639,8 +16680,7 @@ exit \$RC
                   source_url: validation.data.source_url || null
                 }
               };
-              const [routedWebappPayload] = await buildRoutedIngestPayloads(webappPayload, { smartIngestRouter });
-              const result = await persistentMemoryEngine.ingestMemory(routedWebappPayload);
+              const result = await ingestCanonicalPayload(webappPayload, { sourceType: 'api', mode: 'atomic' });
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
@@ -16683,16 +16723,24 @@ exit \$RC
 
         case '/api/memories/delete-all':
           if (req.method === 'DELETE') {
-            // Self-host (remote) orgs keep memories on their agent, not central PG.
-            // Route the clear to the agent's memory-only endpoint — hard-deletes
-            // every memory + edge + vector for the org, leaving KB/meetings and
-            // ALL usage/billing counters untouched. No central prisma work.
+            // Clear only data owned by this authenticated workspace identity.
+            // Audit entries deliberately survive as immutable compliance history.
+            // A remote agent is an org-level data plane, so its complete purge is
+            // restricted to organization owners/admins and never removes the agent.
             if (orgIsRemote(orgId)) {
               try {
-                const out = await amrClearMemories(orgId);
+                const membership = await prisma.userOrganization.findUnique({
+                  where: { userId_orgId: { userId, orgId } }, select: { role: true },
+                });
+                const canPurgeBox = principal?.master || principal?.scopes?.includes('admin')
+                  || membership?.role === 'owner' || membership?.role === 'admin';
+                if (!canPurgeBox) {
+                  return jsonResponse(res, { error: 'Only an organization owner or admin can clear a self-hosted workspace.' }, 403);
+                }
+                const out = await amrPurge(orgId);
                 if (!out) return jsonResponse(res, { error: 'Delete all failed', message: 'agent unreachable' }, 502);
                 invalidateAggregateCache({ userId, orgId, project: null });
-                return jsonResponse(res, { success: true, deleted: out.deleted || 0, remaining: 0 });
+                return jsonResponse(res, { success: true, deleted: out.shard_deleted || out.deleted || 0, remaining: 0, data_plane: 'self_hosted' });
               } catch (error) {
                 return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
               }
@@ -16700,52 +16748,86 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              // SECURITY: include orgId so a user in multiple orgs cannot
-              // wipe memories from another org with a key scoped to org A.
-              const memoryWhere = { userId, ...(orgId ? { orgId } : {}), ...(project ? { project } : {}) };
+              const ownerWhere = { userId, ...(orgId ? { orgId } : {}) };
+              const memoryWhere = { ...ownerWhere, ...(project ? { project } : {}) };
+              const [allMemories, documents] = await Promise.all([
+                prisma.memory.findMany({ where: memoryWhere, select: { id: true } }),
+                // A project-only cleanup is used by benchmark tooling. Documents
+                // are not project-addressable, so only the Settings full clear
+                // removes source evidence.
+                project ? Promise.resolve([]) : prisma.knowledgeDocument.findMany({
+                  where: ownerWhere, select: { id: true, sourceArtifactId: true },
+                }),
+              ]);
+              const memoryIds = allMemories.map((m) => m.id);
+              const documentIds = documents.map((d) => d.id);
+              const segments = documentIds.length
+                ? await prisma.knowledgeSegment.findMany({ where: { documentId: { in: documentIds }, ...ownerWhere }, select: { id: true } })
+                : [];
+              const segmentIds = segments.map((s) => s.id);
 
-              // Get all IDs first
-              const allMemories = await prisma.memory.findMany({ where: memoryWhere, select: { id: true } });
-              const ids = allMemories.map(m => m.id);
-
-              if (ids.length > 0) {
-                // Bulk Prisma: delete related tables then memories (4 queries total)
-                await prisma.auditLog.updateMany({
-                  where: { resourceId: { in: ids } },
-                  data: { resourceId: null },
+              const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+              const qdrantKey = process.env.QDRANT_API_KEY || '';
+              const deletePoints = async (collection, points) => {
+                if (!qdrantUrl || points.length === 0) return;
+                const response = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                  body: JSON.stringify({ points }),
                 });
-                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.memoryVersion.updateMany({
-                  where: { relatedMemoryId: { in: ids } },
-                  data: { relatedMemoryId: null },
-                });
-                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+                // A legacy collection may not exist; other failures must be
+                // surfaced so this endpoint never falsely reports an erasure.
+                if (!response.ok && response.status !== 404) throw new Error(`Qdrant ${collection} delete failed (${response.status})`);
+              };
+              const collections = Array.from(new Set([
+                ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                'HIVEMIND_PERSONAL',
+                process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence',
+              ]));
+              for (const collection of collections) {
+                await deletePoints(collection, memoryIds);
+                await deletePoints(collection, segmentIds);
+              }
 
-                // Bulk Qdrant: delete all points by user_id filter (1 API call)
-                try {
-                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
-                  const qdrantKey = process.env.QDRANT_API_KEY || '';
-                  if (qdrantUrl) {
-                    const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
-                    if (orgId) filter.must.push({ key: 'org_id', match: { value: orgId } });
-                    if (project) filter.must.push({ key: 'project', match: { value: project } });
-                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                      body: JSON.stringify({ filter, wait: true }),
-                    });
-                  }
-                } catch (qdrantErr) {
-                  console.warn('[delete-all] Qdrant bulk delete failed:', qdrantErr.message);
+              if (memoryIds.length) {
+                const idArr = `ARRAY[${memoryIds.map((id) => `'${id}'`).join(',')}]::uuid[]`;
+                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: memoryIds } }, data: { relatedMemoryId: null } });
+                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
+                // The audit trail is append-only. There is no live FK in the
+                // production schema, so historical resource IDs remain intact.
+                for (const sql of [
+                  `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_derivations WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_entity_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_outbox WHERE record_id = ANY(${idArr})`,
+                ]) {
+                  await prisma.$executeRawUnsafe(sql).catch((err) => {
+                    if (!/does not exist/i.test(err.message || '')) throw err;
+                  });
                 }
+                await prisma.memory.deleteMany({ where: { id: { in: memoryIds } } });
+              }
+
+              if (documentIds.length) {
+                await prisma.knowledgeDocument.deleteMany({ where: { id: { in: documentIds }, ...ownerWhere } });
+                // Artifacts hold the original raw payload. Remove only artifacts
+                // no longer referenced by any remaining document in this tenant.
+                await prisma.sourceArtifact.deleteMany({ where: { ...ownerWhere, documents: { none: {} } } });
               }
 
               invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
-              return jsonResponse(res, { success: true, deleted: ids.length, remaining: 0 });
+              return jsonResponse(res, {
+                success: true,
+                deleted: memoryIds.length,
+                deleted_documents: documentIds.length,
+                deleted_segments: segmentIds.length,
+                remaining: 0,
+              });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
             }
@@ -16803,7 +16885,8 @@ exit \$RC
                 for (let i = 0; i < ids.length; i += BATCH) {
                   const chunk = ids.slice(i, i + BATCH);
                   try {
-                    await prisma.auditLog.updateMany({ where: { resourceId: { in: chunk } }, data: { resourceId: null } });
+                    // Keep append-only audit rows unchanged; resource_id is
+                    // deliberately polymorphic and has no live FK in prod.
                     await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: chunk } } });
                     await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: chunk } }, data: { relatedMemoryId: null } });
                     await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: chunk } } });
@@ -17723,8 +17806,9 @@ exit \$RC
                               original_query: validation.data.query,
                             },
                           };
-                          const [routedLive] = await buildRoutedIngestPayloads(livePayload, { smartIngestRouter });
-                          await persistentMemoryEngine.ingestMemory(routedLive);
+                          await ingestCanonicalPayload(livePayload, {
+                            sourceType: 'connector', provider: item._source || 'live_query', mode: 'atomic',
+                          });
                         } catch (promoteErr) {
                           console.warn('[memory-promote] failed:', promoteErr.message);
                         }
@@ -20841,9 +20925,7 @@ exit \$RC
                 apiKey: groqKey,
                 ctx: {
                   persistentMemoryStore,
-                  persistentMemoryEngine,
-                  smartIngestRouter,
-                  buildRoutedIngestPayloads,
+                  documentFirstIngestion,
                   accessContext: distillAccessCtx,
                   projectId: ingestProjectId,
                 },
@@ -20852,19 +20934,24 @@ exit \$RC
               // Also save the session-level rollup so /timeline shows the
               // whole conversation as one anchor node.
               try {
-                if (raw_summary && parsed.title && persistentMemoryEngine?.ingestMemory) {
-                  const rollupPayload = {
+                if (raw_summary && parsed.title && documentFirstIngestion?.ingestSource) {
+                  documentFirstIngestion.ingestSource({
+                    userId,
+                    orgId,
                     title: parsed.title.slice(0, 80),
                     content: `${parsed.summary || ''}\n\n${raw_summary}`.slice(0, 8000),
+                    source: {
+                      type: 'chat',
+                      platform: 'ai-chat',
+                      sourceId: url || `${platform || 'chat'}:session`,
+                      url: url || null,
+                      title: parsed.title.slice(0, 80),
+                    },
+                    mode: 'atomic',
                     tags: ['ai-chat-session', `from-${(platform || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '')}`, 'session-rollup'],
-                    memory_type: 'conversation',
-                    user_id: userId,
-                    org_id: orgId,
-                    ...(ingestProjectId ? { project_id: ingestProjectId, project_ids: [ingestProjectId] } : {}),
-                    source_metadata: { source_platform: 'ai-chat', host_platform: platform, url, via: 'chat-ingest-distill' },
-                  };
-                  const [routed] = await buildRoutedIngestPayloads(rollupPayload, { smartIngestRouter });
-                  persistentMemoryEngine.ingestMemory(routed).catch((e) =>
+                    ...(ingestProjectId ? { scope: 'project', projectId: ingestProjectId } : {}),
+                    metadata: { memory_type: 'conversation', host_platform: platform, via: 'chat-ingest-distill' },
+                  }).catch((e) =>
                     console.warn('[ingest/chat-session] rollup save failed:', e.message)
                   );
                 }
@@ -21127,6 +21214,7 @@ exit \$RC
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
                     ingestRoutedPayload,                 // tree-aware dispatch
+                    ingestCanonicalPayload,
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                   },
@@ -21324,9 +21412,8 @@ exit \$RC
                           source_metadata: { source_platform: 'slack', channel: p.channel, via: 'talk-to-hive' },
                           skip_fact_extraction: true,
                         };
-                        buildRoutedIngestPayloads(slackPostPayload, { smartIngestRouter }).then(([routed]) =>
-                          persistentMemoryEngine.ingestMemory(routed)
-                        ).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
+                        ingestCanonicalPayload(slackPostPayload, { sourceType: 'connector', provider: 'slack' })
+                          .catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
                       }
                     } else if (a === 'slack_react') {
                       result = await bridge._call('reactions.add',
@@ -21500,9 +21587,8 @@ exit \$RC
                             },
                             skip_fact_extraction: true,
                           };
-                          buildRoutedIngestPayloads(slackFallbackPayload, { smartIngestRouter }).then(([routed]) =>
-                            persistentMemoryEngine.ingestMemory(routed)
-                          ).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
+                          ingestCanonicalPayload(slackFallbackPayload, { sourceType: 'connector', provider: 'slack' })
+                            .catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
                         }
                       }
                     }
@@ -21734,11 +21820,8 @@ ${injectionText}`;
                     source_metadata: { source_platform: 'chat' },
                     skip_fact_extraction: true,
                   };
-                  buildRoutedIngestPayloads(chatFactPayload, { smartIngestRouter }).then((routedPayloads) => {
-                    for (const routedPayload of routedPayloads) {
-                      persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
-                    }
-                  }).catch(err => console.warn('[chat] Smart routing failed:', err.message));
+                  ingestCanonicalPayload(chatFactPayload, { sourceType: 'chat', mode: 'atomic' })
+                    .catch(err => console.warn('[chat] Fact ingest failed:', err.message));
                 }
               }
 
@@ -22096,7 +22179,11 @@ async function writeAuditLog(prisma, {
 function jsonResponse(res, data, status = 200) {
   res.setHeader('Content-Type', 'application/json');
   res.writeHead(status);
-  res.end(JSON.stringify(data));
+  // Prisma can return BigInt columns (for example SourceArtifact.sizeBytes).
+  // Convert only at the HTTP boundary so document/evidence payloads remain readable.
+  res.end(JSON.stringify(data, (_key, value) => (
+    typeof value === 'bigint' ? value.toString() : value
+  )));
 }
 
 function inferChatToneGuidance(text = '') {

@@ -31,6 +31,22 @@ export const INGEST_SCOPES = Object.freeze([
   'personal', 'organization', 'project', 'team',
 ]);
 
+// Relationship is intentionally absent: graph semantics are typed edges, not
+// user-visible memory rows. Synthesis is accepted only for trusted internal
+// producers; source extraction itself never emits it.
+export const CANONICAL_MEMORY_TYPES = Object.freeze([
+  'fact', 'preference', 'decision', 'lesson', 'goal', 'event',
+  'summary', 'synthesis', 'conversation',
+]);
+
+const LEGACY_MEMORY_TYPE_MAP = Object.freeze({
+  note: 'fact',
+  task: 'goal',
+  commitment: 'goal',
+  observation: 'fact',
+  insight: 'lesson',
+});
+
 /** Default per-source platform label when the caller does not name one. */
 const DEFAULT_PLATFORM_BY_TYPE = Object.freeze({
   kb: 'knowledge_base',
@@ -54,6 +70,7 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {string} [url]        canonical source URL
  * @property {string} [title]      human title of the source item
  * @property {string} [filename]   filename when the payload is a file
+ * @property {Object} [metadata]   provider-native source identifiers
  */
 
 /**
@@ -112,6 +129,10 @@ export function validateEnvelope(env) {
   if (env.mode && env.mode !== 'document' && env.mode !== 'atomic' && env.mode !== 'evidence') {
     return { ok: false, error: 'mode must be document|atomic|evidence' };
   }
+  const memoryType = env.metadata?.memory_type || env.metadata?.memoryType;
+  if (memoryType && !CANONICAL_MEMORY_TYPES.includes(memoryType)) {
+    return { ok: false, error: `metadata.memory_type must be one of ${CANONICAL_MEMORY_TYPES.join('|')}` };
+  }
   return { ok: true };
 }
 
@@ -143,7 +164,7 @@ export function resolvePlatform(source) {
 export function normalizeProvenance(env) {
   const source = env.source || {};
   const platform = resolvePlatform(source);
-  const sourceId = source.sourceId || source.filename || null;
+  const sourceId = source.sourceId || source.source_id || source.filename || null;
   const sourceUrl = source.url || null;
   const title = env.title || source.title || source.filename || null;
 
@@ -154,6 +175,7 @@ export function normalizeProvenance(env) {
   }
 
   const sourceMetadata = {
+    ...(source.metadata && typeof source.metadata === 'object' ? source.metadata : {}),
     source_platform: platform,
     source_type: source.type,
     source_id: sourceId,
@@ -191,4 +213,67 @@ export function detectMode(env) {
   const len = (env.content || '').length;
   const threshold = Number(env.documentThreshold) || DEFAULT_DOCUMENT_THRESHOLD;
   return len >= threshold ? 'document' : 'atomic';
+}
+
+export function canonicalMemoryType(value, fallback = 'fact') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (CANONICAL_MEMORY_TYPES.includes(normalized)) return normalized;
+  return LEGACY_MEMORY_TYPE_MAP[normalized] || fallback;
+}
+
+export function canonicalSourceType(payload = {}) {
+  const metadata = payload.source_metadata || payload.sourceMetadata || {};
+  const explicit = metadata.ingest_source || metadata.source_type || payload.ingest_source;
+  if (INGEST_SOURCE_TYPES.includes(explicit)) return explicit;
+  const platform = String(metadata.source_platform || payload.source_platform || payload.source_type || '').toLowerCase();
+  if (platform.includes('knowledge') || platform === 'kb') return 'kb';
+  if (platform.includes('meeting') || platform.includes('tara')) return 'meeting';
+  if (platform.includes('chat') || platform.includes('talk-to-hive')) return 'chat';
+  if (platform.includes('mcp')) return 'mcp';
+  if (platform && platform !== 'api' && platform !== 'webapp') return 'connector';
+  return 'api';
+}
+
+/**
+ * Normalize an existing flat ingest payload at compatibility boundaries. New
+ * code should construct an IngestEnvelope directly; this keeps legacy routes
+ * on the same validation, provenance, residency, and quality path meanwhile.
+ */
+export function legacyPayloadToEnvelope(payload, overrides = {}) {
+  if (!payload || typeof payload !== 'object') return null;
+  const sourceMetadata = payload.source_metadata || payload.sourceMetadata || {};
+  const sourceType = overrides.sourceType || canonicalSourceType(payload);
+  const platform = overrides.platform || sourceMetadata.source_platform || payload.source_platform || undefined;
+  const projectIds = Array.isArray(payload.project_ids) ? payload.project_ids.filter(Boolean) : [];
+  const memoryType = canonicalMemoryType(payload.memory_type || payload.memoryType || payload.metadata?.memory_type);
+  return {
+    userId: payload.user_id || payload.userId,
+    orgId: payload.org_id || payload.orgId,
+    content: payload.content,
+    title: payload.title,
+    occurredAt: payload.document_date || payload.documentDate || payload.event_time || undefined,
+    scope: payload.scope || payload.target_scope || undefined,
+    projectId: payload.project_id || projectIds[0] || undefined,
+    primaryTeamId: payload.primary_team_id || payload.primaryTeamId || undefined,
+    mode: overrides.mode || payload.ingest_mode || undefined,
+    tags: Array.isArray(payload.tags) ? payload.tags : [],
+    relationship: payload.relationship || undefined,
+    relatedTo: payload.related_to || payload.relatedTo || undefined,
+    metadata: {
+      ...(payload.metadata || {}),
+      memory_type: memoryType,
+      visibility: payload.visibility || payload.metadata?.visibility,
+      project_ids: projectIds,
+    },
+    source: {
+      type: sourceType,
+      platform,
+      provider: overrides.provider || sourceMetadata.provider || undefined,
+      sourceId: sourceMetadata.source_id || payload.source_id || undefined,
+      url: sourceMetadata.source_url || payload.source_url || undefined,
+      title: payload.title,
+      filename: sourceMetadata.filename || payload.filename || undefined,
+      metadata: sourceMetadata,
+    },
+  };
 }

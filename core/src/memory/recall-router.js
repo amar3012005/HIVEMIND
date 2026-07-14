@@ -28,6 +28,7 @@ import { ClusterIndex } from './cluster-index.js';
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 
@@ -128,6 +129,22 @@ const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ 
 const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
 const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
+const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+
+// Legacy KB promotions can receive a strong retrieval score even when their
+// ingestion importance was below today's durable-memory admission threshold.
+// Keep those rows out of normal memory recall without hiding source evidence,
+// summaries, or syntheses used for explicit source reconstruction.
+export function filterLowSaliencePromotedMemories(memories, minImportance = KB_DURABLE_MIN_IMPORTANCE) {
+  return memories.filter((memory) => isDurableKbPromotionAdmitted(memory, minImportance));
+}
+
+export function mergePromotionImportance(memories, rows) {
+  const byId = new Map((rows || []).map((row) => [row.id, row.importanceScore]));
+  return memories.map((memory) => byId.has(memory.id)
+    ? { ...memory, importance_score: byId.get(memory.id) }
+    : memory);
+}
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
@@ -247,6 +264,22 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Also fires as a hard fallback when FTS returned 0 hits.
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
+  const missingPromotionImportance = mems.filter((memory) => {
+    const tags = Array.isArray(memory.tags) ? memory.tags : [];
+    return tags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  if (missingPromotionImportance.length && store.client?.memory?.findMany) {
+    try {
+      const importanceRows = await store.client.memory.findMany({
+        where: { id: { in: missingPromotionImportance.map((memory) => memory.id) } },
+        select: { id: true, importanceScore: true },
+      });
+      mems = mergePromotionImportance(mems, importanceRows);
+    } catch (error) {
+      console.warn('[recall-router] promotion importance hydration failed:', error.message);
+    }
+  }
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
   // Time-travel override: when valid_at is set and we have tags (caller-
   // supplied or inferred), also drop into the direct-fetch path so the
@@ -318,6 +351,7 @@ async function hop1Memory({ store, query, options, ctx }) {
         created_at: m.createdAt,
         valid_at: m.documentDate || m.createdAt,
         source_metadata: m.sourceMetadata || null,
+        importance_score: m.importanceScore,
         _searchMethod: 'tag_fallback',
       }));
     } catch (err) {
@@ -336,6 +370,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     created_at: m.created_at,
     valid_at: m.valid_at || m.document_date,
     source_metadata: m.source_metadata || null,
+    importance_score: m.importance_score ?? m.importanceScore,
     // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
     ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
     ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),
@@ -878,6 +913,7 @@ export class RecallRouter {
     if (!callerWantsAudit) {
       rankedMemories = rankedMemories.filter((m) => !(m.tags || []).includes('internal-audit'));
     }
+    rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
     rankedMemories = applyEventTimeBoost(rankedMemories, query);

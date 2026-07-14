@@ -19,7 +19,7 @@ export class SyncEngine {
    * @param {import('../../memory/graph-engine.js').MemoryGraphEngine} deps.memoryEngine
    * @param {import('../../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
    */
-  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter, externalRefStore, entityResolver, qdrantClient }) {
+  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion }) {
     this.connectorStore = connectorStore;
     this.memoryEngine = memoryEngine;
     this.memoryStore = memoryStore;
@@ -34,6 +34,9 @@ export class SyncEngine {
     // when the lexical FTS path happens to match the query (poor recall for
     // exact-name lookups like "Vinil Audit AI" against rich synthesis rows).
     this.qdrantClient = qdrantClient || null;
+    this.getCanonicalIngestion = typeof getCanonicalIngestion === 'function'
+      ? getCanonicalIngestion
+      : () => globalThis.__hivemindDocumentFirstIngestion || null;
     this._dedupeCache = new Map(); // in-memory dedup; Redis L1 added on top
     // Instance-level Redis state — one client per SyncEngine instance for test isolation
     this._dedupRedis = null;
@@ -288,7 +291,7 @@ export class SyncEngine {
                 continue;
               }
 
-              await this._ingestWithRetry(payload, sourceId, userId);
+              await this._ingestWithRetry(payload, sourceId, userId, orgId);
               telemetry.imported++;
               this._markSeen(sourceId, userId, provider, orgId);
 
@@ -335,7 +338,7 @@ export class SyncEngine {
     }
   }
 
-  async _ingestWithRetry(payload, dedupeKey, userId, attempt = 0) {
+  async _ingestWithRetry(payload, dedupeKey, userId, orgId, attempt = 0) {
     try {
       // Source-id idempotency gate: connector re-syncs (cursor rewind, parallel
       // worker, manual re-run) used to write a NEW memory per thread every
@@ -365,35 +368,49 @@ export class SyncEngine {
         }
       }
 
-      // P1 canonical contract: route through SmartIngestRouter so background
-      // connector polls produce deterministic edges (thread/session/chunk),
-      // same as manual UI ingest paths. Safe fallback to raw payload on error.
-      let effective = payload;
-      let ingestResult = null;
-      if (this.smartIngestRouter) {
-        try {
-          const routed = await this.smartIngestRouter.route(payload);
-          // Tree-shape: gdocs/gemini/slack-thread/gmail-thread emit
-          //   { parent, children } — engine.ingestMemoryTree handles it.
-          if (routed && !Array.isArray(routed) && routed.parent) {
-            const treeRes = await this.memoryEngine.ingestMemoryTree(routed);
-            await this._postIngestHooks(routed.parent, { memoryId: treeRes?.parentId }, userId);
-            return;
-          }
-          if (Array.isArray(routed) && routed.length > 0) {
-            effective = routed[0];
-          }
-        } catch (routeErr) {
-          console.warn('[sync-engine] route failed, using raw payload:', routeErr.message);
-        }
+      // Canonical contract: every connector record enters the same dispatcher
+      // as files, meetings, MCP, and API saves. Long records become evidence-
+      // backed documents; short records remain atomic. The dispatcher owns
+      // smart routing, source provenance, storage residency, and graph policy.
+      const canonical = this.getCanonicalIngestion?.();
+      if (canonical?.ingestSource) {
+        const metadata = payload?.source_metadata || {};
+        const rawProvider = metadata.provider || metadata.source_platform || payload.source_platform || 'unknown';
+        const providerKey = String(rawProvider).replace(/^connector:/, '');
+        const canonicalResult = await canonical.ingestSource({
+          userId,
+          orgId: payload.org_id || payload.orgId || orgId,
+          content: payload.content,
+          title: payload.title,
+          occurredAt: payload.document_date || payload.event_time || metadata.document_date,
+          scope: payload.scope || payload.target_scope,
+          projectId: payload.project_id || payload.project_ids?.[0] || null,
+          primaryTeamId: payload.primary_team_id || null,
+          tags: payload.tags || [],
+          metadata: {
+            ...(payload.metadata || {}),
+            memory_type: payload.memory_type || payload.memoryType || 'fact',
+            visibility: payload.visibility,
+          },
+          source: {
+            type: 'connector',
+            provider: providerKey,
+            sourceId: metadata.source_id || payload.source_id || dedupeKey,
+            url: metadata.source_url || payload.source_url || null,
+            title: payload.title,
+          },
+        });
+        if (!canonicalResult?.ok) throw new Error(canonicalResult?.error || 'canonical connector ingest failed');
+        const canonicalMemoryId = canonicalResult.memoryId || canonicalResult.memoryIds?.[0] || canonicalResult.documentId || null;
+        await this._postIngestHooks(payload, { memoryId: canonicalMemoryId }, userId);
+        return canonicalResult;
       }
-      ingestResult = await this.memoryEngine.ingestMemory(effective);
-      await this._postIngestHooks(effective, ingestResult, userId);
+      throw Object.assign(new Error('canonical connector ingestion unavailable'), { code: 'CANONICAL_INGEST_UNAVAILABLE', statusCode: 503 });
     } catch (error) {
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt);
         await new Promise((r) => setTimeout(r, delay));
-        return this._ingestWithRetry(payload, dedupeKey, userId, attempt + 1);
+        return this._ingestWithRetry(payload, dedupeKey, userId, orgId, attempt + 1);
       }
       throw error;
     }

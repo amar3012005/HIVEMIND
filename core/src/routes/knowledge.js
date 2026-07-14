@@ -360,10 +360,19 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
           ...(enterprise ? { enterprise } : {}),
         });
       } catch (phase1Err) {
-        console.error('[knowledge] ✗ Phase1 failed, falling back to legacy:', phase1Err.message, phase1Err.stack);
+        console.error('[knowledge] ✗ Canonical ingestion failed:', phase1Err.message, phase1Err.stack);
+        return jsonResponse(res, {
+          error: 'canonical_ingest_failed',
+          message: phase1Err.message,
+          code: phase1Err.code || null,
+        }, phase1Err.statusCode || 500);
       }
     } else {
-      console.log(`[knowledge] Phase 1 disabled (ENABLE_DOCUMENT_FIRST_INGEST=${process.env.ENABLE_DOCUMENT_FIRST_INGEST}), using legacy path`);
+      console.error(`[knowledge] Canonical ingestion unavailable (ENABLE_DOCUMENT_FIRST_INGEST=${process.env.ENABLE_DOCUMENT_FIRST_INGEST})`);
+      return jsonResponse(res, {
+        error: 'canonical_ingest_unavailable',
+        message: 'Document ingestion is temporarily unavailable.',
+      }, 503);
     }
 
     const processDocument = processDocumentImpl || (await import('../knowledge/document-chunker.js')).processDocument;

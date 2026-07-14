@@ -5,6 +5,7 @@ import { runWithOrg, currentOrg, currentApiKey } from '../db/prisma.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { rerank as crossEncoderRerank } from './reranker.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 
@@ -2134,6 +2135,31 @@ async function _recallPersistedMemoriesImpl(store, {
     // after rerank/head-slot/slice — since the reranker reorders the set.)
   }
 
+  const missingPromotionImportance = finalItems.filter((item) => {
+    const memory = item.memory || item;
+    const memoryTags = Array.isArray(memory.tags) ? memory.tags : [];
+    return memoryTags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  const prismaMemory = store.client?.memory || store.prisma?.memory;
+  if (missingPromotionImportance.length && prismaMemory?.findMany) {
+    try {
+      const rows = await prismaMemory.findMany({
+        where: { id: { in: missingPromotionImportance.map((item) => (item.memory || item).id) } },
+        select: { id: true, importanceScore: true },
+      });
+      const importanceById = new Map(rows.map((row) => [row.id, row.importanceScore]));
+      finalItems = finalItems.map((item) => {
+        const memory = item.memory || item;
+        if (!importanceById.has(memory.id)) return item;
+        const hydrated = { ...memory, importance_score: importanceById.get(memory.id) };
+        return item.memory ? { ...item, memory: hydrated } : hydrated;
+      });
+    } catch (error) {
+      console.warn('[persisted-retrieval] promotion importance hydration failed:', error.message);
+    }
+  }
+
   // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
   const callerWantsAudit = Array.isArray(tags) && tags.some((t) => t === 'internal-audit');
   // Caller-opts-in hyper-room pass-through (e.g. /hivemind/app/swarm-rooms).
@@ -2151,6 +2177,7 @@ async function _recallPersistedMemoriesImpl(store, {
       // Drop hyper-room decisions from default recall — caller opts in.
       if (!callerWantsRoomDecisions
           && (tags.includes('room-decision') || tags.includes('hyper-rooms'))) return false;
+      if (!isDurableKbPromotionAdmitted(item.memory || item, Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65))) return false;
       return true;
     })
     .sort((a, b) => {

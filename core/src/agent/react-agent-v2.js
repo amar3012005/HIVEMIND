@@ -1015,6 +1015,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
             const resp = await tk.execute(cfg.tool, arg, {
               userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
               persistentMemoryEngine: ctx.persistentMemoryEngine,
+              ingestCanonicalPayload: ctx.ingestCanonicalPayload,
             });
             const text = resp.content?.[0]?.text || '';
             recordTool(cfg.tool, arg, `${text.length}b live`, resp);

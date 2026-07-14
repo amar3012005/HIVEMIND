@@ -12,7 +12,8 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { memoryChatFetch } from '../llm/groq-fallback.js';
+import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
+import { chatCompletion } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
@@ -33,6 +34,132 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
+import { isStructuredSourceNoise } from '../memory/durable-content.js';
+
+const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
+
+function safeDocumentType(value) {
+  const type = String(value || '').toLowerCase().trim()
+    .replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  return type || 'general';
+}
+
+async function classifyKnowledgeDocument(text, filename) {
+  const preview = String(text || '').slice(0, 6000).trim();
+  if (!preview) return { type: 'general', confidence: 0.1 };
+  try {
+    const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'openai/gpt-oss-120b';
+    const parsed = await chatCompletion({
+      model, temperature: 0, max_tokens: 256, json_mode: true, feature: 'kb-document-type',
+      messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
+    });
+    const confidence = Number(parsed.confidence);
+    return { type: safeDocumentType(parsed.type), confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.3 };
+  } catch (error) {
+    console.warn(`[kb-ingest] document type classification unavailable: ${error.message}`);
+    return { type: 'general', confidence: 0.2 };
+  }
+}
+
+function durableTitle(title, content, max = 80) {
+  const value = String(title || '').trim();
+  const languageCodeOnly = /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i.test(value);
+  return value && !languageCodeOnly && !isGarbageTitle(value)
+    ? value.slice(0, max)
+    : cleanTitleFrom(content, Math.min(max, 64));
+}
+
+function durableEntities(entities) {
+  return (Array.isArray(entities) ? entities : [])
+    .filter((entity) => typeof entity === 'string' && entity.trim())
+    // Measurements, percentages, and dates are values on claims, not graph
+    // identities. This language-agnostic structural gate drops numeric-led
+    // phrases without maintaining a domain dictionary.
+    .filter((entity) => /^\p{L}/u.test(entity.trim()))
+    .slice(0, 8);
+}
+
+export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance = 0) {
+  const threshold = Number.isFinite(Number(minImportance))
+    ? Math.max(0, Math.min(1, Number(minImportance)))
+    : 0;
+  const normalizedImportance = (value) => {
+    const rated = Number(value);
+    return Number.isFinite(rated) && rated > 0
+      ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
+      : 0.55;
+  };
+  return (Array.isArray(rawFacts) ? rawFacts : [])
+    .filter((item) => item && typeof item.f === 'string' && item.f.trim().length >= 4
+      && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
+      && typeof item.source_quote === 'string' && item.source_quote.length >= 4
+      && content.includes(item.source_quote)
+      && !isStructuredSourceNoise(item.f)
+      && !isStructuredSourceNoise(item.source_quote)
+      // The source remains recallable even when its claim is not durable enough.
+      && normalizedImportance(item.importance) >= threshold)
+    .slice(0, maxFacts)
+    .map((item) => {
+      const start = content.indexOf(item.source_quote);
+      const rated = Number(item.importance);
+      return {
+        t: durableTitle(item.t, item.f),
+        f: item.f.trim(),
+        memory_type: item.memory_type,
+        source_quote: item.source_quote,
+        source_start: start,
+        source_end: start + item.source_quote.length,
+        importance: normalizedImportance(rated),
+        entities: durableEntities(item.entities),
+        rels: (Array.isArray(item.rels) ? item.rels : [])
+          .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
+      };
+    });
+}
+
+export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {
+  const quote = String(sourceQuote || '').trim();
+  if (!quote) return fallbackId;
+  const exact = (Array.isArray(segments) ? segments : []).find((segment) =>
+    typeof segment?.content === 'string' && segment.content.includes(quote));
+  return exact?.id || fallbackId;
+}
+
+export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8) {
+  const pool = Array.isArray(candidates) ? candidates : [];
+  const cap = Math.max(1, Math.min(12, Number(maxMemories) || 8));
+  const output = [];
+  for (const memory of (Array.isArray(rawMemories) ? rawMemories : []).slice(0, cap)) {
+    const indices = [...new Set((memory?.support_indices || []).map(Number))]
+      .filter((index) => Number.isInteger(index) && index >= 0 && index < pool.length);
+    if (!indices.length || !DURABLE_EXTRACT_TYPES.includes(memory?.memory_type)) continue;
+    const supports = indices.map((index) => pool[index]).filter((item) => item?.segmentId && item?.source_quote);
+    if (!supports.length) continue;
+    const primary = supports[0];
+    const content = String(memory.content || '').trim();
+    if (content.length < 12) continue;
+    const importance = Math.max(...supports.map((item) => Number(item.importance || 0.5)));
+    output.push({
+      t: durableTitle(memory.title || primary.t, content),
+      f: content,
+      memory_type: memory.memory_type,
+      importance: Math.max(0.65, Math.min(1, importance)),
+      // Canonical entities come only from exact-span extraction. The curator
+      // may merge claims but cannot introduce a new graph identity.
+      entities: [...new Set(supports.flatMap((item) => durableEntities(item.entities)))].slice(0, 12),
+      rels: [],
+      segmentId: primary.segmentId,
+      source_quote: primary.source_quote,
+      source_start: primary.source_start,
+      source_end: primary.source_end,
+      support_segment_ids: [...new Set(supports.map((item) => item.segmentId))],
+      support_quotes: supports.map((item) => item.source_quote),
+      source_window_content: primary.source_window_content || null,
+    });
+  }
+  return output;
+}
 
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
@@ -180,11 +307,11 @@ export class DocumentFirstIngestionService {
 
   /** Fire-and-forget entity extraction over segments (P1 #9).
    *  Parallel workers — bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
-  _extractEntitiesAsync({ segments, userId, orgId, documentId }) {
+  _extractEntitiesAsync({ segments, userId, orgId, documentId, force = false }) {
     if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
     // Skip entity extraction on tiny docs (single short segment) — no real value.
     const totalChars = segments.reduce((acc, s) => acc + (s.content?.length || 0), 0);
-    if (segments.length <= 2 && totalChars < 1500) {
+    if (!force && segments.length <= 2 && totalChars < 1500) {
       this.logger.info?.(`[entity-extractor] skipping tiny doc ${documentId} (${segments.length} segs, ${totalChars} chars)`);
       return;
     }
@@ -205,6 +332,16 @@ export class DocumentFirstIngestionService {
       });
       await Promise.all(workers);
     })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
+  }
+
+  _extractPromotedEntitiesAsync({ memories, userId, orgId, documentId }) {
+    const segments = (Array.isArray(memories) ? memories : [])
+      .filter((memory) => memory?.id && memory?.content && !memory.isParent && memory.support_segment_ids?.[0])
+      .map((memory) => ({
+        id: memory.support_segment_ids[0],
+        content: memory.content,
+      }));
+    this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
   }
 
   /**
@@ -598,97 +735,61 @@ Output the JSON object and nothing else.`;
    * json_schema on gpt-oss-120b + salvage; per-window bounded; caps on facts/entities/rels.
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
-  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '' } = {}) {
-    const apiKey = process.env.GROQ_API_KEY;
+  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false } = {}) {
     const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
     const content = (window.content || '').slice(0, 6000);
-    if (!apiKey || content.trim().length < 40) {
+    if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
     }
-    const REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates'];
-    const sys = `You are a precise knowledge-extraction engine. From the SECTION below, extract in ONE pass: atomic FACTS, the CANONICAL ENTITIES each mentions, the RELATIONSHIPS between facts, and each fact's IMPORTANCE. Return ONLY JSON: {"facts":[{"t":"<3-6 word Title Case topic>","f":"<one complete standalone sentence, explicit subject, never a bare it/they/this>","importance":<0.0-1.0>,"entities":["Canonical Name", ...],"rels":[{"to":<index of another fact in THIS list>,"type":"<Extends|Mentions|Contradicts|Updates>"}, ...]}, ...]}.
+    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 2 : 4));
+    const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
+{"facts":[{"t":"short topic","f":"one complete standalone claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
-FACT rules — FEWEST, HIGHEST-SIGNAL (quality over coverage):
-- "f": a complete self-contained sentence; preserve numbers/units/dates/names verbatim; never invent or generalize. Keep it SPECIFIC to THIS document — concrete subjects, real figures, named parties — not a generic restatement.
-- Extract only decision-relevant stated information (names, roles, products, specs, numbers, dates, decisions, events, causal claims). NON-REDUNDANT — never restate the same point; keep the single most specific.
-- SKIP page furniture, headers/footers, doc/article numbers, addresses, phone/email, legal-disclaimer/copyright lines, raw number dumps with no prose, and OCR garbage/mojibake.
-- At MOST ${maxFacts} facts. A thin/decorative section → "facts":[].
-
-IMPORTANCE rules — rate each fact 0.0-1.0 by how decision-critical + specific it is:
-- 0.85-1.0: a decision, commitment, deadline, price/budget figure, contract term, or a named strategic fact unique to this org/project.
-- 0.6-0.8: a concrete spec/metric/role/event with named parties or numbers.
-- 0.3-0.5: supporting context, general description, or background.
-- < 0.3: near-boilerplate (you should usually SKIP these instead).
-
-ENTITY rules — ONE canonical name per real-world thing (so it never forks):
-- A SHORT noun (1-3 words): a specific person, organization, product/model, place, technology, or standard. NEVER a phrase, clause, description, or generic concept.
-- Use the FULL canonical name, not a partial — "Amar Sai Gadde" not "Amar"; "B&B Sinn für Marken" not "B&B" — and reuse that EXACT form for every mention.
-- Source language as written (do not translate); singular; drop legal suffixes; prefer full term over acronym unless the acronym is the proper name. 3-7 high-signal entities per fact max.
-
-RELATIONSHIP rules — only between facts in THIS list, only when genuinely related:
-- "Extends": one fact adds detail/nuance to another (same subject, complementary). "Mentions": two facts share a key entity but are otherwise distinct. "Contradicts": two facts state conflicting values for the same thing. "Updates": one fact supersedes another (rare within one section).
-- Reference the OTHER fact by its 0-based index in "facts". Omit "rels" or use [] when a fact stands alone. Do NOT invent edges to force connectivity.
-
-Output the JSON object and nothing else.`;
-    const isGptOss = /gpt-oss/i.test(model);
-    const SCHEMA = {
-      type: 'object', additionalProperties: false, required: ['facts'],
-      properties: { facts: { type: 'array', items: {
-        type: 'object', additionalProperties: false, required: ['t', 'f', 'importance', 'entities', 'rels'],
-        properties: {
-          t: { type: 'string' }, f: { type: 'string' },
-          importance: { type: 'number' },
-          entities: { type: 'array', items: { type: 'string' } },
-          rels: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['to', 'type'],
-            properties: { to: { type: 'integer' }, type: { type: 'string', enum: REL_TYPES } } } },
-        },
-      } } },
-    };
-    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0.2, max_tokens: 6000,
-        messages: [
-          { role: 'system', content: sys },
-          ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
-          { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
-        ],
-        ...(isGptOss ? { reasoning_effort: process.env.KB_DISTILL_REASONING_EFFORT || 'low' } : {}),
-        response_format: isGptOss
-          ? { type: 'json_schema', json_schema: { name: 'unified_extraction', strict: true, schema: SCHEMA } }
-          : { type: 'json_object' },
-      }),
+Rules: at most ${factCap} facts; prefer decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be an exact 20-260 character substring from SECTION that supports f. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
+    const parsed = await chatCompletion({
+      model, temperature: 0, max_tokens: compact ? 900 : 1800, json_mode: true, feature: 'kb-unified-extract',
+      messages: [
+        { role: 'system', content: sys },
+        ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
+        { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
+      ],
     });
-    if (!resp.ok) throw new Error(`unified-extract ${resp.status}`);
-    const j = await resp.json();
-    const text = j?.choices?.[0]?.message?.content || '';
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    return rawFacts
-      .filter((x) => x && typeof x.f === 'string' && x.f.trim().length >= 20)
-      .slice(0, maxFacts)
-      .map((x) => ({
-        t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim().slice(0, 80) : cleanTitleFrom(x.f, 48),
-        f: x.f.trim(),
-        // LLM-rated salience in the SAME pass (no extra call). Clamp 0.1-1.0;
-        // fall back to a content-signal heuristic if the model omitted/garbled it.
-        importance: (() => {
-          const n = Number(x.importance);
-          if (Number.isFinite(n) && n > 0) return Math.max(0.1, Math.min(1.0, Number(n.toFixed(3))));
-          const f = x.f || '';
-          let s = 0.55;
-          if (/\d/.test(f)) s += 0.1;                                  // has a number/date/figure
-          if (/(decision|deadline|budget|price|contract|agreed|will |must |launch|signed|€|\$|%)/i.test(f)) s += 0.12;
-          if ((Array.isArray(x.entities) ? x.entities.length : 0) >= 3) s += 0.08;
-          return Math.max(0.1, Math.min(0.95, Number(s.toFixed(3))));
-        })(),
-        entities: (Array.isArray(x.entities) ? x.entities : []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8),
-        rels: (Array.isArray(x.rels) ? x.rels : []).filter((r) => r && Number.isInteger(r.to) && REL_TYPES.includes(r.type)).slice(0, 5),
-      }));
+    // Evidence capture is unconditional; promotion is deliberately stricter.
+    const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+    return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
+  }
+
+  async _extractUnifiedReliable(window, options = {}) {
+    const attempts = 1 + Math.max(0, Math.min(2, Number(process.env.KB_UNIFIED_EMPTY_RETRIES ?? 1)));
+    let lastError = null;
+    let best = [];
+    const contentLength = String(window?.content || '').trim().length;
+    const maxFacts = Math.max(1, Number(options.maxFacts) || 8);
+    const expected = contentLength >= 700 ? Math.min(3, maxFacts) : 1;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        // A malformed first completion should not repeat the same wide output.
+        // Retry with a smaller schema/output budget so the document remains
+        // source-first and promotion stays bounded under provider pressure.
+        const claims = await this._extractUnified(window, {
+          ...options,
+          maxFacts: attempt === 1 ? maxFacts : Math.min(maxFacts, 2),
+          compact: attempt > 1,
+        });
+        if (claims.length > best.length) best = claims;
+        if (claims.length >= expected || attempt === attempts) return best;
+        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); retrying (${attempt}/${attempts})`);
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts) throw error;
+        this.logger.warn?.(`[kb-unified] extraction failed; retrying (${attempt}/${attempts}): ${error.message}`);
+      }
+    }
+    if (lastError) throw lastError;
+    return best;
   }
 
   /**
@@ -697,19 +798,26 @@ Output the JSON object and nothing else.`;
    * Returns factObjs (for the cross-doc co-mention pass). Self-contained + residency-safe
    * (ingestMemory → agent, createRelationship → amrAddEdge for remote).
    */
-  async _ingestUnifiedWindow(window, { userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '' }) {
-    let facts = [];
-    try {
-      facts = await this._extractUnified(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
-    } catch (e) {
-      this.logger.warn?.(`[kb-unified] extract failed: ${e.message}`);
-      return [];
+  async _ingestUnifiedWindow(window, { userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '', preExtractedFacts = null }) {
+    if (!window?.segmentId) return [];
+    const extractionModel = process.env.KB_UNIFIED_MODEL || memoryLLMRoute()?.model
+      || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
+    let facts = Array.isArray(preExtractedFacts) ? preExtractedFacts : [];
+    if (!preExtractedFacts) {
+      try {
+        facts = await this._extractUnifiedReliable(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
+      } catch (e) {
+        this.logger.warn?.(`[kb-unified] extract failed: ${e.message}`);
+        return [];
+      }
     }
     if (!facts.length) return [];
     const vs = this.memoryGraphEngine.vectorStore;
     const idByIdx = new Array(facts.length).fill(null);
     const factObjs = [];
     const embedPending = [];
+    const evidenceLinks = [];
+    const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
@@ -720,7 +828,9 @@ Output the JSON object and nothing else.`;
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
-        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
+        ...(fact.memory_type === 'fact' ? ['extracted-fact'] : []),
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);
@@ -730,20 +840,36 @@ Output the JSON object and nothing else.`;
           scope: metadata.scope, visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           document_date: metadata.document_date || null,
-          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
-          metadata: { document_id: documentId, segment_id: window.segmentId || null, distill_agent: 'kb_unified_v1' },
+          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
+          metadata: {
+            document_id: documentId,
+            document_type: metadata.document_type || 'general',
+            document_type_confidence: metadata.document_type_confidence ?? null,
+            segment_id: window.segmentId || null,
+            source_start: fact.source_start,
+            source_end: fact.source_end,
+            source_quote: fact.source_quote,
+            support_segment_ids: fact.support_segment_ids || [window.segmentId],
+            support_quotes: fact.support_quotes || [fact.source_quote],
+            distill_agent: 'kb_unified_v2',
+          },
           skip_fact_extraction: true, defer_entity_linking: true,
+          append_timestamp_to_content: false,
           skipSmartRouting: true, skipPredictCalibrate: true, skipAdvisoryLock: true,
           skip_relationship_classification: true, skip_contradiction_detection: true,
         });
         const id = res?.memoryId || res?.id || null;
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
-        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: 'fact', tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null });
-        embedPending.push({ id, fact: fact.f, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: fact.memory_type, tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null, support_segment_ids: fact.support_segment_ids, support_quotes: fact.support_quotes });
+        embedPending.push({ id, fact: fact.f, memory_type: fact.memory_type, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        if (!orgIsRemote(orgId)) {
+          evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
+          derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
+        }
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
@@ -756,10 +882,14 @@ Output the JSON object and nothing else.`;
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
+    }
+    if (evidenceLinks.length) {
+      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
+      await this.db.memoryDerivation.createMany({ data: derivations, skipDuplicates: true });
     }
     // Intra-window typed edges (from the SAME structured call — coherent, no recall race).
     for (let i = 0; i < facts.length; i++) {
@@ -771,7 +901,7 @@ Output the JSON object and nothing else.`;
         try {
           await this.memoryGraphEngine.store.createRelationship({
             id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type, confidence: 0.85,
-            metadata: { created_by: 'kb_unified_v1', document_id: documentId, intra_window: true },
+            metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true },
           });
         } catch { /* best-effort; dup/FK tolerated */ }
       }
@@ -848,7 +978,8 @@ Output the JSON object and nothing else.`;
       // is what keeps the graph EVOLVING (belief change, supersession, contradiction) without the
       // per-fact LLM. `Derives` (multi-source synthesis) is NOT produced here — it's a
       // cognition/dreaming-layer product, unaffected by this path.
-      if (typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
+      if (process.env.KB_ENABLE_ALGO_VERSION_EDGES === 'true'
+          && typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
         const cands = ranked.slice(0, Number(process.env.KB_ALGO_REL_MAX_CANDS || 8))
           .map(([pid]) => poolById.get(pid)).filter((m) => m && m.content);
         if (cands.length) {
@@ -876,7 +1007,9 @@ Output the JSON object and nothing else.`;
    * bounded set of gray-zone (fact, candidate) pairs — entity-overlapping peers PLUS the top
    * token-similar peers even without a shared entity tag (this is what catches canonicalization
    * drift: "TU München" vs "Technical University Munich" never share an entity tag) — and asks the
-   * LLM to classify each as Updates/Extends/Contradicts/Derives/Mentions/none in a single call.
+   * LLM to classify each as Updates/Extends/Contradicts/Mentions/none in a single call.
+   * Derives is intentionally excluded: inference belongs to the asynchronous
+   * cognition queue and requires independent confidence verification.
    * @returns {Promise<number>} edges created
    */
   async _hybridClassifyRelations(facts, pool, poolById, byEntity, { documentId }) {
@@ -923,13 +1056,12 @@ Output the JSON object and nothing else.`;
 - "Updates": NEW supersedes/corrects PRIOR (belief changed, value revised, role changed, location moved) — even if worded differently.
 - "Extends": NEW adds detail to PRIOR without conflicting.
 - "Contradicts": NEW conflicts with PRIOR and neither clearly supersedes.
-- "Derives": NEW is a synthesis conclusion drawn from PRIOR (+ others).
 - "Mentions": same subject/entity but otherwise unrelated facts.
 - "none": unrelated.
 Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = Updates; "TU München" vs "Technical University Munich" = same entity → Mentions/Updates as fits). Output STRICT JSON: {"edges":[{"i":<pair index>,"type":<one of the above>}]}. Omit pairs that are "none".`;
     const GS = { type: 'object', additionalProperties: false, required: ['edges'], properties: { edges: { type: 'array', items: {
       type: 'object', additionalProperties: false, required: ['i', 'type'],
-      properties: { i: { type: 'integer' }, type: { type: 'string', enum: ['Updates', 'Extends', 'Contradicts', 'Derives', 'Mentions', 'none'] } } } } } };
+      properties: { i: { type: 'integer' }, type: { type: 'string', enum: ['Updates', 'Extends', 'Contradicts', 'Mentions', 'none'] } } } } } };
     const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
@@ -947,19 +1079,120 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     let parsed; try { parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}'); } catch { parsed = {}; }
     const edges = Array.isArray(parsed.edges) ? parsed.edges : [];
     let created = 0;
+    const factById = new Map(facts.map((fact) => [fact.id, fact]));
     for (const e of edges) {
       const p = pairs[Number(e.i)];
       if (!p || !e.type || e.type === 'none') continue;
       try {
-        await store.createRelationship({
-          id: crypto.randomUUID(), from_id: p.fromId, to_id: p.toId, type: e.type, confidence: 0.8,
-          metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
-        });
+        await this._applyCuratedRelationship(e.type, p, { factById, store, documentId });
         created++;
       } catch { /* dup/FK tolerated (algo may have made the same edge) */ }
     }
     if (created) this.logger.info?.(`[kb-hybrid-rel] doc ${String(documentId).slice(0, 8)}: 1 batched LLM call over ${pairs.length} gray-zone pairs → ${created} edges`);
     return created;
+  }
+
+  async _applyCuratedRelationship(type, pair, { factById, store, documentId }) {
+    if (!['Updates', 'Extends', 'Contradicts', 'Mentions'].includes(type)) {
+      throw new Error(`unsupported curated relationship: ${type}`);
+    }
+    const source = factById.get(pair.fromId);
+    if (!source?.user_id || !source?.org_id) throw new Error('curated relationship source scope missing');
+    if (type === 'Updates') {
+      return this.memoryGraphEngine.applyUpdate(pair.fromId, pair.toId, {
+        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
+      });
+    }
+    if (type === 'Extends') {
+      return this.memoryGraphEngine.applyExtends(pair.fromId, pair.toId, {
+        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
+      });
+    }
+    return store.createRelationship({
+      id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type, confidence: 0.8,
+      metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
+    });
+  }
+
+  /**
+   * Convert window-local extraction candidates into a small document-level
+   * memory set before persistence. Evidence segments remain independently
+   * searchable; this pass only decides what deserves durable-memory status.
+   */
+  async _curateDocumentClaims(candidates, { docTitle = '', maxMemories = 8 } = {}) {
+    const pool = (Array.isArray(candidates) ? candidates : [])
+      .filter((candidate) => candidate?.segmentId && candidate?.f && candidate?.source_quote)
+      .slice(0, 48);
+    if (!pool.length) return [];
+
+    const cap = Math.max(1, Math.min(12, Number(maxMemories) || 8));
+    const fallback = () => [...pool]
+      .sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0))
+      .slice(0, cap)
+      .map((candidate) => ({
+        ...candidate,
+        support_segment_ids: [candidate.segmentId],
+        support_quotes: [candidate.source_quote],
+        rels: [],
+      }));
+
+    const route = memoryLLMRoute();
+    const apiKey = route?.key || process.env.GROQ_API_KEY;
+    if (!apiKey || pool.length === 1) return fallback();
+    const model = process.env.KB_CURATOR_MODEL || process.env.KB_UNIFIED_MODEL
+      || route?.model || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
+    const isGptOss = /gpt-oss/i.test(model);
+    const input = pool.map((candidate, index) => ({
+      i: index,
+      type: candidate.memory_type,
+      claim: String(candidate.f).slice(0, 500),
+      importance: Number(candidate.importance || 0.5),
+      entities: (candidate.entities || []).slice(0, 8),
+      source: String(candidate.source_quote).slice(0, 500),
+    }));
+    const schema = {
+      type: 'object', additionalProperties: false, required: ['memories'],
+      properties: { memories: { type: 'array', maxItems: cap, items: {
+        type: 'object', additionalProperties: false,
+        required: ['title', 'content', 'memory_type', 'importance', 'support_indices', 'entities'],
+        properties: {
+          title: { type: 'string' }, content: { type: 'string' },
+          memory_type: { type: 'string', enum: DURABLE_EXTRACT_TYPES },
+          importance: { type: 'number' },
+          support_indices: { type: 'array', minItems: 1, items: { type: 'integer' } },
+          entities: { type: 'array', items: { type: 'string' } },
+        },
+      } } },
+    };
+    const system = `You curate durable organizational memory from source-grounded candidates extracted from ONE document.
+Return at most ${cap} high-value memories that together cover the document's important decisions, commitments, requirements, metrics, events, validated lessons, stable preferences, and defining facts.
+Merge compatible candidates into one complete, information-dense memory. Never merge unrelated subjects. Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source.
+Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.`;
+    try {
+      const response = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model, temperature: 0, max_tokens: 2600,
+          ...(isGptOss ? { reasoning_effort: 'low' } : {}),
+          response_format: isGptOss
+            ? { type: 'json_schema', json_schema: { name: 'document_memory_curator', strict: true, schema } }
+            : { type: 'json_object' },
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },
+          ],
+        }),
+      });
+      if (!response.ok) throw new Error(`curator ${response.status}`);
+      const payload = await response.json();
+      const parsed = JSON.parse(payload?.choices?.[0]?.message?.content || '{}');
+      const output = normalizeCuratedClaims(parsed.memories, pool, cap);
+      return output.length ? output : fallback();
+    } catch (error) {
+      this.logger.warn?.(`[kb-curator] ${String(docTitle).slice(0, 80)}: ${error.message}; using salience fallback`);
+      return fallback();
+    }
   }
 
   /**
@@ -1065,7 +1298,16 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     let docParentId = null;
     try {
       const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
-      const docSummary = [`Document: ${docTitle}`, `Facts extracted: ${childIds.length}`, '', String(firstContent || '').slice(0, 280)].join('\n');
+      const keyTopics = (memories || [])
+        .filter((memory) => memory?.id && !memory.isParent)
+        .map((memory) => String(memory.title || '').trim())
+        .filter(Boolean)
+        .slice(0, 6);
+      const docSummary = [
+        `Document: ${docTitle}`,
+        `Durable memories: ${childIds.length}`,
+        ...(keyTopics.length ? [`Key topics: ${keyTopics.join('; ')}`] : []),
+      ].join('\n');
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const parentRes = await this.memoryGraphEngine.ingestMemory({
         user_id: userId, org_id: orgId,
@@ -1073,18 +1315,21 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         visibility: metadata.visibility || 'private',
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-        content: docSummary, title: docTitle, memory_type: 'fact',
-        importance_score: 0.9,                                    // the doc anchor — high salience
+        content: docSummary, title: docTitle, memory_type: 'summary',
+        // The parent is source-local navigation context, not a durable claim.
+        importance_score: 0.45,
         document_date: metadata.document_date || null,
         tags: normalizeTagsArray([
           ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',
           `ts:${_tsd.toISOString().slice(0, 10)}`,
           ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
           ...(documentId ? [`doc-id:${documentId}`] : []),
+          ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
         ]),
-        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null },
-        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, child_count: childIds.length, total_facts: totalFacts },
+        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null, document_type: metadata.document_type || 'general' },
+        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, document_type: metadata.document_type || 'general', document_type_confidence: metadata.document_type_confidence ?? null, child_count: childIds.length, total_facts: totalFacts },
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
+        append_timestamp_to_content: false,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
       });
       docParentId = parentRes?.memoryId || parentRes?.id || null;
@@ -1094,8 +1339,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
           try {
             await this.memoryGraphEngine.store.createRelationship({ ...base, type: 'PartOf', metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' } });
           } catch (err) {
-            try { await this.memoryGraphEngine.store.createRelationship({ ...base, type: 'Extends', metadata: { ingest_tree: true, subtype: 'PartOf', document_id: documentId, parent_role: 'document', fallback_reason: err.message } }); }
-            catch (err2) { this.logger.warn?.(`[doc-first] PartOf ${String(childId).slice(0, 8)}→${String(docParentId).slice(0, 8)} failed: ${err2.message}`); }
+            this.logger.warn?.(`[doc-first] PartOf ${String(childId).slice(0, 8)}→${String(docParentId).slice(0, 8)} failed: ${err.message}`);
           }
         };
         await Promise.all(childIds.map(createPartOf));
@@ -1232,6 +1476,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       smart: metadata?.smart === true,
       picture_descriptions: metadata?.picture_descriptions === true,
     });
+    const documentClassification = await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
+    const documentType = safeDocumentType(metadata.document_type || documentClassification.type);
+    const documentTypeTag = `document-type:${documentType}`;
     const _msParse = Date.now() - _tParse;
     emit('parsed', 35, { parse_ms: _msParse, pages: parseResult.pages, word_count: parseResult.wordCount });
 
@@ -1258,7 +1505,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // scope-key tag enables the upload route's per-scope dedup query without
     // any schema change — gin-indexed tags[] is already there.
     const _scopeTag = `scope-key:${_scopeKey}`;
-    const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag]));
+    const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag, documentTypeTag]));
 
     // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
     // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
@@ -1278,7 +1525,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
               this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
               this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
             ]);
-            if (segs > 0) {
+            if (segs > 0 && memLinks > 0) {
               this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero tokens`);
               emit('skipped-unchanged', 100, { documentId: prior.id });
               return { documentId: prior.id, segmentCount: segs, candidateCount: 0, promotedCount: memLinks, skippedUnchanged: true };
@@ -1327,7 +1574,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         userId,
         orgId,
         sourceArtifactId: sourceArtifact.id,
-        documentType: 'file',
+        documentType,
         title: filename,
         sourcePlatform: 'knowledge_upload',
         sourceId: _scopedSourceId,
@@ -1342,7 +1589,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         contentType,
         filename,
         createdAt: new Date().toISOString(),
-        metadata,
+        metadata: { ...metadata, document_type: documentType, document_type_confidence: documentClassification.confidence },
       };
       await amrKbDoc(orgId, docPayload);
       knowledgeDoc = { id: docId };
@@ -1360,7 +1607,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
           userId,
           orgId,
           sourceArtifactId: sourceArtifact.id,
-          documentType: 'file',
+          documentType,
           title: filename,
           sourcePlatform: 'knowledge_upload',
           sourceId: _scopedSourceId,
@@ -1368,13 +1615,15 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
           wordCount: parseResult.wordCount,
           parseStatus: parseResult.success ? 'parsed' : 'failed',
           parseEngine: parseResult.engine,
-          parseMetadata: parseResult.metadata || {},
+          parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           structureExtracted: parseResult.success,
           tags: _docTags,
         },
         update: {
-          // Backfill scope-key tag on pre-existing rows so the dedup gate sees
-          // them in subsequent uploads. parseMetadata stays untouched.
+          // Backfill provenance on pre-existing rows so document filters and
+          // memory citations expose the same classification after re-upload.
+          documentType,
+          parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           tags: _docTags,
         }
       });
@@ -1422,7 +1671,6 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     const _msSeg = Date.now() - _tSeg;
     emit('embedded', 70, { segments: segments.length, embed_ms: _msEmbed });
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
@@ -1437,8 +1685,12 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         documentTitle: filename,
         documentId: knowledgeDoc.id,
         documentHash: checksum.slice(0, 16),
+        document_type: documentType,
+        document_type_confidence: documentClassification.confidence,
+        tags: [...(metadata.tags || []), documentTypeTag],
       },
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to
@@ -1529,7 +1781,6 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // Step 5: Embed segments
     await this._embedSegments(segments);
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: parentDoc.id });
     // Step 6: Promote canonical memories (more selective for enterprise)
     const promoted = await this._promoteMemories({
       documentId: parentDoc.id,
@@ -1545,6 +1796,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       },
       promotionStrategy: 'enterprise_selective'
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id });
 
     return {
       documentId: parentDoc.id,
@@ -1690,7 +1942,6 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
     await this._embedSegments(segments, orgId);
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 5: promote memories
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
@@ -1704,6 +1955,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       },
       promotionStrategy: `connector_${providerKey}`,
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
 
     return {
       documentId: knowledgeDoc.id,
@@ -1863,10 +2115,12 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       // (smart-router) owns the actual update/extend/contradict logic — we only
       // forward, never reimplement it here ("memory engine left untouched").
       relationship: envelope.relationship || undefined,
+      relationship_explicit: Boolean(envelope.relationship),
       related_to: envelope.relatedTo || undefined,
       project_ids: projectIds,
       project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
+      code_metadata: envelope.metadata?.code_metadata || undefined,
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)
@@ -2373,10 +2627,10 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           }));
         } catch { /* keep targets */ }
-        const uFacts = [];
+        const extractedCandidates = [];
         let wi = 0;
         // RESERVE the budget synchronously BEFORE each window's async call. The old code clamped
-        // against uFacts.length, which is stale while other workers are mid-flight — 4 workers ×
+        // against the result length, which is stale while other workers are mid-flight — 4 workers ×
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
         let uBudget = DOC_CAP;
@@ -2386,22 +2640,56 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
             const grant = Math.max(1, Math.min(w.maxFacts || 8, uBudget));
             uBudget -= grant;
             w.maxFacts = grant;
-            const fo = await this._ingestUnifiedWindow(w, { userId, orgId, documentId, metadata, docTitle, entityContext: '' });
-            const got = Array.isArray(fo) ? fo.length : 0;
-            if (got) uFacts.push(...fo);
+            let claims = [];
+            try {
+              claims = await this._extractUnifiedReliable(w, { entityContext: '', maxFacts: w.maxFacts, docTitle });
+            } catch (error) {
+              this.logger.warn?.(`[kb-unified] candidate extract failed: ${error.message}`);
+            }
+            const got = Array.isArray(claims) ? claims.length : 0;
+            if (got) {
+              extractedCandidates.push(...claims.map((claim) => ({
+                ...claim,
+                segmentId: resolveEvidenceSegment(claim.source_quote, promotableSegments, w.segmentId),
+                source_window_content: w.content,
+              })));
+            }
             uBudget += Math.max(0, grant - got); // return the unused part of the reservation
           }
         });
         await Promise.all(uWorkers);
-        // Cross-window consolidation (flag: KB_CONSOLIDATE=1) — different windows extract
-        // near-duplicate facts independently; merge them so the doc yields FEWER, RICHER
-        // memories (keep one canonical fact w/ merged content+tags, delete the dupes).
-        try {
-          if (String(process.env.KB_CONSOLIDATE || '') === '1' && uFacts.length >= 8) {
-            const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
-            if (removed > 0) this.logger.info?.(`[kb-unified] consolidated: merged ${removed} near-duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+        const curated = await this._curateDocumentClaims(extractedCandidates, {
+          docTitle,
+          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 8),
+        });
+        const uFacts = [];
+        const extraEvidenceLinks = [];
+        for (const claim of curated) {
+          const sourceWindow = {
+            segmentId: claim.segmentId,
+            content: claim.source_window_content || claim.source_quote,
+            heading: null,
+            page: null,
+          };
+          const persisted = await this._ingestUnifiedWindow(sourceWindow, {
+            userId, orgId, documentId, metadata, docTitle, preExtractedFacts: [claim],
+          });
+          const memory = persisted?.[0];
+          if (!memory) continue;
+          uFacts.push(memory);
+          if (!orgIsRemote(orgId)) {
+            for (let index = 1; index < (claim.support_segment_ids || []).length; index++) {
+              extraEvidenceLinks.push({
+                memoryId: memory.id, documentId,
+                segmentId: claim.support_segment_ids[index], linkType: 'supports',
+                confidence: claim.importance, excerpt: claim.support_quotes?.[index] || null,
+              });
+            }
           }
-        } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
+        }
+        if (extraEvidenceLinks.length) {
+          await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
+        }
         if (uFacts.length) {
           // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
           // extractor already produced (one pool fetch + tag intersection).
@@ -2412,7 +2700,12 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
           //          Updates the LLM might phrase-miss). Belt-and-suspenders = maximum graph quality.
           //   'hybrid': algo edges + ONE batched LLM/doc for the gray-zone (cost-leaning).
           //   'algo' : pure algorithmic, 0 LLM (cheapest, higher miss).
-          const _linkMode = String(process.env.KB_ENTITY_LINK_MODE || 'llm');
+          const configuredLinkMode = String(process.env.KB_ENTITY_LINK_MODE || 'hybrid');
+          // Per-fact LLM linking magnifies noisy extraction into noisy graph
+          // topology. Keep it only as an explicit diagnostic escape hatch.
+          const _linkMode = configuredLinkMode === 'llm' && process.env.KB_ALLOW_PER_FACT_LLM_LINKING !== 'true'
+            ? 'hybrid'
+            : configuredLinkMode;
           if (_linkMode === 'algo' || _linkMode === 'hybrid') {
             this._algoLinkKbFacts(uFacts, { orgId, userId, documentId })
               .then((n) => this.logger.info?.(`[kb-unified] ${_linkMode} cross-doc linked ${uFacts.length} facts → ${n} edges`))
@@ -2432,7 +2725,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         }
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
         const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
-        this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${uFacts.length} facts from ${targets.length} windows + parent=${uDocParent ? 'y' : 'n'} (single-call extract+entities+rels)`);
+        this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${extractedCandidates.length} candidates → ${uFacts.length} curated memories + parent=${uDocParent ? 'y' : 'n'}`);
         return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent };
       }
 

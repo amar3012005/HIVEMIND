@@ -16,6 +16,7 @@
  */
 
 import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
+import { resolveDistillActions } from './chat-ingest-actions.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DISTILL_MODEL = process.env.HIVEMIND_DISTILL_MODEL || 'openai/gpt-oss-120b';
@@ -82,8 +83,7 @@ async function callLLMJSON({ messages, apiKey, model, signal }) {
  * @param {string} opts.url        — source URL of the chat
  * @param {string} opts.userId
  * @param {string} opts.orgId
- * @param {Object} opts.ctx        — { persistentMemoryStore, persistentMemoryEngine,
- *                                     smartIngestRouter, buildRoutedIngestPayloads,
+ * @param {Object} opts.ctx        — { persistentMemoryStore, documentFirstIngestion,
  *                                     accessContext }
  * @param {string} opts.apiKey     — GROQ_API_KEY
  * @returns {Promise<{saved,updated,deduped,memory_ids,errors,actions}>}
@@ -93,7 +93,7 @@ export async function distillChatSession({ candidates, platform, url, userId, or
     return { saved: 0, updated: 0, deduped: 0, memory_ids: [], errors: [], actions: [] };
   }
   if (!apiKey) throw new Error('GROQ_API_KEY required');
-  if (!ctx?.persistentMemoryStore || !ctx?.persistentMemoryEngine || !ctx?.buildRoutedIngestPayloads) {
+  if (!ctx?.persistentMemoryStore || !ctx?.documentFirstIngestion?.ingestSource) {
     throw new Error('memory pipeline ctx unavailable');
   }
 
@@ -144,13 +144,9 @@ export async function distillChatSession({ candidates, platform, url, userId, or
     ],
   });
 
-  const actions = Array.isArray(llmResult.actions) ? llmResult.actions : [];
-
-  // Fallback — if LLM returned nothing usable, default every candidate to "save".
-  const decided = new Map(actions.map((a) => [Number(a.index), a]));
-  for (let i = 0; i < candidates.length; i++) {
-    if (!decided.has(i)) decided.set(i, { index: i, action: 'save', target_memory_id: null, reason: 'default-save (no llm decision)' });
-  }
+  // Fail closed. Missing/malformed decisions and invented update targets must
+  // never turn unreviewed chat text into durable or destructive writes.
+  const decided = resolveDistillActions(llmResult.actions, candidates, neighborsPerCand);
 
   // 3. Execute actions.
   const out = { saved: 0, updated: 0, deduped: 0, memory_ids: [], errors: [], actions: [], rows: [] };
@@ -181,50 +177,65 @@ export async function distillChatSession({ candidates, platform, url, userId, or
         ...(url ? [`url:${new URL(url).hostname}`] : []),
       ]));
 
+      const scopedProjectId = ctx?.projectId || null;
+      const source = {
+        type: 'chat',
+        platform: 'ai-chat',
+        sourceId: url || `${platformTag}:session`,
+        url: url || null,
+        title: cand.title,
+      };
+      const commonEnvelope = {
+        userId,
+        orgId,
+        content: cand.content,
+        title: cand.title,
+        source,
+        mode: 'atomic',
+        tags: baseTags,
+        ...(scopedProjectId ? { scope: 'project', projectId: scopedProjectId } : {}),
+        metadata: {
+          memory_type: cand.memory_type || 'fact',
+          host_platform: platform,
+          via: 'chat-ingest-distill',
+        },
+      };
+
       if (decision.action === 'update' && decision.target_memory_id) {
-        await ctx.persistentMemoryStore.updateMemory({
-          id: decision.target_memory_id,
-          content: cand.content,
-          title: cand.title,
-          tags: baseTags,
-          user_id: userId,
-          org_id: orgId,
-          update_reason: decision.reason || `refined via ${platform} chat ingest`,
+        const updated = await ctx.documentFirstIngestion.ingestSource({
+          ...commonEnvelope,
+          relationship: {
+            type: 'Updates',
+            target_id: decision.target_memory_id,
+            confidence: 1,
+            reason: decision.reason || `refined via ${platform} chat ingest`,
+          },
+          relatedTo: decision.target_memory_id,
         });
+        if (!updated?.ok || !updated.memoryIds?.length) {
+          throw new Error(updated?.error || 'canonical chat update was not persisted');
+        }
+        const updatedId = updated.memoryIds[0];
         out.updated++;
-        out.memory_ids.push(decision.target_memory_id);
+        out.memory_ids.push(updatedId);
         out.rows.push({
           action: 'updated',
           title: cand.title,
           memory_type: cand.memory_type,
           tags: baseTags,
-          id: decision.target_memory_id,
+          id: updatedId,
           reason: decision.reason || '',
         });
         continue;
       }
 
       // save
-      const scopedProjectId = ctx?.projectId || null;
-      const payload = {
-        title: cand.title,
-        content: cand.content,
-        tags: baseTags,
-        memory_type: cand.memory_type || 'fact',
-        user_id: userId,
-        org_id: orgId,
-        ...(scopedProjectId ? { project_id: scopedProjectId, project_ids: [scopedProjectId] } : {}),
-        source_metadata: {
-          source_platform: 'ai-chat',
-          host_platform: platform,
-          url,
-          via: 'chat-ingest-distill',
-        },
-      };
-      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
-      const saved = await ctx.persistentMemoryEngine.ingestMemory(routed);
+      const saved = await ctx.documentFirstIngestion.ingestSource(commonEnvelope);
+      if (!saved?.ok || !saved.memoryIds?.length) {
+        throw new Error(saved?.error || 'canonical chat memory was not persisted');
+      }
       out.saved++;
-      const savedId = saved?.id || saved?.memory?.id || null;
+      const savedId = saved.memoryIds[0];
       if (savedId) out.memory_ids.push(savedId);
       out.rows.push({
         action: 'saved',

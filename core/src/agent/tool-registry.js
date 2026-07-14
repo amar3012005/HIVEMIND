@@ -570,17 +570,15 @@ const TOOL_HANDLERS = {
       project_ids: resolvedProjectId ? [resolvedProjectId] : [],
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
-    const [routed] = await ctx.buildRoutedIngestPayloads(payload, {
-      smartIngestRouter: ctx.smartIngestRouter,
-    });
-    // Use tree-aware dispatcher when provided so conversation/document
-    // sessions with multiple turns/sections produce parent + children +
-    // PartOf edges in one transaction. Falls back to ingestMemory for
-    // legacy flat payloads or older server.js versions without the
-    // dispatcher attached on ctx.
-    const saved = ctx.ingestRoutedPayload
-      ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-      : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    let saved;
+    if (ctx.ingestCanonicalPayload) {
+      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
+    } else {
+      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
+      saved = ctx.ingestRoutedPayload
+        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
+        : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    }
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
     return {
       saved: true,
@@ -843,12 +841,15 @@ const TOOL_HANDLERS = {
       org_id: ctx.orgId,
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
-    const [routed] = await ctx.buildRoutedIngestPayloads(payload, {
-      smartIngestRouter: ctx.smartIngestRouter,
-    });
-    const saved = ctx.ingestRoutedPayload
-      ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-      : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    let saved;
+    if (ctx.ingestCanonicalPayload) {
+      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
+    } else {
+      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
+      saved = ctx.ingestRoutedPayload
+        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
+        : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    }
     return { logged: true, id: saved?.parentId || saved?.id || saved?.memoryId || null };
   },
 

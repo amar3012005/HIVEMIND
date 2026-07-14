@@ -110,3 +110,8 @@
 - **Parent:** `feat/outreach-email-intent` @ `f0f63bc3` off singulance-main ada8c880. FE unchanged.
 - OUTREACH-tagged task rooms auto-enable the org's gmail connector (when connected, only if the room had none); outreach-shaped room goals upgrade a generic first turn to intended_output=email → agents draft a ready-to-send email → compose card. No task hardcoding — tag + task language drive it.
 - Released via scripts/release-singulance.sh (control-plane + employees rebuilt, health-gated, smoke 200×4).
+
+## prod-20260714-4b9f950e — Atomic task kickoff
+- **Parent:** `fix/task-kickoff-dispatch` @ `4b9f950e` off singulance-main 88017a51. FE unchanged.
+- tasks/open now creates + dispatches the kickoff turn server-side (nightly-cycle pattern) — task rooms start working the moment they open instead of sitting at 0 turns. Rooms created before this release still need one manual message (or delete + re-open the task).
+- Released via release script (control-plane only, health-gated, smoke 200×4).

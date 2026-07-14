@@ -22031,9 +22031,7 @@ exit \$RC
                 apiKey: groqKey,
                 ctx: {
                   persistentMemoryStore,
-                  persistentMemoryEngine,
-                  smartIngestRouter,
-                  buildRoutedIngestPayloads,
+                  documentFirstIngestion,
                   accessContext: distillAccessCtx,
                   projectId: ingestProjectId,
                 },
@@ -22042,19 +22040,24 @@ exit \$RC
               // Also save the session-level rollup so /timeline shows the
               // whole conversation as one anchor node.
               try {
-                if (raw_summary && parsed.title && persistentMemoryEngine?.ingestMemory) {
-                  const rollupPayload = {
+                if (raw_summary && parsed.title && documentFirstIngestion?.ingestSource) {
+                  documentFirstIngestion.ingestSource({
+                    userId,
+                    orgId,
                     title: parsed.title.slice(0, 80),
                     content: `${parsed.summary || ''}\n\n${raw_summary}`.slice(0, 8000),
+                    source: {
+                      type: 'chat',
+                      platform: 'ai-chat',
+                      sourceId: url || `${platform || 'chat'}:session`,
+                      url: url || null,
+                      title: parsed.title.slice(0, 80),
+                    },
+                    mode: 'atomic',
                     tags: ['ai-chat-session', `from-${(platform || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '')}`, 'session-rollup'],
-                    memory_type: 'conversation',
-                    user_id: userId,
-                    org_id: orgId,
-                    ...(ingestProjectId ? { project_id: ingestProjectId, project_ids: [ingestProjectId] } : {}),
-                    source_metadata: { source_platform: 'ai-chat', host_platform: platform, url, via: 'chat-ingest-distill' },
-                  };
-                  const [routed] = await buildRoutedIngestPayloads(rollupPayload, { smartIngestRouter });
-                  persistentMemoryEngine.ingestMemory(routed).catch((e) =>
+                    ...(ingestProjectId ? { scope: 'project', projectId: ingestProjectId } : {}),
+                    metadata: { memory_type: 'conversation', host_platform: platform, via: 'chat-ingest-distill' },
+                  }).catch((e) =>
                     console.warn('[ingest/chat-session] rollup save failed:', e.message)
                   );
                 }

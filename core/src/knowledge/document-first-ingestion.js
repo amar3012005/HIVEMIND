@@ -2076,6 +2076,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       // (smart-router) owns the actual update/extend/contradict logic — we only
       // forward, never reimplement it here ("memory engine left untouched").
       relationship: envelope.relationship || undefined,
+      relationship_explicit: Boolean(envelope.relationship),
       related_to: envelope.relatedTo || undefined,
       project_ids: projectIds,
       project: envelope.metadata?.project || undefined,

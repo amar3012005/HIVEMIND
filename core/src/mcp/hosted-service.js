@@ -940,6 +940,22 @@ Use only when the user explicitly asks to rename the assistant. NOT for setting 
       },
     },
     {
+      name: 'hivemind_chat_context',
+      description: `Build the same event-driven, source-grounded context used by /api/chat without generating the final answer. Returns facts, source sections, citations, coverage, and cutoff state for another LLM. A document-backed fact result receives one bounded evidence expansion; full raw-document hydration remains explicit-only.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The user question verbatim.' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full'], default: 'fact' },
+          project_id: { type: 'string', description: 'Optional accessible project UUID.' },
+          source_document_id: { type: 'string', description: 'Known document UUID; use with full.' },
+          source_title: { type: 'string', description: 'Known source title; use with full.' },
+          include_live: { type: 'boolean', default: false, description: 'Allow eligible live connector evidence.' },
+        },
+        required: ['query'],
+      },
+    },
+    {
       name: 'hivemind_set_voice',
       description: `Define how HIVEMIND speaks — tone, terminology, do/don't rules, signature phrases. Loaded into every Talk-to-HIVE system prompt. Re-calling with the same scope updates the profile.
 Use when the user wants to calibrate HIVEMIND's communication style for themselves (scope="personal") or for the whole org (scope="organization"). NOT for renaming the assistant — use hivemind_set_assistant_name. Organization scope overrides personal scope for shared members; personal scope applies only to the calling user. Content should be in freeform markdown (see parameter description for examples).`,
@@ -2696,6 +2712,45 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           return formatToolContent({ created: false, error: err.message });
         }
       }
+
+      case 'hivemind_chat_context':
+        {
+          const requestedMode = ['fact', 'explain', 'full'].includes(args.mode) ? args.mode : 'fact';
+          const recallArgs = {
+            query_context: args.query,
+            mode: requestedMode,
+            include_live: args.include_live === true,
+            ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
+            ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+            ...(args.source_title ? { source_title: args.source_title } : {}),
+          };
+          let result = await apiClient.post('/api/recall', recallArgs);
+
+          // Use returned provenance, not query wording, to decide whether the
+          // fact-only packet needs bounded source evidence. Never infer full.
+          const hasDocumentAnchor = (result.memories || []).some((memory) => {
+            const tags = memory?.tags || [];
+            return tags.some((tag) => typeof tag === 'string' && (
+              tag.startsWith('filename:') || tag.startsWith('doc-id:') || tag.startsWith('doc-hash:')
+            )) || !!memory?.source_metadata?.document_id;
+          });
+          if (requestedMode === 'fact' && !(result.evidence || []).length && hasDocumentAnchor) {
+            result = await apiClient.post('/api/recall', { ...recallArgs, mode: 'explain' });
+          }
+
+          return formatToolContent({
+            mode_used: result.mode_used || requestedMode,
+            context: result.evidence_packet || {
+              facts: result.memories || [],
+              sourceSections: result.evidence || [],
+              liveEvidence: result.live || [],
+              citations: [],
+              coverage: {},
+              cutoff_reason: result.cutoff_reason || null,
+            },
+            latency_ms: result.latency_ms || null,
+          });
+        }
 
       case 'hivemind_recall':
         {

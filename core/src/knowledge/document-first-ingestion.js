@@ -34,6 +34,48 @@ import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 
+const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
+
+export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance = 0) {
+  const threshold = Number.isFinite(Number(minImportance))
+    ? Math.max(0, Math.min(1, Number(minImportance)))
+    : 0;
+  const normalizedImportance = (value) => {
+    const rated = Number(value);
+    return Number.isFinite(rated) && rated > 0
+      ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
+      : 0.55;
+  };
+  return (Array.isArray(rawFacts) ? rawFacts : [])
+    .filter((item) => item && typeof item.f === 'string' && item.f.trim().length >= 4
+      && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
+      && typeof item.source_quote === 'string' && item.source_quote.length >= 4
+      && content.includes(item.source_quote)
+      // The source remains recallable even when its claim is not durable enough.
+      && normalizedImportance(item.importance) >= threshold)
+    .slice(0, maxFacts)
+    .map((item) => {
+      const start = content.indexOf(item.source_quote);
+      const rated = Number(item.importance);
+      return {
+        t: (typeof item.t === 'string' && item.t.trim() && !isGarbageTitle(item.t))
+          ? item.t.trim().slice(0, 80)
+          : cleanTitleFrom(item.f, 48),
+        f: item.f.trim(),
+        memory_type: item.memory_type,
+        source_quote: item.source_quote,
+        source_start: start,
+        source_end: start + item.source_quote.length,
+        importance: normalizedImportance(rated),
+        entities: (Array.isArray(item.entities) ? item.entities : [])
+          .filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8),
+        rels: (Array.isArray(item.rels) ? item.rels : [])
+          .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
+      };
+    });
+}
+
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
 // imprints, mastheads, photo credits, page headers, tables of contents. None of
@@ -668,27 +710,9 @@ Output the JSON object and nothing else.`;
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    return rawFacts
-      .filter((x) => x && typeof x.f === 'string' && x.f.trim().length >= 20)
-      .slice(0, maxFacts)
-      .map((x) => ({
-        t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim().slice(0, 80) : cleanTitleFrom(x.f, 48),
-        f: x.f.trim(),
-        // LLM-rated salience in the SAME pass (no extra call). Clamp 0.1-1.0;
-        // fall back to a content-signal heuristic if the model omitted/garbled it.
-        importance: (() => {
-          const n = Number(x.importance);
-          if (Number.isFinite(n) && n > 0) return Math.max(0.1, Math.min(1.0, Number(n.toFixed(3))));
-          const f = x.f || '';
-          let s = 0.55;
-          if (/\d/.test(f)) s += 0.1;                                  // has a number/date/figure
-          if (/(decision|deadline|budget|price|contract|agreed|will |must |launch|signed|€|\$|%)/i.test(f)) s += 0.12;
-          if ((Array.isArray(x.entities) ? x.entities.length : 0) >= 3) s += 0.08;
-          return Math.max(0.1, Math.min(0.95, Number(s.toFixed(3))));
-        })(),
-        entities: (Array.isArray(x.entities) ? x.entities : []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8),
-        rels: (Array.isArray(x.rels) ? x.rels : []).filter((r) => r && Number.isInteger(r.to) && REL_TYPES.includes(r.type)).slice(0, 5),
-      }));
+    // Evidence capture is unconditional; promotion is deliberately stricter.
+    const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+    return normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance);
   }
 
   /**
@@ -1073,8 +1097,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         visibility: metadata.visibility || 'private',
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-        content: docSummary, title: docTitle, memory_type: 'fact',
-        importance_score: 0.9,                                    // the doc anchor — high salience
+        content: docSummary, title: docTitle, memory_type: 'summary',
+        // The parent is source-local navigation context, not a durable claim.
+        importance_score: 0.45,
         document_date: metadata.document_date || null,
         tags: normalizeTagsArray([
           ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',

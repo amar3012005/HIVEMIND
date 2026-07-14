@@ -35,6 +35,8 @@ test('native AMR preserves canonical memory, evidence, graph, durability, and te
     },
     relationship: { findMany: async () => [] },
     knowledgeSegment: { findMany: async () => [] },
+    knowledgeDocument: { findMany: async () => [] },
+    memoryEvidenceLink: { findMany: async () => [] },
     $transaction: async (fn) => typeof fn === 'function' ? fn(realPrisma) : [],
   };
 

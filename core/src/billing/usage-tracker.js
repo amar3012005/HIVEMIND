@@ -40,6 +40,9 @@ export function meterDeepResearch(orgId) { if (_tracker && orgId) _safe(_tracker
 export function meterWebIntel(orgId)   { if (_tracker && orgId) _safe(_tracker.recordWebIntel(orgId)); }
 export function meterGraphQuery(orgId) { if (_tracker && orgId) _safe(_tracker.recordGraphQuery(orgId)); }
 export function meterTara(orgId)       { if (_tracker && orgId) _safe(_tracker.recordTara(orgId)); }
+// Value-action meter: one approved outbound email actually sent (closed loop).
+// Called ONLY on gmail_send success — never on approval emission or deny.
+export function meterEmailSend(orgId)  { if (_tracker && orgId) { _safe(_tracker.recordEmailSend(orgId)); _safe(_tracker.recordDaily(orgId, 'emailSends')); } }
 
 export class UsageTracker {
   constructor(prisma) {
@@ -268,12 +271,33 @@ export class UsageTracker {
     }
   }
 
+  /**
+   * Record one approved outbound email send (closed-loop value action).
+   * Success-path only — the caller meters AFTER gmail_send returned ok.
+   */
+  async recordEmailSend(orgId) {
+    if (!this.prisma || !orgId) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "emailSends", "updatedAt")
+         VALUES ($1::uuid, $2, 1, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "emailSends" = "OrgUsage"."emailSends" + 1, "updatedAt" = NOW()`,
+        orgId, month
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record email send failed:', err.message);
+    }
+  }
+
   // type → OrgUsageDaily column. (Internal constant — safe to interpolate.)
   static _DAILY_COL = {
     tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads',
     kbPages: 'knowledgeBasePages',
     memories: 'memoriesIngested', deepResearch: 'deepResearchJobs', webIntel: 'webIntelJobs',
-    graphQueries: 'graphQueries', tara: 'taraUsage',
+    graphQueries: 'graphQueries', tara: 'taraUsage', emailSends: 'emailSends',
   };
 
   /**

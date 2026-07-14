@@ -1377,6 +1377,7 @@ model OrgUsage {
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  emailSends           Int      @default(0)
   connectorCount       Int      @default(0)
   webIntelDay          DateTime @default(now()) @db.Date
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
@@ -1404,6 +1405,7 @@ model OrgUsageDaily {
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  emailSends           Int      @default(0)
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([orgId, day])

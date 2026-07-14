@@ -55,3 +55,14 @@
 - **Acceptance evidence:** public 200 ×4; turn `817301e5` on FOREST org (canonical company = "Formula 1"): brief recalled 431 chars, verifier returned grounded=false with gap "deliverable never references the company's canonical name (Formula 1) — possible identity substitution", goalkeeper re-round also refused → seal status **escalated** (NOT complete) — the exact blocking behavior required; `(thinking)` occurrences in logs since deploy: 0; fresh fatal/panic/uncaught/OOM: 0 (prior count was a grep false-positive: `-i OOM` matches inside `room=`).
 - **Rollback:** tags `rollback-20260714-142631` (all five services) + env backups `.bak-prod-20260714-d9dfcfe7` + DB backup from prior release (no schema change in this release).
 - **Untested side effects:** none — no emails/calls; internal test org only.
+
+## prod-20260714-8d74e135 — Reconciled: landing restore + stale-domain sweep + google-native connector OAuth
+- **Date:** 2026-07-14
+- **Parent:** branch `release/landing-plus-fixes`, SHA `8d74e1352702d60ec695cb360d559a0e2d3163d7` — based on `codex/hyperagents-grounding-guard` @ d103e55e (landing restore, OWNED BY THE CODEX SESSION — reconciled, not overwritten) + cherry-picks d9dfcfe7 (grounding gate) + 837e102e (ledger)
+- **Frontend:** branch `fix/connectors-on-landing`, SHA `e754b979e5eca7a8333a0956db955cf4c55ce8e9` — on top of the codex landing FE (7be553d6) + stale-domain sweep (3 commits) + google-native connector routing
+- **Why:** the prior 80e8ea0f promote regressed the codex landing release (its branch lacked the landing commits). This release carries BOTH lines.
+- **Images:** fe-single rebuilt `sha256:16da1721…`; employees/control/core/tara retagged from d9dfcfe7 (employees source verified byte-identical via sha1 diff before reuse).
+- **Key change — Google connector OAuth:** Connectors page now routes gmail/google-* (except google-gemini) through the google-NATIVE path: same `GOOGLE_CLIENT_ID` as login, redirect `core.singulancelabs.com/api/connectors/gmail/callback` — the davinciai.eu account-picker text came from the central-Nango client. Live-verified auth URL: client `…dgtg4`, redirect core.singulancelabs.com.
+- **Acceptance:** landing hero "Run your institution as an AI company" present in main.3bfcee9e.js; sw.js hive-shell-v3 preserved; minified bundle carries the native-first routing condition; public 200 ×4; remaining davinciai strings = env-fallbacks + intentional central-Nango fallbacks only.
+- **Rollback:** fe rollback tag `rollback-20260714-152221-single`; env backups `.bak-prod-20260714-8d74e135`.
+- **ACTION REQUIRED (Google Cloud Console, cannot be done from repo):** the `…dgtg4` OAuth client must list `https://core.singulancelabs.com/api/connectors/gmail/callback` as an authorized redirect URI, or connector connects will fail with redirect_uri_mismatch. Also set the client's consent-screen app name/domain to singulancelabs.com if any davinciai branding remains there.

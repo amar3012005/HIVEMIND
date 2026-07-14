@@ -99,3 +99,9 @@
 - First release executed end-to-end by scripts/release-singulance.sh (descendant gate → worktree → FE build → health-gated recreate → smoke). One iteration: initial pick had a dup state + clipped api-client method — CI build caught it, fixed in 297001f8.
 - **FE branch audit:** with this port, FE singulance-main supersedes ALL other FE branches (india/europe/master/mobile-version = obsolete experiments; hermes/sso/meeting-dial/stale-domains = already in canon via other lineages).
 - Acceptance: bundle carries "Partner referral code"; /v1/referrals/preview responds (401 unauth = route live); public 200 ×4.
+
+## prod-20260714-5be810de — Live action cards (email compose + call ringing)
+- **Parent:** `feat/live-action-cards` @ `5be810de…`; FE @ `7de3e14c…`. Off singulance-main faab3549.
+- Gmail-style compose card for agent email sends: From/To/Subject schema, body types in realtime, one-click Send, per-room "Automate from next turn" toggle (auto-approves after typing completes; same HITL endpoint). TARA outbound calls show a ringing popup (pulse rings → in-progress → dismiss).
+- FE-only (new LiveActionCards.jsx + HyperAgents.jsx wiring). Released by scripts/release-singulance.sh; markers verified in served chunk 84.bf19852e; public 200 ×4.
+- Rollback: script-created rollback tag + env backups.

@@ -164,3 +164,26 @@ test('document parent is a bounded summary with structural PartOf edges', async 
   assert.doesNotMatch(ingested[0].content, /raw source/);
   assert.deepEqual(relationships.map((edge) => edge.type), ['PartOf', 'PartOf']);
 });
+
+test('canonical entity extraction runs only over curated durable memories', async () => {
+  const previous = process.env.ENABLE_ENTITY_EXTRACTION;
+  process.env.ENABLE_ENTITY_EXTRACTION = 'true';
+  const seen = [];
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    entityExtractor: { extractFromSegment: async (args) => seen.push(args.segment) },
+    logger: { info() {}, warn() {} },
+  });
+  service._extractPromotedEntitiesAsync({
+    memories: [
+      { id: 'm1', content: 'A curated claim.', support_segment_ids: ['s1'] },
+      { id: 'm2', content: 'Uncurated legacy row.' },
+      { id: 'parent', content: 'Document summary.', isParent: true, support_segment_ids: ['s2'] },
+    ],
+    userId: 'u1', orgId: 'o1', documentId: 'd1',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [{ id: 's1', content: 'A curated claim.' }]);
+  if (previous === undefined) delete process.env.ENABLE_ENTITY_EXTRACTION;
+  else process.env.ENABLE_ENTITY_EXTRACTION = previous;
+});

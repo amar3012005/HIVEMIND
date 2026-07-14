@@ -13,6 +13,7 @@
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
+import { chatCompletion } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
@@ -49,18 +50,10 @@ async function classifyKnowledgeDocument(text, filename) {
   if (!preview) return { type: 'general', confidence: 0.1 };
   try {
     const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'openai/gpt-oss-120b';
-    const response = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0, max_tokens: 128,
-        messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
-        response_format: { type: 'json_object' },
-      }),
+    const parsed = await chatCompletion({
+      model, temperature: 0, max_tokens: 256, json_mode: true, feature: 'kb-document-type',
+      messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
     });
-    if (!response.ok) throw new Error(`document type ${response.status}`);
-    const body = await response.json();
-    const parsed = JSON.parse(body?.choices?.[0]?.message?.content || '{}');
     const confidence = Number(parsed.confidence);
     return { type: safeDocumentType(parsed.type), confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.3 };
   } catch (error) {
@@ -743,10 +736,9 @@ Output the JSON object and nothing else.`;
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
   async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '' } = {}) {
-    const apiKey = process.env.GROQ_API_KEY;
     const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
     const content = (window.content || '').slice(0, 6000);
-    if (!apiKey || content.trim().length < 40) {
+    if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
@@ -782,41 +774,14 @@ RELATIONSHIP rules — only between facts in THIS list, only when genuinely rela
 - Reference the OTHER fact by its 0-based index in "facts". Omit "rels" or use [] when a fact stands alone. Do NOT invent edges to force connectivity.
 
 Output the JSON object and nothing else.`;
-    const isGptOss = /gpt-oss/i.test(model);
-    const SCHEMA = {
-      type: 'object', additionalProperties: false, required: ['facts'],
-      properties: { facts: { type: 'array', items: {
-        type: 'object', additionalProperties: false, required: ['t', 'f', 'importance', 'entities', 'rels'],
-        properties: {
-          t: { type: 'string' }, f: { type: 'string' },
-          importance: { type: 'number' },
-          entities: { type: 'array', items: { type: 'string' } },
-          rels: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['to', 'type'],
-            properties: { to: { type: 'integer' }, type: { type: 'string', enum: REL_TYPES } } } },
-        },
-      } } },
-    };
-    const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0.2, max_tokens: 6000,
-        messages: [
-          { role: 'system', content: sys },
-          ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
-          { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
-        ],
-        ...(isGptOss ? { reasoning_effort: process.env.KB_DISTILL_REASONING_EFFORT || 'low' } : {}),
-        response_format: isGptOss
-          ? { type: 'json_schema', json_schema: { name: 'unified_extraction', strict: true, schema: SCHEMA } }
-          : { type: 'json_object' },
-      }),
+    const parsed = await chatCompletion({
+      model, temperature: 0.2, max_tokens: 6000, json_mode: true, feature: 'kb-unified-extract',
+      messages: [
+        { role: 'system', content: sys },
+        ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
+        { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
+      ],
     });
-    if (!resp.ok) throw new Error(`unified-extract ${resp.status}`);
-    const j = await resp.json();
-    const text = j?.choices?.[0]?.message?.content || '';
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch { const a = extractJsonArray(text); parsed = a.length ? { facts: a } : null; }
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
     // Evidence capture is unconditional; promotion is deliberately stricter.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
@@ -1579,7 +1544,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
               this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
               this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
             ]);
-            if (segs > 0) {
+            if (segs > 0 && memLinks > 0) {
               this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero tokens`);
               emit('skipped-unchanged', 100, { documentId: prior.id });
               return { documentId: prior.id, segmentCount: segs, candidateCount: 0, promotedCount: memLinks, skippedUnchanged: true };

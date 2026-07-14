@@ -68,6 +68,8 @@ from .db import (
     get_recent_turn_context,
     get_employee_playbooks_map,
     update_employee_playbook,
+    get_room_playbook,
+    update_room_playbook,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -2805,6 +2807,13 @@ async def _orchestrate_single_agent(
         log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
                  intended_output, req.room_id, conns)
         intended_output = "answer"
+    # Room-level learned method lessons (skill sequences that worked for this room
+    # kind) prime the planner's skill choice. Best-effort — [] pre-migration.
+    _room_playbook: list = []
+    try:
+        _room_playbook = await get_room_playbook(req.room_id, org_id=req.org_id)
+    except Exception:  # noqa: BLE001
+        _room_playbook = []
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
@@ -2818,6 +2827,7 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
+            room_playbook=_room_playbook,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2922,10 +2932,19 @@ async def _orchestrate_single_agent(
                 "pending_writes": bool(pending),
                 "user_signal": (str(getattr(req, "user_signal", "") or "").strip() or None),
             }
-            _merged = await evo_reflect_and_merge(
+            _merged, _room_lessons = await evo_reflect_and_merge(
                 evo_playbooks=_evo_playbooks, transcript=transcript, participants=participants,
                 final_text=final_text, outcome=_outcome, reflect_model=None,
+                skills_used=list(result.get("skills_used") or []),
+                room_kind=str(result.get("room_kind") or ""),
+                room_playbook=_room_playbook,
             )
+            # ROOM-level method lessons (which skill sequences worked for this room
+            # kind) persist on the room itself and prime the next turn's planner.
+            if isinstance(_room_lessons, list) and _room_lessons:
+                _rok = await update_room_playbook(req.room_id, req.org_id, _room_lessons)
+                log.info("[single] room=%s room_playbook persisted=%s lessons=%d",
+                         req.room_id, _rok, len(_room_lessons))
             if isinstance(_merged, dict) and _merged:
                 _oks = [await update_employee_playbook(req.org_id, str(_slug), _lessons)
                         for _slug, _lessons in _merged.items()]

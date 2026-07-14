@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+
+# Production log hygiene: AgentScope agents print their full reasoning
+# ("<name>(thinking): ...") to stdout by default — model chain-of-thought does
+# not belong in production logs. Structured verdicts/events only. Must be set
+# BEFORE any agentscope import; opt back in explicitly via the env if debugging.
+os.environ.setdefault("AGENTSCOPE_DISABLE_CONSOLE_OUTPUT", "true")
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Header

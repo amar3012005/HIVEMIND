@@ -70,6 +70,7 @@ from .db import (
     update_employee_playbook,
     get_room_playbook,
     update_room_playbook,
+    get_company_name,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -1954,6 +1955,8 @@ async def _verify_turn(
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
+    company_name: str = "",
+    company_context_missing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Phase 5 — recon/verify pass. Before the turn seals, cross-check the
     produced evidence against the lead's `done_criterion`: artifact exists (or
@@ -1981,6 +1984,8 @@ async def _verify_turn(
         "writes_pending_approval": [p.get("label") for p in pending],
         "produced_artifacts": produced,
         "memory_hits": int((blackboard or {}).get("hit_count", 0) or 0),
+        "company_name": company_name or None,
+        "company_context_missing": bool(company_context_missing),
         "gathered_facts": [str(f)[:200] for f in ((blackboard or {}).get("facts") or [])][:24],
         "final_excerpt": (final_text or "")[:1600],
     }
@@ -2043,6 +2048,12 @@ async def _verify_turn(
         "when hivemind_web_search was NOT used this turn (if web_search WAS used, a web citation backed "
         "by its result IS grounded). A claim the text marks UNVERIFIED is honest and NEVER lowers "
         "grounded_ok.\n"
+        "- COMPANY IDENTITY: when company_name is set, the deliverable must be about THAT company. "
+        "If the text asserts facts about the organisation's identity/market/products under a DIFFERENT "
+        "organisation name with no backing in gathered_facts, that is a fabrication → grounded_ok=false. "
+        "When company_context_missing is true, any confident company-specific claim (its market, its "
+        "customers, its positioning) is UNGROUNDED by definition → grounded_ok=false + a gap naming the "
+        "missing company context.\n"
         "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
@@ -2085,6 +2096,23 @@ async def _verify_turn(
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
     }
+    # ── Deterministic company-grounding gate (does NOT trust the LLM verdict) ──
+    # A company-scoped turn with NO company context cannot be grounded: the room
+    # had nothing real to stand on, so a plausible-sounding deliverable is exactly
+    # the failure mode to block. Same when a known canonical company name never
+    # appears in a company-scoped deliverable (identity substitution).
+    _company_scoped = bool(re.search(r"\b(our|we|us|company)\b", f"{req.room_goal or ''} {req.user_message or ''}", re.I))
+    if _company_scoped and company_context_missing:
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
+            "company context missing — the room had no company brief/canon, so company-specific claims cannot be grounded"]
+        verdict["company_context_missing"] = True
+    elif _company_scoped and company_name and company_name.lower() not in (final_text or "").lower():
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
+            f"deliverable never references the company's canonical name ({company_name}) — possible identity substitution"]
     return verdict
 
 
@@ -2508,6 +2536,8 @@ async def _verify_and_emit(
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
+    company_name: str = "",
+    company_context_missing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Run the verify pass, emit a `verify` event, stash the verdict on the
     plan (so the handler/P6 goalkeeper can read it), and return it."""
@@ -2517,6 +2547,7 @@ async def _verify_and_emit(
     verdict = await _verify_turn(
         req, lead, final_text=final_text,
         tool_call_counts=tool_call_counts, blackboard=blackboard, model=model,
+        company_name=company_name, company_context_missing=company_context_missing,
     )
     if verdict is None:
         return None
@@ -2797,7 +2828,30 @@ async def _orchestrate_single_agent(
     except Exception as exc:  # noqa: BLE001 — grounding is best-effort, never fatal
         log.warning("[single] company brief failed (non-fatal): %s", exc)
         _company_brief = ""
-    log.info("[single] room=%s company_brief=%d chars", req.room_id, len(_company_brief or ""))
+    if not _company_brief:
+        # One retry with a longer window: an empty brief on a company-scoped task
+        # now HARD-FAILS verification (grounding gate), so a transient recall miss
+        # is worth 12 more seconds — much cheaper than an escalated turn.
+        try:
+            _company_brief = await asyncio.wait_for(
+                _build_company_brief(req.user_message, req.user_id, req.org_id, "", project_id=req.project_id),
+                timeout=12.0,
+            )
+        except Exception:  # noqa: BLE001
+            _company_brief = ""
+    # Canonical company identity for the verification gate: the onboarded company
+    # name + whether the room is flying blind on company context.
+    _company_name = ""
+    try:
+        _company_name = await get_company_name(req.org_id)
+    except Exception:  # noqa: BLE001
+        _company_name = ""
+    _company_ctx_missing = not (_company_brief or "").strip()
+    if _company_ctx_missing:
+        await _emit({"t": "warning", "code": "company_context_missing",
+                     "note": "No company brief/canon could be recalled — company-specific claims will fail verification."})
+    log.info("[single] room=%s company_brief=%d chars company=%s ctx_missing=%s",
+             req.room_id, len(_company_brief or ""), _company_name or "-", _company_ctx_missing)
 
     # Derive the intended deliverable + capability-gate it BEFORE the run, so SYNTH writes the right
     # FORMAT (a ready-to-send email vs a generic report). If the artifact's connector isn't enabled
@@ -2905,7 +2959,9 @@ async def _orchestrate_single_agent(
         await _verify_and_emit(req, lead, final_text=final_text,
                                blackboard={"hit_count": gather_count,
                                            "facts": result.get("gather_facts") or []},
-                               model=_m_recon)
+                               model=_m_recon,
+                               company_name=_company_name,
+                               company_context_missing=_company_ctx_missing)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side

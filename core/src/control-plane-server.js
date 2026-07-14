@@ -294,6 +294,30 @@ function capacityErrorResponse(res, error) {
   }, 402);
 }
 
+// ── Outbound value-action ledger (closed loop) ───────────────────────────
+// One row per action that ACTUALLY left the platform (approved email send /
+// outbound call). Written on SUCCESS only, fire-and-forget — the send response
+// must never fail because the ledger insert did. Raw SQL (not the Prisma model)
+// so a deployed client generated before the outbound_actions migration still
+// works. Reply-matcher/call-end later fills `outcome` by (org_id, thread_id).
+async function recordOutboundAction({ orgId, userId, roomId, approvalId, channel, recipient, subject, messageId, threadId, meta }) {
+  try {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "hivemind"."outbound_actions"
+         (org_id, user_id, room_id, approval_id, channel, recipient, subject, message_id, thread_id, status, meta)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, 'sent', $10::jsonb)`,
+      orgId, userId || null, roomId || null,
+      approvalId ? String(approvalId).slice(0, 80) : null,
+      String(channel).slice(0, 20),
+      recipient ? String(recipient).slice(0, 320) : null,
+      subject ? String(subject).slice(0, 500) : null,
+      messageId ? String(messageId).slice(0, 160) : null,
+      threadId ? String(threadId).slice(0, 160) : null,
+      meta ? JSON.stringify(meta) : null,
+    );
+  } catch (e) { console.warn('[outbound-ledger] insert failed:', e.message); }
+}
+
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
 // The room-turn kick to the employees sidecar is fire-and-forget and can be
 // dropped (the sidecar holds the connection open for the whole synchronous
@@ -7623,6 +7647,43 @@ Write the persona now.`;
       }
     }
 
+    // GET /v1/hyper/outcomes — closed-loop value counters for the dashboard:
+    // what actually LEFT the platform (emails sent, calls placed) and what came
+    // back (replies, bookings), from the outbound_actions ledger. 7d + 30d.
+    if (pathname === '/v1/hyper/outcomes' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT
+             COUNT(*) FILTER (WHERE channel = 'email' AND sent_at >= now() - interval '7 days')  AS emails_7d,
+             COUNT(*) FILTER (WHERE channel = 'call'  AND sent_at >= now() - interval '7 days')  AS calls_7d,
+             COUNT(*) FILTER (WHERE outcome = 'replied' AND outcome_at >= now() - interval '7 days') AS replies_7d,
+             COUNT(*) FILTER (WHERE outcome = 'booked'  AND outcome_at >= now() - interval '7 days') AS bookings_7d,
+             COUNT(*) FILTER (WHERE channel = 'email' AND sent_at >= now() - interval '30 days') AS emails_30d,
+             COUNT(*) FILTER (WHERE channel = 'call'  AND sent_at >= now() - interval '30 days') AS calls_30d,
+             COUNT(*) FILTER (WHERE outcome = 'replied' AND outcome_at >= now() - interval '30 days') AS replies_30d,
+             COUNT(*) FILTER (WHERE outcome = 'booked'  AND outcome_at >= now() - interval '30 days') AS bookings_30d
+           FROM "hivemind"."outbound_actions"
+          WHERE org_id = $1::uuid AND status = 'sent'`,
+          current.session.orgId,
+        );
+        const r0 = rows?.[0] || {};
+        const n = (v) => Number(v || 0);
+        return jsonResponse(res, {
+          window_7d:  { emails_sent: n(r0.emails_7d),  calls: n(r0.calls_7d),  replies: n(r0.replies_7d),  bookings: n(r0.bookings_7d) },
+          window_30d: { emails_sent: n(r0.emails_30d), calls: n(r0.calls_30d), replies: n(r0.replies_30d), bookings: n(r0.bookings_30d) },
+        });
+      } catch (err) {
+        // Ledger table may not exist yet on an un-migrated deploy — return zeros,
+        // never a 500 (the dashboard tile must degrade gracefully).
+        return jsonResponse(res, {
+          window_7d:  { emails_sent: 0, calls: 0, replies: 0, bookings: 0 },
+          window_30d: { emails_sent: 0, calls: 0, replies: 0, bookings: 0 },
+        });
+      }
+    }
+
     // POST /v1/hyper/tasks/open { task_id } — open (or create) the room for a
     // dashboard task. First click provisions a room named after the task with
     // the task detail as its goal and marks the task in the persisted state;
@@ -8237,6 +8298,17 @@ Write the persona now.`;
         await appendTurnEvent(prisma, turnId, {
           t: 'approval_resolved', approval_id: approvalId, decision, label: rec.label, result, ts: Date.now(),
         });
+        // Ledger: only approved gmail sends count as an outbound value action.
+        if (decision === 'approve' && rec.bridge !== 'mcp' && String(rec.descriptor?.tool || '').startsWith('gmail_send')) {
+          recordOutboundAction({
+            orgId: room.orgId, userId: room.userId, roomId, approvalId,
+            channel: 'email',
+            recipient: rec.descriptor?.arguments?.to || rec.to || null,
+            subject: rec.descriptor?.arguments?.subject || rec.subject || null,
+            messageId: result?.id || null, threadId: result?.threadId || null,
+            meta: { via: 'approve', tool: rec.descriptor?.tool },
+          }).catch(() => {});
+        }
         return jsonResponse(res, { ok: true, approval_id: approvalId, decision, result }, 200);
       } catch (err) {
         console.warn('[hyper-rooms] approve failed:', err.message);
@@ -8294,6 +8366,14 @@ Write the persona now.`;
         const tx = await r.text();
         let result; try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
         if (!r.ok) return jsonResponse(res, { error: `gmail send failed (${r.status})`, result }, 502);
+        // Ledger: this send actually left the platform (one-click preview send).
+        recordOutboundAction({
+          orgId: room.orgId, userId: room.userId, roomId,
+          approvalId: String(body.approval_id || '').trim() || null,
+          channel: 'email', recipient: to, subject,
+          messageId: result?.id || null, threadId: result?.threadId || null,
+          meta: { via: 'send-email', attachments: attachments.length },
+        }).catch(() => {});
         // Mark the approval card resolved (best-effort) so the stale card can't re-send.
         const approvalId = String(body.approval_id || '').trim();
         if (approvalId) {

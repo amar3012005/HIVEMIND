@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { filterLowSaliencePromotedMemories } from '../../src/memory/recall-router.js';
+import {
+  filterLowSaliencePromotedMemories,
+  mergePromotionImportance,
+} from '../../src/memory/recall-router.js';
 
 const promoted = (memory_type, importance_score) => ({
   memory_type,
@@ -26,4 +29,11 @@ test('preserves summaries, syntheses, raw memories, and admitted durable claims'
 
 test('fails closed when a promoted durable claim has no valid importance', () => {
   assert.deepEqual(filterLowSaliencePromotedMemories([promoted('fact', null)], 0.65), []);
+});
+
+test('hydrates importance lost by lexical retrieval before admission filtering', () => {
+  const memories = [{ id: 'legacy', memory_type: 'fact', tags: ['promoted-memory', 'distilled-from-kb'] }];
+  const hydrated = mergePromotionImportance(memories, [{ id: 'legacy', importanceScore: 0.3 }]);
+  assert.equal(hydrated[0].importance_score, 0.3);
+  assert.deepEqual(filterLowSaliencePromotedMemories(hydrated, 0.65), []);
 });

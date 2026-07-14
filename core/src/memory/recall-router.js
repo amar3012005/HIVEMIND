@@ -149,6 +149,13 @@ export function filterLowSaliencePromotedMemories(memories, minImportance = KB_D
   });
 }
 
+export function mergePromotionImportance(memories, rows) {
+  const byId = new Map((rows || []).map((row) => [row.id, row.importanceScore]));
+  return memories.map((memory) => byId.has(memory.id)
+    ? { ...memory, importance_score: byId.get(memory.id) }
+    : memory);
+}
+
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
 ]);
@@ -267,6 +274,23 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Also fires as a hard fallback when FTS returned 0 hits.
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
+  const missingPromotionImportance = mems.filter((memory) => {
+    const tags = Array.isArray(memory.tags) ? memory.tags : [];
+    return tags.includes('promoted-memory')
+      && tags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  if (missingPromotionImportance.length && store.client?.memory?.findMany) {
+    try {
+      const importanceRows = await store.client.memory.findMany({
+        where: { id: { in: missingPromotionImportance.map((memory) => memory.id) } },
+        select: { id: true, importanceScore: true },
+      });
+      mems = mergePromotionImportance(mems, importanceRows);
+    } catch (error) {
+      console.warn('[recall-router] promotion importance hydration failed:', error.message);
+    }
+  }
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
   // Time-travel override: when valid_at is set and we have tags (caller-
   // supplied or inferred), also drop into the direct-fetch path so the
@@ -338,6 +362,7 @@ async function hop1Memory({ store, query, options, ctx }) {
         created_at: m.createdAt,
         valid_at: m.documentDate || m.createdAt,
         source_metadata: m.sourceMetadata || null,
+        importance_score: m.importanceScore,
         _searchMethod: 'tag_fallback',
       }));
     } catch (err) {
@@ -356,6 +381,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     created_at: m.created_at,
     valid_at: m.valid_at || m.document_date,
     source_metadata: m.source_metadata || null,
+    importance_score: m.importance_score ?? m.importanceScore,
     // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
     ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
     ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),

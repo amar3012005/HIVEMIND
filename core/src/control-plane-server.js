@@ -7809,6 +7809,26 @@ Write the persona now.`;
             JSON.stringify({ _company: company }), row.id,
           );
         } catch { /* state best-effort */ }
+        // ATOMIC KICKOFF: create + dispatch the first turn server-side (same
+        // pattern as the nightly cycle) — the FE comment always assumed this,
+        // but this path only RETURNED kickoff_message, so task rooms opened
+        // with 0 turns and sat silent until the user typed. Event-driven: the
+        // task's own kickoff text is the turn, agents start immediately.
+        try {
+          const kickTurn = await prisma.hyperTurn.create({
+            data: { roomId: taskRoom.id, seq: 1, userMessage: kickoff, status: 'live', lines: [] },
+          });
+          const roomRow2 = await prisma.hyperRoom.findUnique({
+            where: { id: taskRoom.id }, select: { participantIds: true, goal: true, projectId: true },
+          }).catch(() => null);
+          dispatchHyperRoomTurn({
+            room_id: taskRoom.id, turn_id: kickTurn.id,
+            user_id: current.session.userId, org_id: current.session.orgId,
+            user_message: kickoff, participant_ids: roomRow2?.participantIds || [],
+            project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
+            callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+          }).catch((e) => console.warn('[hyper-tasks] kickoff dispatch failed:', e.message));
+        } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message); }
         return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
       } catch (err) {
         if (err?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, err);

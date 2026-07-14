@@ -28,7 +28,7 @@ import { ClusterIndex } from './cluster-index.js';
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
-import { isStructuredSourceNoise } from './durable-content.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 
@@ -131,24 +131,12 @@ const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
 const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
 
-const DURABLE_PROMOTION_TYPES = new Set([
-  'fact', 'decision', 'preference', 'goal', 'event', 'lesson', 'conversation',
-]);
-
 // Legacy KB promotions can receive a strong retrieval score even when their
 // ingestion importance was below today's durable-memory admission threshold.
 // Keep those rows out of normal memory recall without hiding source evidence,
 // summaries, or syntheses used for explicit source reconstruction.
 export function filterLowSaliencePromotedMemories(memories, minImportance = KB_DURABLE_MIN_IMPORTANCE) {
-  return memories.filter((memory) => {
-    const tags = Array.isArray(memory.tags) ? memory.tags : [];
-    const type = memory.memory_type || memory.memoryType;
-    const isKbPromotion = tags.includes('distilled-from-kb');
-    if (!isKbPromotion || !DURABLE_PROMOTION_TYPES.has(type)) return true;
-    if (isStructuredSourceNoise(memory.content)) return false;
-    const importance = Number(memory.importance_score ?? memory.importanceScore);
-    return Number.isFinite(importance) && importance >= minImportance;
-  });
+  return memories.filter((memory) => isDurableKbPromotionAdmitted(memory, minImportance));
 }
 
 export function mergePromotionImportance(memories, rows) {

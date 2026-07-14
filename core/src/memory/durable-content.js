@@ -17,3 +17,16 @@ export function isStructuredSourceNoise(value) {
   const markupFragment = angles >= 2 && text.startsWith('<') && text.includes('>');
   return styleOrCodeBlock || markupFragment;
 }
+
+const DURABLE_PROMOTION_TYPES = new Set([
+  'fact', 'decision', 'preference', 'goal', 'event', 'lesson', 'conversation',
+]);
+
+export function isDurableKbPromotionAdmitted(memory, minImportance = 0.65) {
+  const tags = Array.isArray(memory?.tags) ? memory.tags : [];
+  const type = memory?.memory_type || memory?.memoryType;
+  if (!tags.includes('distilled-from-kb') || !DURABLE_PROMOTION_TYPES.has(type)) return true;
+  if (isStructuredSourceNoise(memory?.content)) return false;
+  const importance = Number(memory?.importance_score ?? memory?.importanceScore);
+  return Number.isFinite(importance) && importance >= minImportance;
+}

@@ -92,3 +92,10 @@
 - **Ops:** scripts/release-singulance.sh — one-command protocol release (canon-descendant gate, clean worktree, selective build, health-gated recreates, smoke).
 - **Images:** employees 883934a5ec9e, fe fcbceedd5424 (rebuilt); rest retagged. No migrations.
 - **Rollback:** rollback-20260714-174903 + env backups `.bak-prod-20260714-e7aa7a98` (includes the model-env change).
+
+## prod-20260714-b773c02f — Partner referral onboarding (FE catch-up complete)
+- **Parent:** `feat/referral-onboarding-port` @ `b773c02f…`; FE @ `297001f8…`. Off singulance-main a94504c0.
+- Port of codex/referral-onboarding (login referral field + intent pass-through + offer preview + org-create redemption; coexists with enterprise access codes). Backend /v1/referrals/* + org-create referralCode already on canon.
+- First release executed end-to-end by scripts/release-singulance.sh (descendant gate → worktree → FE build → health-gated recreate → smoke). One iteration: initial pick had a dup state + clipped api-client method — CI build caught it, fixed in 297001f8.
+- **FE branch audit:** with this port, FE singulance-main supersedes ALL other FE branches (india/europe/master/mobile-version = obsolete experiments; hermes/sso/meeting-dial/stale-domains = already in canon via other lineages).
+- Acceptance: bundle carries "Partner referral code"; /v1/referrals/preview responds (401 unauth = route live); public 200 ×4.

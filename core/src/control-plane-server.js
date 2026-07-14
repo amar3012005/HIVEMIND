@@ -7454,7 +7454,28 @@ Write the persona now.`;
           select: { id: true, name: true, roleArchetype: true, status: true },
           take: 12,
         }).catch(() => []);
-        return jsonResponse(res, { onboarded: true, hq_room_id: row.id, company, employees });
+        // Closed-loop outcomes summary (7d) for the dashboard tile. Zeros when
+        // the ledger table doesn't exist yet (un-migrated deploy) — never fail
+        // the company payload over the counter.
+        let outcomes = { emails_sent: 0, calls: 0, replies: 0, bookings: 0 };
+        try {
+          const oc = await prisma.$queryRawUnsafe(
+            `SELECT
+               COUNT(*) FILTER (WHERE channel = 'email' AND sent_at >= now() - interval '7 days') AS emails,
+               COUNT(*) FILTER (WHERE channel = 'call'  AND sent_at >= now() - interval '7 days') AS calls,
+               COUNT(*) FILTER (WHERE outcome = 'replied' AND outcome_at >= now() - interval '7 days') AS replies,
+               COUNT(*) FILTER (WHERE outcome = 'booked'  AND outcome_at >= now() - interval '7 days') AS bookings
+             FROM "hivemind"."outbound_actions"
+            WHERE org_id = $1::uuid AND status = 'sent'`,
+            current.session.orgId,
+          );
+          const o = oc?.[0] || {};
+          outcomes = {
+            emails_sent: Number(o.emails || 0), calls: Number(o.calls || 0),
+            replies: Number(o.replies || 0), bookings: Number(o.bookings || 0),
+          };
+        } catch { /* zeros */ }
+        return jsonResponse(res, { onboarded: true, hq_room_id: row.id, company, employees, outcomes });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

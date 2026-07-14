@@ -38,6 +38,37 @@ import { isStructuredSourceNoise } from '../memory/durable-content.js';
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
 
+function safeDocumentType(value) {
+  const type = String(value || '').toLowerCase().trim()
+    .replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  return type || 'general';
+}
+
+async function classifyKnowledgeDocument(text, filename) {
+  const preview = String(text || '').slice(0, 6000).trim();
+  if (!preview) return { type: 'general', confidence: 0.1 };
+  try {
+    const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'openai/gpt-oss-120b';
+    const response = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 128,
+        messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
+        response_format: { type: 'json_object' },
+      }),
+    });
+    if (!response.ok) throw new Error(`document type ${response.status}`);
+    const body = await response.json();
+    const parsed = JSON.parse(body?.choices?.[0]?.message?.content || '{}');
+    const confidence = Number(parsed.confidence);
+    return { type: safeDocumentType(parsed.type), confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.3 };
+  } catch (error) {
+    console.warn(`[kb-ingest] document type classification unavailable: ${error.message}`);
+    return { type: 'general', confidence: 0.2 };
+  }
+}
+
 function durableTitle(title, content, max = 80) {
   const value = String(title || '').trim();
   const languageCodeOnly = /^[a-z]{2,3}(?:-[a-z]{2,4})?$/i.test(value);
@@ -852,6 +883,7 @@ Output the JSON object and nothing else.`;
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
         ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
         ...(fact.memory_type === 'fact' ? ['extracted-fact'] : []),
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
         ...(documentId ? [`doc-id:${documentId}`] : []),
@@ -865,9 +897,11 @@ Output the JSON object and nothing else.`;
           content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           document_date: metadata.document_date || null,
-          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
+          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
           metadata: {
             document_id: documentId,
+            document_type: metadata.document_type || 'general',
+            document_type_confidence: metadata.document_type_confidence ?? null,
             segment_id: window.segmentId || null,
             source_start: fact.source_start,
             source_end: fact.source_end,
@@ -1344,9 +1378,10 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
           `ts:${_tsd.toISOString().slice(0, 10)}`,
           ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
           ...(documentId ? [`doc-id:${documentId}`] : []),
+          ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
         ]),
-        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null },
-        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, child_count: childIds.length, total_facts: totalFacts },
+        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null, document_type: metadata.document_type || 'general' },
+        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, document_type: metadata.document_type || 'general', document_type_confidence: metadata.document_type_confidence ?? null, child_count: childIds.length, total_facts: totalFacts },
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
         append_timestamp_to_content: false,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
@@ -1495,6 +1530,9 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       smart: metadata?.smart === true,
       picture_descriptions: metadata?.picture_descriptions === true,
     });
+    const documentClassification = await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
+    const documentType = safeDocumentType(metadata.document_type || documentClassification.type);
+    const documentTypeTag = `document-type:${documentType}`;
     const _msParse = Date.now() - _tParse;
     emit('parsed', 35, { parse_ms: _msParse, pages: parseResult.pages, word_count: parseResult.wordCount });
 
@@ -1521,7 +1559,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
     // scope-key tag enables the upload route's per-scope dedup query without
     // any schema change — gin-indexed tags[] is already there.
     const _scopeTag = `scope-key:${_scopeKey}`;
-    const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag]));
+    const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag, documentTypeTag]));
 
     // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
     // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
@@ -1590,7 +1628,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         userId,
         orgId,
         sourceArtifactId: sourceArtifact.id,
-        documentType: 'file',
+        documentType,
         title: filename,
         sourcePlatform: 'knowledge_upload',
         sourceId: _scopedSourceId,
@@ -1605,7 +1643,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         contentType,
         filename,
         createdAt: new Date().toISOString(),
-        metadata,
+        metadata: { ...metadata, document_type: documentType, document_type_confidence: documentClassification.confidence },
       };
       await amrKbDoc(orgId, docPayload);
       knowledgeDoc = { id: docId };
@@ -1623,7 +1661,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
           userId,
           orgId,
           sourceArtifactId: sourceArtifact.id,
-          documentType: 'file',
+          documentType,
           title: filename,
           sourcePlatform: 'knowledge_upload',
           sourceId: _scopedSourceId,
@@ -1631,13 +1669,15 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
           wordCount: parseResult.wordCount,
           parseStatus: parseResult.success ? 'parsed' : 'failed',
           parseEngine: parseResult.engine,
-          parseMetadata: parseResult.metadata || {},
+          parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           structureExtracted: parseResult.success,
           tags: _docTags,
         },
         update: {
-          // Backfill scope-key tag on pre-existing rows so the dedup gate sees
-          // them in subsequent uploads. parseMetadata stays untouched.
+          // Backfill provenance on pre-existing rows so document filters and
+          // memory citations expose the same classification after re-upload.
+          documentType,
+          parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           tags: _docTags,
         }
       });
@@ -1699,6 +1739,9 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         documentTitle: filename,
         documentId: knowledgeDoc.id,
         documentHash: checksum.slice(0, 16),
+        document_type: documentType,
+        document_type_confidence: documentClassification.confidence,
+        tags: [...(metadata.tags || []), documentTypeTag],
       },
     });
     this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });

@@ -22,7 +22,7 @@ const SKILL_NOTES = [
   'Result is auto-saved as a Gemini session memory so the conversation lands in HIVEMIND graph.',
 ].join('\n');
 
-export function registerGeminiTools(toolkit, { persistentMemoryEngine } = {}) {
+export function registerGeminiTools(toolkit) {
   toolkit.createToolGroup({
     name: 'google-gemini',
     description: 'Google Gemini direct query tool (Nango-routed).',
@@ -60,7 +60,7 @@ export function registerGeminiTools(toolkit, { persistentMemoryEngine } = {}) {
 
       // Side-effect: auto-log as Gemini memory so the conversation lands in the
       // graph. Fire-and-forget — never fails the tool call on ingest error.
-      if (persistentMemoryEngine && ctx?.userId) {
+      if (ctx?.ingestCanonicalPayload && ctx?.userId) {
         const { GeminiAdapter } = await import('../../connectors/providers/gemini/adapter.js');
         const adapter = new GeminiAdapter();
         const payloads = adapter.normalize({
@@ -72,12 +72,20 @@ export function registerGeminiTools(toolkit, { persistentMemoryEngine } = {}) {
             { role: 'assistant', content: text },
           ],
         }, { user_id: ctx.userId, org_id: ctx.orgId });
-        for (const p of payloads) {
-          if (p?._tree?.parent) {
-            persistentMemoryEngine.ingestMemoryTree(p._tree).catch(e =>
-              console.warn('[gemini-tool] auto-save failed:', e.message)
-            );
-          }
+        const transcript = payloads.flatMap((p) => p?._tree?.parent ? [p._tree.parent, ...(p._tree.children || [])] : [])
+          .map((p) => `${p.role || 'turn'}: ${p.content || ''}`.trim())
+          .filter(Boolean)
+          .join('\n\n');
+        if (transcript) {
+          ctx.ingestCanonicalPayload({
+            content: transcript,
+            title: `Gemini query: ${args.prompt.slice(0, 50)}`,
+            sourceType: 'connector',
+            sourcePlatform: 'google-gemini',
+            sourceId: `gemini-tool-${Date.now()}`,
+            metadata: { provider: 'google-gemini', model },
+            mode: 'document',
+          }).catch(e => console.warn('[gemini-tool] canonical auto-save failed:', e.message));
         }
       }
 

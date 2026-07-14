@@ -405,33 +405,7 @@ export class SyncEngine {
         await this._postIngestHooks(payload, { memoryId: canonicalMemoryId }, userId);
         return canonicalResult;
       }
-
-      // Compatibility fallback for runtimes where the canonical service has
-      // not initialized yet.
-      // P1 canonical contract: route through SmartIngestRouter so background
-      // connector polls produce deterministic edges (thread/session/chunk),
-      // same as manual UI ingest paths. Safe fallback to raw payload on error.
-      let effective = payload;
-      let ingestResult = null;
-      if (this.smartIngestRouter) {
-        try {
-          const routed = await this.smartIngestRouter.route(payload);
-          // Tree-shape: gdocs/gemini/slack-thread/gmail-thread emit
-          //   { parent, children } — engine.ingestMemoryTree handles it.
-          if (routed && !Array.isArray(routed) && routed.parent) {
-            const treeRes = await this.memoryEngine.ingestMemoryTree(routed);
-            await this._postIngestHooks(routed.parent, { memoryId: treeRes?.parentId }, userId);
-            return;
-          }
-          if (Array.isArray(routed) && routed.length > 0) {
-            effective = routed[0];
-          }
-        } catch (routeErr) {
-          console.warn('[sync-engine] route failed, using raw payload:', routeErr.message);
-        }
-      }
-      ingestResult = await this.memoryEngine.ingestMemory(effective);
-      await this._postIngestHooks(effective, ingestResult, userId);
+      throw Object.assign(new Error('canonical connector ingestion unavailable'), { code: 'CANONICAL_INGEST_UNAVAILABLE', statusCode: 503 });
     } catch (error) {
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt);

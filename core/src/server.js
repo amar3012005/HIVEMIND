@@ -560,6 +560,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma && shouldRunConnec
     smartIngestRouter,
     externalRefStore,
     entityResolver,
+    getCanonicalIngestion: () => documentFirstIngestion,
     // qdrantClient injected post-construction (see below) — not yet defined
     // at this point in file load order.
   });
@@ -8919,6 +8920,7 @@ exit \$RC
             externalRefStore,
             entityResolver,
             qdrantClient,
+            getCanonicalIngestion: () => documentFirstIngestion,
           });
 
           const incremental = body.incremental !== false;
@@ -12508,6 +12510,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -12546,6 +12549,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -12612,6 +12616,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   await engine.runSync({
                     adapter,
@@ -13788,7 +13793,7 @@ exit \$RC
               const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
               const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient });
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion: () => documentFirstIngestion });
 
               const cursor = conn.metadata?.cursor || decoded.historyId;
               const accessToken = decryptToken(conn.access_token_encrypted);
@@ -13978,6 +13983,7 @@ exit \$RC
                 externalRefStore,
                 entityResolver,
                 qdrantClient,
+                getCanonicalIngestion: () => documentFirstIngestion,
               });
               const syncId = crypto.randomUUID();
               setImmediate(async () => {
@@ -14980,6 +14986,14 @@ exit \$RC
                 }, phase1Err.statusCode || 500);
               }
             }
+
+            // The old schema/chunk writer is intentionally unreachable. Keeping
+            // two enterprise ingestion implementations creates divergent
+            // memories, provenance, and relationship semantics.
+            return jsonResponse(res, {
+              error: 'canonical_ingest_unavailable',
+              message: 'Enterprise document ingestion is temporarily unavailable.',
+            }, 503);
 
             try {
               const { extractSchema } = await import('./knowledge/enterprise/extractor.js');

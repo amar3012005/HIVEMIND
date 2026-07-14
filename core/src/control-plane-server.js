@@ -7782,6 +7782,24 @@ Write the persona now.`;
         try {
           await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, taskRoom.id);
         } catch { /* goal best-effort */ }
+        // EVENT-DRIVEN outbound: an OUTREACH-tagged task auto-enables the org's
+        // Gmail connector on its room (when connected), so the first turn can
+        // produce a ready-to-send email (compose card) instead of downgrading
+        // to a text answer. Driven by the task's tag — no task is hardcoded.
+        if (String(task.tag || '').toUpperCase() === 'OUTREACH') {
+          try {
+            const g = await prisma.platformIntegration.findFirst({
+              where: { orgId: current.session.orgId, platformType: { in: ['gmail', 'google'] } },
+              select: { id: true },
+            }).catch(() => null);
+            if (g) {
+              await prisma.$executeRawUnsafe(
+                'UPDATE "hivemind"."hyper_rooms" SET "enabled_connectors" = ARRAY[\'gmail\'] WHERE "id" = $1::uuid AND ("enabled_connectors" IS NULL OR cardinality("enabled_connectors") = 0)',
+                taskRoom.id,
+              );
+            }
+          } catch { /* best-effort — room still works as text */ }
+        }
         // Mark the task with its room in the persisted state.
         task.room_id = taskRoom.id;
         task.status = 'active';

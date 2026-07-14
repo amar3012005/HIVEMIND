@@ -2857,6 +2857,15 @@ async def _orchestrate_single_agent(
     # FORMAT (a ready-to-send email vs a generic report). If the artifact's connector isn't enabled
     # for the room, downgrade to a text answer — never write the wrong format or call an absent connector.
     intended_output = _derive_intended_output(req.user_message)
+    # EVENT-DRIVEN outreach intent: a room whose GOAL is outreach-shaped (the
+    # onboarding task's own text — "outreach", "cold email", "messaging" — rides
+    # into the room goal at task-open) upgrades a generic first turn to a
+    # ready-to-send EMAIL deliverable. No task is hardcoded: the trigger is the
+    # task's language, so any outreach-tagged task drives the compose card.
+    if intended_output == "answer" and re.search(
+            r"\b(outreach|cold[- ]?email|email (campaign|sequence|messaging)|messaging)\b",
+            f"{req.room_goal or ''}", re.I):
+        intended_output = "email"
     if not _artifact_connector_enabled(intended_output, conns):
         log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
                  intended_output, req.room_id, conns)

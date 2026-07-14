@@ -210,3 +210,16 @@ test('curated Updates use the atomic version operator', async () => {
     /unsupported curated relationship/,
   );
 });
+
+test('unified extraction retries an empty model response without lowering admission', async () => {
+  const service = Object.create(DocumentFirstIngestionService.prototype);
+  service.logger = { warn() {} };
+  let calls = 0;
+  service._extractUnified = async () => {
+    calls += 1;
+    return calls === 1 ? [] : [{ f: 'Approved policy.', importance: 0.9 }];
+  };
+  const result = await service._extractUnifiedReliable({ content: 'source' }, {});
+  assert.equal(calls, 2);
+  assert.equal(result.length, 1);
+});

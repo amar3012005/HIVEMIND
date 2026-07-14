@@ -767,6 +767,24 @@ Output the JSON object and nothing else.`;
     return normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance);
   }
 
+  async _extractUnifiedReliable(window, options = {}) {
+    const attempts = 1 + Math.max(0, Math.min(2, Number(process.env.KB_UNIFIED_EMPTY_RETRIES ?? 1)));
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const claims = await this._extractUnified(window, options);
+        if (claims.length || attempt === attempts) return claims;
+        this.logger.warn?.(`[kb-unified] empty extraction; retrying (${attempt}/${attempts})`);
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts) throw error;
+        this.logger.warn?.(`[kb-unified] extraction failed; retrying (${attempt}/${attempts}): ${error.message}`);
+      }
+    }
+    if (lastError) throw lastError;
+    return [];
+  }
+
   /**
    * Ingest ONE window via the unified extractor: create the fact memories (provenance +
    * canonical entity tags), contextual-embed them, and create the intra-window typed edges.
@@ -780,7 +798,7 @@ Output the JSON object and nothing else.`;
     let facts = Array.isArray(preExtractedFacts) ? preExtractedFacts : [];
     if (!preExtractedFacts) {
       try {
-        facts = await this._extractUnified(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
+        facts = await this._extractUnifiedReliable(window, { entityContext, maxFacts: window.maxFacts || 8, docTitle });
       } catch (e) {
         this.logger.warn?.(`[kb-unified] extract failed: ${e.message}`);
         return [];
@@ -2606,7 +2624,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
             w.maxFacts = grant;
             let claims = [];
             try {
-              claims = await this._extractUnified(w, { entityContext: '', maxFacts: w.maxFacts, docTitle });
+              claims = await this._extractUnifiedReliable(w, { entityContext: '', maxFacts: w.maxFacts, docTitle });
             } catch (error) {
               this.logger.warn?.(`[kb-unified] candidate extract failed: ${error.message}`);
             }

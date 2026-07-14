@@ -1436,7 +1436,10 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   const evLines = (evidence.evidence || []).slice(0, 8).map((e) => {
     const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
     const page = e.page ? ` p.${e.page}` : '';
-    const body = (e.content || e.snippet || '').replace(/\n/g, ' ').slice(0, 320);
+    // Evidence retrieval produces a query-centred snippet. Prefer it over the
+    // start of a long source segment so exact policy questions retain the
+    // matching sentence in the bounded answer prompt.
+    const body = (e.snippet || e.content || '').replace(/\n/g, ' ').slice(0, 520);
     return `[DOC/${doc}${page}] ${body}`;
   }).join('\n');
 

@@ -18,6 +18,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -39,6 +40,51 @@ _DISCLOSURE = {
     "es": "¡Hola! Soy TARA, un asistente de IA llamando en nombre de {company}. Puede finalizar esta llamada en cualquier momento.",
     "nl": "Hallo! Dit is TARA, een AI-assistent die belt namens {company}. U kunt dit gesprek op elk moment beëindigen.",
 }
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+# Cartesia Sonic transcript rules (docs: formatting-text-for-sonic) folded into
+# the persona prompt so the LLM emits TTS-clean text. Sonic reads capitalized
+# acronyms letter-by-letter only when spelled with spaces/<spell>; raw ALL-CAPS
+# words can be mis-read — hence the explicit rules below.
+_TTS_STYLE_CARTESIA = (
+    " SPOKEN-OUTPUT RULES (text-to-speech): write exactly what should be spoken."
+    " End every reply with punctuation. Never use quotation marks unless quoting"
+    " someone. Say URLs with the word dot (singulance dot com), never bare '.'."
+    " Dates as MM/DD/YYYY; times like 7 PM with a space. For acronyms that must"
+    " be spelled out (API, CRM, EU), keep them under 4 letters or write them as"
+    " letters with spaces. Avoid ALL-CAPS words for emphasis — Sonic may spell"
+    " them out; use wording for emphasis instead. Use - for a short pause. Use"
+    " ?? to emphasize a question. No markdown, no lists, no emojis."
+)
+
+
+def build_speak(voice_id: Optional[str], language: str) -> dict:
+    """The Settings.agent.speak block for the configured provider.
+
+    cartesia → BYO endpoint (tts/bytes) on the SAME Deepgram agent: Sonic voice,
+    ~225ms ttfb measured from the box, and the connection bills at the BYO-TTS
+    tier. voice_id is honored only when it is a Cartesia voice UUID; an Aura
+    model name (persona default) falls back to the configured Cartesia voice.
+    Anything else (or no key) → Deepgram Aura-2, byte-identical to before.
+    """
+    if config.SPEAK_PROVIDER == "cartesia" and config.CARTESIA_API_KEY:
+        cart_voice = voice_id if (voice_id and _UUID_RE.match(voice_id)) else config.CARTESIA_VOICE_ID
+        return {
+            "provider": {
+                "type": "cartesia",
+                "model_id": config.CARTESIA_MODEL,
+                "voice": {"mode": "id", "id": cart_voice},
+                "language": (language or "en").split("-")[0],
+            },
+            "endpoint": {
+                "url": config.CARTESIA_TTS_URL,
+                "headers": {"x-api-key": config.CARTESIA_API_KEY},
+            },
+        }
+    return {"provider": {"type": "deepgram",
+                         "model": voice_id or config.DEEPGRAM_SPEAK_MODEL}}
 
 
 def build_settings(*, session_id: str, user_id: Optional[str], org_id: Optional[str],
@@ -67,11 +113,12 @@ def build_settings(*, session_id: str, user_id: Optional[str], org_id: Optional[
                     "url": f"{config.PUBLIC_HTTP_BASE}/think/v1/chat/completions?{qs}",
                     "headers": {"authorization": f"Bearer {config.THINK_SHIM_SECRET}"},
                 },
-                "prompt": prompt,
+                "prompt": prompt + (_TTS_STYLE_CARTESIA
+                                    if config.SPEAK_PROVIDER == "cartesia" and config.CARTESIA_API_KEY
+                                    else ""),
                 "functions": FUNCTION_DEFS,
             },
-            "speak": {"provider": {"type": "deepgram",
-                                   "model": voice_id or config.DEEPGRAM_SPEAK_MODEL}},
+            "speak": build_speak(voice_id, language),
             "greeting": (disclosure + (" " + greeting_extra if greeting_extra else "")).strip(),
         },
     }
@@ -242,12 +289,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                         # call: switch speak to the default authorized English voice.
                         if "speak" in desc and "authorized" in desc:
                             try:
+                                # Recover onto the CONFIGURED provider (Cartesia stays
+                                # Cartesia with its default voice — no silent mid-call
+                                # revert to Aura), voice reset to the known-good default.
                                 await dg.send(json.dumps({
                                     "type": "UpdateSpeak",
-                                    "speak": {"provider": {"type": "deepgram",
-                                                           "model": config.DEEPGRAM_SPEAK_MODEL}},
+                                    "speak": build_speak(None, language),
                                 }))
-                                log.info("recovered speak → %s session=%s", config.DEEPGRAM_SPEAK_MODEL, session_id)
+                                log.info("recovered speak → provider=%s session=%s", config.SPEAK_PROVIDER, session_id)
                             except Exception:  # noqa: BLE001
                                 pass
                     elif mtype == "AgentStartedSpeaking":

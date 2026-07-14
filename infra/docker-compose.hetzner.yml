@@ -188,23 +188,29 @@ services:
     ports:
       - "${BROKER_PORT:-8790}:8790"
 
-  # ── Voice agent (TARA) — buildable from this repo ──
-  tara:
-    build: { context: ../services/tara-aaas }
-    image: hivemind/tara-aaas:${VERSION:-latest}
-    container_name: hm-tara
+  # ── Voice agent (TARA) — Deepgram orchestration + managed telephony ──
+  tara-deepgram:
+    build: { context: ../services/tara-deepgram }
+    image: hivemind/tara-deepgram:${VERSION:-latest}
+    container_name: tara-deepgram
     restart: unless-stopped
+    env_file:
+      - ${TARA_DEEPGRAM_ENV_FILE:-/opt/tara-deepgram/.env}
     environment:
       HIVEMIND_API_KEY: ${HIVEMIND_MASTER_API_KEY}
-      HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
-      HIVEMIND_TARA_STREAM_URL: http://core:3000
-      GROQ_API_KEY: ${GROQ_API_KEY}
-      CARTESIA_API_KEY: ${CARTESIA_API_KEY:-}
-      CARTESIA_VOICE_ID: ${CARTESIA_VOICE_ID:-}
-      GROQ_WHISPER_MODEL: ${GROQ_WHISPER_MODEL:-whisper-large-v3-turbo}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    depends_on: [core]
-    profiles: ["full"]   # `docker compose --profile full up -d` to include voice/extras
+      HIVEMIND_TARA_STREAM_URL: http://core:3000/api/tara/stream
+    ports:
+      - "${TARA_DEEPGRAM_PORT:-8091}:8091"
+    volumes:
+      - /opt/tara-deepgram/call-logs:/data/call-logs
+    depends_on:
+      core: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ── Hermes (agent gateway) — buildable from services/hm-hermes ──
   hermes:

@@ -31,6 +31,16 @@ DEEPGRAM_AGENT_URL = os.getenv(
 DEEPGRAM_SPEAK_MODEL = os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-thalia-en")
 DEEPGRAM_LISTEN_MODEL = os.getenv("DEEPGRAM_LISTEN_MODEL", "nova-3")
 
+# ── Speak provider: "deepgram" (Aura-2, default) | "cartesia" (Sonic, BYO key).
+# Cartesia rides the SAME Deepgram agent as a BYO speak endpoint (tts/bytes) —
+# STT/turn-taking/barge-in unchanged; also drops the agent to the BYO-TTS tier.
+SPEAK_PROVIDER = os.getenv("TARA_DG_SPEAK_PROVIDER", "deepgram").lower()
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
+CARTESIA_MODEL = os.getenv("TARA_DG_CARTESIA_MODEL", "sonic-3")
+# Default voice: "Skylar - Friendly Guide" (US female, support/care register).
+CARTESIA_VOICE_ID = os.getenv("TARA_DG_CARTESIA_VOICE", "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4")
+CARTESIA_TTS_URL = os.getenv("TARA_DG_CARTESIA_URL", "https://api.cartesia.ai/tts/bytes")
+
 # Public base URLs of THIS service (Deepgram + Telnyx call back into us).
 PUBLIC_HTTP_BASE = os.getenv("TARA_DG_PUBLIC_HTTP", "https://core.singulancelabs.com/voice2")
 PUBLIC_WS_BASE   = os.getenv("TARA_DG_PUBLIC_WS",   "wss://core.singulancelabs.com/voice2")

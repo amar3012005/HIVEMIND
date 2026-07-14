@@ -2,7 +2,7 @@
 // Seeds an outbound_actions row, feeds an inbound thread (no SENT label) and a
 // sent-only thread, asserts: replied set once, idempotent, own-copy ignored.
 import { PrismaClient } from '@prisma/client';
-import { GmailAdapter } from './src/connectors/providers/gmail/adapter.js';
+import { GmailAdapter } from '../src/connectors/providers/gmail/adapter.js';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 const prisma = new PrismaClient();

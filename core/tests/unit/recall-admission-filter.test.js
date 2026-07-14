@@ -17,6 +17,14 @@ test('filters legacy low-salience durable KB promotions', () => {
   assert.deepEqual(filterLowSaliencePromotedMemories([noise, useful], 0.65), [useful]);
 });
 
+test('filters legacy structured-source rows even when old importance is inflated', () => {
+  const css = {
+    id: 'css', memory_type: 'fact', importance_score: 1,
+    content: '.blue{color:var(--blue-deep);}', tags: ['distilled-from-kb'],
+  };
+  assert.deepEqual(filterLowSaliencePromotedMemories([css], 0.65), []);
+});
+
 test('preserves summaries, syntheses, raw memories, and admitted durable claims', () => {
   const rows = [
     { id: 'summary', ...promoted('summary', 0.45) },

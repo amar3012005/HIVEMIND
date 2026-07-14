@@ -69,6 +69,21 @@ test('unified promotion retains low-salience content as evidence instead of memo
   assert.deepEqual(claims.map((claim) => claim.t), ['Retention period']);
 });
 
+test('unified promotion keeps markup and style code as evidence only', () => {
+  const source = '.blue{color:var(--blue-deep);} The approved retention period is seven years.';
+  const claims = normalizeUnifiedClaims([
+    {
+      t: 'CSS', f: '.blue{color:var(--blue-deep);}', memory_type: 'fact',
+      source_quote: '.blue{color:var(--blue-deep);}', importance: 1, entities: ['CSS'], rels: [],
+    },
+    {
+      t: 'Retention', f: 'The approved retention period is seven years.', memory_type: 'fact',
+      source_quote: 'The approved retention period is seven years.', importance: 0.9, entities: [], rels: [],
+    },
+  ], source, 8, 0.65);
+  assert.deepEqual(claims.map((claim) => claim.t), ['Retention']);
+});
+
 test('document curation merges support without losing source provenance', () => {
   const candidates = [
     { t: 'Retention', f: 'Retention is seven years.', memory_type: 'fact', importance: 0.9, entities: ['Policy'], segmentId: 's1', source_quote: 'Retention is seven years.' },

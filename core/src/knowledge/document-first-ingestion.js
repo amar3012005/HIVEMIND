@@ -33,6 +33,7 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
+import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
@@ -70,6 +71,8 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
       && typeof item.source_quote === 'string' && item.source_quote.length >= 4
       && content.includes(item.source_quote)
+      && !isStructuredSourceNoise(item.f)
+      && !isStructuredSourceNoise(item.source_quote)
       // The source remains recallable even when its claim is not durable enough.
       && normalizedImportance(item.importance) >= threshold)
     .slice(0, maxFacts)

@@ -12,7 +12,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { memoryChatFetch } from '../llm/groq-fallback.js';
+import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 

@@ -105,3 +105,8 @@
 - Gmail-style compose card for agent email sends: From/To/Subject schema, body types in realtime, one-click Send, per-room "Automate from next turn" toggle (auto-approves after typing completes; same HITL endpoint). TARA outbound calls show a ringing popup (pulse rings → in-progress → dismiss).
 - FE-only (new LiveActionCards.jsx + HyperAgents.jsx wiring). Released by scripts/release-singulance.sh; markers verified in served chunk 84.bf19852e; public 200 ×4.
 - Rollback: script-created rollback tag + env backups.
+
+## prod-20260714-f0f63bc3 — Event-driven outreach email (task tag → gmail room → email deliverable)
+- **Parent:** `feat/outreach-email-intent` @ `f0f63bc3` off singulance-main ada8c880. FE unchanged.
+- OUTREACH-tagged task rooms auto-enable the org's gmail connector (when connected, only if the room had none); outreach-shaped room goals upgrade a generic first turn to intended_output=email → agents draft a ready-to-send email → compose card. No task hardcoding — tag + task language drive it.
+- Released via scripts/release-singulance.sh (control-plane + employees rebuilt, health-gated, smoke 200×4).

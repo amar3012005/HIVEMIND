@@ -75,5 +75,7 @@ screen recording captured for the actual tenant.
 ## Current test status
 
 - Passed on `2026-07-14`: authenticated bootstrap, teams, projects, org projects, outcomes, and company context for the MANDI tenant; public homepage, login, Overview, API/Core/TARA health; release image and frontend chunk markers; fresh fatal/unhandled log check.
-- Observed on `2026-07-14`: MANDI fact recall for `what do you know about me` returned `200` in `1.57s` with `cutoff_reason=latency_budget` and no memory/evidence. This is not a grounding pass; verify the tenant's saved sources and repeat with a known document or memory before diagnosing retrieval.
+- Passed on `2026-07-14`: authenticated MANDI document browser returned all `37` parsed documents through the live `/v1/proxy/documents` contract. The tenant has `937` source segments and `199` evidence links in the active `hivemind` schema.
+- Observed on `2026-07-14`: MANDI fact recall for `what do you know about me` returned `200` in `1.57s` with `cutoff_reason=latency_budget` and no memory/evidence. This was an unrelated query, not data loss: the same tenant has source records. Repeat using a known document title or durable memory before diagnosing retrieval.
+- Remaining policy check: verify that an authorized non-uploader organization member sees the intended shared documents. The list route currently scopes by both user and organization, so this must be an explicit product decision before widening access.
 - Still required: user-driven UI flow, document ingest/recall/chat evidence, HyperAgents room run, Gmail reply loop with a dedicated test connection, optional permitted TARA call, and Stripe checkout only when a deliberate payment test is requested.

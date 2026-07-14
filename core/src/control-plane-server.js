@@ -101,6 +101,10 @@ const CONFIG = {
   corePublicBaseUrl: process.env.HIVEMIND_CORE_API_PUBLIC_URL
     || process.env.HIVEMIND_CORE_PUBLIC_URL
     || 'https://core.hivemind.davinciai.eu:8050',
+  // INTERNAL — tara-aaas voice service (outbound dialing lives here). Docker
+  // hostname by default; the outbound call bridge (/v1/hyper-rooms/:id/call)
+  // posts to {taraAaasBaseUrl}/calls/outbound, which enforces the allowlist.
+  taraAaasBaseUrl: process.env.HIVEMIND_TARA_AAAS_URL || 'http://tara-aaas:8090',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: process.env.HIVEMIND_CONTROL_PLANE_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me',
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
@@ -8295,6 +8299,53 @@ Write the persona now.`;
         return jsonResponse(res, { ok: true, sent: true, to, subject, result }, 200);
       } catch (err) {
         console.warn('[hyper-rooms] send-email failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper-rooms/:id/call — channel 2 of the closed loop: place a
+    // REAL outbound TARA call from a room. Body: { to, goal? }. The user's
+    // click IS the approval (same trust model as send-email). Proxies to the
+    // tara-aaas outbound API, which enforces the TELNYX_ALLOWED_NUMBERS
+    // allowlist server-side (a 400 from there surfaces as-is). On successful
+    // dial, writes the outbound_actions ledger row (channel=call); the
+    // /api/tara/calls/end path later fills outcome completed/booked by the
+    // session_id carried in meta.
+    const roomCallMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/call$/);
+    if (roomCallMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const roomId = roomCallMatch[1];
+      const body = await parseBody(req);
+      const to = String(body.to || '').trim();
+      if (!/^\+[1-9]\d{6,14}$/.test(to)) {
+        return jsonResponse(res, { error: 'to must be an E.164 phone number (e.g. +4915112345678)' }, 400);
+      }
+      try {
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId, archivedAt: null } });
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        const taraBase = CONFIG.taraAaasBaseUrl;
+        const sessionId = `hyper-${roomId.slice(0, 8)}-${Date.now()}`;
+        const r = await fetch(`${taraBase}/calls/outbound`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to, session_id: sessionId, user_id: room.userId, org_id: room.orgId }),
+          signal: AbortSignal.timeout(20000),
+        }).catch(() => null);
+        if (!r) return jsonResponse(res, { error: 'TARA outbound service unreachable' }, 503);
+        const tx = await r.text();
+        let result; try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
+        if (!r.ok) return jsonResponse(res, { error: result?.error || `dial failed (${r.status})`, result }, r.status === 400 ? 400 : 502);
+        // Ledger: the dial actually went out (value action, channel 2).
+        recordOutboundAction({
+          orgId: room.orgId, userId: room.userId, roomId,
+          channel: 'call', recipient: to,
+          messageId: result?.call_leg_id || null,
+          meta: { via: 'room-call', session_id: sessionId, goal: String(body.goal || '').slice(0, 300) || undefined },
+        }).catch(() => {});
+        return jsonResponse(res, { ok: true, dialing: true, session_id: sessionId, call_leg_id: result?.call_leg_id || null }, 200);
+      } catch (err) {
+        console.warn('[hyper-rooms] call failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
     }

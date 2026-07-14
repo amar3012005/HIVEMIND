@@ -92,12 +92,12 @@ _E164 = re.compile(r"^\+[1-9]\d{7,14}$")
 async def dial(req: DialRequest) -> dict:
     """Dial via the configured provider; register metadata for stream routing.
 
-    Allowlist is OPT-IN: if TELNYX_/TWILIO_ALLOWED_NUMBERS is set, dialing is
-    restricted to it (dev safety); if empty, any valid E.164 the operator enters
-    in the FE is dialed. Only a format check is enforced when open."""
+    Outbound dialing is fail-closed: the destination must be present in the
+    configured Telnyx/Twilio allowlist. This gate is shared by room calls and
+    campaigns, so no caller can bypass it through a different route."""
     if not _E164.match(req.to or ""):
         raise ValueError(f"Number {req.to!r} is not valid E.164 (e.g. +4915772925738).")
-    if config.ALLOWED_NUMBERS and req.to not in config.ALLOWED_NUMBERS:
+    if req.to not in config.ALLOWED_NUMBERS:
         raise ValueError(f"Number {req.to!r} not in the configured allowlist.")
     if config.TELEPHONY_PROVIDER == "twilio":
         return await _dial_twilio(req)

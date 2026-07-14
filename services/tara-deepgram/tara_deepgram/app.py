@@ -11,6 +11,7 @@ import asyncio
 import logging
 
 import httpx
+import re
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,9 +127,53 @@ async def _aura_catalog() -> list[dict]:
     return _voice_cache["voices"] or _AURA_FALLBACK
 
 
+_cartesia_cache: dict = {"at": 0.0, "voices": []}
+
+
+async def _cartesia_catalog() -> list[dict]:
+    """Cartesia public voice catalog, mapped to the same shape as Aura's."""
+    import time as _t
+    if _cartesia_cache["voices"] and _t.time() - _cartesia_cache["at"] < 3600:
+        return _cartesia_cache["voices"]
+    try:
+        out = []
+        async with httpx.AsyncClient(timeout=15) as c:
+            nxt = "https://api.cartesia.ai/voices/?limit=100&is_owner=false"
+            for _ in range(5):  # paginate, cap ~500 voices
+                r = await c.get(nxt, headers={
+                    "Authorization": f"Bearer {config.CARTESIA_API_KEY}",
+                    "Cartesia-Version": "2025-04-16"})
+                if r.status_code != 200:
+                    break
+                j = r.json() or {}
+                for v in j.get("data", []):
+                    out.append({
+                        "id": v.get("id"),
+                        "name": v.get("name", ""),
+                        "gender": v.get("gender", ""),
+                        "language": v.get("language", "en"),
+                        "description": (v.get("description") or "")[:90],
+                    })
+                if not j.get("has_more") or not j.get("data"):
+                    break
+                nxt = f"https://api.cartesia.ai/voices/?limit=100&is_owner=false&starting_after={j['data'][-1]['id']}"
+        if out:
+            out.sort(key=lambda v: (v["language"] != "en", v["language"], v["name"]))
+            _cartesia_cache.update({"at": _t.time(), "voices": out})
+            return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("cartesia catalog fetch failed: %s", e)
+    return _cartesia_cache["voices"]
+
+
 @app.get("/voices")
 async def list_voices(language: str | None = None, gender: str | None = None):
-    catalog = await _aura_catalog()
+    # Catalog follows the ACTIVE speak provider — the picker must offer voices
+    # the call will actually use (Cartesia Sonic when TARA_DG_SPEAK_PROVIDER=cartesia).
+    if config.SPEAK_PROVIDER == "cartesia" and config.CARTESIA_API_KEY:
+        catalog = await _cartesia_catalog() or await _aura_catalog()
+    else:
+        catalog = await _aura_catalog()
     out = [v for v in catalog if not language or v["language"] == language]
     if gender:
         g = gender.lower()[:3]  # 'fem'/'mas' matches feminine/masculine
@@ -139,11 +184,28 @@ async def list_voices(language: str | None = None, gender: str | None = None):
 
 @app.get("/voice-preview")
 async def voice_preview(voice_id: str, text: str | None = None, language: str = "en"):
-    if not config.DEEPGRAM_API_KEY:
-        return JSONResponse({"error": "tts_unavailable"}, status_code=503)
-    import httpx
     from fastapi.responses import Response
     sample = (text or "Hi, this is how I sound. How can I help you today?")[:200]
+    # Cartesia voice ids are UUIDs — preview through the SAME engine the call uses.
+    if re.match(r"^[0-9a-f-]{36}$", voice_id, re.I) and config.CARTESIA_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.post(config.CARTESIA_TTS_URL,
+                    headers={"Authorization": f"Bearer {config.CARTESIA_API_KEY}",
+                             "Cartesia-Version": "2025-04-16",
+                             "Content-Type": "application/json"},
+                    json={"model_id": config.CARTESIA_MODEL, "transcript": sample,
+                          "voice": {"mode": "id", "id": voice_id},
+                          "language": (language or "en").split("-")[0],
+                          "output_format": {"container": "mp3", "sample_rate": 44100,
+                                            "bit_rate": 64000}})
+            if r.status_code != 200:
+                return JSONResponse({"error": "preview_failed", "detail": r.text[:200]}, status_code=502)
+            return Response(content=r.content, media_type="audio/mpeg")
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=502)
+    if not config.DEEPGRAM_API_KEY:
+        return JSONResponse({"error": "tts_unavailable"}, status_code=503)
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(

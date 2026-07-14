@@ -127,10 +127,9 @@ const CONFIG = {
   b2bCorePublicBaseUrl: process.env.HIVEMIND_B2B_CORE_API_PUBLIC_URL || '',
   b2cCoreApiBaseUrl: process.env.HIVEMIND_B2C_CORE_API_BASE_URL || '',
   b2cCorePublicBaseUrl: process.env.HIVEMIND_B2C_CORE_API_PUBLIC_URL || '',
-  // INTERNAL — tara-aaas voice service (outbound dialing lives here). Docker
-  // hostname by default; the outbound call bridge (/v1/hyper-rooms/:id/call)
-  // posts to {taraAaasBaseUrl}/calls/outbound, which enforces the allowlist.
-  taraAaasBaseUrl: process.env.HIVEMIND_TARA_AAAS_URL || 'http://tara-aaas:8090',
+  // INTERNAL — Deepgram TARA service. The outbound call bridge posts to its
+  // allowlisted Telnyx dial endpoint; the legacy tara-aaas service is not used.
+  taraDeepgramBaseUrl: process.env.HIVEMIND_TARA_DEEPGRAM_URL || 'http://tara-deepgram:8091',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: requireSessionSecret('HIVEMIND_CONTROL_PLANE_SESSION_SECRET', ['SESSION_SECRET']),
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
@@ -8444,7 +8443,7 @@ Write the persona now.`;
     // POST /v1/hyper-rooms/:id/call — channel 2 of the closed loop: place a
     // REAL outbound TARA call from a room. Body: { to, goal? }. The user's
     // click IS the approval (same trust model as send-email). Proxies to the
-    // tara-aaas outbound API, which enforces the TELNYX_ALLOWED_NUMBERS
+    // tara-deepgram outbound API, which enforces the configured phone
     // allowlist server-side (a 400 from there surfaces as-is). On successful
     // dial, writes the outbound_actions ledger row (channel=call); the
     // /api/tara/calls/end path later fills outcome completed/booked by the
@@ -8462,12 +8461,18 @@ Write the persona now.`;
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId, archivedAt: null } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-        const taraBase = CONFIG.taraAaasBaseUrl;
+        const taraBase = CONFIG.taraDeepgramBaseUrl;
         const sessionId = `hyper-${roomId.slice(0, 8)}-${Date.now()}`;
         const r = await fetch(`${taraBase}/calls/outbound`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to, session_id: sessionId, user_id: room.userId, org_id: room.orgId }),
+          body: JSON.stringify({
+            to,
+            session_id: sessionId,
+            user_id: room.userId,
+            org_id: room.orgId,
+            goal: String(body.goal || '').slice(0, 300) || undefined,
+          }),
           signal: AbortSignal.timeout(20000),
         }).catch(() => null);
         if (!r) return jsonResponse(res, { error: 'TARA outbound service unreachable' }, 503);

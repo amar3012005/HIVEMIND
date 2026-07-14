@@ -23,6 +23,24 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from . import config
 from .agent_session import build_settings
+
+# Instant openings when no call goal is set (goal → plan_opening strategist).
+_WIDGET_GREETING_INTERNAL = {
+    "en": "Hi, I'm TARA — your company's HIVEMIND. Ask me anything about what we know.",
+    "de": "Hallo, ich bin TARA — das HIVEMIND Ihres Unternehmens. Fragen Sie mich, was Sie wissen möchten.",
+    "fr": "Bonjour, je suis TARA — le HIVEMIND de votre entreprise. Posez-moi vos questions.",
+    "es": "Hola, soy TARA — el HIVEMIND de su empresa. Pregúnteme lo que quiera saber.",
+    "nl": "Hallo, ik ben TARA — het HIVEMIND van uw bedrijf. Stel me gerust uw vragen.",
+    "it": "Ciao, sono TARA — l'HIVEMIND della vostra azienda. Chiedetemi pure.",
+}
+_WIDGET_GREETING_EXTERNAL = {
+    "en": "Hi, this is TARA. Thanks for taking a moment — how can I help you today?",
+    "de": "Hallo, hier ist TARA. Schön, dass Sie da sind — wie kann ich Ihnen helfen?",
+    "fr": "Bonjour, ici TARA. Merci de votre temps — comment puis-je vous aider ?",
+    "es": "Hola, soy TARA. Gracias por su tiempo — ¿en qué puedo ayudarle?",
+    "nl": "Hallo, dit is TARA. Fijn dat u er bent — waarmee kan ik u helpen?",
+    "it": "Ciao, sono TARA. Grazie per il suo tempo — come posso aiutarla?",
+}
 from .core_client import core_post
 
 log = logging.getLogger("tara_dg.browser")
@@ -67,12 +85,24 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
         "input":  {"encoding": "linear16", "sample_rate": 16000},
         "output": {"encoding": "linear16", "sample_rate": 16000, "container": "none"},
     }
-    # Web widget mode: no phone functions, no outbound disclosure greeting.
+    # Web widget mode: no phone functions, no outbound telephony disclosure.
+    # (mode + goal already ride the think endpoint URL via build_settings.)
     settings["agent"]["think"].pop("functions", None)
-    settings["agent"]["greeting"] = ""
-    if mode:  # per-call mode rides the think endpoint URL
-        think = settings["agent"]["think"]["endpoint"]
-        think["url"] = think["url"].replace("mode=external", f"mode={mode}")
+    # TARA SPEAKS FIRST — same strategist as outbound dialing: with a goal set,
+    # plan_opening (skill persona + goal) crafts the opening line; without one,
+    # an instant mode-appropriate greeting so the widget never sits silent.
+    opening = ""
+    if goal:
+        from .turn_router import plan_opening
+        plan = await plan_opening(persona_prompt=skill_prompt, goal=goal,
+                                  company="the company", language=language)
+        opening = (plan.get("opening") or "").strip()
+    if not opening:
+        opening = (_WIDGET_GREETING_INTERNAL if mode == "internal"
+                   else _WIDGET_GREETING_EXTERNAL).get(
+            language, (_WIDGET_GREETING_INTERNAL if mode == "internal"
+                       else _WIDGET_GREETING_EXTERNAL)["en"])
+    settings["agent"]["greeting"] = opening
 
     closed = asyncio.Event()
     try:

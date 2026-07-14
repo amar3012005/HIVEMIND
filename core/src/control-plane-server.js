@@ -7763,10 +7763,25 @@ Write the persona now.`;
             // the kickoff again whenever the room has no turns; the FE's stable
             // idempotency key makes a double-post harmless.
             const turnCount = await prisma.hyperTurn.count({ where: { roomId: existing.id } }).catch(() => 1);
-            return jsonResponse(res, {
-              room: existing, task,
-              ...(turnCount === 0 ? { kickoff_message: kickoff } : {}),
-            });
+            if (turnCount === 0) {
+              try {
+                const kickTurn = await prisma.hyperTurn.create({
+                  data: { roomId: existing.id, seq: 1, userMessage: kickoff, status: 'live',
+                          idempotencyKey: `task-kickoff-${existing.id}`, lines: [] },
+                });
+                const rr = await prisma.hyperRoom.findUnique({
+                  where: { id: existing.id }, select: { participantIds: true, goal: true, projectId: true },
+                }).catch(() => null);
+                dispatchHyperRoomTurn({
+                  room_id: existing.id, turn_id: kickTurn.id,
+                  user_id: current.session.userId, org_id: current.session.orgId,
+                  user_message: kickoff, participant_ids: rr?.participantIds || [],
+                  project_id: rr?.projectId || null, room_goal: rr?.goal || '',
+                  callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+                }).catch((e) => console.warn('[hyper-tasks] re-open kickoff dispatch failed:', e.message));
+              } catch (e) { console.warn('[hyper-tasks] re-open kickoff failed:', e.message || e); }
+            }
+            return jsonResponse(res, { room: existing, task });
           }
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
@@ -7816,7 +7831,8 @@ Write the persona now.`;
         // task's own kickoff text is the turn, agents start immediately.
         try {
           const kickTurn = await prisma.hyperTurn.create({
-            data: { roomId: taskRoom.id, seq: 1, userMessage: kickoff, status: 'live', lines: [] },
+            data: { roomId: taskRoom.id, seq: 1, userMessage: kickoff, status: 'live',
+                    idempotencyKey: `task-kickoff-${taskRoom.id}`, lines: [] },
           });
           const roomRow2 = await prisma.hyperRoom.findUnique({
             where: { id: taskRoom.id }, select: { participantIds: true, goal: true, projectId: true },
@@ -7828,7 +7844,7 @@ Write the persona now.`;
             project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }).catch((e) => console.warn('[hyper-tasks] kickoff dispatch failed:', e.message));
-        } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message); }
+        } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message || e.code || e); }
         return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
       } catch (err) {
         if (err?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, err);

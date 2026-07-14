@@ -120,3 +120,7 @@
 - **Parent:** `fix/kickoff-idempotency` @ `c24e4f8e` off singulance-main 98d9d307. FE unchanged.
 - Root cause of silent task rooms: kickoff hyperTurn.create omitted NOT NULL idempotency_key → insert failed silently. Fixed (`task-kickoff-<roomId>`, also dedupes double-clicks) + re-opening a 0-turn task room now dispatches its kickoff.
 - LIVE PROOF: re-opened task t5 ("Prepare Outreach Materials", OUTREACH) on room 61b523f5 → turn created, agents ran unprompted: 28 events incl. skill_used + plan + seal. Task auto-start verified end-to-end.
+
+## prod-20260714-8fa3eebe → f86ba45b → c2779ecd — Reconcile + outbound email chain completed
+- 8fa3eebe: merge of codex/ingestion-production-reconcile (31 ingestion commits, forked fd90e579) + fix/google-native-token-fallback into canon. c2779ecd: gmail native connect now requests compose+send scopes (drafts/sends 403'd on readonly grants — RECONNECT Gmail required for pre-existing connections). f86ba45b: next_tasks suggestion event + FE cards merged.
+- Debug trail on live room 61b523f5: "not connected" (Nango-only token resolution; fixed by platform_integrations fallback) → Google 403 (readonly scope; fixed by compose+send). Lesson recorded: canon MUST be fast-forwarded at acceptance, immediately — the 9d09a0ad collision happened because 4882225c was released but never merged to canon.

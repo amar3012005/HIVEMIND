@@ -224,6 +224,19 @@ test('unified extraction retries an empty model response without lowering admiss
   assert.equal(result.length, 1);
 });
 
+test('unified extraction retries sparse long-document coverage and keeps the better set', async () => {
+  const service = Object.create(DocumentFirstIngestionService.prototype);
+  service.logger = { warn() {} };
+  let calls = 0;
+  service._extractUnified = async () => {
+    calls += 1;
+    return Array.from({ length: calls === 1 ? 2 : 3 }, (_, index) => ({ f: `Claim ${index}` }));
+  };
+  const result = await service._extractUnifiedReliable({ content: 'x'.repeat(800) }, { maxFacts: 6 });
+  assert.equal(calls, 2);
+  assert.equal(result.length, 3);
+});
+
 test('unified promotion replaces language-code titles and rejects value entities', () => {
   const source = 'FOREST approved a 12 percent threshold on 1 August 2026.';
   const [claim] = normalizeUnifiedClaims([{

@@ -1,5 +1,10 @@
 # HIVEMIND Deploy Runbook — NOW tier (immutable images + rollback)
 
+> **SUPERSEDED FOR CURRENT SINGULANCE PRODUCTION.** Follow
+> [`PRODUCTION_RELEASE_PROTOCOL.md`](./PRODUCTION_RELEASE_PROTOCOL.md). This file
+> documents an older GHCR/multi-replica deployment design and its commands are not
+> current production instructions.
+
 **Problem this fixes:** prod ran stock `node:20` with `/opt/HIVEMIND/core` bind-mounted
 and deployed by `git pull` on the box. No immutable artifact → drift (the box's
 `main` once sat 383 commits behind on a stray branch; pulls aborted on local

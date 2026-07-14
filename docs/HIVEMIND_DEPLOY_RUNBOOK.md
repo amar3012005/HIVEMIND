@@ -1,5 +1,11 @@
 # HIVEMIND — Feature Build + Clean Deploy Runbook
 
+> **SUPERSEDED FOR PRODUCTION DEPLOYMENT.** Use
+> [`PRODUCTION_RELEASE_PROTOCOL.md`](./PRODUCTION_RELEASE_PROTOCOL.md) and
+> [`PRODUCTION_RELEASE.md`](./PRODUCTION_RELEASE.md). Commands below are retained
+> as historical implementation context and must not be executed against SINGULANCE
+> when they use mutable tags, shared checkouts, `scp`, or retired replicas.
+
 How any session should build a feature and ship it so it is **durable** (survives a
 container recreate) and **safe** (default-off, tested, no regression). Grounded in the
 real topology — verified 2026-07-13.

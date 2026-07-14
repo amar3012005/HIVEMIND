@@ -5,7 +5,9 @@ description: Use for every SINGULANCE production build, deployment, rollback, im
 
 # SINGULANCE Production Release Skill
 
-Read this before changing production.
+Read [`../docs/PRODUCTION_RELEASE_PROTOCOL.md`](../docs/PRODUCTION_RELEASE_PROTOCOL.md)
+and [`../docs/PRODUCTION_RELEASE.md`](../docs/PRODUCTION_RELEASE.md) before changing production.
+Those files are authoritative if this summary ever drifts.
 
 ## Host
 
@@ -14,32 +16,32 @@ verify that `46.224.4.164` is still the DNS target for the public production
 hosts, then use `ssh root@46.224.4.164`. Never use `myserver`; it is a
 different, older host.
 
-## Two-image rule
+## Image rule
 
-Each application service keeps exactly two deployable images:
+Production Compose runs only immutable `prod-YYYYMMDD-<parent-sha>` tags.
+Aliases are operator conveniences, not deployment inputs:
 
-- `stable`: the image currently serving before a promotion. This is rollback.
-- `latest`: the fully validated release being served after promotion.
+- `stable` and `latest`: the currently accepted release.
+- `rollback-<timestamp>`: the prior running digest retained for rollback.
 
 Application services are `core-api`, `control-plane`, `employees`, dashboard
-frontend (`fe:latest-single`), and homepage frontend (`fe:home-latest`).
+frontend (`fe:<release>-single`), and homepage frontend when explicitly included.
 Database, Redis, Qdrant, Docling, Nango, and other vendor images are upgraded
 only as explicit infrastructure changes; do not retag or prune their active
 images as application releases.
 
 ## Release contract
 
-1. Build immutable candidate tags from one committed root revision and one
-   committed frontend revision.
+1. Build immutable release tags from one pushed parent revision and its exact
+   pushed frontend gitlink revision, using clean detached worktrees.
 2. Run syntax, focused contract tests, and image smoke checks before promotion.
-3. Tag every running application image as `stable`.
-4. Tag the validated candidates as `latest`.
-5. Recreate the application services with `VERSION=latest` and
-   `NEXT_VERSION=latest`.
+3. Tag every running application image with a timestamped rollback tag.
+4. Pin `VERSION` and `NEXT_VERSION` to the immutable release ID.
+5. Render Compose config, then recreate one affected service at a time.
 6. Verify public health, authenticated bootstrap, login, memory access,
    HyperAgents, and frontend bundle labels.
-7. Remove candidate and superseded application tags. Keep only `stable` and
-   `latest`, then run `docker image prune -f` and `docker builder prune -af`.
+7. After acceptance, move `stable` and `latest` aliases to the accepted digest,
+   retain rollback tags, and prune only dangling images/build cache.
 
 ## Migration rule
 
@@ -50,7 +52,6 @@ migration chain on the live database.
 
 ## Immediate rollback
 
-Retag `stable` as `latest`, then recreate only the affected services. Check
-health before and after. Do not delete a `stable` image until the newer release
-has passed production smoke checks.
-
+Restore the prior immutable `VERSION`/`NEXT_VERSION` values (or timestamped
+rollback image tags), render Compose config, and recreate only affected services.
+Check health before and after; never repair a failed release tag in place.

@@ -5,10 +5,12 @@
 # for instant rollback. Replaces "git pull on the box + restart" (no artifact,
 # drift-prone — the 383-commits-behind / stash-dance failure mode).
 #
-# Usage:   IMAGE_TAG=<git-sha> ./scripts/deploy-image.sh
+# LEGACY DIRECT-SWAP TOOL. The production protocol uses Compose-pinned release
+# tags instead. This script is disabled unless explicitly acknowledged.
+# Usage:   ALLOW_LEGACY_DIRECT_SWAP=1 IMAGE_TAG=<git-sha> ./scripts/deploy-image.sh
 #   env:   IMAGE        registry/name (default ghcr.io/amar3012005/hivemind-core)
 #          IMAGE_TAG    REQUIRED — commit sha from CI (build-core-image workflow)
-#          CONTAINERS   space-separated core replica names (default "hm-core hm-core-2")
+#          CONTAINERS   space-separated core container names (default "hm-core")
 #          HEALTH_PATH  in-container health probe (default /health on :3000)
 #          STATE_DIR    where the last-good tag is recorded (default /opt/HIVEMIND/.deploy)
 #
@@ -16,9 +18,14 @@
 # its health smoke. Pair with scripts/rollback.sh.
 set -euo pipefail
 
+if [ "${ALLOW_LEGACY_DIRECT_SWAP:-}" != "1" ]; then
+  echo "[deploy-image] disabled: use docs/PRODUCTION_RELEASE_PROTOCOL.md and Compose-pinned immutable releases" >&2
+  exit 2
+fi
+
 IMAGE="${IMAGE:-ghcr.io/amar3012005/hivemind-core}"
 IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG is required (the git sha from CI)}"
-CONTAINERS="${CONTAINERS:-hm-core hm-core-2}"
+CONTAINERS="${CONTAINERS:-hm-core}"
 HEALTH_PATH="${HEALTH_PATH:-/health}"
 STATE_DIR="${STATE_DIR:-/opt/HIVEMIND/.deploy}"
 REF="${IMAGE}:${IMAGE_TAG}"

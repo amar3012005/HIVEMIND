@@ -18,4 +18,4 @@ if [ -z "$TARGET" ]; then
 fi
 
 echo "[rollback] redeploying previous tag: $TARGET"
-IMAGE_TAG="$TARGET" exec "$(dirname "$0")/deploy-image.sh"
+ALLOW_LEGACY_DIRECT_SWAP=1 IMAGE_TAG="$TARGET" exec "$(dirname "$0")/deploy-image.sh"

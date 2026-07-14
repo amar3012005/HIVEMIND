@@ -7149,6 +7149,18 @@ exit \$RC
               const { getUsageTrackerInstance } = await import('./billing/usage-tracker.js');
               getUsageTrackerInstance()?.recordDaily?.(call.orgId, 'tara')?.catch?.(() => {});
             } catch { /* never break call end */ }
+            // Closed-loop ledger: a room-initiated outbound call completed. Mark
+            // its outbound_actions row completed (insight below may upgrade to
+            // booked). Raw SQL + fire-and-forget — never breaks call end.
+            try {
+              await prisma.$executeRawUnsafe(
+                `UPDATE "hivemind"."outbound_actions"
+                    SET outcome = 'completed', outcome_at = now()
+                  WHERE org_id = $1::uuid AND channel = 'call'
+                    AND meta->>'session_id' = $2 AND outcome IS NULL`,
+                call.orgId, String(body.session_id),
+              );
+            } catch { /* ledger optional */ }
             const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
             const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
             if (transcript.trim() && process.env.GROQ_API_KEY) {
@@ -7166,6 +7178,20 @@ exit \$RC
                   const j = await r.json();
                   let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
                   await prisma.taraInsight.upsert({ where: { callId: call.id }, update: { summary: parsed.summary || null, data: parsed }, create: { callId: call.id, orgId: tOrg, userId: tUser, summary: parsed.summary || null, data: parsed } });
+                  // Closed-loop ledger upgrade: insight says a meeting was booked
+                  // (or a concrete lead landed) → outcome=booked on the room call.
+                  try {
+                    const booked = /book/i.test(String(parsed.goal_outcome || '')) || parsed.lead_found === true;
+                    if (booked) {
+                      await prisma.$executeRawUnsafe(
+                        `UPDATE "hivemind"."outbound_actions"
+                            SET outcome = 'booked', outcome_at = now()
+                          WHERE org_id = $1::uuid AND channel = 'call'
+                            AND meta->>'session_id' = $2 AND outcome IS DISTINCT FROM 'booked'`,
+                        tOrg, String(body.session_id),
+                      );
+                    }
+                  } catch { /* ledger optional */ }
 
                   // ONE call-log summary memory per call (replaces the old per-turn
                   // + per-insight memory spam). Postgres-only via store.createMemory

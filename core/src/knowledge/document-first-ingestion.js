@@ -827,6 +827,8 @@ Output the JSON object and nothing else.`;
     const idByIdx = new Array(facts.length).fill(null);
     const factObjs = [];
     const embedPending = [];
+    const evidenceLinks = [];
+    const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
@@ -837,7 +839,8 @@ Output the JSON object and nothing else.`;
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
-        ...(metadata.tags || []), 'extracted-fact', 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
+        ...(fact.memory_type === 'fact' ? ['extracted-fact'] : []),
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);
@@ -847,7 +850,7 @@ Output the JSON object and nothing else.`;
           scope: metadata.scope, visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: fact.f, title: fact.t, memory_type: 'fact', tags,
+          content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           document_date: metadata.document_date || null,
           source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
@@ -887,10 +890,14 @@ Output the JSON object and nothing else.`;
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: 'fact', is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
+    }
+    if (evidenceLinks.length) {
+      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
+      await this.db.memoryDerivation.createMany({ data: derivations, skipDuplicates: true });
     }
     // Intra-window typed edges (from the SAME structured call — coherent, no recall race).
     for (let i = 0; i < facts.length; i++) {
@@ -902,7 +909,7 @@ Output the JSON object and nothing else.`;
         try {
           await this.memoryGraphEngine.store.createRelationship({
             id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type, confidence: 0.85,
-            metadata: { created_by: 'kb_unified_v1', document_id: documentId, intra_window: true },
+            metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true },
           });
         } catch { /* best-effort; dup/FK tolerated */ }
       }

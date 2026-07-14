@@ -84,3 +84,11 @@
 - **Acceptance:** all app services on the immutable tag; public 200 ×4; authenticated /v1/hyper/outcomes returns counters; /v1/hyper/company carries outcomes; FE serves hive-shell-v5, BRAIN|Operating System|VOICE, landing hero, outcomes-strip chunk; fresh fatal/uncaught: 0 (log grep excludes room= OOM false-positive).
 - **Rollback:** tags rollback-<TS> (see docker images) + env backups + DB backup.
 - **Post-release:** singulance-main fast-forwarded (both repos) — THE deploy branch from now on. Remaining un-ported: feat/mneme-foundation deep engine/recall work (separate migration project).
+
+## prod-20260714-e7aa7a98 — Latency (Cerebras pin + 120b lanes) + room-stream stability + release script
+- **Parent:** `fix/latency-cerebras-pin` @ `e7aa7a98…` (+ script/ledger commits, tip f17807bd→this); FE `fix/room-stream-stability` @ `567da880…`. Off singulance-main 908f8202.
+- **Latency:** engine pin gpt-oss-120b → ["Cerebras","Groq","Together"]; env HYPER_AUTO_GATHER/AUTO_DEBATE/MODEL_RECON=openai/gpt-oss-120b. Measured live (turn 1e9b7d4e): engine 45s→14.5s, full turn incl. verify 90s→21s wall-clock; all calls provider=Cerebras.
+- **FE stability (post-synthesis blinking):** quiet seal refetch (no full-screen spinner), one-shot seal latch (SSE/poll race fired load() twice), identity-stable event merge (poll no longer forces 4 re-renders/sec).
+- **Ops:** scripts/release-singulance.sh — one-command protocol release (canon-descendant gate, clean worktree, selective build, health-gated recreates, smoke).
+- **Images:** employees 883934a5ec9e, fe fcbceedd5424 (rebuilt); rest retagged. No migrations.
+- **Rollback:** rollback-20260714-174903 + env backups `.bak-prod-20260714-e7aa7a98` (includes the model-env change).

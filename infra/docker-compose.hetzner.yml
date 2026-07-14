@@ -50,6 +50,9 @@ services:
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 2.0
     environment:
       <<: *common-env
       HOSTNAME: hm-core
@@ -64,7 +67,7 @@ services:
       qdrant:   { condition: service_started }
       redis:    { condition: service_started }
     ports:
-      - "${CORE_PORT:-2026}:3000"
+      - "127.0.0.1:${CORE_PORT:-2026}:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -78,16 +81,20 @@ services:
     container_name: hm-control
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1152m
+    cpus: 0.75
     environment:
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}
     volumes:
       - hivemind-data:/app/data        # share the BYOD registry file with core (selfhost/register writes it)
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }
     ports:
-      - "${CONTROL_PORT:-2027}:3000"
+      - "127.0.0.1:${CONTROL_PORT:-2027}:3000"
 
   employees:
     build: { context: ../employees-service }
@@ -95,6 +102,9 @@ services:
     container_name: hm-employees
     env_file: [../.env]
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1536m
+    cpus: 0.75
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -114,6 +124,9 @@ services:
     image: hivemind/postgres-age:15-age-custom
     container_name: hm-postgres
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 1.5
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hivemind_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -130,6 +143,9 @@ services:
     image: qdrant/qdrant:v1.12.4
     container_name: hm-qdrant
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 1.25
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     # Per-tenant collections each open many RocksDB segment files; default nofile=1024 → "Too many open
@@ -145,6 +161,9 @@ services:
     image: redis:7-alpine
     container_name: hm-redis
     restart: unless-stopped
+    mem_limit: 384m
+    memswap_limit: 576m
+    cpus: 0.25
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -153,6 +172,9 @@ services:
     image: nangohq/nango-server:hosted
     container_name: hm-nango
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1152m
+    cpus: 0.5
     environment:
       NANGO_DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=nango
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
@@ -160,12 +182,15 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "${NANGO_PORT:-3003}:3003"
+      - "127.0.0.1:${NANGO_PORT:-3003}:8080"
 
   docling:
     image: ghcr.io/docling-project/docling-serve:latest
     container_name: hm-docling
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 1.0
     volumes:
       - docling-models:/opt/app-root/src/.cache
 
@@ -177,8 +202,11 @@ services:
     image: hivemind/byod-broker:${VERSION:-latest}
     container_name: hm-byod-broker
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 384m
+    cpus: 0.25
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
+      DATABASE_URL: ${BROKER_DATABASE_URL:?set BROKER_DATABASE_URL for the BYOD broker}
       MNEME_AGENT_REGISTRY_FILE: /app/data/byod-agents.json
       BROKER_PORT: "8790"
     volumes:
@@ -186,7 +214,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "${BROKER_PORT:-8790}:8790"
+      - "127.0.0.1:${BROKER_PORT:-8790}:8790"
 
   # ── Voice agent (TARA) — Deepgram orchestration + managed telephony ──
   tara-deepgram:
@@ -194,13 +222,16 @@ services:
     image: hivemind/tara-deepgram:${VERSION:-latest}
     container_name: tara-deepgram
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1152m
+    cpus: 0.75
     env_file:
       - ${TARA_DEEPGRAM_ENV_FILE:-/opt/tara-deepgram/.env}
     environment:
       HIVEMIND_API_KEY: ${HIVEMIND_MASTER_API_KEY}
       HIVEMIND_TARA_STREAM_URL: http://core:3000/api/tara/stream
     ports:
-      - "${TARA_DEEPGRAM_PORT:-8091}:8091"
+      - "127.0.0.1:${TARA_DEEPGRAM_PORT:-8091}:8091"
     volumes:
       - /opt/tara-deepgram/call-logs:/data/call-logs
     depends_on:
@@ -235,6 +266,9 @@ services:
     image: hivemind/hm-playwright:${VERSION:-latest}
     container_name: hm-playwright
     restart: unless-stopped
+    mem_limit: 1536m
+    memswap_limit: 2304m
+    cpus: 0.75
 
   # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
   #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.

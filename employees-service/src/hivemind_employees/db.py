@@ -710,3 +710,26 @@ async def set_status(employee_id: str, status: str) -> None:
             "UPDATE hivemind.digital_employees SET status=$2, updated_at=NOW() WHERE id=$1",
             employee_id, status,
         )
+
+
+async def get_company_name(org_id: str) -> str:
+    """Canonical onboarded company name for the org (from the newest active
+    HQ room's persisted _company payload). '' when the org has no onboarded
+    company — callers treat that as missing company context."""
+    if not org_id:
+        return ""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT agent_connectors->'_company'->>'company' AS name "
+                "FROM hivemind.hyper_rooms "
+                "WHERE org_id = $1::uuid AND agent_connectors ? '_company' AND archived_at IS NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                org_id,
+            )
+            if row and row["name"]:
+                return str(row["name"]).strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_company_name fallback: %s", exc)
+    return ""

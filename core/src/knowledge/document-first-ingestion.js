@@ -256,11 +256,11 @@ export class DocumentFirstIngestionService {
 
   /** Fire-and-forget entity extraction over segments (P1 #9).
    *  Parallel workers — bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
-  _extractEntitiesAsync({ segments, userId, orgId, documentId }) {
+  _extractEntitiesAsync({ segments, userId, orgId, documentId, force = false }) {
     if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
     // Skip entity extraction on tiny docs (single short segment) — no real value.
     const totalChars = segments.reduce((acc, s) => acc + (s.content?.length || 0), 0);
-    if (segments.length <= 2 && totalChars < 1500) {
+    if (!force && segments.length <= 2 && totalChars < 1500) {
       this.logger.info?.(`[entity-extractor] skipping tiny doc ${documentId} (${segments.length} segs, ${totalChars} chars)`);
       return;
     }
@@ -281,6 +281,16 @@ export class DocumentFirstIngestionService {
       });
       await Promise.all(workers);
     })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
+  }
+
+  _extractPromotedEntitiesAsync({ memories, userId, orgId, documentId }) {
+    const segments = (Array.isArray(memories) ? memories : [])
+      .filter((memory) => memory?.id && memory?.content && !memory.isParent && memory.support_segment_ids?.[0])
+      .map((memory) => ({
+        id: memory.support_segment_ids[0],
+        content: memory.content,
+      }));
+    this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
   }
 
   /**
@@ -1589,7 +1599,6 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
     const _msSeg = Date.now() - _tSeg;
     emit('embedded', 70, { segments: segments.length, embed_ms: _msEmbed });
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
@@ -1606,6 +1615,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         documentHash: checksum.slice(0, 16),
       },
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to
@@ -1696,7 +1706,6 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
     // Step 5: Embed segments
     await this._embedSegments(segments);
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: parentDoc.id });
     // Step 6: Promote canonical memories (more selective for enterprise)
     const promoted = await this._promoteMemories({
       documentId: parentDoc.id,
@@ -1712,6 +1721,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       },
       promotionStrategy: 'enterprise_selective'
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id });
 
     return {
       documentId: parentDoc.id,
@@ -1857,7 +1867,6 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
     // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
     await this._embedSegments(segments, orgId);
 
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 5: promote memories
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
@@ -1871,6 +1880,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       },
       promotionStrategy: `connector_${providerKey}`,
     });
+    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
 
     return {
       documentId: knowledgeDoc.id,

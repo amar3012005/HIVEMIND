@@ -223,3 +223,18 @@ test('unified extraction retries an empty model response without lowering admiss
   assert.equal(calls, 2);
   assert.equal(result.length, 1);
 });
+
+test('unified promotion replaces language-code titles and rejects value entities', () => {
+  const source = 'FOREST approved a 12 percent threshold on 1 August 2026.';
+  const [claim] = normalizeUnifiedClaims([{
+    t: 'en',
+    f: source,
+    memory_type: 'decision',
+    source_quote: source,
+    importance: 0.9,
+    entities: ['FOREST', '12 percent', '1 August 2026'],
+    rels: [],
+  }], source, 5, 0.65);
+  assert.match(claim.t, /^FOREST approved/);
+  assert.deepEqual(claim.entities, ['FOREST']);
+});

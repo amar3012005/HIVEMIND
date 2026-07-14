@@ -631,7 +631,8 @@ export class MemoryGraphEngine {
       }
       const c = String(input.content || '');
       // Avoid double-stamping when the content already ends with our marker.
-      if (c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
+      if (input.append_timestamp_to_content !== false
+        && c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
         input = { ...input, content: c.replace(/\s+$/, '') + ` (${dispTs})` };
       }
       input._ts_stamped = true;

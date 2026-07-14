@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DocumentFirstIngestionService, normalizeCuratedClaims, normalizeUnifiedClaims } from '../../src/knowledge/document-first-ingestion.js';
+import {
+  DocumentFirstIngestionService,
+  normalizeCuratedClaims,
+  normalizeUnifiedClaims,
+  resolveEvidenceSegment,
+} from '../../src/knowledge/document-first-ingestion.js';
 
 test('unified promotion validates multilingual exact source spans and durable types', () => {
   const source = 'Der Vorstand beschloss, das Projekt am 15. Juli zu starten. 次の会議は8月3日に東京で開催されます。';
@@ -99,6 +104,32 @@ test('document curation merges support without losing source provenance', () => 
   assert.deepEqual(claims[0].support_segment_ids, ['s1', 's2']);
   assert.deepEqual(claims[0].support_quotes, [candidates[0].source_quote, candidates[1].source_quote]);
   assert.deepEqual(claims[0].entities, ['Policy', 'Compliance Officer']);
+});
+
+test('re-windowed claims resolve to the exact persisted evidence segment', () => {
+  const segments = [
+    { id: 'segment-intro', content: 'General introduction and background.' },
+    { id: 'segment-policy', content: 'The board approved a seven-year retention period.' },
+    { id: 'segment-owner', content: 'Mira Chen owns the annual compliance review.' },
+  ];
+  assert.equal(
+    resolveEvidenceSegment('Mira Chen owns the annual compliance review.', segments, 'segment-intro'),
+    'segment-owner',
+  );
+  assert.equal(resolveEvidenceSegment('missing quote', segments, 'segment-intro'), 'segment-intro');
+});
+
+test('document curation preserves the primary extraction window for exact spans', () => {
+  const candidates = [{
+    t: 'Retention', f: 'Retention is seven years.', memory_type: 'fact', importance: 0.9,
+    entities: ['Policy'], segmentId: 's1', source_quote: 'Retention is seven years.',
+    source_window_content: 'Policy context. Retention is seven years. Review context.',
+  }];
+  const [claim] = normalizeCuratedClaims([{
+    title: 'Retention policy', content: 'Retention is seven years.', memory_type: 'fact',
+    importance: 0.9, support_indices: [0], entities: ['Policy'],
+  }], candidates, 8);
+  assert.equal(claim.source_window_content, candidates[0].source_window_content);
 });
 
 test('document curation rejects unsupported references and invalid memory types', () => {

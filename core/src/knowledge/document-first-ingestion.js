@@ -94,6 +94,14 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
     });
 }
 
+export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {
+  const quote = String(sourceQuote || '').trim();
+  if (!quote) return fallbackId;
+  const exact = (Array.isArray(segments) ? segments : []).find((segment) =>
+    typeof segment?.content === 'string' && segment.content.includes(quote));
+  return exact?.id || fallbackId;
+}
+
 export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8) {
   const pool = Array.isArray(candidates) ? candidates : [];
   const cap = Math.max(1, Math.min(12, Number(maxMemories) || 8));
@@ -123,6 +131,7 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
       source_end: primary.source_end,
       support_segment_ids: [...new Set(supports.map((item) => item.segmentId))],
       support_quotes: supports.map((item) => item.source_quote),
+      source_window_content: primary.source_window_content || null,
     });
   }
   return output;
@@ -2648,7 +2657,13 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
               this.logger.warn?.(`[kb-unified] candidate extract failed: ${error.message}`);
             }
             const got = Array.isArray(claims) ? claims.length : 0;
-            if (got) extractedCandidates.push(...claims.map((claim) => ({ ...claim, segmentId: w.segmentId })));
+            if (got) {
+              extractedCandidates.push(...claims.map((claim) => ({
+                ...claim,
+                segmentId: resolveEvidenceSegment(claim.source_quote, promotableSegments, w.segmentId),
+                source_window_content: w.content,
+              })));
+            }
             uBudget += Math.max(0, grant - got); // return the unused part of the reservation
           }
         });
@@ -2657,12 +2672,15 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 8),
         });
-        const windowBySegment = new Map(uWindows.map((window) => [window.segmentId, window]));
         const uFacts = [];
         const extraEvidenceLinks = [];
         for (const claim of curated) {
-          const sourceWindow = windowBySegment.get(claim.segmentId);
-          if (!sourceWindow) continue;
+          const sourceWindow = {
+            segmentId: claim.segmentId,
+            content: claim.source_window_content || claim.source_quote,
+            heading: null,
+            page: null,
+          };
           const persisted = await this._ingestUnifiedWindow(sourceWindow, {
             userId, orgId, documentId, metadata, docTitle, preExtractedFacts: [claim],
           });

@@ -69,6 +69,7 @@ from .db import (
     get_employee_playbooks_map,
     update_employee_playbook,
     get_room_playbook,
+    get_connected_gmail,
     update_room_playbook,
     get_company_name,
     get_room_template,
@@ -2350,7 +2351,12 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     # it stays in the room; ONLY the part above it is the email.
     body = re.split(r"^-{3,}\s*SUPPORTING MATERIAL\s*-{3,}\s*$", body,
                     maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)[0].strip() or body
-    subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
+    _subj_m = re.search(r"^\s*subject\s*:\s*(.+)$", body, flags=re.IGNORECASE | re.MULTILINE)
+    _subj = (_subj_m.group(1).strip().strip("*") if _subj_m else "")
+    if _subj and "supporting material" not in _subj.lower():
+        subject = _subj
+    else:
+        subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
     email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
                         flags=re.IGNORECASE | re.MULTILINE).strip() or body
     # Thread the REAL upstream artifact URL in; strip/replace any fabricated link.
@@ -2514,7 +2520,8 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
     # A non-terminal doc/sheet step is a prerequisite the terminal step references.
     has_prereq_artifact = any(s.get("kind") in ("doc", "sheet") for s in steps[:-1])
     ctx: Dict[str, Any] = {"body": body, "artifacts": [], "last_artifact_url": None,
-                           "expects_prior_artifact": has_prereq_artifact}
+                           "expects_prior_artifact": has_prereq_artifact,
+                           "sender_email": str(plan.get("sender_email") or "")}
     skips: List[str] = []
     last_result: Dict[str, Any] = {}
     try:
@@ -2902,6 +2909,11 @@ async def _orchestrate_single_agent(
     except Exception:  # noqa: BLE001
         _room_playbook = []
 
+    _sender_email = ""
+    try:
+        _sender_email = await get_connected_gmail(req.user_id, req.org_id)
+    except Exception:  # noqa: BLE001
+        _sender_email = ""
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2914,7 +2926,7 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
-            room_playbook=_room_playbook,
+            room_playbook=_room_playbook, sender_email=_sender_email,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2977,6 +2989,7 @@ async def _orchestrate_single_agent(
         "execution": contributions,
         "verified_contacts": _vc,
         "enabled_connectors": conns,
+        "sender_email": _sender_email,
     }
 
     # 3. PRODUCE (centralized, idempotent).

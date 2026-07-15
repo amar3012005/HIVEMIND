@@ -733,3 +733,24 @@ async def get_company_name(org_id: str) -> str:
         except Exception as exc:  # noqa: BLE001
             log.warning("get_company_name fallback: %s", exc)
     return ""
+
+
+async def get_connected_gmail(user_id: str, org_id: Optional[str] = None) -> str:
+    """The Gmail address the user connected (platform_integrations.platform_user_id) —
+    the real sender for outreach. '' when none connected."""
+    if not user_id:
+        return ""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT platform_user_id FROM hivemind.platform_integrations "
+                "WHERE user_id = $1::uuid AND platform_type = 'gmail' "
+                "AND platform_user_id IS NOT NULL ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+                user_id,
+            )
+            if row and row["platform_user_id"] and "@" in str(row["platform_user_id"]):
+                return str(row["platform_user_id"]).strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_connected_gmail failed: %s", exc)
+    return ""

@@ -93,17 +93,19 @@ test('document curation merges support without losing source provenance', () => 
   const candidates = [
     { t: 'Retention', f: 'Retention is seven years.', memory_type: 'fact', importance: 0.9, entities: ['Policy'], segmentId: 's1', source_quote: 'Retention is seven years.' },
     { t: 'Owner', f: 'The compliance officer owns reviews.', memory_type: 'fact', importance: 0.82, entities: ['Compliance Officer'], segmentId: 's2', source_quote: 'The compliance officer owns reviews.' },
+    { t: 'Scope', f: 'The policy applies to every managed customer workspace.', memory_type: 'fact', importance: 0.8, entities: ['Customer Workspace'], segmentId: 's3', source_quote: 'The policy applies to every managed customer workspace.' },
   ];
   const claims = normalizeCuratedClaims([{
     title: 'Retention review policy',
-    content: 'Records are retained for seven years and the compliance officer owns the reviews.',
-    memory_type: 'fact', importance: 0.94, support_indices: [0, 1], entities: ['Policy'],
+    content: 'Records are retained for seven years. The compliance officer owns the reviews. The policy applies to every managed customer workspace.',
+    memory_type: 'fact', importance: 0.94, support_indices: [0, 1, 2], entities: ['Policy'],
   }], candidates, 8);
 
   assert.equal(claims.length, 1);
-  assert.deepEqual(claims[0].support_segment_ids, ['s1', 's2']);
-  assert.deepEqual(claims[0].support_quotes, [candidates[0].source_quote, candidates[1].source_quote]);
-  assert.deepEqual(claims[0].entities, ['Policy', 'Compliance Officer']);
+  assert.match(claims[0].f, /every managed customer workspace/);
+  assert.deepEqual(claims[0].support_segment_ids, ['s1', 's2', 's3']);
+  assert.deepEqual(claims[0].support_quotes, candidates.map((candidate) => candidate.source_quote));
+  assert.deepEqual(claims[0].entities, ['Policy', 'Compliance Officer', 'Customer Workspace']);
 });
 
 test('re-windowed claims resolve to the exact persisted evidence segment', () => {

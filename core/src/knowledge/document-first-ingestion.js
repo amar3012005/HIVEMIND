@@ -749,9 +749,11 @@ Output the JSON object and nothing else.`;
     }
     const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 2 : 4));
     const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
+{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
-Rules: at most ${factCap} facts; prefer decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be an exact 20-260 character substring from SECTION that supports f. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
+Rules: at most ${factCap} facts; fewer, richer memories are better than many fragments. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
+
+Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
     const parsed = await chatCompletion({
       model, temperature: 0, max_tokens: compact ? 900 : 1800, json_mode: true, feature: 'kb-unified-extract',
       messages: [
@@ -1123,13 +1125,13 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
    * memory set before persistence. Evidence segments remain independently
    * searchable; this pass only decides what deserves durable-memory status.
    */
-  async _curateDocumentClaims(candidates, { docTitle = '', maxMemories = 8 } = {}) {
+  async _curateDocumentClaims(candidates, { docTitle = '', maxMemories = 6 } = {}) {
     const pool = (Array.isArray(candidates) ? candidates : [])
       .filter((candidate) => candidate?.segmentId && candidate?.f && candidate?.source_quote)
       .slice(0, 48);
     if (!pool.length) return [];
 
-    const cap = Math.max(1, Math.min(12, Number(maxMemories) || 8));
+    const cap = Math.max(1, Math.min(12, Number(maxMemories) || 6));
     const fallback = () => [...pool]
       .sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0))
       .slice(0, cap)
@@ -1140,12 +1142,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
         rels: [],
       }));
 
-    const route = memoryLLMRoute();
-    const apiKey = route?.key || process.env.GROQ_API_KEY;
-    if (!apiKey || pool.length === 1) return fallback();
+    if (pool.length === 1) return fallback();
     const model = process.env.KB_CURATOR_MODEL || process.env.KB_UNIFIED_MODEL
-      || route?.model || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
-    const isGptOss = /gpt-oss/i.test(model);
+      || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
     const input = pool.map((candidate, index) => ({
       i: index,
       type: candidate.memory_type,
@@ -1154,43 +1153,18 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       entities: (candidate.entities || []).slice(0, 8),
       source: String(candidate.source_quote).slice(0, 500),
     }));
-    const schema = {
-      type: 'object', additionalProperties: false, required: ['memories'],
-      properties: { memories: { type: 'array', maxItems: cap, items: {
-        type: 'object', additionalProperties: false,
-        required: ['title', 'content', 'memory_type', 'importance', 'support_indices', 'entities'],
-        properties: {
-          title: { type: 'string' }, content: { type: 'string' },
-          memory_type: { type: 'string', enum: DURABLE_EXTRACT_TYPES },
-          importance: { type: 'number' },
-          support_indices: { type: 'array', minItems: 1, items: { type: 'integer' } },
-          entities: { type: 'array', items: { type: 'string' } },
-        },
-      } } },
-    };
     const system = `You curate durable organizational memory from source-grounded candidates extracted from ONE document.
 Return at most ${cap} high-value memories that together cover the document's important decisions, commitments, requirements, metrics, events, validated lessons, stable preferences, and defining facts.
-Merge compatible candidates into one complete, information-dense memory. Never merge unrelated subjects. Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source.
-Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.`;
+Merge compatible candidates into one complete, information-dense memory. Never merge unrelated subjects. A strong memory keeps the subject together with the relevant decision or requirement, scope, owner, rationale, constraints, numbers, dates, and outcome. Do not split one coherent plan or decision into mini-facts. Prefer 1-3 concise sentences when the supporting candidates contain that context; do not pad or repeat content.
+Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.`;
     try {
-      const response = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model, temperature: 0, max_tokens: 2600,
-          ...(isGptOss ? { reasoning_effort: 'low' } : {}),
-          response_format: isGptOss
-            ? { type: 'json_schema', json_schema: { name: 'document_memory_curator', strict: true, schema } }
-            : { type: 'json_object' },
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },
-          ],
-        }),
+      const parsed = await chatCompletion({
+        model, temperature: 0, max_tokens: 2600, json_mode: true, feature: 'kb-document-curator',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },
+        ],
       });
-      if (!response.ok) throw new Error(`curator ${response.status}`);
-      const payload = await response.json();
-      const parsed = JSON.parse(payload?.choices?.[0]?.message?.content || '{}');
       const output = normalizeCuratedClaims(parsed.memories, pool, cap);
       return output.length ? output : fallback();
     } catch (error) {
@@ -2646,7 +2620,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
         // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
         const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
-        const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 11);
+        const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 4);
         let uWindows = targets;
         try {
           const { chunkText } = await import('./document-chunker.js');
@@ -2655,7 +2629,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
           if (uc.length) uWindows = uc.map((content, i) => ({
             segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
             content, heading: null, page: null,
-            maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * UFPK))),
+            maxFacts: Math.max(1, Math.min(4, Math.round((content.length / 1000) * UFPK))),
             scope: metadata.scope, visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
@@ -2694,7 +2668,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         await Promise.all(uWorkers);
         const curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
-          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 8),
+          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 6),
         });
         const uFacts = [];
         const extraEvidenceLinks = [];

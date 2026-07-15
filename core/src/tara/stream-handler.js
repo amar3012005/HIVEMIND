@@ -22,6 +22,24 @@ import { buildPrompt } from './prompt-builder.js';
 import { ClinicalReasoningEngine } from './clinical-reasoning.js';
 import { mapModelToOpenRouter } from '../llm/groq-fallback.js';
 
+export function createTaraRecallFn(recallRouter) {
+  return (_store, opts = {}) => recallRouter.recall(
+    opts.query_context || '',
+    {
+      mode: 'fact',
+      limit: opts.max_memories || 8,
+      include_live: false,
+      tags: opts.tags || [],
+      date_range: opts.date_range || null,
+    },
+    {
+      userId: opts.user_id,
+      orgId: opts.org_id,
+      accessContext: opts.access_context || null,
+    },
+  );
+}
+
 export class TaraStreamHandler {
   constructor({ memoryStore, recallFn, llmBaseUrl, llmApiKey, defaultModel, qdrantClient }) {
     this.sessionManager = new SessionManager({ memoryStore });

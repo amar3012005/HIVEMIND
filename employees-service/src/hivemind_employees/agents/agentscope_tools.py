@@ -1165,13 +1165,13 @@ def build_hivemind_toolkit(
                 max_memories: Max memories to return (default 5).
             """
             with _client(api_key, user_id, org_id) as c:
-                body = {"query_context": query, "max_memories": max_memories}
+                body = {"query_context": query, "max_memories": max_memories, "mode": "explain"}
                 # Room scope: when the room belongs to a project HIVEMIND, every
                 # agent recall is scoped to that project so the room stays on-topic.
-                # core /api/recall reads `project`/`preferred_project` (NOT
-                # `project_id`) — same keys recall_emulated sends — so the agents
-                # hit the exact project-scoped recall path the grounding pass uses.
+                # project_id is the hard tenant-validated scope. The legacy
+                # project/preferred_project fields remain ranking hints only.
                 if project_id:
+                    body["project_id"] = project_id
                     body["project"] = project_id
                     body["preferred_project"] = project_id
                 r = c.post("/api/recall", json=body)

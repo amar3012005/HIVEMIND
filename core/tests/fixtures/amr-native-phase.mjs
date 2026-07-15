@@ -12,7 +12,13 @@ const dataRoot = process.argv[3];
 const dim = 8;
 const orgId = '00000000-0000-4000-8000-00000000a001';
 const otherOrgId = '00000000-0000-4000-8000-00000000b001';
-const nativePath = fileURLToPath(new URL('../../src/vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url));
+const nativeFilename = process.platform === 'darwin' && process.arch === 'arm64'
+  ? 'singulance-amr.darwin-arm64.node'
+  : process.platform === 'linux' && process.arch === 'x64'
+    ? 'singulance-amr.linux-x64-gnu.node'
+    : null;
+if (!nativeFilename) throw new Error(`unsupported AMR test platform: ${process.platform}-${process.arch}`);
+const nativePath = fileURLToPath(new URL(`../../src/vector/mneme/${nativeFilename}`, import.meta.url));
 const binding = loadBinding(nativePath);
 const backend = {
   openStore: (root, collection, dimensions) => binding.MnemeStore.open(root, collection, dimensions),

@@ -58,6 +58,43 @@ function filterMatchValue(filter, key) {
   return clause?.match?.value ?? null;
 }
 
+export function buildHybridSearchFilter(filters = {}) {
+  const must = [];
+  if (filters.user_id) must.push({ key: 'user_id', match: { value: filters.user_id } });
+  if (filters.org_id) must.push({ key: 'org_id', match: { value: filters.org_id } });
+  if (filters.project) must.push({ key: 'project', match: { value: filters.project } });
+  if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
+    must.push({ key: 'project_ids', match: { any: filters.project_ids } });
+  } else if (typeof filters.project_id === 'string' && filters.project_id.trim()) {
+    must.push({ key: 'project_ids', match: { any: [filters.project_id.trim()] } });
+  }
+  if (typeof filters.team_id === 'string' && filters.team_id.trim()) {
+    must.push({ key: 'team_id', match: { value: filters.team_id.trim() } });
+  }
+  if (Array.isArray(filters.tags) && filters.tags.length > 0) {
+    must.push({ key: 'tags', match: { any: filters.tags } });
+  }
+  if (filters.is_latest !== undefined) {
+    must.push({ key: 'is_latest', match: { value: filters.is_latest } });
+  }
+  if (filters.known_at) must.push({ key: 'created_at', range: { lte: filters.known_at } });
+  if (filters.valid_at) {
+    must.push({
+      should: [
+        { is_empty: { key: 'valid_from' } },
+        { key: 'valid_from', range: { lte: filters.valid_at } },
+      ],
+    });
+    must.push({
+      should: [
+        { is_empty: { key: 'valid_to' } },
+        { key: 'valid_to', range: { gt: filters.valid_at } },
+      ],
+    });
+  }
+  return must.length > 0 ? { must } : undefined;
+}
+
 // Central tenant routing. When QDRANT_PER_TENANT is off this returns the legacy
 // collection (unchanged behavior). When on, routes by org PLAN (looked up +
 // cached): enterprise org → org_<id>, free/personal/no-org → HIVEMIND_PERSONAL.
@@ -251,6 +288,8 @@ export class QdrantClient {
         content: memory.content,
         is_latest: memory.is_latest ?? true,
         created_at: memory.created_at || new Date().toISOString(),
+        valid_from: memory.valid_from || null,
+        valid_to: memory.valid_to || null,
         source: memory.source || memory.source_metadata?.source_platform || null,
         source_platform: memory.source_metadata?.source_platform || memory.source || null,
         document_date: memory.document_date,
@@ -283,7 +322,8 @@ export class QdrantClient {
         confidence: memory.importance_score ?? memory.strength ?? null,
         createdAt: memory.created_at || new Date().toISOString(),
         project: memory.project || null, projectIds: memory.project_ids || [],
-        validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
+        validFrom: memory.valid_from || null, validTo: memory.valid_to || null,
+        documentDate: memory.document_date || null,
         metadata: memory.metadata || {},
       };
       try { await amrWrite(memory.org_id, _rrec, point.vector); }
@@ -327,7 +367,7 @@ export class QdrantClient {
             cognitiveLayerRole: memory.cognitive_layer_role || null,
             confidence: memory.importance_score ?? memory.strength ?? null,
             createdAt: memory.created_at || new Date().toISOString(),
-            project: memory.project || null, projectIds: memory.project_ids || [], primaryTeamId: memory.primary_team_id || null, scope: memory.scope || null, visibility: memory.visibility || null, validFrom: memory.valid_from || null, documentDate: memory.document_date || null, metadata: memory.metadata || {},
+            project: memory.project || null, projectIds: memory.project_ids || [], primaryTeamId: memory.primary_team_id || null, scope: memory.scope || null, visibility: memory.visibility || null, validFrom: memory.valid_from || null, validTo: memory.valid_to || null, documentDate: memory.document_date || null, metadata: memory.metadata || {},
           };
           await amrWrite(memory.org_id, _rec, point.vector);
         } catch (e) { console.warn('[mneme] unified write failed:', e.message); }
@@ -339,6 +379,31 @@ export class QdrantClient {
       // Don't throw - allow in-memory storage to succeed
       return memory.id;
     }
+  }
+
+  /**
+   * Patch lifecycle metadata without replacing the vector. PostgreSQL remains
+   * canonical; this keeps Qdrant's indexed eligibility fields synchronized so
+   * metadata-first candidate generation does not admit a superseded point.
+   */
+  async updateMemoryPayload(memoryId, payload, { orgId, collectionName } = {}) {
+    if (!memoryId || !orgId || !payload || typeof payload !== 'object') return false;
+    if (orgIsRemote(orgId)) return true; // The BYOD agent updates its own point.
+
+    const resolvedCollection = await routeCollection({ explicit: collectionName, orgId });
+    const response = await fetch(
+      `${qbase()}/collections/${resolvedCollection}/points/payload`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ payload, points: [memoryId], wait: true }),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Qdrant payload update failed: ${response.status} ${detail}`);
+    }
+    return true;
   }
 
   /**
@@ -493,69 +558,7 @@ export class QdrantClient {
    * @returns {Promise<Array>} Search results
    */
   async hybridSearch(query, filters = {}) {
-    const mustFilters = [];
-
-    // Add user/org filters for isolation
-    if (filters.user_id) {
-      mustFilters.push({
-        key: 'user_id',
-        match: { value: filters.user_id }
-      });
-    }
-
-    if (filters.org_id) {
-      mustFilters.push({
-        key: 'org_id',
-        match: { value: filters.org_id }
-      });
-    }
-
-    // Add project filter
-    if (filters.project) {
-      mustFilters.push({
-        key: 'project',
-        match: { value: filters.project }
-      });
-    }
-
-    // Add project_ids filter (V2 — array membership check on payload.project_ids)
-    if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
-      mustFilters.push({
-        key: 'project_ids',
-        match: { any: filters.project_ids }
-      });
-    } else if (typeof filters.project_id === 'string' && filters.project_id.trim()) {
-      mustFilters.push({
-        key: 'project_ids',
-        match: { any: [filters.project_id.trim()] }
-      });
-    }
-
-    // Add team_id filter (V2 — payload.team_id)
-    if (typeof filters.team_id === 'string' && filters.team_id.trim()) {
-      mustFilters.push({
-        key: 'team_id',
-        match: { value: filters.team_id.trim() }
-      });
-    }
-
-    // Add tags filter
-    if (filters.tags && filters.tags.length > 0) {
-      mustFilters.push({
-        key: 'tags',
-        match: { any: filters.tags }
-      });
-    }
-
-    // Add is_latest filter
-    if (filters.is_latest !== undefined) {
-      mustFilters.push({
-        key: 'is_latest',
-        match: { value: filters.is_latest }
-      });
-    }
-
-    const filter = mustFilters.length > 0 ? { must: mustFilters } : undefined;
+    const filter = buildHybridSearchFilter(filters);
 
     return await this.searchMemories({
       query,
@@ -666,6 +669,8 @@ export class QdrantClient {
           content: memory.content,
           is_latest: memory.is_latest ?? true,
           created_at: memory.created_at || new Date().toISOString(),
+          valid_from: memory.valid_from || null,
+          valid_to: memory.valid_to || null,
           source_platform: memory.source_metadata?.source_platform || memory.source || null,
           document_date: memory.document_date,
           importance_score: memory.importance_score,

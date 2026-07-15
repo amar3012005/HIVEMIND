@@ -122,6 +122,7 @@ export class AmrMemoryStore {
       scope: r.scope || found.rec.scope,
       primary_team_id: r.primaryTeamId || found.rec.primary_team_id,
       valid_from: r.validFrom || found.rec.valid_from,
+      valid_to: r.validTo || found.rec.valid_to,
       document_date: r.documentDate || found.rec.document_date,
       project: r.project ?? found.rec.project,
       project_ids: r.projectIds || found.rec.project_ids || [],
@@ -135,7 +136,8 @@ export class AmrMemoryStore {
       title: r.title || null, tags: r.tags || [], memory_type: r.memoryType || null,
       is_latest: r.isLatest ?? true, layer: r.layer || 'memory',
       cognitive_layer_role: r.cognitiveLayerRole || null, confidence: r.confidence ?? null,
-      created_at: r.createdAt || now, valid_from: r.validFrom || null, document_date: r.documentDate || null,
+      created_at: r.createdAt || now, valid_from: r.validFrom || null, valid_to: r.validTo || null,
+      document_date: r.documentDate || null,
       project: r.project || null, project_ids: r.projectIds || [], metadata: r.metadata || {},
       scope: r.scope || null, primary_team_id: r.primaryTeamId || null,
       recall_count: r.recallCount ?? 0, strength: r.strength ?? 1.0, last_accessed_at: null,
@@ -194,19 +196,52 @@ export class AmrMemoryStore {
     return true;
   }
 
+  static _rangeCond(val, range) {
+    if (!range) return true;
+    if (val == null) return false;
+    const comparable = typeof val === 'string' && !Number.isNaN(new Date(val).getTime()) ? new Date(val).getTime() : val;
+    const bound = (value) => typeof value === 'string' && !Number.isNaN(new Date(value).getTime()) ? new Date(value).getTime() : value;
+    if (range.gt !== undefined && !(comparable > bound(range.gt))) return false;
+    if (range.gte !== undefined && !(comparable >= bound(range.gte))) return false;
+    if (range.lt !== undefined && !(comparable < bound(range.lt))) return false;
+    if (range.lte !== undefined && !(comparable <= bound(range.lte))) return false;
+    return true;
+  }
+
+  static _conditionMatches(rec, condition) {
+    if (condition?.should) return condition.should.some((candidate) => AmrMemoryStore._conditionMatches(rec, candidate));
+    if (condition?.must) return condition.must.every((candidate) => AmrMemoryStore._conditionMatches(rec, candidate));
+    if (condition?.must_not) return condition.must_not.every((candidate) => !AmrMemoryStore._conditionMatches(rec, candidate));
+    if (condition?.is_empty?.key) {
+      const value = rec[condition.is_empty.key];
+      return value == null || (Array.isArray(value) && value.length === 0);
+    }
+    const value = rec[condition?.key];
+    return AmrMemoryStore._matchCond(value, condition?.match)
+      && AmrMemoryStore._rangeCond(value, condition?.range);
+  }
+
   // The engine's recall sends the FULL Qdrant-shaped filter ({must:[{key,match}],must_not:[...]})
   // — org_id, user_id, project, project_ids, layer, tags, is_latest, promoted-exclusion. The
   // simple {is_latest, layer, must_not:{layer}} shape (internal callers) is still honored.
   _passesFilter(rec, f = {}) {
     if (rec.deleted_at) return false;
     if (Array.isArray(f.must) || Array.isArray(f.must_not)) {
-      for (const c of f.must || []) if (!AmrMemoryStore._matchCond(rec[c.key], c.match)) return false;
-      for (const c of f.must_not || []) if (AmrMemoryStore._matchCond(rec[c.key], c.match)) return false;
+      for (const c of f.must || []) if (!AmrMemoryStore._conditionMatches(rec, c)) return false;
+      for (const c of f.must_not || []) if (AmrMemoryStore._conditionMatches(rec, c)) return false;
+      if (f.should?.length && !f.should.some((c) => AmrMemoryStore._conditionMatches(rec, c))) return false;
       return true;
     }
     if (f.is_latest !== undefined && !!rec.is_latest !== !!f.is_latest) return false;
     if (f.layer && rec.layer !== f.layer) return false;
     if (f.must_not?.layer && rec.layer === f.must_not.layer) return false;
+    const snapshot = f.valid_at || null;
+    if (f.known_at && (!rec.created_at || new Date(rec.created_at) > new Date(f.known_at))) return false;
+    if (snapshot) {
+      const validFrom = rec.valid_from || rec.document_date || rec.created_at;
+      if (validFrom && new Date(validFrom) > new Date(snapshot)) return false;
+      if (rec.valid_to && new Date(rec.valid_to) <= new Date(snapshot)) return false;
+    }
     return true;
   }
 
@@ -415,6 +450,7 @@ export class AmrMemoryStore {
       if (Array.isArray(patch.tags)) rec.tags = patch.tags;
       if (patch.is_latest !== undefined) rec.is_latest = !!patch.is_latest;
       if (patch.memory_type !== undefined) rec.memory_type = patch.memory_type;
+      if (patch.valid_to !== undefined) rec.valid_to = patch.valid_to;
     });
     if (ok) this.store.flush();
     return ok;
@@ -524,7 +560,7 @@ export async function migrateFromPostgres(amr, pg, qFetch, qcoll, org) {
         id: m.id, userId: m.user_id, content: m.content, title: m.title, tags: m.tags,
         memoryType: m.memory_type, isLatest: m.is_latest, layer: m.layer,
         cognitiveLayerRole: m.cognitive_layer_role, confidence: m.confidence,
-        createdAt: m.created_at, validFrom: m.valid_from, documentDate: m.document_date,
+        createdAt: m.created_at, validFrom: m.valid_from, validTo: m.valid_to, documentDate: m.document_date,
         project: m.project, projectIds: m.project_ids, metadata: m.metadata,
         scope: m.scope, primaryTeamId: m.primary_team_id, recallCount: m.recall_count, strength: m.strength,
       }, vec);

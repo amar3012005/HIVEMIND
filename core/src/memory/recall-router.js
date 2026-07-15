@@ -31,6 +31,7 @@ import { ResultReranker } from '../search/result-reranker.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
+import { scopedMemoryWhere } from './prisma-graph-store.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -50,6 +51,37 @@ const HOP3_LIVE_LIMIT          = 5;
 // algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
 // beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
 const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
+const MAX_TEMPORAL_RANGE_MS    = 366 * 24 * 60 * 60 * 1000;
+
+function normalizedIso(value) {
+  if (typeof value !== 'string' && !(value instanceof Date)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function boundedString(value, maxLength) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function normalizeTemporalRange(value) {
+  if (!value || typeof value !== 'object') return null;
+  const start = normalizedIso(value.start);
+  const end = normalizedIso(value.end);
+  if (!start && !end) return null;
+  const boundedEnd = end || new Date(new Date(start).getTime() + MAX_TEMPORAL_RANGE_MS).toISOString();
+  const boundedStart = start || new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString();
+  if (new Date(boundedStart) > new Date(boundedEnd)) return null;
+  if (new Date(boundedEnd) - new Date(boundedStart) > MAX_TEMPORAL_RANGE_MS) {
+    return {
+      start: new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString(),
+      end: boundedEnd,
+      clamped: true,
+    };
+  }
+  return { start: boundedStart, end: boundedEnd, clamped: false };
+}
 
 // Server-owned normalization for the additive recall contract. Legacy modes
 // retain their current behavior; only fact/explain/full opt into the new plan.
@@ -58,17 +90,51 @@ const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
 export function resolveRecallPlan(input = {}) {
   const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
   const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
-  const mode = explicit ? requested : 'fact';
-  const temporal = input.temporal === 'known_at' || input.valid_at ? 'known_at' : 'current';
+  const fullAllowed = requested !== 'full' || input.explicit_mode === true;
+  const mode = requested === 'full' && !fullAllowed
+    ? 'explain'
+    : explicit ? requested : 'fact';
+  const operation = input.operation === 'timeline' ? 'timeline' : 'recall';
+  const structuredSource = input.source && typeof input.source === 'object' ? input.source : {};
+  const structuredTime = input.time && typeof input.time === 'object' ? input.time : {};
+  // Explicit flat arguments are the established public contract and win over
+  // inferred/structured values during the additive migration.
+  const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
+  const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
+  const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
+  const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
+  const range = normalizeTemporalRange(input.date_range || structuredTime.range);
+  const temporal = knownAt
+    ? 'known_at'
+    : validAt
+      ? 'valid_at'
+      : range
+        ? 'range'
+        : input.temporal === 'known_at'
+          ? 'known_at'
+          : 'current';
   const budget = mode === 'full' ? 24_000 : mode === 'explain' ? 8_000 : 2_000;
 
   return {
     mode,
     requested_mode: requested,
     legacy: !explicit,
+    operation,
+    mode_downgraded: requested === 'full' && !fullAllowed ? 'full_requires_explicit_caller' : null,
     temporal,
+    source: {
+      requested: !!(sourceDocumentId || sourceTitle),
+      document_id: sourceDocumentId,
+      title: sourceTitle,
+    },
+    time: {
+      mode: temporal,
+      valid_at: validAt,
+      known_at: knownAt,
+      range,
+    },
     max_graph_hops: mode === 'fact' ? 0 : 1,
-    max_memories: 5,
+    max_memories: operation === 'timeline' ? Math.min(Math.max(Number(input.limit) || 20, 1), 50) : 5,
     context_budget: budget,
     // Existing mode values retain their event-driven behavior. New modes are
     // deliberate: fact is fast-only; explain/full permit evidence expansion.
@@ -258,16 +324,15 @@ async function hop1Memory({ store, query, options, ctx }) {
   // always carry the word "last").
   const inferredTags = matchedConnector && (isRecentish || hasValidAt) ? [matchedConnector] : null;
 
-  // Bi-temporal `valid_at` filter: snap recall to a past moment so the
-  // agent sees only memories whose document_date <= valid_at AND that
-  // were already known by then (created_at <= valid_at). recallPersisted
-  // honors a date_range param keyed on created_at; we also rely on the
-  // tag-anchored override below to apply document_date filter for the
-  // connector path. Anything else uses created_at as the bi-temporal
-  // baseline.
+  // Bi-temporal controls are independent: valid_at constrains the effective
+  // interval, while known_at constrains when HIVEMIND learned the record.
   const validAtDate = options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
     ? new Date(options.valid_at)
     : null;
+  const knownAtDate = options.known_at && !Number.isNaN(new Date(options.known_at).getTime())
+    ? new Date(options.known_at)
+    : null;
+  const snapshotValidAtDate = validAtDate;
   // Fast-path: if we already know we'll use the tag-anchored override,
   // skip the expensive FTS+vector recall — it adds ~1.5s and we'd discard
   // its output anyway. HOP1_TIMEOUT_MS=1500 was eating these calls.
@@ -292,7 +357,11 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
     ...(explicitDateRange
       ? { date_range: explicitDateRange }
-      : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
+      : {}),
+    ...(options.valid_at ? { valid_at: options.valid_at } : {}),
+    ...(options.known_at ? { known_at: options.known_at } : {}),
+    include_superseded: options.include_superseded === true,
+    exact_source: !!(options.source_document_id || options.source_title),
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -328,42 +397,42 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Time-travel override: when valid_at is set and we have tags (caller-
   // supplied or inferred), also drop into the direct-fetch path so the
   // document_date <= valid_at filter applies AND we order by date.
-  const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
+  const timeTravelOverride = (validAtDate || knownAtDate) && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
   const callerTagOverride = callerTags && store.client?.memory;
   if ((recencyOverride || timeTravelOverride || callerTagOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
-      const orFilters = [];
-      if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
-      if (ctx.userId) orFilters.push({ userId: ctx.userId });
+      const accessWhere = scopedMemoryWhere({
+        user_id: ctx.userId,
+        org_id: ctx.orgId,
+        project: options.project || undefined,
+        access_context: scopedAccessCtx,
+      });
       const tagOnly = await store.client.memory.findMany({
         where: {
+          ...accessWhere,
           deletedAt: null,
           // valid_at queries need superseded versions too — show what was
           // current at that past moment (isLatest at valid_at, not now).
-          ...(validAtDate ? {} : { isLatest: true }),
+          ...(validAtDate || knownAtDate ? {} : { isLatest: true }),
           tags: { hasSome: effectiveTags },
-          ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
           // Time-travel: filter by EVENT TIME (document_date) only —
           // that's what users mean by "as of May 13" (msgs sent by then),
           // not "memories known by then". Bi-temporal createdAt filter
           // was excluding memories ingested today but sent earlier.
-          ...(validAtDate ? {
-            OR: [
-              { documentDate: { lte: validAtDate } },
-              {
-                AND: [
-                  { documentDate: null },
-                  { createdAt: { lte: validAtDate } },
-                ],
-              },
+          ...(snapshotValidAtDate ? {
+            AND: [
+              { OR: [{ validFrom: null }, { validFrom: { lte: snapshotValidAtDate } }] },
+              { OR: [{ validTo: null }, { validTo: { gt: snapshotValidAtDate } }] },
             ],
           } : {}),
+          ...(knownAtDate ? { createdAt: { lte: knownAtDate } } : {}),
         },
         orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
         take: Math.min((options.limit || HOP1_DEFAULT_LIMIT) * 4, 50),
         select: {
-          id: true, title: true, content: true, memoryType: true, tags: true,
-          createdAt: true, documentDate: true, importanceScore: true, sourceMetadata: true,
+          id: true, title: true, content: true, memoryType: true, tags: true, isLatest: true,
+          createdAt: true, documentDate: true, validFrom: true, validTo: true,
+          importanceScore: true, sourceMetadata: true,
         },
       });
       // Connector-specific quality filter. A memory tagged "slack" that
@@ -393,7 +462,10 @@ async function hop1Memory({ store, query, options, ctx }) {
         tags: m.tags || [],
         score: Number(m.importanceScore) || 0.5,
         created_at: m.createdAt,
-        valid_at: m.documentDate || m.createdAt,
+        valid_at: m.validFrom || m.documentDate || m.createdAt,
+        valid_from: m.validFrom || null,
+        valid_to: m.validTo || null,
+        is_latest: m.isLatest,
         source_metadata: m.sourceMetadata || null,
         importance_score: m.importanceScore,
         _searchMethod: 'tag_fallback',
@@ -877,18 +949,23 @@ export async function recallEnhance({
   };
 }
 
-export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {} }) {
+export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {} }) {
   if (!prisma?.relationship || !memoryIds.length || !orgId) return { items: [], reason: null };
+  const knownAt = normalizedIso(time.known_at);
+  const memoryTimeWhere = {
+    ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+  };
   const rows = await prisma.relationship.findMany({
     where: {
       OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }],
-      fromMemory: { orgId, deletedAt: null },
-      toMemory: { orgId, deletedAt: null },
+      ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+      fromMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
+      toMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
     },
     select: {
       fromId: true, toId: true, type: true, confidence: true, metadata: true, createdAt: true,
-      fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, memoryProjects: { select: { projectId: true } } } },
-      toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, memoryProjects: { select: { projectId: true } } } },
+      fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
+      toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
     },
     take: 24,
   });
@@ -902,7 +979,8 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
       return ids.some((id) => projectIds.has(id));
     }
     if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
-    return true;
+    if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
+    return false;
   };
   return {
     reason: rows.length ? 'typed-one-hop' : null,
@@ -1023,11 +1101,20 @@ export class RecallRouter {
     const traceLatency = {};
     const startedAt = Date.now();
     const recallPlan = resolveRecallPlan(options);
+    options = {
+      ...options,
+      source_document_id: recallPlan.source.document_id,
+      source_title: recallPlan.source.title,
+      valid_at: recallPlan.time.valid_at,
+      known_at: recallPlan.time.known_at,
+      date_range: recallPlan.time.range,
+      include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
+    };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;
     let explicitSourceDocuments = [];
     let explicitSourceHydration = null;
-    const explicitSourceRequested = !!(options.source_document_id || options.source_title);
+    const explicitSourceRequested = recallPlan.source.requested;
     if (recallPlan.mode !== 'fact' && this.evidence?.resolveSourceDocuments
       && explicitSourceRequested) {
       explicitSourceDocuments = await withTimeout(
@@ -1051,7 +1138,7 @@ export class RecallRouter {
             total: 16,
           }),
           Math.min(2_200, remainingBudget()),
-          null,
+          { timed_out: true },
         );
       }
     }
@@ -1153,10 +1240,14 @@ export class RecallRouter {
     // Fire in try/catch — never block recall on boost failure.
     if (this.clusterIndex && ctx.orgId) {
       try {
-        rankedMemories = await crossClusterEntityBoost(rankedMemories, {
-          clusterIndex:   this.clusterIndex,
-          organizationId: ctx.orgId,
-        });
+        rankedMemories = await withTimeout(
+          crossClusterEntityBoost(rankedMemories, {
+            clusterIndex:   this.clusterIndex,
+            organizationId: ctx.orgId,
+          }),
+          Math.min(350, remainingBudget()),
+          rankedMemories,
+        );
       } catch (boostErr) {
         console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
       }
@@ -1209,8 +1300,8 @@ export class RecallRouter {
     let selectedEvidence = hop2.items || [];
     if (explicitSourceHydration) {
       const hydrated = await explicitSourceHydration;
-      if (hydrated?.length) selectedEvidence = hydrated;
-      else if (Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
+      if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
+      else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
     }
     const evidenceWithLineage = selectedEvidence.map((e) => ({
       ...e,
@@ -1223,9 +1314,11 @@ export class RecallRouter {
 
     // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
-    let deliverN = RECALL_DELIVER_LIMIT;
+    let deliverN = recallPlan.operation === 'timeline'
+      ? Math.min(options.limit || recallPlan.max_memories, 50)
+      : RECALL_DELIVER_LIMIT;
     try {
-      const cfg = await getRetrievalConfig(ctx.orgId);
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
       if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
@@ -1251,7 +1344,22 @@ export class RecallRouter {
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
-    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+    const rerankBudget = remainingBudget();
+    let deliverMemories = rerankBudget > 1
+      ? await withTimeout(
+        rerank(query, rankedMemories, { topN: deliverN }),
+        rerankBudget,
+        rankedMemories.slice(0, deliverN),
+      )
+      : rankedMemories.slice(0, deliverN);
+    if (recallPlan.operation === 'timeline') {
+      deliverMemories = [...deliverMemories].sort((left, right) => {
+        const leftTime = new Date(left.valid_from || left.valid_at || left.created_at || 0).getTime();
+        const rightTime = new Date(right.valid_from || right.valid_at || right.created_at || 0).getTime();
+        return leftTime - rightTime;
+      });
+    }
+    if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
 
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
@@ -1318,6 +1426,7 @@ export class RecallRouter {
         evidence_trigger: hop2.reason,
         live_trigger:     hop3.reason,
         tiers_fired:      tiersFired,
+        cutoff_reason:    cutoffReason,
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
       },
     };

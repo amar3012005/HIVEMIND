@@ -31,6 +31,7 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
+import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -486,6 +487,10 @@ const ROUTER_TOOLS = [
         properties: {
           queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 semantic search queries. Preserve names and meaning in the user\'s language; multilingual retrieval handles them directly.' },
           mode: { type: 'string', enum: ['fact', 'explain', 'full'], description: 'fact = cheap current answer; explain = evidence and typed relations; full = explicit source reconstruction only when the user asks for complete context.' },
+          entities: { type: 'array', items: { type: 'string' }, description: 'Exact named entities explicitly present in the request.' },
+          source_title: { type: 'string', description: 'Exact filename/title explicitly named by the user, if any.' },
+          valid_at: { type: 'string', description: 'ISO timestamp when the fact was true, only when the request explicitly supplies a date.' },
+          known_at: { type: 'string', description: 'ISO timestamp for what the workspace knew by then, only when explicitly requested.' },
         },
         required: ['queries'],
       },
@@ -554,7 +559,7 @@ async function routerPlan({ message, history, language, assistantName, orgName, 
 - Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
 - Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
 - Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
-CRITICAL: recall queries MUST be in ENGLISH — translate the user's terms (German/French/etc. → English) before searching; memory is English and ranks poorly on foreign-language queries.
+CRITICAL: preserve the user's wording, names, filenames, and language in recall queries. Multilingual retrieval handles semantic matching; never replace exact source or entity names with translated guesses.
 Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote in.`;
 
   const histMsgs = Array.isArray(history)
@@ -649,14 +654,33 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
   // Default: recall (also the safe catch-all for an unknown tool name).
   const queries = (Array.isArray(args.queries) ? args.queries : [])
     .filter(q => typeof q === 'string' && q.trim()).slice(0, 3);
-  const mode = ['fact', 'explain', 'full'].includes(args.mode) ? args.mode : 'fact';
+  const mode = ['fact', 'explain'].includes(args.mode) ? args.mode : 'fact';
   onEvent?.({ type: 'plan', routed: 'recall', queries });
-  return { plan: { ...basePlan, sub_queries: queries.length ? queries : [message], recall_mode: mode }, usage };
+  return {
+    plan: {
+      ...basePlan,
+      sub_queries: queries.length ? queries : [message],
+      recall_mode: mode,
+      named_entities: Array.isArray(args.entities)
+        ? args.entities.filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8)
+        : [],
+      needs_traverse: args.mode === 'explain',
+      source: typeof args.source_title === 'string' && args.source_title.trim()
+        ? { title: args.source_title.trim().slice(0, 512) }
+        : null,
+      time: {
+        ...(typeof args.valid_at === 'string' ? { valid_at: args.valid_at } : {}),
+        ...(typeof args.known_at === 'string' ? { known_at: args.known_at } : {}),
+      },
+    },
+    usage,
+  };
 }
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
 async function gatherEvidence({ plan, ctx, onEvent }) {
+  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   const steps = [];
   const memoriesById = new Map();
   const liveItems = [];
@@ -711,7 +735,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   }
   // Also overwrite plan.time_travel so the hivemind_at branch below
   // uses the corrected date (planner often hallucinated year=2024).
-  if (derivedValidAt) {
+  if (!deterministicRecall && derivedValidAt) {
     plan.needs_time_travel = true;
     plan.time_travel = { ...(plan.time_travel || {}), valid_time: derivedValidAt };
   }
@@ -755,16 +779,21 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   }
 
   const recallExtras = {
-    ...(userConnector ? { tags: [userConnector] } : {}),
-    ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
-    ...(derivedDateRange ? { date_range: derivedDateRange } : {}),
+    ...(!deterministicRecall && userConnector ? { tags: [userConnector] } : {}),
+    ...((deterministicRecall ? plan.time?.valid_at : derivedValidAt) ? { valid_at: deterministicRecall ? plan.time.valid_at : derivedValidAt } : {}),
+    ...(deterministicRecall && plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
+    ...((deterministicRecall ? plan.time?.range : derivedDateRange) ? { date_range: deterministicRecall ? plan.time.range : derivedDateRange } : {}),
+    ...(deterministicRecall && plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
+    ...(deterministicRecall && plan.source?.title ? { source_title: plan.source.title } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
   // default, insight for relation queries, panorama for time/history).
   // Insight mode pulls synthesis_evidence_chains so the agent sees the
   // multi-source claim AND its source memories without a second call.
-  const recallMode = plan.recall_mode || 'quick';
+  const recallMode = deterministicRecall
+    ? (plan.explicit_recall_mode || 'fact')
+    : (plan.recall_mode || 'quick');
   // T1-4: mode-aware candidate limit. Quick mode (common path) fetches 8, not
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
@@ -775,11 +804,20 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       ? 12
       : 8;
   const evidenceSeen = new Set();
-  if (plan.sub_queries.length > 0) {
+  const recallQueries = deterministicRecall
+    ? [plan.user_message || plan.sub_queries[0]].filter(Boolean)
+    : plan.sub_queries;
+  if (recallQueries.length > 0) {
     const recallResults = await Promise.all(
-      plan.sub_queries.map(async (q) => {
+      recallQueries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: recallLimit, ...recallExtras }, ctx);
+          const r = await dispatchTool('hivemind_recall', {
+            query: q,
+            mode: recallMode,
+            limit: recallLimit,
+            _explicit_mode: !!plan.explicit_recall_mode,
+            ...recallExtras,
+          }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -859,6 +897,8 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // chat on its fast path.
   const documentAnchor = resolveDocumentAnchorFromMemories(allRecallMems);
   if (
+    !deterministicRecall
+    &&
     process.env.HIVEMIND_CHAT_ANCHORED_EVIDENCE !== 'false'
     && (recallMode === 'quick' || recallMode === 'fact')
     && evidenceItems.length === 0
@@ -894,6 +934,56 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     }
   }
 
+  let coverage = assessRecallCoverage({
+    plan,
+    memories: [...memoriesById.values()],
+    evidence: evidenceItems,
+    relationships: [...edgesByKey.values()],
+  });
+  let escalationCount = 0;
+  if (deterministicRecall && !plan.explicit_recall_mode) {
+    const escalation = chooseRecallEscalation({
+      plan,
+      coverage,
+      query: plan.user_message || recallQueries[0],
+    });
+    if (escalation) {
+      escalationCount = 1;
+      try {
+        const expanded = await dispatchTool('hivemind_recall', { ...recallExtras, ...escalation.args }, ctx);
+        recordTool(
+          'hivemind_recall',
+          escalation.args,
+          `${expanded?.memories?.length || 0} memories + ${expanded?.evidence_count || 0} evidence (${escalation.reason})`,
+          expanded,
+        );
+        for (const memory of (expanded?.memories || [])) {
+          if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+        }
+        for (const item of (expanded?.evidence || [])) {
+          const key = item?.id || `${item?.document_title || '?'}|${item?.page || ''}|${(item?.content || item?.snippet || '').slice(0, 40)}`;
+          if (!evidenceSeen.has(key)) {
+            evidenceSeen.add(key);
+            evidenceItems.push(item);
+          }
+        }
+        for (const edge of (expanded?.relationships || [])) {
+          if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
+          edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
+        }
+        if (expanded?.evidence_packet) recallPackets.push(expanded.evidence_packet);
+      } catch (error) {
+        recordTool('hivemind_recall', escalation.args, `escalation error: ${error.message}`, null);
+      }
+      coverage = assessRecallCoverage({
+        plan,
+        memories: [...memoriesById.values()],
+        evidence: evidenceItems,
+        relationships: [...edgesByKey.values()],
+      });
+    }
+  }
+
   const hasConnectorTagged = allRecallMems.some(m => (m.tags || []).some(t => CONNECTORS.includes(t)));
   const hasEntityTagged = allRecallMems.some(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:')));
   const TEMPORAL_HINT = /\b(latest|last|recent|today|yesterday|this week|now|currently|as of)\b/i;
@@ -911,7 +1001,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // as-of-scoped (recallExtras.valid_at set from the same derived date) AND
   // returned enough rows — it would re-fetch the same window. Keep it as a
   // safety net when recall came back thin (<3) or wasn't date-scoped.
-  if (wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
+  if (!deterministicRecall && wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
     try {
       // Derive valid_time: planner first, else "now" (latest snapshot).
       const validTime = plan.time_travel?.valid_time
@@ -947,7 +1037,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const isRelational = (plan.named_entities?.length || 0) > 0 || plan.recall_mode === 'insight';
   const shouldTraverse = memoriesById.size > 0
     && (!traverseRelationalOnly || (isRelational && memoriesById.size < 8));
-  if (shouldTraverse) {
+  if (!deterministicRecall && shouldTraverse) {
     // Smarter seed selection. Build a ranked candidate list:
     //   1. Memories matching ANY named_entity in title/content/tags
     //   2. Memories with entity:* tags
@@ -1126,6 +1216,8 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
     recall_packets: recallPackets,
+    coverage,
+    escalation_count: escalationCount,
     steps,
     webJob,
   };
@@ -1326,8 +1418,21 @@ export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKn
   );
 }
 
-async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
+export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
+  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
+  if (deterministicRecall && evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
+    return {
+      response: 'No grounded workspace evidence found',
+      claims: [],
+      rejected_claims: [],
+      grounded: true,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['The requested source was not covered by retrieved source evidence.'],
+      usage: null,
+    };
+  }
 
   // Connector capability hint — built from active Nango connections so
   // the LLM knows write access exists + which channels/recipients are
@@ -1559,8 +1664,12 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     }
   } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
 
+  const sourceFirst = evidence.coverage?.source_requested === true;
+  const groundedEvidence = sourceFirst
+    ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
+    : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}${personaNote}
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1579,7 +1688,7 @@ ${message}`;
   // re-ask the LLM once with an explicit nudge. Catches LLM stubbornness
   // when grounding rules are clear but the model gave up anyway.
   const bailedOut = /\b(i (don'?t|do not) have|no (record|records|memory|memories|notes) (of|about|on|for)|i can'?t find|nothing (in|about) (my )?memor)/i.test(response);
-  if (bailedOut && evidence.memories.length > 0) {
+  if (!deterministicRecall && bailedOut && evidence.memories.length > 0) {
     const ml = String(message).toLowerCase();
     const connectorMentioned = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence']
       .find(k => ml.includes(k));
@@ -2101,6 +2210,9 @@ export async function runReactAgentV2({
   ctx,
   onEvent,
   router,
+  recallMode,
+  recallSource,
+  recallTime,
   allowGeneralKnowledge = false,
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
@@ -2190,7 +2302,11 @@ export async function runReactAgentV2({
           model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
         });
     if (planResult.usage) usages.push(planResult.usage);
-    const plan = planResult.plan;
+    const plan = applyExplicitRecallControls(planResult.plan, {
+      mode: recallMode,
+      source: recallSource,
+      time: recallTime,
+    });
 
     // Router direct-answer short-circuit: the router already wrote a
     // language-correct reply (no tool needed) → skip the extra answerDirectly
@@ -2515,9 +2631,14 @@ export async function runReactAgentV2({
     // STEP 3 — Evidence
     const evidence = await gatherEvidence({ plan, ctx, onEvent });
     steps.push(...evidence.steps);
+    trace.recall = {
+      coverage: evidence.coverage,
+      escalation_count: evidence.escalation_count,
+    };
 
     // STEP 4 — Reflect (only when evidence sparse + plan asked for stuff)
-    if (evidence.memories.length < 2 && plan.sub_queries.length > 0) {
+    const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
+    if (!deterministicRecall && evidence.memories.length < 2 && plan.sub_queries.length > 0) {
       try {
         // Reflection on sparse evidence → INTERNAL_MODEL (gap analysis)
         const reflect = await reflectStep({
@@ -2564,7 +2685,7 @@ export async function runReactAgentV2({
     // If the answer confidence is low AND we have explicit gaps[], re-recall
     // on those gaps + re-synthesize. Caps at 1 retry to avoid runaway loops.
     const CONF_THRESHOLD = Number(process.env.HIVEMIND_CONF_RETRY_THRESHOLD || 0.45);
-    if (answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
+    if (!deterministicRecall && answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
       onEvent?.({ type: 'reflect_low_confidence', confidence: answer.confidence, gaps: answer.gaps });
       try {
         // Take up to 2 gap phrases as targeted recall queries.

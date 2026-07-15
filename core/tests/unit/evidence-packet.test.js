@@ -90,6 +90,24 @@ test('typed graph expansion rejects inaccessible tenant scopes', async () => {
   assert.ok(result.items.some((item) => item.to_id === 'to-allowed'));
 });
 
+test('valid-time graph expansion keeps lifecycle edges while known-time remains bounded', async () => {
+  let where;
+  const prisma = { relationship: { findMany: async (args) => { where = args.where; return [edge('personal', 'personal')]; } } };
+  const knownAt = '2026-02-01T00:00:00.000Z';
+  const result = await loadTypedGraphEvidence({
+    prisma,
+    memoryIds: ['anchor'],
+    userId: 'user-1',
+    orgId: 'org-1',
+    accessContext: { projectIds: [], teamIds: [] },
+    time: { valid_at: '2026-01-01T00:00:00.000Z', known_at: knownAt },
+  });
+  assert.equal(where.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.AND, undefined);
+  assert.equal(result.items.length, 1);
+});
+
 test('hung event-driven evidence returns at the deadline for fast fallback', async () => {
   const started = Date.now();
   const enhanced = await recallEnhance({

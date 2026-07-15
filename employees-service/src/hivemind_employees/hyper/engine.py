@@ -979,6 +979,7 @@ class Director:
         intended_output: str = "answer",
         room_kind: str = "",
         room_playbook: Optional[List[str]] = None,
+        sender_email: str = "",
     ) -> None:
         self.user_message = user_message
         self.user_id = user_id
@@ -1003,6 +1004,9 @@ class Director:
         # Room-type learned lessons ("previously effective: X→Y"), written by the
         # post-turn reflection, primed into the planner catalog block. [] = none yet.
         self.room_playbook: List[str] = [str(x) for x in (room_playbook or []) if str(x).strip()][:6]
+        # The real connected Gmail — used as the email's From/signature so the
+        # synth never invents a placeholder address.
+        self.sender_email = str(sender_email or "").strip()
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
@@ -2038,6 +2042,15 @@ class Director:
             _fmt = "\n\nThe deliverable is a SPREADSHEET — output the rows/columns the producer will create as a sheet."
         else:
             _fmt = ""
+        # Real sender identity: the email signs off as the connected Gmail; never
+        # invent a placeholder like email@company.com. Robust-email contract too.
+        if _io == "email" and self.sender_email:
+            _fmt += (f"\n\nSENDER IDENTITY: this email is sent from {self.sender_email}. Sign off with "
+                     f"the sender's real name/role and this exact address — NEVER invent a placeholder "
+                     f"email, phone, or link. Write a tight, specific, non-generic email grounded in the "
+                     f"team's discussion: one clear why-now hook tied to the prospect, one concrete value "
+                     f"point, one single ask. No filler, no [brackets] left unfilled except the recipient's "
+                     f"first name.")
         sysp = (self._system_prompt() + "\n\nYou are now WRITING THE FINAL DELIVERABLE from the gathered "
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
@@ -2331,6 +2344,7 @@ async def run_director(
     intended_output: str = "answer",
     room_kind: str = "",
     room_playbook: Optional[List[str]] = None,
+    sender_email: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2344,5 +2358,6 @@ async def run_director(
         company_brief=company_brief,
         intended_output=intended_output,
         room_kind=room_kind, room_playbook=room_playbook,
+        sender_email=sender_email,
     )
     return await director.run()

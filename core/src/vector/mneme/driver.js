@@ -407,6 +407,13 @@ function _lexFilter(rec, f) {
   if (f.project && rec.project !== f.project) return false;
   if (f.created_after && new Date(rec.createdAt) < new Date(f.created_after)) return false;
   if (f.created_before && new Date(rec.createdAt) > new Date(f.created_before)) return false;
+  const snapshot = f.valid_at || null;
+  const createdAt = rec.createdAt || rec.created_at || null;
+  const validFrom = rec.validFrom || rec.valid_from || rec.documentDate || rec.document_date || createdAt;
+  const validTo = rec.validTo || rec.valid_to || null;
+  if (f.known_at && (!createdAt || new Date(createdAt) > new Date(f.known_at))) return false;
+  if (snapshot && validFrom && new Date(validFrom) > new Date(snapshot)) return false;
+  if (snapshot && validTo && new Date(validTo) <= new Date(snapshot)) return false;
   return true;
 }
 function _toMemoryRow(rec, score) {
@@ -415,8 +422,12 @@ function _toMemoryRow(rec, score) {
     memory_type: rec.memoryType || null, project: rec.project || null,
     importance_score: Number(rec.confidence ?? rec.importanceScore ?? 0.5),
     is_latest: rec.isLatest !== false,
-    created_at: rec.createdAt, updated_at: rec.updatedAt || rec.createdAt,
-    document_date: rec.documentDate || null, event_dates: rec.eventDates || [],
+    created_at: rec.createdAt || rec.created_at || null,
+    updated_at: rec.updatedAt || rec.updated_at || rec.createdAt || rec.created_at || null,
+    document_date: rec.documentDate || rec.document_date || null,
+    valid_from: rec.validFrom || rec.valid_from || null,
+    valid_to: rec.validTo || rec.valid_to || null,
+    event_dates: rec.eventDates || [],
     source: rec.source || rec.sourcePlatform || null, visibility: rec.visibility || null,
     cognitive_layer_role: rec.cognitiveLayerRole || null, tier: rec.tier ?? null,
     fts_score: score,

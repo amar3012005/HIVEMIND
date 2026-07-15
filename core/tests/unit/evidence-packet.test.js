@@ -90,6 +90,24 @@ test('typed graph expansion rejects inaccessible tenant scopes', async () => {
   assert.ok(result.items.some((item) => item.to_id === 'to-allowed'));
 });
 
+test('valid-time graph expansion keeps lifecycle edges while known-time remains bounded', async () => {
+  let where;
+  const prisma = { relationship: { findMany: async (args) => { where = args.where; return [edge('personal', 'personal')]; } } };
+  const knownAt = '2026-02-01T00:00:00.000Z';
+  const result = await loadTypedGraphEvidence({
+    prisma,
+    memoryIds: ['anchor'],
+    userId: 'user-1',
+    orgId: 'org-1',
+    accessContext: { projectIds: [], teamIds: [] },
+    time: { valid_at: '2026-01-01T00:00:00.000Z', known_at: knownAt },
+  });
+  assert.equal(where.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.AND, undefined);
+  assert.equal(result.items.length, 1);
+});
+
 test('hung event-driven evidence returns at the deadline for fast fallback', async () => {
   const started = Date.now();
   const enhanced = await recallEnhance({
@@ -247,6 +265,14 @@ test('named source hydration keeps a query-centred passage for the answer model'
   });
   assert.match(row.snippet, /human approval/);
   assert.ok(row.snippet.length <= 526);
+});
+
+test('query-centred snippets prefer the window covering the most lowercase query detail', () => {
+  const service = new EvidenceRetrievalService({ db: null, qdrantClient: null });
+  const content = `This brochure is an overview. ${'padding '.repeat(30)}Any action on client data requires human approval before execution.`;
+  const snippet = service._extractSnippet(content, 'what does the brochure say about human approval', 120);
+  assert.match(snippet, /human approval/);
+  assert.doesNotMatch(snippet, /^This brochure is an overview/);
 });
 
 test('named source hydration falls back to canonical segments when vector search hangs', async () => {

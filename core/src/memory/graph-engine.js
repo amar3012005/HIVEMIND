@@ -2987,7 +2987,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
 
   async applyUpdate(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {
     const activeStore = storeOverride || this.store;
-    return activeStore.transaction(async store => {
+    let vectorPatch = null;
+    const result = await activeStore.transaction(async store => {
       const source = await store.getMemory(sourceId);
       let target = await store.getMemory(targetId);
 
@@ -3007,10 +3008,20 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         throw new Error('Tenant scope violation in applyUpdate');
       }
 
+      const sourceEffectiveAt = source.valid_from || source.document_date || source.created_at || nowIso();
+      const targetEffectiveAt = target.valid_from || target.document_date || target.created_at || sourceEffectiveAt;
+      const sourceEffectiveMs = new Date(sourceEffectiveAt).getTime();
+      const targetEffectiveMs = new Date(targetEffectiveAt).getTime();
+      const closeAt = new Date(Math.max(
+        Number.isFinite(sourceEffectiveMs) ? sourceEffectiveMs : Date.now(),
+        Number.isFinite(targetEffectiveMs) ? targetEffectiveMs : 0,
+      )).toISOString();
       await store.updateMemory(targetId, {
         is_latest: false,
+        valid_to: closeAt,
         updated_at: nowIso()
       });
+      vectorPatch = { memoryId: targetId, payload: { is_latest: false, valid_to: closeAt } };
 
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
@@ -3058,6 +3069,23 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         processingMs: Date.now() - startedAt
       };
     });
+
+    // Never perform network I/O inside the database transaction. The canonical
+    // write commits first; Qdrant is a candidate index and is synchronized
+    // best-effort. Canonical hydration below prevents stale payloads from
+    // changing eligibility if this patch temporarily fails.
+    if (vectorPatch && this.vectorStore?.updateMemoryPayload && !orgIsRemote(org_id)) {
+      try {
+        await runWithOrg(org_id, () => this.vectorStore.updateMemoryPayload(
+          vectorPatch.memoryId,
+          vectorPatch.payload,
+          { orgId: org_id },
+        ));
+      } catch (error) {
+        console.warn('[graph-engine] Qdrant lifecycle payload sync failed:', error.message);
+      }
+    }
+    return result;
   }
 
   async applyExtends(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {

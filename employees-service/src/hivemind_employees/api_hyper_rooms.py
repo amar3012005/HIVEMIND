@@ -2305,10 +2305,34 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     # Agent-driven recipient fallback: an owner may have RECALLED the contact from
     # HIVEMIND during EXECUTE — scan the executed work + synthesis for a real email.
     if not to:
-        _pool = " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + (ctx.get("body") or "")
+        # Prefer the enriched PROSPECT rows on the board (real Impressum emails)
+        # over a stray address in the body — the synthesis signature often carries
+        # the SENDER's own placeholder (e.g. email@ourcompany.com), which must NEVER
+        # become the recipient. Own-domain + placeholder local-parts are excluded.
+        own = set()
+        try:
+            for tok in re.findall(r"[\w.+-]+@([\w.-]+\.\w+)", (ctx.get("sender_email") or "")):
+                own.add(tok.lower())
+        except Exception:  # noqa: BLE001
+            pass
+        # Own brand from the room's company (done_criterion carries "Company: X").
+        _dc = str(plan.get("done_criterion") or "")
+        _m = re.search(r"Company:\s*([A-Za-z0-9][\w&.\- ]{1,40})", _dc)
+        brand = (_m.group(1).strip().split()[0].lower() if _m else "")
+        _PLACEHOLDER_LOCAL = {"email", "your", "yourname", "name", "firstname", "lastname",
+                              "recipient", "sender", "me", "user", "you", "prospect"}
+        # Rank prospect-board emails first, then body emails.
+        board = "\n".join(x for x in (ctx.get("prospect_emails") or []))
+        _pool = board + "\n" + " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + (ctx.get("body") or "")
         for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _pool):
-            low = addr.lower()
+            low = addr.lower(); local = low.split("@", 1)[0]; dom = low.split("@", 1)[1]
             if "noreply" in low or "no-reply" in low or "example." in low:
+                continue
+            if local in _PLACEHOLDER_LOCAL:
+                continue
+            if dom in own:
+                continue
+            if brand and len(brand) >= 4 and brand in dom:
                 continue
             to = addr
             break

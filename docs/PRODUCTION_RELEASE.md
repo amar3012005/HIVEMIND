@@ -1,5 +1,13 @@
 # SINGULANCE Production Release Ledger
 
+## 2026-07-16 - Runtime reconciliation audit
+
+- This entry records read-only production observations. It is not a new deployment or acceptance claim.
+- Runtime identity: `VERSION=prod-20260716-3baea859` and `NEXT_VERSION=prod-20260716-3baea859`.
+- Core: `hivemind/core-api:prod-20260716-3baea859`, healthy; immutable digest `sha256:bc89fb773c53df1f46c312401c2c9fe9780c04de59d076060fab557e146d6f77`.
+- Frontend, Control, Employees, TARA, BYOD broker, and Playwright remain on the prior `prod-20260715-8aa07a4b` line. This is a mixed-service runtime, not evidence of a full-platform promotion.
+- `/root/hivemind` and `/root/hivemind-next` are dirty shared checkouts. They are not build inputs. The next promotion must use a clean detached worktree and preserve the running core image as the rollback target.
+
 ## 2026-07-15 - Pre-release lineage reconciliation audit
 
 - This entry records observed state only. It is not a deployment or acceptance claim.

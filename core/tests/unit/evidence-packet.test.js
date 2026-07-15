@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEvidencePacket, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
+import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
 import { EvidenceRetrievalService } from '../../src/knowledge/evidence-retrieval.js';
 
 test('full evidence packet preserves a bounded raw source window', () => {
@@ -19,6 +19,41 @@ test('full evidence packet preserves a bounded raw source window', () => {
   const counts = packet.source_sections.reduce((m, s) => m.set(s.document_id, (m.get(s.document_id) || 0) + 1), new Map());
   assert.ok([...counts.values()].every((count) => count <= 8));
   assert.equal(packet.citations.length, 12);
+});
+
+test('evidence packet prefers the query-centred snippet over a segment prefix', () => {
+  const packet = buildEvidencePacket({
+    memories: [],
+    evidence: [{
+      segmentId: 's1', documentId: 'd1',
+      content: 'irrelevant segment prefix',
+      snippet: '...never act on client data without human approval...',
+    }],
+    plan: { mode: 'explain' },
+  });
+  assert.match(packet.source_sections[0].content, /human approval/);
+  assert.doesNotMatch(packet.source_sections[0].content, /irrelevant segment prefix/);
+});
+
+test('source-focused evidence admits only the resolved document id', async () => {
+  const calls = [];
+  const result = await hop2Evidence({
+    evidenceService: {
+      async retrieveEvidence(options) {
+        calls.push(options);
+        return [{ segmentId: 'segment-1', documentId: 'document-active' }];
+      },
+    },
+    query: 'What does it say about human approval?',
+    ctx: { userId: 'user-1', orgId: 'org-1' },
+    inspection: { docIds: ['document-active'], filenames: [], sparse: true },
+    prisma: null,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].documentIds, ['document-active']);
+  assert.equal(result.reason, 'doc-anchored');
+  assert.deepEqual(result.docIds, ['document-active']);
 });
 
 test('packet preserves partial results and exposes latency cutoff', () => {
@@ -157,6 +192,7 @@ test('named source resolution is tenant scoped', async () => {
   });
   assert.equal(query.where.userId, 'user-1');
   assert.equal(query.where.orgId, 'org-1');
+  assert.equal(query.where.archivedAt, null);
   assert.equal(query.where.OR.length, 2);
   assert.equal(documents[0].id, 'doc-1');
 });
@@ -185,10 +221,32 @@ test('named source hydration returns ordered raw segments around evidence anchor
     query: 'budget decision', userId: 'user-1', orgId: 'org-1', perDocument: 4, total: 4,
   });
   assert.deepEqual(segmentQuery.where, {
-    userId: 'user-1', orgId: 'org-1', documentId: 'doc-1', segmentIndex: { gte: 3 },
+    userId: 'user-1', orgId: 'org-1', documentId: 'doc-1',
+    document: { archivedAt: null }, segmentIndex: { gte: 3 },
   });
   assert.deepEqual(rows.map((row) => row.metadata.segmentIndex), [3, 4]);
   assert.equal(rows[0].document.title, 'Board Notes.pdf');
+});
+
+test('named source hydration keeps a query-centred passage for the answer model', async () => {
+  const content = `${'prefix '.repeat(150)}never act on client data without human approval. Lawyers review the output.`;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        findMany: async () => [{ id: 's1', documentId: 'doc-1', content, segmentIndex: 1 }],
+      },
+    },
+    qdrantClient: null,
+  });
+  service.retrieveEvidence = async () => [{
+    segmentId: 's1', documentId: 'doc-1', score: 0.9, metadata: { segmentIndex: 1 },
+  }];
+  const [row] = await service.hydrateSourceDocuments({
+    documents: [{ id: 'doc-1', title: 'Brochure.pdf' }],
+    query: 'human approval', userId: 'user-1', orgId: 'org-1',
+  });
+  assert.match(row.snippet, /human approval/);
+  assert.ok(row.snippet.length <= 526);
 });
 
 test('named source hydration falls back to canonical segments when vector search hangs', async () => {

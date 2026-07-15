@@ -37,10 +37,14 @@ test('temporal comparison recall widens candidate pools and lowers vector thresh
     });
 
     assert.equal(lexicalCalls.length, 1);
-    assert.equal(lexicalCalls[0].n_results, 40);
-    assert.equal(vectorCalls.length, 1);
-    assert.equal(vectorCalls[0].limit, 40);
-    assert.equal(vectorCalls[0].score_threshold, 0.18);
+    // Wide retrieval has a production floor of 150; temporal queries may widen
+    // beyond it, but must never regress to the former 40-candidate pool.
+    assert.equal(lexicalCalls[0].n_results, 150);
+    // Temporal expansion may add a second indexed lane. Every lane remains
+    // bounded by the same wide pool and at least one uses the loose threshold.
+    assert.ok(vectorCalls.length >= 1);
+    assert.ok(vectorCalls.every((call) => call.limit === 150));
+    assert.ok(vectorCalls.some((call) => call.score_threshold <= 0.18));
   } finally {
     client.isConnected = originalIsConnected;
     client.hybridSearch = originalHybridSearch;

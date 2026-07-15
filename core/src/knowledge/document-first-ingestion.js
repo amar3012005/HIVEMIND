@@ -303,6 +303,10 @@ export class DocumentFirstIngestionService {
     this.entityExtractor = entityExtractor;
     this.topicStateWriter = topicStateWriter;
     this.logger = logger;
+    // Collapse simultaneous first uploads of the same bytes into one pipeline.
+    // Database constraints protect rows across processes; this prevents callers
+    // in one process from racing before the unchanged-document check is visible.
+    this.documentIngestFlights = new Map();
   }
 
   /** Fire-and-forget entity extraction over segments (P1 #9).
@@ -1433,6 +1437,34 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
    */
   async ingestKnowledgeDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
+    const metadata = opts?.metadata || {};
+    const scopeKey = metadata.primary_team_id
+      ? `team:${metadata.primary_team_id}`
+      : (metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]))
+        ? `project:${metadata.project_id || metadata.project_ids[0]}`
+        : metadata.scope === 'organization'
+          ? `org:${opts.orgId}`
+          : `personal:${opts.userId}`;
+    const checksum = crypto.createHash('sha256').update(opts.fileBuffer).digest('hex');
+    const flightKey = [opts.orgId, opts.userId, opts.filename, checksum, scopeKey].join(':');
+    const existingFlight = this.documentIngestFlights.get(flightKey);
+    if (existingFlight) {
+      const result = await existingFlight;
+      return { ...result, skippedUnchanged: true, coalescedConcurrent: true };
+    }
+
+    const flight = this._ingestKnowledgeDocumentOnce(opts);
+    this.documentIngestFlights.set(flightKey, flight);
+    try {
+      return await flight;
+    } finally {
+      if (this.documentIngestFlights.get(flightKey) === flight) {
+        this.documentIngestFlights.delete(flightKey);
+      }
+    }
+  }
+
+  async _ingestKnowledgeDocumentOnce(opts) {
     // Remote (self-host) orgs: KB writes route to the agent — assertKbAllowedForOrg is lifted.
     // All other paths (enterprise, connector) still block via their own assertKbAllowedForOrg calls.
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);

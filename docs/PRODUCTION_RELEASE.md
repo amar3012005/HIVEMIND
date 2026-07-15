@@ -1,5 +1,37 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-c459a086 - HyperAgents outreach: connected-Gmail sender identity + prospect-stack cards
+
+- **Parent:** `hivemind-main` at `c459a0869c5f0724bda1e2057098a18c61b1d02a` ("chore(fe): bump Da-vinci gitlink → prospect-stack cards (00aad39) (#34)").
+- **Frontend:** `frontend/Da-vinci` at `00aad39c74f32389f63fabf25cf9dac9effd0722` ("feat(hyperagents): outreach prospect stack cards with email-verified badges"), pushed on `origin/fe-prospect-stack-on-prod`.
+- **Scope:** application-only release. Changed services: `employees-service` (engine.py, api_hyper_rooms.py, db.py — connected-Gmail sender identity threaded into synth, robust subject extraction, `get_connected_gmail`) and the frontend (`HyperAgents.jsx` — outreach prospect-stack cards with green "email verified" badges). `hm-core`, `hm-control`, `tara-deepgram`, and all data services were not rebuilt; their prior verified digests were retagged unchanged under this release ID.
+- **Build:** fetched into a clean detached worktree `/root/builds/prod-20260716-c459a086` (`git worktree add --detach`); asserted `HEAD` = `c459a086`, working tree clean, submodule initialized to `00aad39` with no `+`/`-`/dirty status before building.
+- **Images:** employees `hivemind/employees:prod-20260716-c459a086` = `sha256:844a246f1484f94e1f4de285015d19b84c0a0fc82ee9e64172c13a746e6d45b9` (manifest list digest); frontend `hivemind/fe:prod-20260716-c459a086-single` = `sha256:568fcecd86cc1d4c629aa2eb3799dec28327daa3f8044b3ac42862bd2d943ce3` (manifest list digest). Reused unchanged: `hivemind/core-api:prod-20260716-c459a086` (from running `hm-core`, image id `sha256:9e706bc9bba8...`), `hivemind/control-plane:prod-20260716-c459a086` (from running `hm-control`, image id `sha256:46150e1f5842...`), `hivemind/tara-deepgram:prod-20260716-c459a086` (from running `tara-deepgram`, image id `sha256:382efc7ed893...`).
+- **Runtime:** `VERSION` and `NEXT_VERSION` set to `prod-20260716-c459a086` in `/root/hivemind/.env` and `/root/hivemind-next/.env.embedding-canary-runtime`; both backed up first (`.bak.20260715T233900Z`). `docker compose config` confirmed for both `docker-compose.hetzner.yml` (employees) and `docker-compose.next.yml --profile single` (frontend) that the affected services resolve to the immutable tag before recreation.
+- **Recreate order:** `employees` recreated first (`--no-deps --force-recreate`), reached `healthy` immediately, zero fresh fatal/panic/traceback/OOM in the post-recreate window; then `frontend` recreated (`--no-deps --force-recreate`), came up healthy with a clean Caddy start and zero errors. Data services (`postgres`, `redis`, `qdrant`, `docling`, `nango`) were not restarted — no migrations in this release (confirmed no pending migration files/errors before promotion), so no backup gate was required.
+- **Migrations:** none. No schema change; verified no pending migrations before promoting.
+- **Acceptance:**
+  - Public: `https://core.singulancelabs.com/health` → 200; `https://core.singulancelabs.com/voice2/health` (TARA) → 200; `https://api.singulancelabs.com/health` (Control) → 200; `https://next.singulancelabs.com/` → 200; `https://next.singulancelabs.com/hivemind/login` → 200; `https://personal.singulancelabs.com/` → 200; `https://enterprise.singulancelabs.com/` → 200.
+  - Frontend lazy-chunk release marker: served `index.html` references `static/js/main.14a0fffc.js`; the lazy chunk `static/js/2338.6467b028.chunk.js` resolves live (200) and contains the new "prospect" outreach-card marker string — confirmed via a non-`main.js` chunk, not just the entry bundle.
+  - Employees internal health (`hm-employees:8060/health`) → 200; bootstrap round-trip to `hm-control` succeeded (`GET /v1/employees/bootstrap` → 200) with clean reconcile on startup.
+  - Fresh fatal/panic/uncaught/unhandled/OOM/migration error count: zero in `hm-employees`, `hivemind-next-frontend-1`, and `hm-core` over the post-recreate window.
+- **Not exercised:** a live end-to-end outreach room send (would trigger a real customer-facing Gmail send) was intentionally not run as part of this acceptance; the new code paths were verified via clean health/bootstrap and log inspection only, per "no customer side effect unless explicitly authorized."
+- **Ledger backfill:** the two entries below (`prod-20260715-418d3b29`, `prod-20260716-2eb3d1da`) are recorded retroactively — both were real, previously-deployed ancestors of this release that a prior session deployed without updating this ledger. Confirmed via `docker ps` / image digests on `singulance` at reconciliation time before this release.
+- **Aliases:** `hivemind/employees:stable`/`:latest` and `hivemind/fe:stable-single`/`:latest-single` retagged to this release's images after acceptance.
+- **Rollback:** `hivemind/employees:rollback-20260715T233134Z` (pre-release running image, `prod-20260715-418d3b29`) and `hivemind/fe:rollback-20260715T233134Z-single` (pre-release running image, `prod-20260715-3bf522e6-single`). `hm-core`/`hm-control`/`tara-deepgram` were not replaced, so no rollback tag was required for them.
+
+## prod-20260716-2eb3d1da - Curate richer durable memories from documents (retroactive backfill)
+
+- **Parent:** `hivemind-main` at `2eb3d1da0be0c650d6f49a00fb2c1cbaab313609` ("feat: curate richer durable memories from documents (#28)").
+- **Frontend:** unchanged, pinned at `40b69ddf707e4b628c8caddf451301dd59793d1e`.
+- **Scope:** `hm-core` only; recorded retroactively from observed runtime state (`VERSION=prod-20260716-2eb3d1da` in `/root/hivemind/.env`, `hm-core` running `hivemind/core-api:prod-20260716-2eb3d1da`, healthy) at the time of the `prod-20260716-c459a086` reconcile. Not deployed or acceptance-verified by the session recording this backfill entry.
+
+## prod-20260715-418d3b29 - Impressum/contact enrichment on places_search (retroactive backfill)
+
+- **Parent:** `hivemind-main` at `418d3b29e30cae4d2fe649db4c2643fe51dbcf1a` ("feat(hyperagents): impressum/contact enrichment on places_search — fetch each firm's Impressum/Kontakt page, attach best real email … (#27)").
+- **Frontend:** unchanged, pinned at `40b69ddf707e4b628c8caddf451301dd59793d1e`.
+- **Scope:** `employees-service` only; recorded retroactively from observed runtime state (`NEXT_VERSION=prod-20260715-418d3b29` in `/root/hivemind-next/.env.embedding-canary-runtime`, `hm-employees` running `hivemind/employees:prod-20260715-418d3b29`, healthy) at the time of the `prod-20260716-c459a086` reconcile. Not deployed or acceptance-verified by the session recording this backfill entry.
+
 ## prod-20260716-351b7220 - Recall source and backend parity
 
 - **Parent:** `hivemind-main` at `351b72205299da4769f162b68e9364f7a29797ee`.

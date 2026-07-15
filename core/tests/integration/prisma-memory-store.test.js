@@ -45,11 +45,19 @@ test('prisma memory graph persists update versions and search results', { skip: 
       }
     });
 
-    const memories = await store.listMemories({
+    const currentMemories = await store.listMemories({
       user_id: userId,
       org_id: orgId,
       project: 'integration-alpha',
-      is_latest: undefined,
+      is_latest: true,
+      limit: 10,
+      offset: 0
+    });
+    const supersededMemories = await store.listMemories({
+      user_id: userId,
+      org_id: orgId,
+      project: 'integration-alpha',
+      is_latest: false,
       limit: 10,
       offset: 0
     });
@@ -70,7 +78,8 @@ test('prisma memory graph persists update versions and search results', { skip: 
     const prior = await store.getMemory(base.memoryId);
     const current = await store.getMemory(updated.memoryId);
 
-    assert.equal(memories.total, 2);
+    assert.equal(currentMemories.total, 1);
+    assert.equal(supersededMemories.total, 1);
     assert.equal(prior.is_latest, false);
     assert.equal(current.is_latest, true);
     assert.ok(search.length >= 1);

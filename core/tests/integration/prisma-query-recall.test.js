@@ -72,7 +72,7 @@ test('persisted query patterns and recall use prisma-backed data', { skip: !pris
     assert.ok(state[0].history.length >= 2);
     assert.ok(byEvent.length >= 1);
     assert.ok(recall.memories.length >= 1);
-    assert.ok(recall.injectionText.includes('<relevant-memories>'));
+    assert.ok(recall.injectionText.includes('<chain-of-note>'));
   } finally {
     await prisma.derivationJob.deleteMany({
       where: {
@@ -140,10 +140,17 @@ test('persisted recall dedupes near-identical memories and filters low-signal se
       org_id: orgId,
       max_memories: 5
     });
+    const sessionRecall = await recallPersistedMemories(store, {
+      query_context: 'What did my Claude session say about NVIDIA?',
+      user_id: userId,
+      org_id: orgId,
+      max_memories: 5
+    });
 
     assert.equal(recall.memories.length, 1);
     assert.match(recall.memories[0].content, /NVIDIA \.exe files do not work on Linux/i);
     assert.doesNotMatch(recall.injectionText, /romantic conversation about poetry/i);
+    assert.ok(sessionRecall.memories.some(memory => (memory.tags || []).includes('session')));
   } finally {
     await prisma.derivationJob.deleteMany({
       where: {

@@ -794,14 +794,14 @@ export async function queryPersistedMemories(store, opts) {
   return _queryPersistedMemoriesImpl(store, opts);
 }
 async function _queryPersistedMemoriesImpl(store, { pattern, user_id, org_id, project, ...params }) {
-  const { memories } = await store.listMemories({
-    user_id,
-    org_id,
-    project,
-    is_latest: undefined,
-    limit: 5000,
-    offset: 0
-  });
+  // listMemories intentionally defaults to current-only. History queries need
+  // both partitions; asking with `undefined` used to silently lose every
+  // superseded node and collapse state_of_union timelines to one item.
+  const [currentPage, supersededPage] = await Promise.all([
+    store.listMemories({ user_id, org_id, project, is_latest: true, limit: 5000, offset: 0 }),
+    store.listMemories({ user_id, org_id, project, is_latest: false, limit: 5000, offset: 0 }),
+  ]);
+  const memories = [...(currentPage.memories || []), ...(supersededPage.memories || [])];
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 5000 });
   const memoryById = new Map(memories.map(memory => [memory.id, memory]));
   const active = memories.filter(memory => memory.is_latest !== false);
@@ -1660,6 +1660,7 @@ async function _recallPersistedMemoriesImpl(store, {
     if (_tagsForNoise.some((t) => t === 'promotions' || t === 'label:promotions')) _noiseMul *= 0.30;
     if (_tagsForNoise.some((t) => t === 'social' || t === 'label:social' || t === 'forums' || t === 'label:forums')) _noiseMul *= 0.50;
     if (_tagsForNoise.some((t) => t === 'notification' || t === 'automated' || t === 'no-reply')) _noiseMul *= 0.35;
+    if (_tagsForNoise.some((t) => t === 'session' || t === 'claude-session' || t === 'session-summary')) _noiseMul *= 0.35;
     if (_noiseMul < 1) score *= Math.max(_noiseMul, 0.15);
     // First-person BOOST: mails the user actually wrote (sent-by-user) are
     // ground truth — their own thoughts, decisions, replies. Lift the score
@@ -1725,6 +1726,8 @@ async function _recallPersistedMemoriesImpl(store, {
     const attribution = candidate.memory?.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
     else if (attribution === 'third_party') score *= 0.8;
+    const candidateNoiseTags = Array.isArray(candidate.memory?.tags) ? candidate.memory.tags : [];
+    if (candidateNoiseTags.some((t) => t === 'session' || t === 'claude-session' || t === 'session-summary')) score *= 0.35;
     // Retroactive detection for untagged existing memories
     if (!attribution && candidate.memory) {
       const c = (candidate.memory.content || '').toLowerCase();
@@ -1801,6 +1804,12 @@ async function _recallPersistedMemoriesImpl(store, {
     // facts only. Source-agnostic chokepoint (covers lexical + vector + graph).
     const _tags = item.tags || item.memory?.tags || [];
     if (Array.isArray(_tags) && _tags.includes('promoted-from-segment')) return false;
+    // Legacy whole-session summaries are source material, not default durable
+    // facts. Keep them available for explicit session/chat provenance queries,
+    // but do not let incidental or negated keyword overlap pollute normal recall.
+    if (Array.isArray(_tags)
+        && _tags.includes('session')
+        && !/\b(session|claude|conversation|chat transcript|chat history)\b/i.test(query_context || '')) return false;
     if (META_FACT_RE.test(content)) return false;
     // Filter facts that are just file/document references with no real content
     if (content.length < 40 && /\.(pdf|doc|txt|csv|xls)/i.test(content)) return false;

@@ -104,6 +104,7 @@ test('hivemind_chat_context returns the server packet and escalates anchored fac
 
   assert.deepEqual(calls.map((call) => call.body.mode), ['fact', 'explain']);
   assert.ok(calls.every((call) => call.path === '/api/recall'));
+  assert.ok(calls.every((call) => call.body.explicit_mode === true));
   assert.equal(parsed.mode_used, 'explain');
   assert.deepEqual(parsed.context, packet);
   assert.equal(parsed.latency_ms, 42);

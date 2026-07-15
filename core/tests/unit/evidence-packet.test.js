@@ -56,6 +56,31 @@ test('source-focused evidence admits only the resolved document id', async () =>
   assert.deepEqual(result.docIds, ['document-active']);
 });
 
+test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
+  let where;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: {
+        findMany: async (args) => {
+          where = args.where;
+          return [
+            { id: 'brochure', title: 'HIVEMIND Brochure.html.pdf', sourceId: 'hivemind-brochure', updatedAt: new Date('2026-07-15') },
+            { id: 'other', title: 'Other document', sourceId: 'other', updatedAt: new Date('2026-07-16') },
+          ];
+        },
+      },
+    },
+    qdrantClient: null,
+  });
+  const documents = await service.resolveSourceFromQuery({
+    userId: 'user-1', orgId: 'org-1', query: 'What exactly does the brochure say?',
+  });
+  assert.equal(where.userId, 'user-1');
+  assert.equal(where.orgId, 'org-1');
+  assert.equal(where.archivedAt, null);
+  assert.deepEqual(documents.map((document) => document.id), ['brochure']);
+});
+
 test('packet preserves partial results and exposes latency cutoff', () => {
   const packet = buildEvidencePacket({
     memories: [{ id: 'm1', content: 'fast fact' }],

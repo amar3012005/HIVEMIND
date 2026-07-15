@@ -208,7 +208,7 @@ export async function remoteKbSegment(orgId, segment, vector) {
   catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteKbRecall(orgId, vector, opts = {}) {
-  try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, scoreThreshold: opts.scoreThreshold }); return out?.results || []; }
+  try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, documentIds: opts.documentIds, scoreThreshold: opts.scoreThreshold }); return out?.results || []; }
   catch (e) { console.warn(`[mneme/remote] kb-recall failed org=${orgId}: ${e.message}`); return []; }
 }
 export async function remoteKbHydrate(orgId, ids) {

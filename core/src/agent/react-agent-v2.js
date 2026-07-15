@@ -31,7 +31,7 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
-import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
+import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation, resolveSourceArtifact } from './chat-recall-policy.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -679,7 +679,7 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
-async function gatherEvidence({ plan, ctx, onEvent }) {
+async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   const steps = [];
   const memoriesById = new Map();
@@ -696,6 +696,27 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // their source rows in the same answer.
   const synthesisChains = new Map(); // key = synthesis_id → chain
   const recallPackets = [];
+  let activeDeadlineAt = deadlineAt;
+  const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
+  const beforeDeadline = (promise) => {
+    const ms = remaining();
+    return ms > 0
+      ? Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('recall deadline exceeded')), ms))])
+      : Promise.reject(new Error('recall deadline exceeded'));
+  };
+
+  if (!plan.source) {
+    try {
+      plan.source = await resolveSourceArtifact({
+        evidenceRetrieval: ctx.evidenceRetrieval,
+        query: plan.user_message,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        deadlineAt,
+      });
+    } catch { /* ordinary recall remains available when source resolution fails */ }
+  }
+  if (!plan.source) activeDeadlineAt = Date.now() + TURN_BUDGET_MS;
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -811,13 +832,14 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     const recallResults = await Promise.all(
       recallQueries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', {
+          const r = await beforeDeadline(dispatchTool('hivemind_recall', {
             query: q,
             mode: recallMode,
             limit: recallLimit,
             _explicit_mode: !!plan.explicit_recall_mode,
+            deadline_at: activeDeadlineAt,
             ...recallExtras,
-          }, ctx);
+          }, ctx));
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -941,7 +963,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     relationships: [...edgesByKey.values()],
   });
   let escalationCount = 0;
-  if (deterministicRecall && !plan.explicit_recall_mode) {
+  if (deterministicRecall && remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
     const escalation = chooseRecallEscalation({
       plan,
       coverage,
@@ -950,7 +972,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     if (escalation) {
       escalationCount = 1;
       try {
-        const expanded = await dispatchTool('hivemind_recall', { ...recallExtras, ...escalation.args }, ctx);
+        const expanded = await beforeDeadline(dispatchTool('hivemind_recall', {
+          ...recallExtras,
+          ...escalation.args,
+          deadline_at: activeDeadlineAt,
+        }, ctx));
         recordTool(
           'hivemind_recall',
           escalation.args,
@@ -1463,7 +1489,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
       response: 'No grounded workspace evidence found',
       claims: [],
       rejected_claims: [],
-      grounded: true,
+      grounded: false,
       evidence_used: [],
       confidence: 0,
       gaps: ['The requested source was not covered by retrieved source evidence.'],
@@ -2254,6 +2280,7 @@ export async function runReactAgentV2({
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
+  const recallDeadlineAt = Date.now() + 3_000;
   // Tool-decision router (per-request `router:'tool'` OR env CHAT_ROUTER=tool).
   // Per-request lets us A/B test safely without flipping the deployment default.
   const useRouter = (router || process.env.CHAT_ROUTER) === 'tool';
@@ -2666,7 +2693,7 @@ export async function runReactAgentV2({
     }
 
     // STEP 3 — Evidence
-    const evidence = await gatherEvidence({ plan, ctx, onEvent });
+    const evidence = await gatherEvidence({ plan, ctx, onEvent, deadlineAt: recallDeadlineAt });
     steps.push(...evidence.steps);
     trace.recall = {
       coverage: evidence.coverage,

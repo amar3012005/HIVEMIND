@@ -1450,15 +1450,67 @@ class Director:
                 "address": pl.get("formattedAddress", ""),
             })
         rows = [x for x in rows if x["company"]]
-        # Onto the blackboard as sourced prospect facts (synth cites Google Places).
+        # Impressum/contact enrichment — for firms with a website, fetch the
+        # legally-mandated Impressum/Kontakt page and attach a real email (named
+        # person preferred). Concurrent + bounded; a failure just leaves email "".
+        await self._enrich_impressum(rows)
+        # Onto the blackboard as sourced prospect facts (synth cites Google Places;
+        # email cites the Impressum so the outreach send has a real recipient).
         for x in rows:
             self.blackboard.append(
-                f"- PROSPECT: {x['company']} | phone {x['phone'] or '—'} | {x['website'] or '—'} "
-                f"| {x['address']} (source: Google Places)")
+                f"- PROSPECT: {x['company']} | contact {x.get('email') or '—'} | phone {x['phone'] or '—'} "
+                f"| {x['website'] or '—'} | {x['address']} (source: Google Places"
+                + ("; email: Impressum" if x.get('email') else "") + ")")
         self.gather_count += 1
-        await self.emit({"t": "prospects", "query": query, "count": len(rows), "prospects": rows})
-        log.info("[hyper-engine] places_search '%s' → %d firms", query[:60], len(rows))
+        await self.emit({"t": "prospects", "query": query, "count": len(rows),
+                         "with_email": sum(1 for x in rows if x.get('email')), "prospects": rows})
+        log.info("[hyper-engine] places_search '%s' → %d firms, %d with email",
+                 query[:60], len(rows), sum(1 for x in rows if x.get('email')))
         return json.dumps({"found": len(rows), "prospects": rows})
+
+    # Role-address ranking: a named person beats a role inbox beats nothing.
+    _IMPRESSUM_PATHS = ("/impressum", "/impressum/", "/de/impressum", "/kontakt", "/imprint", "/contact", "")
+    _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+    _EMAIL_BAD = re.compile(r"\.(png|jpe?g|gif|svg|webp)$|sentry|example|wixpress|@2x|godaddy|\.gov", re.I)
+
+    async def _enrich_one_impressum(self, row: Dict[str, Any]) -> None:
+        site = (row.get("website") or "").strip().rstrip("/")
+        if not site:
+            return
+        for path in self._IMPRESSUM_PATHS:
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0),
+                                             follow_redirects=True, verify=False) as c:
+                    r = await c.get(site + path, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code != 200:
+                    continue
+                cands = [e for e in self._EMAIL_RE.findall(r.text) if not self._EMAIL_BAD.search(e.lower())]
+                if not cands:
+                    continue
+                # Prefer an email on the firm's own domain; then a named-looking one;
+                # then a role inbox — never a third-party/CDN address.
+                dom = site.split("//")[-1].split("/")[0].replace("www.", "")
+                same = [e for e in cands if dom.split(".")[0] in e.lower()]
+                pool = same or cands
+                weak = re.compile(r"^(datenschutz|webmaster|privacy|noreply|no-reply|admin|postmaster|abuse)@", re.I)
+                role = re.compile(r"^(info|kontakt|contact|office|mail|hello|hallo|kanzlei|team|zentrale)@", re.I)
+                strong = [e for e in pool if not weak.match(e)]
+                p2 = strong or pool
+                named = [e for e in p2 if not role.match(e) and not weak.match(e)]
+                row["email"] = (named or p2)[0]
+                return
+            except Exception:  # noqa: BLE001 — enrichment is best-effort
+                continue
+
+    async def _enrich_impressum(self, rows: List[Dict[str, Any]]) -> None:
+        targets = [x for x in rows if x.get("website")][:12]
+        if not targets:
+            return
+        sem = asyncio.Semaphore(6)
+        async def _guard(x):
+            async with sem:
+                await self._enrich_one_impressum(x)
+        await asyncio.gather(*[_guard(x) for x in targets], return_exceptions=True)
 
     # ── live web search (HIVEMIND core Tavily-backed) ────────────────────────
     async def _web_search(self, query: str) -> str:

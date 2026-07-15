@@ -1459,38 +1459,6 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const sys = answerPrompt({ language, assistantName, orgName });
   const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   if (deterministicRecall && evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
-    const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
-    const memorySources = evidence.memories.slice(0, 10).map(m => {
-      const tags = m.tags || [];
-      const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
-                   || (m.source_metadata?.source_type === 'synthesis-bridge')
-                   || tags.includes('synthesis:canonical')
-                   || tags.includes('synthesis:bridge');
-      const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
-                      : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
-                      : null;
-      return {
-        id: m.id,
-        title: m.title,
-        snippet: m.content,
-        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-        tags,
-        memory_type: m.memory_type,
-        rank_trace: {
-          is_synthesis: !!isSynth,
-          synthesis_type: synthType,
-          synthesis_confidence: m.synthesis_confidence ?? null,
-          synthesis_revision: m.synthesis_revision ?? null,
-          cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
-          cross_cluster_overlap: m._cross_cluster_overlap ?? null,
-          synthesis_boosted: !!m._synthesis_boosted,
-        },
-      };
-    });
-    const publicSources = evidence.coverage?.source_requested
-      ? citationSources
-      : [...citationSources, ...memorySources].slice(0, 10);
-
     return {
       response: 'No grounded workspace evidence found',
       claims: [],
@@ -2807,6 +2775,38 @@ export async function runReactAgentV2({
     }
 
     onEvent?.({ type: 'finish', text: answer.response });
+
+    const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
+    const memorySources = evidence.memories.slice(0, 10).map(m => {
+      const tags = m.tags || [];
+      const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
+                   || (m.source_metadata?.source_type === 'synthesis-bridge')
+                   || tags.includes('synthesis:canonical')
+                   || tags.includes('synthesis:bridge');
+      const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
+                      : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
+                      : null;
+      return {
+        id: m.id,
+        title: m.title,
+        snippet: m.content,
+        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+        tags,
+        memory_type: m.memory_type,
+        rank_trace: {
+          is_synthesis: !!isSynth,
+          synthesis_type: synthType,
+          synthesis_confidence: m.synthesis_confidence ?? null,
+          synthesis_revision: m.synthesis_revision ?? null,
+          cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
+          cross_cluster_overlap: m._cross_cluster_overlap ?? null,
+          synthesis_boosted: !!m._synthesis_boosted,
+        },
+      };
+    });
+    const publicSources = evidence.coverage?.source_requested
+      ? citationSources
+      : [...citationSources, ...memorySources].slice(0, 10);
 
     return {
       project_choice: recallProjectChoice,

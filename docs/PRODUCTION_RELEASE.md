@@ -1,5 +1,48 @@
 # SINGULANCE Production Release Ledger
 
+## 2026-07-15 - prod-20260715-19fa016d (recall source-grounding, PR #13)
+
+```yaml
+release_id: prod-20260715-19fa016d
+host: singulance
+deployed_at_utc: 2026-07-15T18:15:00Z
+parent:
+  branch: hivemind-main (PR #13 squash-merge; owner-authorized one-time admin bypass; enforce_admins re-enabled and verified true)
+  sha: 19fa016d639c2cbc80d155b908b1856377147549
+frontend:
+  gitlink: a017b4322aba68b41fca477af7347239a58122bf (unchanged; core-only release)
+runtime:
+  VERSION: prod-20260715-19fa016d
+  NEXT_VERSION: prod-20260715-8aa07a4b   # canary intentionally not advanced; divergence recorded, reconcile at next canary release
+images:
+  core: sha256:0985b38bc9222dee0212fb87f85ccef6d9246d2bb3a759e4273d1ac78544b2a0 (immutable tag; stable+latest advanced post-acceptance)
+  other_services: unchanged digests from prior entries
+migrations:
+  - 20260710153000_agent_usage_quotas — IN-TREE at 19fa016d, additive ADD COLUMN IF NOT EXISTS.
+    Applied manually 2026-07-15T18:14Z AFTER first promotion surfaced taraSeconds runtime errors.
+    DEVIATIONS RECORDED: (a) applied after incompatible code, not before (invariant 9);
+    (b) no fresh pre-change backup checksum verified (nearest encrypted backup hivemind-20260715-033001.sql.gz.enc, 16.3MB, ~15h prior);
+    (c) not recorded in an applied-migrations ledger at apply time.
+    PROVENANCE VERIFIED: git show 19fa016d contains the migration SQL, schema.prisma taraSeconds fields, and 16 usage-tracker.js references — canonical, not drift.
+tests:
+  - 44/44 recall/chat/temporal/citation/TARA/HTTP contract tests inside hivemind/core-api:prod-20260715-8aa07a4b prior to merge (PR #13)
+acceptance:
+  behavior:
+    - source-explain agent path fail-closed on unknown source (0 sections)
+    - chat FOREST warm: grounded brochure-cited answer, 9 sources, 4.8s (stable image refused the same question with 3 sources — pre-existing claim-validator gate)
+    - EXACT human-approval passage verbatim assertion: OPEN acceptance item, re-run tracked in cleanup
+    - fact fast path 28ms
+  public: [homepage 200, core_health 200, control loopback 200]
+  containers: [hm-core healthy on release tag; hm-control/hm-employees/tara-deepgram healthy; tara-aaas retired pre-release]
+  fresh_error_log: P3005 boot-time migrate-deploy on non-baselined DB — known baseline condition on prior releases; formal baselining is an open item
+rollback:
+  image: hivemind/core-api:prod-20260715-8aa07a4b
+  env_backup: /root/hivemind/.env.bak-recall-p1
+notes:
+  - box ran prod-20260715-8aa07a4b before this release while the ledger head recorded observed state only — this is the first full deployment entry for the 19fa016d line
+  - PR #14 (first ledger attempt) was cut from a wrong lineage and closed unmerged; this entry replaces it from a fresh hivemind-main clone
+```
+
 ## 2026-07-15 - Pre-release lineage reconciliation audit
 
 - This entry records observed state only. It is not a deployment or acceptance claim.

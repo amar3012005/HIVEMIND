@@ -71,6 +71,25 @@ test('hung event-driven evidence returns at the deadline for fast fallback', asy
   assert.ok(Date.now() - started < 200);
 });
 
+test('hung live connector returns at the deadline with an empty live fallback', async () => {
+  const started = Date.now();
+  const enhanced = await recallEnhance({
+    memories: [{ id: 'm1', tags: ['source:gmail'] }],
+    query: 'latest gmail message',
+    ctx: { userId: 'user-1', orgId: 'org-1' },
+    evidenceService: null,
+    prisma: {},
+    includeLive: true,
+    liveIntent: true,
+    deadlineMs: 25,
+    liveQuery: () => new Promise(() => {}),
+  });
+  assert.equal(enhanced.trace.live_eligible, true);
+  assert.equal(enhanced.trace.live_trigger, 'timeout');
+  assert.deepEqual(enhanced.live, []);
+  assert.ok(Date.now() - started < 200);
+});
+
 test('full recall hydrates a tenant-scoped ordered source window', async () => {
   let query;
   const service = new EvidenceRetrievalService({

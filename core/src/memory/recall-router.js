@@ -796,7 +796,7 @@ export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) 
 export async function recallEnhance({
   memories, query, ctx, evidenceService, prisma, includeLive = true,
   includeGraph = false, includeAdjacent = false, deadlineMs = null,
-  liveIntent = false, surfacePolicyAllowsLive = true,
+  liveIntent = false, surfacePolicyAllowsLive = true, liveQuery = hop3Live,
 }) {
   const startedAt = Date.now();
   const inspection = inspectMemories(memories || []);
@@ -812,7 +812,7 @@ export async function recallEnhance({
     !liveEligible
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
-          hop3Live({ prisma, query, ctx, inspection }),
+          liveQuery({ prisma, query, ctx, inspection }),
           cap(HOP3_TIMEOUT_MS),
           { items: [], reason: 'timeout' },
         ),

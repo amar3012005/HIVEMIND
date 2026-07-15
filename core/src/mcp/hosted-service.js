@@ -2719,6 +2719,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           const recallArgs = {
             query_context: args.query,
             mode: requestedMode,
+            explicit_mode: true,
             include_live: args.include_live === true,
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
             ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
@@ -3460,42 +3461,30 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.transaction_time && !args.valid_time) {
           throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
         }
-        // Default transaction_time to "now" when only valid_time is given —
-        // and warn callers passing a TX-time earlier than any memory's
-        // creation: empty result is correct, not a bug.
         const txTime = args.transaction_time || null;
         const validTime = args.valid_time || null;
-        const res = await apiClient.post('/api/temporal/as-of', {
-          transaction_time: txTime,
-          valid_time: validTime,
+        const query = args.memory_query || args.file_path || 'workspace memory';
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          time: {
+            ...(txTime ? { known_at: txTime } : {}),
+            ...(validTime ? { valid_at: validTime } : {}),
+          },
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
           project_id: args.project_id || null,
         });
-        let memories = res.memories || [];
-        if (args.file_path) {
-          memories = memories.filter(m => (m.tags || []).includes(`file:${args.file_path}`));
-        }
-        if (args.project) {
-          memories = memories.filter(m => m.project === args.project);
-        }
-        // Enterprise semantic filter (post-filter on title+content tokens)
-        if (args.memory_query && typeof args.memory_query === 'string') {
-          const q = args.memory_query.toLowerCase();
-          const tokens = q.split(/\s+/).filter(t => t.length >= 3);
-          if (tokens.length > 0) {
-            memories = memories.filter(m => {
-              const haystack = `${m.title || ''} ${m.content || ''}`.toLowerCase();
-              return tokens.some(t => haystack.includes(t));
-            });
-          }
-        }
-        const polished = polishMemories(memories);
+        const polished = polishMemories(res.memories || []);
         const hint = (polished.length === 0 && txTime)
           ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
           : null;
         return formatToolContent({
-          query: res.query || { transaction_time: txTime, valid_time: validTime },
+          query: { text: query, transaction_time: txTime, valid_time: validTime },
           count: polished.length,
           memories: polished,
+          evidence: res.evidence || [],
+          evidence_packet: res.evidence_packet || null,
+          cutoff_reason: res.cutoff_reason || null,
           ...(hint ? { hint } : {})
         });
       }
@@ -3505,34 +3494,53 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.time_a || !args.time_b) {
           throw new Error('hivemind_code_diff requires time_a and time_b');
         }
-        const tagsFilter = [];
-        if (args.file_path) tagsFilter.push(`file:${args.file_path}`);
-        if (Array.isArray(args.tags) && args.tags.length) tagsFilter.push(...args.tags);
-
-        const diff = await apiClient.post('/api/temporal/diff', {
-          time_a: args.time_a,
-          time_b: args.time_b,
-          tags_filter: tagsFilter.length ? tagsFilter : undefined
+        const from = new Date(args.time_a);
+        const to = new Date(args.time_b);
+        if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+          throw new Error('hivemind_diff requires valid time_a/time_b with time_a before time_b');
+        }
+        const tags = [...(Array.isArray(args.tags) ? args.tags : []), ...(args.file_path ? [`file:${args.file_path}`] : [])];
+        const query = args.memory_query || args.file_path || tags.join(' ') || 'workspace changes';
+        const recallAt = (value) => apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          time: { valid_at: value.toISOString() },
+          ...(tags.length ? { tags } : {}),
         });
-        return formatToolContent({ ...diff, file_path: args.file_path || null });
+        const [a, b] = await Promise.all([recallAt(from), recallAt(to)]);
+        const fromIds = new Set((a.memories || []).map((memory) => memory.id));
+        const toIds = new Set((b.memories || []).map((memory) => memory.id));
+        const added = (b.memories || []).filter((memory) => !fromIds.has(memory.id));
+        const removed = (a.memories || []).filter((memory) => !toIds.has(memory.id));
+        const persisted = (b.memories || []).filter((memory) => fromIds.has(memory.id));
+        const changedIds = new Set([...added, ...removed].map((memory) => memory.id));
+        const edges = [...(a.evidence_packet?.graphEvidence || []), ...(b.evidence_packet?.graphEvidence || [])];
+        const seenEdges = new Set();
+        const changes = edges.filter((edge) => {
+          const type = String(edge.type || '').toLowerCase();
+          const key = `${edge.from_id}|${edge.to_id}|${type}`;
+          if (!['updates', 'contradicts'].includes(type) || seenEdges.has(key)) return false;
+          if (!changedIds.has(edge.from_id) && !changedIds.has(edge.to_id)) return false;
+          seenEdges.add(key);
+          return true;
+        });
+        return formatToolContent({ query, from_date: args.time_a, to_date: args.time_b, added, removed, persisted, changes, from: a, to: b });
       }
 
       case 'hivemind_timeline':
       case 'hivemind_code_timeline': {
-        let memoryId = args.memory_id;
-        if (!memoryId && args.file_path) {
-          // Resolve latest memory tagged file:<path>
-          const list = await apiClient.get('/api/memories', {
-            params: { tags: `file:${args.file_path}`, limit: 1 }
-          });
-          const memories = Array.isArray(list) ? list : (list?.memories || list?.data || []);
-          memoryId = memories[0]?.id || null;
-        }
-        if (!memoryId) {
+        if (!args.memory_id && !args.file_path) {
           throw new Error('hivemind_code_timeline requires memory_id or a resolvable file_path');
         }
-        const res = await apiClient.post('/api/temporal/timeline', { memory_id: memoryId });
-        return formatToolContent(res);
+        const query = args.memory_query || args.file_path || args.memory_id;
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          operation: 'timeline',
+          include_superseded: true,
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
+        });
+        return formatToolContent({ query, timeline: res.memories || [], evidence_packet: res.evidence_packet || null, cutoff_reason: res.cutoff_reason || null });
       }
 
       default:

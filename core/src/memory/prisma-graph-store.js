@@ -96,6 +96,7 @@ function mapAgentRow(r) {
     created_at: r.created_at,
     updated_at: r.created_at,
     valid_from: r.valid_from || null,
+    valid_to: r.valid_to || null,
     document_date: r.document_date || null,
     metadata: r.metadata || {},
     // Provenance is folded into the agent's `metadata` jsonb on write (createMemory
@@ -153,6 +154,7 @@ function mapMemoryRecord(record) {
     updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
     document_date: record.documentDate instanceof Date ? record.documentDate.toISOString() : record.documentDate,
     valid_from: record.validFrom instanceof Date ? record.validFrom.toISOString() : (record.validFrom || null),
+    valid_to: record.validTo instanceof Date ? record.validTo.toISOString() : (record.validTo || null),
     event_dates: (record.eventDates || []).map(value => value instanceof Date ? value.toISOString() : value),
     memory_type: record.memoryType,
     title: record.title,
@@ -516,6 +518,8 @@ export class PrismaGraphStore {
       const rIsLatest = patch.isLatest ?? patch.is_latest;
       if (rIsLatest !== undefined) remotePatch.is_latest = rIsLatest;
       if (patch.memoryType !== undefined) remotePatch.memory_type = patch.memoryType;
+      const rValidTo = patch.validTo ?? patch.valid_to;
+      if (rValidTo !== undefined) remotePatch.valid_to = rValidTo;
       if (Object.keys(remotePatch).length) await amrUpdate(_remoteUpdOrg, id, remotePatch);
       return this.getMemory(id);
     }
@@ -531,6 +535,8 @@ export class PrismaGraphStore {
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
+    const validToVal = patch.validTo ?? patch.valid_to;
+    if (validToVal !== undefined) data.validTo = validToVal ? new Date(validToVal) : null;
 
     await this.client.memory.update({
       where: { id },
@@ -583,7 +589,7 @@ export class PrismaGraphStore {
   // candidate). Returns Map<id, mappedMemory>; ids absent from PG are simply
   // omitted (same as getMemory→null). Includes memoryProjects so project_ids
   // populate (getMemory omitted it).
-  async getMemories(ids) {
+  async getMemories(ids, temporal = null) {
     if (!Array.isArray(ids) || ids.length === 0) return new Map();
     const uniq = [...new Set(ids.filter(Boolean))];
     const _org = currentOrg();
@@ -593,8 +599,21 @@ export class PrismaGraphStore {
       for (const r of rows) out.set(r.id, mapAgentRow(r));
       return out;
     }
+    const validAtValue = temporal?.valid_at || null;
+    const validAt = validAtValue ? new Date(validAtValue) : null;
+    const knownAt = temporal?.known_at ? new Date(temporal.known_at) : null;
     const records = await this.client.memory.findMany({
-      where: { id: { in: uniq } },
+      where: {
+        id: { in: uniq },
+        deletedAt: null,
+        ...(knownAt ? { createdAt: { lte: knownAt } } : {}),
+        ...(validAt ? {
+          AND: [
+            { OR: [{ validFrom: null }, { validFrom: { lte: validAt } }] },
+            { OR: [{ validTo: null }, { validTo: { gt: validAt } }] },
+          ],
+        } : {}),
+      },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -839,13 +858,15 @@ export class PrismaGraphStore {
     };
   }
 
-  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
+  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, valid_at, known_at, source_platform, scope = 'personal', access_context = null }) {
     // .amr org: there is no Postgres to run to_tsvector against. The lexical (keyword) leg of hybrid
     // recall runs over the org's .amr records instead — same scope, term-overlap scoring. Without
     // this the lexical leg would $queryRaw-passthrough to central Postgres (PG=0 for this org) and
     // silently return nothing, leaving recall vector-only.
     if (query && isMnemeOrg(org_id) && mnemeMode() === 'sole') {
-      return amrLexical(org_id, query, { org_id, user_id, scope, is_latest, project, created_after, created_before }, n_results * 3) || [];
+      return amrLexical(org_id, query, {
+        org_id, user_id, scope, is_latest, project, created_after, created_before, valid_at, known_at,
+      }, n_results * 3) || [];
     }
     // REMOTE agent org (push model): recall lives on the org's agent, not central. Embed the query here
     // and vector-search the agent (amrRecall → POST /v1/recall); content rides in the hit payload.
@@ -860,7 +881,11 @@ export class PrismaGraphStore {
         // HYBRID: vector (semantic) + lexical (exact-term FTS over the agent's Postgres). The lexical
         // leg surfaces buried exact terms that cosine rank misses — without it self-host recall was
         // vector-only. Union by id; keep the higher score (lexical hits ride at their ts_rank).
-        const lexFilter = { is_latest: is_latest !== undefined ? is_latest : true };
+        const lexFilter = {
+          ...(is_latest !== undefined ? { is_latest } : {}),
+          valid_at,
+          known_at,
+        };
         const [hits, lex] = await Promise.all([
           amrRecall(org_id, vec, filter, n_results * 3, 0).then((r) => r || []),
           (amrLexicalRemote(org_id, query, lexFilter, n_results * 3) || Promise.resolve([])).then((r) => r || []),
@@ -881,11 +906,21 @@ export class PrismaGraphStore {
             scope: p.scope || null,
             importance_score: score, is_latest: p.is_latest ?? true,
             created_at: p.created_at || null, updated_at: p.created_at || null,
+            document_date: p.document_date || null,
+            valid_from: p.valid_from || null,
+            valid_to: p.valid_to || null,
             score, cognitive_layer_role: p.cognitive_layer_role || null,
           });
         }
         return Array.from(byId.values())
           .filter((m) => {
+            const snapshot = valid_at || null;
+            if (known_at && (!m.created_at || new Date(m.created_at) > new Date(known_at))) return false;
+            if (snapshot) {
+              const validFrom = m.valid_from || m.document_date || m.created_at;
+              if (validFrom && new Date(validFrom) > new Date(snapshot)) return false;
+              if (m.valid_to && new Date(m.valid_to) <= new Date(snapshot)) return false;
+            }
             if (m.scope !== 'project' || scopedProjectIds.length === 0) return true;
             const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
             return pids.some(id => scopedProjectIds.includes(id));
@@ -992,18 +1027,25 @@ export class PrismaGraphStore {
           const dateBeforeWhere = created_before
             ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
             : '';
+          const snapshotValidAt = valid_at || null;
+          const validAtWhere = snapshotValidAt
+            ? (ftsParams.push(new Date(snapshotValidAt).toISOString()), `AND (m.valid_from IS NULL OR m.valid_from <= ${nextParam()}::timestamptz) AND (m.valid_to IS NULL OR m.valid_to > ${nextParam()}::timestamptz)`)
+            : '';
+          const knownAtWhere = known_at
+            ? (ftsParams.push(new Date(known_at).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
+            : '';
 
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
-                   m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
+                   m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
                    ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
                            to_tsquery('english', $1)) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
-              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
+              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
               AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
                   @@ to_tsquery('english', $1)
             ORDER BY fts_score DESC
@@ -1023,6 +1065,8 @@ export class PrismaGraphStore {
               created_at: r.created_at?.toISOString?.() || r.created_at,
               updated_at: r.updated_at?.toISOString?.() || r.updated_at,
               document_date: r.document_date?.toISOString?.() || r.document_date,
+              valid_from: r.valid_from?.toISOString?.() || r.valid_from,
+              valid_to: r.valid_to?.toISOString?.() || r.valid_to,
               source: r.source,
               visibility: r.visibility,
               // Phase 1 synthesis columns — needed by recall-router boost + synthesized[] shape
@@ -1054,8 +1098,14 @@ export class PrismaGraphStore {
         tags: tags?.length ? { hasEvery: tags } : undefined,
         createdAt: {
           gte: created_after ? new Date(created_after) : undefined,
-          lte: created_before ? new Date(created_before) : undefined
-        }
+          lte: upperCreatedAt,
+        },
+        ...(valid_at ? {
+          AND: [
+            { OR: [{ validFrom: null }, { validFrom: { lte: new Date(valid_at) } }] },
+            { OR: [{ validTo: null }, { validTo: { gt: new Date(valid_at) } }] },
+          ],
+        } : {}),
       },
       include: {
         sourceMetadata: true,

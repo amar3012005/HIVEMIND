@@ -119,6 +119,21 @@ const MEMORIES_PAYLOAD_INDEXES = [
     description: 'When the interaction occurred (dual-layer timestamp)'
   },
   {
+    field_name: 'created_at',
+    field_schema: 'datetime',
+    description: 'Transaction-time eligibility for known_at recall'
+  },
+  {
+    field_name: 'valid_from',
+    field_schema: 'datetime',
+    description: 'Valid-time window start'
+  },
+  {
+    field_name: 'valid_to',
+    field_schema: 'datetime',
+    description: 'Valid-time window end'
+  },
+  {
     field_name: 'importance_score',
     field_schema: 'float',
     description: 'User/model assigned importance (0-1)'
@@ -263,6 +278,7 @@ export class QdrantCollections {
 
     if (await this.collectionExists(collectionName)) {
       logger.info(`Collection ${collectionName} already exists`);
+      await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
       return;
     }
 
@@ -425,9 +441,8 @@ export class QdrantCollections {
         });
       } catch (error) {
         // Check if index already exists
-        const collections = await this.#client.getCollections();
-        const collection = collections.collections.find(c => c.name === collectionName);
-        if (collection && collection.payload_schema?.[index.field_name]) {
+        const collection = await this.#client.getCollection(collectionName);
+        if (collection.payload_schema?.[index.field_name]) {
           logger.debug(`Payload index ${index.field_name} already exists`);
         } else {
           logger.error(`Failed to create payload index ${index.field_name}`, { error });

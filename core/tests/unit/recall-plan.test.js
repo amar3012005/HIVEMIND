@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isLiveExpansionEligible, resolveRecallPlan } from '../../src/memory/recall-router.js';
+import { RecallRouter, isLiveExpansionEligible, resolveRecallPlan } from '../../src/memory/recall-router.js';
 
 test('legacy recall modes preserve their existing event-driven behavior', () => {
   const plan = resolveRecallPlan({ mode: 'auto' });
@@ -104,4 +104,19 @@ test('source identifiers are normalized and bounded by the server', () => {
   assert.equal(plan.source.document_id.length, 128);
   assert.equal(plan.source.title.length, 512);
   assert.equal(plan.source.requested, true);
+});
+
+test('an unresolved explicit source fails closed before memory recall', async () => {
+  let recalled = false;
+  const router = new RecallRouter({
+    persistentMemoryStore: { recall: async () => { recalled = true; return { memories: [] }; } },
+    evidenceRetrieval: { resolveSourceDocuments: async () => [] },
+    prisma: null,
+  });
+  const result = await router.recall('What does this source say?', {
+    mode: 'explain', source_document_id: 'not-authorized',
+  }, { userId: 'user-1', orgId: 'org-1' });
+  assert.equal(recalled, false);
+  assert.deepEqual(result.memories, []);
+  assert.equal(result.trace.cutoff_reason, 'source_not_found');
 });

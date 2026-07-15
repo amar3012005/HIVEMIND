@@ -9,7 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
-import { orgIsRemote, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -57,6 +57,7 @@ export class EvidenceRetrievalService {
         const hits = await amrKbRecall(orgId, queryVector, {
           limit: limit * 2,
           documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
+          documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
           scoreThreshold: effectiveThreshold,
         });
         if (!hits || !hits.length) return [];
@@ -298,6 +299,62 @@ export class EvidenceRetrievalService {
       orderBy: { updatedAt: 'desc' },
       take: Math.max(1, Math.min(limit, 10)),
     });
+  }
+
+  /**
+   * Resolve a document mentioned in natural-language input before retrieval.
+   * This is metadata-only: source eligibility never depends on vector scores or
+   * an LLM extracting an English filename.
+   */
+  async resolveSourceFromQuery({ userId, orgId, query, limit = 1 }) {
+    const tokens = [...new Set(String(query || '')
+      .normalize('NFKC')
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((token) => token.toLocaleLowerCase())
+      .filter((token) => token.length >= 3))]
+      .slice(0, 12);
+    if (!tokens.length) return [];
+
+    const score = (document) => {
+      const haystack = [document.title, document.sourceId, document.filename]
+        .filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase();
+      const hits = tokens.filter((token) => haystack.includes(token)).length;
+      return hits / tokens.length;
+    };
+
+    if (orgIsRemote(orgId)) {
+      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+      return (listed?.documents || [])
+        .filter((document) => !document.userId || document.userId === userId)
+        .map((document) => ({ ...document, _sourceScore: score(document) }))
+        .filter((document) => document._sourceScore > 0)
+        .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+        .slice(0, Math.max(1, Math.min(limit, 3)));
+    }
+
+    if (!this.db?.knowledgeDocument) return [];
+    const documents = await this.db.knowledgeDocument.findMany({
+      where: {
+        userId,
+        orgId,
+        archivedAt: null,
+        OR: tokens.flatMap((token) => [
+          { title: { contains: token, mode: 'insensitive' } },
+          { sourceId: { contains: token, mode: 'insensitive' } },
+        ]),
+      },
+      select: {
+        id: true, title: true, sourceId: true, documentType: true,
+        sourcePlatform: true, sourceUrl: true, documentDate: true, updatedAt: true,
+      },
+      take: 30,
+    });
+    return documents
+      .map((document) => ({ ...document, _sourceScore: score(document) }))
+      .filter((document) => document._sourceScore > 0)
+      .sort((a, b) => b._sourceScore - a._sourceScore
+        || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, Math.max(1, Math.min(limit, 3)));
   }
 
   /**

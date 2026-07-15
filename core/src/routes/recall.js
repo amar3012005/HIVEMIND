@@ -1,5 +1,33 @@
 import crypto from 'node:crypto';
 
+function resolveWithinDeadline(promise, timeoutMs, fallback) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      },
+    );
+  });
+}
+
 export async function handleRecallRoute(ctx = {}) {
   const {
     req,
@@ -29,6 +57,7 @@ export async function handleRecallRoute(ctx = {}) {
     evidenceRetrieval,
     amrBumpRecall,
     qdrantClient,
+    recallRuntime: injectedRecallRuntime = null,
   } = ctx;
 
   const _recallT0 = Date.now();
@@ -80,6 +109,99 @@ export async function handleRecallRoute(ctx = {}) {
       } else {
         return jsonResponse(res, { error: 'Project not found or access denied', project_id: recallProjectId }, 403);
       }
+    }
+
+    const query = body.query_context || body.context || '';
+    let recallRuntime = injectedRecallRuntime;
+    if (!recallRuntime) {
+      const [{ RecallRouter, resolveRecallPlan, loadTypedGraphEvidence }, { buildRecallPacket }] = await Promise.all([
+        import('../memory/recall-router.js'),
+        import('../memory/recall-packet.js'),
+      ]);
+      const router = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+      recallRuntime = {
+        resolvePlan: resolveRecallPlan,
+        recall: (...args) => router.recall(...args),
+        loadGraph: loadTypedGraphEvidence,
+        buildPacket: buildRecallPacket,
+      };
+    }
+    const recallPlan = recallRuntime.resolvePlan(body);
+
+    // Explicit fact/explain/full modes use the bounded, source-grounded
+    // internal service. Unspecified and legacy modes retain the established
+    // backwards-compatible HTTP response pipeline below.
+    if (!recallPlan.legacy) {
+      if (!query || typeof query !== 'string') {
+        return jsonResponse(res, { error: 'query_context is required' }, 400);
+      }
+      const remainingMs = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - _recallT0));
+      const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
+      const bounded = await resolveWithinDeadline(
+        recallRuntime.recall(query, {
+          mode: recallPlan.mode,
+          include_live: body.include_live === true,
+          live_intent: body.live_intent === true,
+          surface_policy_allows_live: body.surface_policy_allows_live !== false,
+          project: recallProject,
+          project_id: recallProjectId,
+          tags: body.tags || [],
+          valid_at: body.valid_at,
+          date_range: body.date_range || temporalExpansion.dateRange || null,
+          source_document_id: body.source_document_id || null,
+          source_title: body.source_title || null,
+        }, {
+          userId,
+          orgId,
+          projectId: recallProjectId,
+          accessContext: recallAccessCtx,
+        }),
+        remainingMs(),
+        timeoutResult,
+      );
+
+      let graphEvidence = [];
+      if (recallPlan.max_graph_hops > 0 && bounded.memories?.length && remainingMs() > 1) {
+        const graph = await resolveWithinDeadline(
+          recallRuntime.loadGraph({
+            prisma,
+            memoryIds: bounded.memories.map((memory) => memory.id).filter(Boolean),
+            userId,
+            orgId,
+            accessContext: recallAccessCtx,
+          }),
+          Math.min(500, remainingMs()),
+          { items: [], reason: 'timeout' },
+        );
+        graphEvidence = graph.items || [];
+      }
+
+      const elapsed = Date.now() - _recallT0;
+      const cutoffReason = bounded.trace?.timeout || elapsed >= recallPlan.latency_budget_ms
+        ? 'latency_budget'
+        : bounded.trace?.cutoff_reason || null;
+      const packet = recallRuntime.buildPacket({
+        facts: bounded.memories || [],
+        sourceSections: bounded.evidence || [],
+        timeline: bounded.timeline || [],
+        conflicts: graphEvidence.filter((edge) => String(edge.type).toLowerCase() === 'contradicts'),
+        graphEvidence,
+        liveEvidence: bounded.live || [],
+        plan: recallPlan,
+        cutoffReason,
+        trace: bounded.trace,
+      });
+      if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
+      return jsonResponse(res, {
+        memories: bounded.memories || [],
+        evidence: bounded.evidence || [],
+        live: bounded.live || [],
+        mode_used: recallPlan.mode,
+        recall_plan: recallPlan,
+        evidence_packet: packet,
+        cutoff_reason: cutoffReason,
+        latency_ms: Date.now() - _recallT0,
+      });
     }
 
     let recallAuthorId = null;

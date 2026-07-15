@@ -12,7 +12,8 @@ const dataRoot = process.argv[3];
 const dim = 8;
 const orgId = '00000000-0000-4000-8000-00000000a001';
 const otherOrgId = '00000000-0000-4000-8000-00000000b001';
-const nativePath = fileURLToPath(new URL('../../src/vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url));
+const nativePath = process.env.MNEME_BINDING
+  || fileURLToPath(new URL('../../src/vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url));
 const binding = loadBinding(nativePath);
 const backend = {
   openStore: (root, collection, dimensions) => binding.MnemeStore.open(root, collection, dimensions),
@@ -84,6 +85,35 @@ if (phase === 'write') {
     recalledId: JSON.parse(hits[0].text).id,
     otherTenantId: other[0]?.id,
     postgresCalls: postgresCalls.length,
+  }));
+} else if (phase === 'delete') {
+  await state.adapter.memoryEvidenceLink.deleteMany({ where: { documentId: '00000000-0000-4000-8000-00000000a201' } });
+  await state.adapter.knowledgeSegment.deleteMany({ where: { documentId: '00000000-0000-4000-8000-00000000a201' } });
+  await state.adapter.relationship.deleteMany({ where: { OR: [
+    { fromId: { in: ['00000000-0000-4000-8000-00000000a101', '00000000-0000-4000-8000-00000000a102'] } },
+    { toId: { in: ['00000000-0000-4000-8000-00000000a101', '00000000-0000-4000-8000-00000000a102'] } },
+  ] } });
+  await state.adapter.memory.deleteMany({ where: { id: { in: [
+    '00000000-0000-4000-8000-00000000a101', '00000000-0000-4000-8000-00000000a102',
+  ] } } });
+  await state.adapter.knowledgeDocument.deleteMany({ where: { id: '00000000-0000-4000-8000-00000000a201' } });
+  state.store.flush();
+  process.stdout.write(JSON.stringify({ deleted: true }));
+} else if (phase === 'read-deleted') {
+  const memories = await state.prisma.memory.findMany({ where: { orgId } });
+  const relationships = await state.prisma.relationship.findMany({ where: { fromMemory: { orgId } } });
+  const segments = await state.prisma.knowledgeSegment.findMany({ where: { orgId } });
+  const evidence = await state.prisma.memoryEvidenceLink.findMany({ where: { documentId: '00000000-0000-4000-8000-00000000a201' } });
+  const documents = await state.prisma.knowledgeDocument.findMany({ where: { orgId } });
+  const hits = state.store.recallLayer(Float32Array.from(vector(1)), 5, 0)
+    .map((hit) => JSON.parse(hit.text).id);
+  process.stdout.write(JSON.stringify({
+    memories: memories.length,
+    relationships: relationships.length,
+    segments: segments.length,
+    evidenceLinks: evidence.length,
+    documents: documents.length,
+    deletedClaimRecalled: hits.includes('00000000-0000-4000-8000-00000000a102'),
   }));
 } else {
   throw new Error(`unknown phase: ${phase}`);

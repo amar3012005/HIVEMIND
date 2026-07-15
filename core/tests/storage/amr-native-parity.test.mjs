@@ -28,6 +28,16 @@ test('native AMR preserves canonical memory, evidence, graph, durability, and te
     assert.equal(reloaded.recalledId, '00000000-0000-4000-8000-00000000a102');
     assert.equal(reloaded.otherTenantId, 'pg-memory');
     assert.equal(reloaded.postgresCalls, 1);
+
+    assert.deepEqual(runPhase('delete', root), { deleted: true });
+    assert.deepEqual(runPhase('read-deleted', root), {
+      memories: 0,
+      relationships: 0,
+      segments: 0,
+      evidenceLinks: 0,
+      documents: 0,
+      deletedClaimRecalled: false,
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

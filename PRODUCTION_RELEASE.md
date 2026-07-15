@@ -131,3 +131,8 @@
 - Follow-up fixes (5971bf0f): turn message outranks room goal in kind resolution (HQ goal embedding the task list mis-typed a competitor question as outreach — caught live); recipient-less gmail drafts allowed (produce path drafts for the user to address).
 - **Live proof:** outreach turn 2bb455af sealed with `## Ideal Customer Profile/Prospect List/Sequence/Success Metrics`; market turn 097fdf7b (post-fix) kind=market with `## Competitive Landscape/Where We Win/Threats & Gaps/Recommended Moves`. 4/4 unit checks (skeleton in for market/outreach answer, absent for general + email). "Competitive desk" marker in served chunk 84.02ec1810.
 - **Known pending (user action, not code):** Gmail draft 403 persists until Gmail is reconnected to grant compose+send (current grant readonly, verified in oauth_scopes).
+
+## prod-20260715-f98dce54 — Open dial allowlist (owner opt-out)
+- **Parent:** `feat/open-dial-allowlist` @ `f98dce54` off singulance-main 68d957cd. tara-deepgram only.
+- `*` in ALLOWED_NUMBERS (or DIAL_ALLOW_ALL=true) opens outbound dialing to any valid E.164; closed lists unchanged (fail-closed). Server env appended `*` (backup .env.bak-allowall). Owner accepts cost/compliance for open dialing.
+- Verified in-container: allow-all True; 3/3 telephony tests pass; closed-list behavior regression-checked.

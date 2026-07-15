@@ -14,6 +14,7 @@ function triple() {
 
 function localCandidates() {
   return [
+    ...(process.env.MNEME_BINDING ? [process.env.MNEME_BINDING] : []),
     join(__dirname, `singulance-amr.${triple()}.node`),
     join(__dirname, 'singulance-amr.node'),
   ];

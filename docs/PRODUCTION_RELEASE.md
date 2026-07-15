@@ -1,5 +1,41 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260715-8aa07a4b - Canonical P0 reconciliation release
+
+- **Date:** 2026-07-15 10:27 UTC
+- **Parent:** branch `hivemind-main`, SHA `8aa07a4bf6e32a99541ae12fd48da52805a6cad7`
+- **Frontend:** branch `singulance-main`, SHA `a017b4322aba68b41fca477af7347239a58122bf`
+- **Runtime:** `VERSION=prod-20260715-8aa07a4b`, `NEXT_VERSION=prod-20260715-8aa07a4b`
+- **Build source:** clean detached `/root/builds/prod-20260715-8aa07a4b`; the dirty shared checkout was not used or modified.
+
+### Images
+
+| Service | Image digest | Origin |
+|---|---|---|
+| core | `sha256:088e157ecee594e2250839fa4dae538c71ec45444eac86c9e42673dc83246671` | built |
+| employees | `sha256:5d849b4d9d1612eba49989f6b5147238c7f520cf27298a53de89dff61b59f812` | built |
+| control | `sha256:46150e1f5842b7b9fcaaad2934b877f58af859a65d6663111d8662545318a266` | unchanged, retagged |
+| tara-deepgram | `sha256:382efc7ed893748f1563b451a7f2a92999aa94f6bdff5cef7f45b17a28e2fa80` | unchanged, retagged |
+| byod-broker | `sha256:ae0fe36a8468690f7c0da07a1af5ae608d069fd3f8b8e1d4d2b6088706340eee` | unchanged, retagged |
+| playwright | `sha256:4177c43a4414d50b0028a957c85bce332201fc5a1c72fbbbc65179dd5144ee94` | unchanged, retagged |
+| frontend-single | `sha256:5bac21c091ad210bc9d24252333859a2923bb5bd9029408480af1e4f4330eb0c` | exact accepted frontend, retagged |
+
+### Verification
+
+- Pre-release: scoped release gate 75/75; HyperAgents Python contract 1/1; disposable BYOD lifecycle passed.
+- No migrations. PostgreSQL, Qdrant, Redis, Docling, and Nango were not recreated.
+- Public: homepage, dashboard, login, Overview, API health, and Core health returned 200. TARA returned 200 on its service health endpoint; its public privileged token route returned the expected 401.
+- Authenticated disposable session: bootstrap, teams, projects, HyperAgents company, `fact`, `explain`, `full`, and grounded `/chat` returned 200 for the target user/org.
+- Warm `fact`: 5 memories, 3 citations, 1285 ms, no cutoff. `explain`: 5 memories and 5 evidence sections in 1176 ms. `full`: 5 memories and 5 evidence sections in 671 ms.
+- Fresh fatal, panic, uncaught, unhandled, OOM, and migration-error matches: 0 across Core, Control, Employees, TARA, BYOD broker, Playwright, and frontend.
+- No email or telephone side effect was triggered.
+
+### Rollback
+
+- Tags: `rollback-20260715-101635` from each actual pre-release running image.
+- Preserved files and env backups: `/root/backups/pre-prod-20260715-8aa07a4b-20260715-101635`.
+- The production-specific Compose drift and stale uncommitted TARA checkout edit remain preserved and were not used as build input.
+
 ## 2026-07-15 - Pre-release lineage reconciliation audit
 
 - This entry records observed state only. It is not a deployment or acceptance claim.

@@ -1,5 +1,18 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-351b7220 - Recall source and backend parity
+
+- **Parent:** `hivemind-main` at `351b72205299da4769f162b68e9364f7a29797ee`.
+- **Frontend:** unchanged code, pinned at `f0f9a350b83754721885637b49206f811140ae79` and retagged under this release ID.
+- **Images:** core `hivemind/core-api:prod-20260716-351b7220` = `sha256:c20f00917bcf547628fe7320fa2a9ff232c27ddc79fcc6d32ba99614a4fd9a1d`; frontend `hivemind/fe:prod-20260716-351b7220-single` = `sha256:9024f45a049787a08f0bf169e7a98c4c7bb33729d69ce973a050421d3f6d2272`.
+- **Runtime:** `VERSION` and `NEXT_VERSION` are `prod-20260716-351b7220`; only `hm-core` was recreated. The frontend image was unchanged and remains running.
+- **Migration:** verified additive PostgreSQL indexes `memories_org_created_at_idx` and `memories_org_valid_window_idx`; both use `CREATE INDEX IF NOT EXISTS` and were present before promotion.
+- **Backup:** `/root/backups/hivemind-prod-20260716-351b7220.dump`, SHA-256 `e783df2f01815b37154a2e78c3fff51832d4b45f6d8b9056f6287e2e38a612bf`.
+- **Acceptance:** core healthy with PostgreSQL, Qdrant, and Docling reachable; public Core health returned `ok:true`; `next.singulancelabs.com/hivemind` and `/hivemind/login` returned `200`; no fresh fatal, panic, uncaught, unhandled, OOM, or migration errors were found in the core deployment window.
+- **Not exercised:** an authenticated tenant-specific recall/chat request; no customer-side effects were triggered.
+- **Aliases:** core and frontend `stable` and `latest` match the images above.
+- **Rollback:** `hivemind/core-api:rollback-20260715T215652Z-pre-prod-20260716-351b7220` and `hivemind/fe:rollback-20260715T215652Z-pre-prod-20260716-351b7220`.
+
 ## 2026-07-15 - Pre-release lineage reconciliation audit
 
 - This entry records observed state only. It is not a deployment or acceptance claim.

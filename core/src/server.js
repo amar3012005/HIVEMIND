@@ -476,18 +476,13 @@ if (enrichmentQueue) {
 // (deadlock-proof) — if anything in the job hangs, the slot frees after
 // INGEST_JOB_TIMEOUT_MS and the queue keeps draining.
 const INGEST_MAX_CONCURRENCY = Math.max(1, Number(process.env.INGEST_MAX_CONCURRENCY || 6));
+const INGEST_MAX_QUEUE = Math.max(0, Number(process.env.INGEST_MAX_QUEUE || 48));
 const INGEST_JOB_TIMEOUT_MS = Math.max(10000, Number(process.env.INGEST_JOB_TIMEOUT_MS || 90000));
-const _ingestSem = { active: 0, waiters: [] };
-function ingestAcquire() {
-  if (_ingestSem.active < INGEST_MAX_CONCURRENCY) { _ingestSem.active += 1; return Promise.resolve(); }
-  return new Promise((resolve) => { _ingestSem.waiters.push(resolve); });
-}
-function ingestRelease() {
-  const next = _ingestSem.waiters.shift();
-  if (next) next();                              // hand slot to next waiter (active unchanged)
-  else _ingestSem.active = Math.max(0, _ingestSem.active - 1);
-}
-console.log(`[boot] Ingest concurrency cap=${INGEST_MAX_CONCURRENCY} jobTimeout=${INGEST_JOB_TIMEOUT_MS}ms`);
+const { createIngestAdmission } = await import('./memory/ingest-admission.js');
+const ingestAdmission = createIngestAdmission({ concurrency: INGEST_MAX_CONCURRENCY, maxQueue: INGEST_MAX_QUEUE });
+const ingestAcquire = () => ingestAdmission.acquire();
+const ingestRelease = () => ingestAdmission.release();
+console.log(`[boot] Ingest concurrency cap=${INGEST_MAX_CONCURRENCY} queueCap=${INGEST_MAX_QUEUE} jobTimeout=${INGEST_JOB_TIMEOUT_MS}ms`);
 
 // External-ref store + entity resolver — Salesforce / cross-system memory.
 const { ExternalRefStore } = await import('./memory/external-ref-store.js');
@@ -17363,6 +17358,14 @@ exit \$RC
               const wantSmartRouting = body.smartIngest !== false && !body.skipProcessing;
 
               if (!syncMode) {
+                if (!ingestAdmission.canAccept()) {
+                  res.setHeader('Retry-After', '5');
+                  return jsonResponse(res, { error: 'ingest_busy', message: 'Ingestion is busy. Please retry shortly.' }, 503);
+                }
+                // Reserve capacity synchronously before returning 202. Deferring
+                // acquire() into the detached callback creates a TOCTOU race in
+                // which multiple accepted requests can overfill the queue.
+                const ingestTicket = ingestAcquire();
                 // --- Async ingest: return job ID immediately ---
                 const jobId = crypto.randomUUID();
                 ingestTracker.createJob(jobId, { userId, orgId, title: validation.data.title });
@@ -17383,7 +17386,7 @@ exit \$RC
                   // enterWith didn't survive) so the deferred enrichment/entity-link LLM calls enqueued
                   // below attribute their token spend to the originating org key, not the system sentinel.
                   try { enterOrgContext(orgId, principal.keyId || null); } catch { /* best-effort */ }
-                  await ingestAcquire();
+                  await ingestTicket;
                   // Deadlock-proof: release the slot exactly once, and force it
                   // free after INGEST_JOB_TIMEOUT_MS so a hung job (qdrant/pool/
                   // lock stall) can never wedge the bounded queue.

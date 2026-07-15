@@ -1,5 +1,13 @@
 # HIVEMIND Autonomous Agent System
 
+## Mandatory Production Release Rule
+
+Before any production edit, build, migration, restart, or deployment, read and follow
+[`docs/PRODUCTION_RELEASE_PROTOCOL.md`](docs/PRODUCTION_RELEASE_PROTOCOL.md). Compare the intended
+commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop rather than deploy from
+a dirty checkout, stale frontend gitlink, mutable image tag, unpushed commit, or conflicting session.
+SINGULANCE production is only `ssh singulance`; never use `myserver` for this release path.
+
 ## Overview
 
 This document defines the autonomous agent teams, subagents, and skills for seamless HIVEMIND development.

@@ -1,5 +1,17 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-2eb3d1da - Contextual durable-memory ingestion
+
+- **Parent:** `hivemind-main` at `2eb3d1da0be0c650d6f49a00fb2c1cbaab313609`.
+- **Frontend:** unchanged runtime image; committed gitlink `40b69ddf707e4b628c8caddf451301dd59793d1e` was verified in the clean release source.
+- **Image:** core `hivemind/core-api:prod-20260716-2eb3d1da` = `sha256:9e706bc9bba89a3ad80a91dc8df9e48a8e1884e6225907876862414937f0ef27`.
+- **Scope:** `hm-core` only. The extractor now promotes fewer contextual durable memories, retains exact source support, and uses the OpenRouter-aware metered client for document curation.
+- **Migration:** none.
+- **Acceptance:** container healthy; PostgreSQL, Qdrant, and Docling reachable; public Core health, homepage, and login returned `200`; source markers for contextual extraction, metered curation, and the six-memory default were verified inside the running image; no fresh fatal, panic, uncaught, unhandled, OOM, or migration errors.
+- **Probe:** authenticated FOREST upload reached the live endpoint but was correctly rejected with `402` by the current plan limit before any document was created. No entitlement bypass or customer data mutation occurred.
+- **Aliases:** core `stable` and `latest` point to the image above.
+- **Rollback:** `hivemind/core-api:rollback-20260715T225835Z-pre-prod-20260716-2eb3d1da`.
+
 ## prod-20260716-351b7220 - Recall source and backend parity
 
 - **Parent:** `hivemind-main` at `351b72205299da4769f162b68e9364f7a29797ee`.

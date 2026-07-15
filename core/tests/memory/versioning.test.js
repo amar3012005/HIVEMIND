@@ -36,8 +36,41 @@ test('Updates transitions old node to is_latest=false', async () => {
 
   assert.equal(result.operation, 'updated');
   assert.equal(oldMemory.is_latest, false);
+  assert.ok(oldMemory.valid_to, 'Updates must close the predecessor valid-time window');
+  assert.ok(new Date(oldMemory.valid_to) >= new Date(oldMemory.created_at));
   assert.equal(newMemory.is_latest, true);
   assert.equal(store.relationships.filter(edge => edge.type === 'Updates').length, 1);
+});
+
+test('Updates synchronizes indexed lifecycle metadata after the canonical transaction', async () => {
+  const { store, engine } = createEngine();
+  const tenant = {
+    user_id: '00000000-0000-4000-8000-000000000041',
+    org_id: '00000000-0000-4000-8000-000000000042',
+  };
+  const target = await engine.ingestMemory({
+    ...tenant, content: 'The approval policy is version one', smartIngest: false,
+    source_metadata: { source_type: 'manual' },
+  });
+  const source = await engine.ingestMemory({
+    ...tenant, content: 'The approval policy is version two', smartIngest: false,
+    source_metadata: { source_type: 'manual' },
+  });
+  const patches = [];
+  engine.vectorStore = {
+    async updateMemoryPayload(memoryId, payload, options) {
+      patches.push({ memoryId, payload, options });
+    },
+  };
+
+  await engine.applyUpdate(source.memoryId, target.memoryId, tenant);
+
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].memoryId, target.memoryId);
+  assert.equal(patches[0].payload.is_latest, false);
+  assert.ok(patches[0].payload.valid_to);
+  assert.equal(patches[0].options.orgId, tenant.org_id);
+  assert.equal((await store.getMemory(target.memoryId)).valid_to, patches[0].payload.valid_to);
 });
 
 test('inferred Updates without shared entity evidence remain non-destructive', async () => {

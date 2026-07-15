@@ -126,7 +126,7 @@ export async function handleRecallRoute(ctx = {}) {
         buildPacket: buildRecallPacket,
       };
     }
-    const recallPlan = recallRuntime.resolvePlan(body);
+    const recallPlan = recallRuntime.resolvePlan({ ...body, explicit_mode: true });
 
     // Explicit fact/explain/full modes use the bounded, source-grounded
     // internal service. Unspecified and legacy modes retain the established
@@ -140,16 +140,17 @@ export async function handleRecallRoute(ctx = {}) {
       const bounded = await resolveWithinDeadline(
         recallRuntime.recall(query, {
           mode: recallPlan.mode,
+          explicit_mode: true,
           include_live: body.include_live === true,
           live_intent: body.live_intent === true,
           surface_policy_allows_live: body.surface_policy_allows_live !== false,
           project: recallProject,
           project_id: recallProjectId,
           tags: body.tags || [],
-          valid_at: body.valid_at,
-          date_range: body.date_range || temporalExpansion.dateRange || null,
-          source_document_id: body.source_document_id || null,
-          source_title: body.source_title || null,
+          source: recallPlan.source,
+          time: recallPlan.time,
+          operation: recallPlan.operation,
+          include_superseded: recallPlan.operation === 'timeline' || body.include_superseded === true,
         }, {
           userId,
           orgId,
@@ -169,6 +170,7 @@ export async function handleRecallRoute(ctx = {}) {
             userId,
             orgId,
             accessContext: recallAccessCtx,
+            time: recallPlan.time,
           }),
           Math.min(500, remainingMs()),
           { items: [], reason: 'timeout' },

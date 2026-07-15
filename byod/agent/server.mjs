@@ -29,7 +29,7 @@ function tokenOk(header) {
 }
 const PORT = Number(process.env.AGENT_PORT || 8787);
 const DIM = Number(process.env.MNEME_DIM || 1024);
-const SCHEMA_VERSION = 1; // bump when the agent's local schema changes
+const SCHEMA_VERSION = 2; // v2 adds valid_to and indexed bi-temporal eligibility.
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -60,6 +60,7 @@ async function ensureSchema() {
       confidence real,
       created_at timestamptz NOT NULL DEFAULT now(),
       valid_from timestamptz,
+      valid_to timestamptz,
       document_date timestamptz,
       project text,
       project_ids text[] NOT NULL DEFAULT '{}',
@@ -85,10 +86,13 @@ async function ensureSchema() {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS recall_count int NOT NULL DEFAULT 0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1.0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS valid_to timestamptz;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
     CREATE INDEX IF NOT EXISTS memories_latest_idx  ON memories(org_id, is_latest) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_created_idx ON memories(org_id, created_at) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_valid_idx   ON memories(org_id, valid_from, valid_to) WHERE deleted_at IS NULL;
     CREATE TABLE IF NOT EXISTS relationships (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -241,6 +245,15 @@ async function qdrantHealthy() {
 
 // Build a Qdrant payload filter from the engine's filter spec. org_id is always forced.
 function qdrantFilter(f = {}) {
+  if (Array.isArray(f.must)) {
+    const must = f.must.filter((condition) => condition?.key !== 'org_id');
+    must.unshift({ key: 'org_id', match: { value: ORG } });
+    return {
+      ...f,
+      must,
+      ...(Array.isArray(f.must_not) ? { must_not: f.must_not } : {}),
+    };
+  }
   const must = [{ key: 'org_id', match: { value: ORG } }];
   if (f.is_latest !== undefined) must.push({ key: 'is_latest', match: { value: !!f.is_latest } });
   if (f.layer) must.push({ key: 'layer', match: { value: f.layer } });
@@ -263,6 +276,8 @@ function payloadOf(rec) {
     memory_type: rec.memoryType || null, layer: rec.layer || 'memory',
     cognitive_layer_role: rec.cognitiveLayerRole || null,
     is_latest: rec.isLatest ?? true, created_at: rec.createdAt || null,
+    document_date: rec.documentDate || null, valid_from: rec.validFrom || null,
+    valid_to: rec.validTo || null,
   };
 }
 
@@ -292,9 +307,9 @@ const routes = {
     if (!r.id) return { ok: false, error: 'record.id required' };
     await pg.query(
       `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
-         cognitive_layer_role, confidence, created_at, valid_from, document_date, project, project_ids,
+         cognitive_layer_role, confidence, created_at, valid_from, valid_to, document_date, project, project_ids,
          metadata, scope, primary_team_id, recall_count, strength, vector_synced)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,coalesce($20::int,0),coalesce($21::real,1.0),false)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17,$18::jsonb,$19,$20::uuid,coalesce($21::int,0),coalesce($22::real,1.0),false)
        ON CONFLICT (id) DO UPDATE SET
          content=EXCLUDED.content,
          -- title/tags/confidence: the 2-phase write (engine row, THEN vector
@@ -318,6 +333,7 @@ const routes = {
          -- value when the incoming one is null/empty, so the date + source
          -- metadata survive the vector-add upsert (and any later partial write).
          valid_from=COALESCE(EXCLUDED.valid_from, memories.valid_from),
+         valid_to=COALESCE(EXCLUDED.valid_to, memories.valid_to),
          document_date=COALESCE(EXCLUDED.document_date, memories.document_date),
          project=EXCLUDED.project, project_ids=EXCLUDED.project_ids,
          metadata=(memories.metadata || EXCLUDED.metadata),
@@ -328,7 +344,7 @@ const routes = {
          vector_synced=false, deleted_at=NULL`,
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
-       r.createdAt || null, r.validFrom || null, r.documentDate || null, r.project || null,
+       r.createdAt || null, r.validFrom || null, r.validTo || null, r.documentDate || null, r.project || null,
        r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null,
        r.recallCount ?? 0, r.strength ?? 1.0]
     );
@@ -374,10 +390,16 @@ const routes = {
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
     if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
     if (f.must_not?.layer) { args.push(f.must_not.layer); conds.push(`layer<>$${args.length}`); }
+    const snapshot = f.valid_at || null;
+    if (f.known_at) { args.push(f.known_at); conds.push(`created_at<=$${args.length}::timestamptz`); }
+    if (snapshot) {
+      args.push(snapshot); conds.push(`(valid_from IS NULL OR valid_from<=$${args.length}::timestamptz)`);
+      args.push(snapshot); conds.push(`(valid_to IS NULL OR valid_to>$${args.length}::timestamptz)`);
+    }
     args.push(b.limit || 10);
     const { rows } = await pg.query(
       `SELECT id, content, title, tags, memory_type, layer, cognitive_layer_role, is_latest, created_at, user_id,
-              project, project_ids, scope, primary_team_id,
+              project, project_ids, scope, primary_team_id, document_date, valid_from, valid_to,
               ts_rank(content_tsv, plainto_tsquery('english',$2)) AS score
        FROM memories WHERE ${conds.join(' AND ')} ORDER BY score DESC LIMIT $${args.length}`, args);
     return { results: rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
@@ -385,7 +407,8 @@ const routes = {
       project: m.project || null, project_ids: m.project_ids || [], scope: m.scope || null,
       primary_team_id: m.primary_team_id || null,
       memory_type: m.memory_type, layer: m.layer, cognitive_layer_role: m.cognitive_layer_role,
-      is_latest: m.is_latest, created_at: m.created_at } })) };
+      is_latest: m.is_latest, created_at: m.created_at, document_date: m.document_date,
+      valid_from: m.valid_from, valid_to: m.valid_to } })) };
   },
 
   // Hydrate full rows by id (content stays on-box until requested).
@@ -490,7 +513,7 @@ const routes = {
     return { ok: true, bumped: r.rowCount };
   },
 
-  // Generic partial update: tags / is_latest / memory_type. Used by the central engine's
+  // Generic partial update: tags / is_latest / memory_type / valid_to. Used by the central engine's
   // updateMemory seam for remote orgs (entity-link type upgrades, supersession is_latest flips).
   '/v1/update': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
@@ -498,11 +521,18 @@ const routes = {
     if (Array.isArray(b.tags)) { args.push(b.tags); sets.push(`tags=$${args.length}`); }
     if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
     if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
+    if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
     if (!sets.length) return { ok: true };
     await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
-    if (Array.isArray(b.tags)) {
+    const payload = {
+      ...(Array.isArray(b.tags) ? { tags: b.tags } : {}),
+      ...(b.is_latest !== undefined ? { is_latest: !!b.is_latest } : {}),
+      ...(b.memory_type !== undefined ? { memory_type: b.memory_type } : {}),
+      ...(b.valid_to !== undefined ? { valid_to: b.valid_to } : {}),
+    };
+    if (Object.keys(payload).length > 0) {
       qFetch(`/collections/${QCOLL}/points/payload`, { method: 'POST',
-        body: JSON.stringify({ payload: { tags: b.tags }, points: [b.id] }) }).catch(() => {});
+        body: JSON.stringify({ payload, points: [b.id] }) }).catch(() => {});
     }
     return { ok: true };
   },

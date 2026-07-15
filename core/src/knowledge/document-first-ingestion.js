@@ -1476,7 +1476,9 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       smart: metadata?.smart === true,
       picture_descriptions: metadata?.picture_descriptions === true,
     });
-    const documentClassification = await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
+    const documentClassification = metadata.document_type
+      ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
+      : await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
     const documentType = safeDocumentType(metadata.document_type || documentClassification.type);
     const documentTypeTag = `document-type:${documentType}`;
     const _msParse = Date.now() - _tParse;

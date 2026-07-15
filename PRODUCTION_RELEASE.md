@@ -136,3 +136,11 @@
 - **Parent:** `feat/open-dial-allowlist` @ `f98dce54` off singulance-main 68d957cd. tara-deepgram only.
 - `*` in ALLOWED_NUMBERS (or DIAL_ALLOW_ALL=true) opens outbound dialing to any valid E.164; closed lists unchanged (fail-closed). Server env appended `*` (backup .env.bak-allowall). Owner accepts cost/compliance for open dialing.
 - Verified in-container: allow-all True; 3/3 telephony tests pass; closed-list behavior regression-checked.
+
+## prod-20260715-bb57af40 — Google Maps connector + hyperagents elements UI
+- **Merged to hivemind-main:** #16 (squash 123d510e); FE #2 (Da-vinci). Canon = deployed content.
+- **Parent SHA (pre-squash):** bb57af40 (= codex recall 3baea859 + maps cherry-pick). FE gitlink f0f9a350.
+- **core digest:** sha256:06d4da0b… ; services: core-api, fe rebuilt; employees/control/tara retagged.
+- **Verified:** 13 catalog connectors incl. google-maps seeded; elements markers (Gmail gate / EmailBlock / Maps tile) in served bundle; public 200×4; health green.
+- **Aliases:** stable + latest → this release (all services). Rollback: prior timestamped tags retained.
+- **Migrations:** none. **Action:** create Google Maps integration in Nango dashboard so tenants can connect.

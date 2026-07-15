@@ -8,7 +8,7 @@
  *
  * Field names match plans.js:
  *   tokensPerMonth, searchQueriesPerMonth, maxConnectors,
- *   maxUsers, knowledgeBaseUploadsPerMonth
+ *   maxUsers, knowledgeBasePagesPerMonth
  */
 
 import { currentApiKey } from '../db/prisma.js';
@@ -24,7 +24,6 @@ const DAILY_LIMITS = {
   tokens: ['llmTokensPerDay', 'tokens', 'tokens'],
   searches: ['searchQueriesPerDay', 'searches', 'queries'],
   graphQueries: ['searchQueriesPerDay', 'graphQueries', 'queries'],
-  uploads: ['knowledgeBaseUploadsPerDay', 'uploads', 'uploads'],
   kbPages: ['knowledgeBasePagesPerDay', 'kbPages', 'pages'],
   deepResearch: ['deepResearchPerDay', 'deepResearch', 'jobs'],
   webIntel: ['webIntelPerDay', 'webIntel', 'jobs'],
@@ -38,7 +37,7 @@ const DAILY_LIMITS = {
  *
  * @param {{allowed:boolean, reason?:string, limit?:number, current?:number, plan?:string}} check
  *        The object returned by PlanEnforcer.checkLimit().
- * @param {'kbPages'|'uploads'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'hyperRooms'|'users'} resource
+ * @param {'kbPages'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'hyperRooms'|'users'} resource
  * @returns {object} Contract body to send with HTTP 402.
  */
 export function planLimitBody(check, resource) {
@@ -98,7 +97,7 @@ export class PlanEnforcer {
     this.planStore = planStore;
     this.usageTracker = usageTracker;
 
-    // In-memory counters: orgId -> { tokens, searches, uploads, month }
+    // In-memory counters: orgId -> billable usage counters for the current month.
     this._counters = new Map();
   }
 
@@ -141,7 +140,6 @@ export class PlanEnforcer {
     c = {
       tokens: dbUsage.tokensProcessed || 0,
       searches: dbUsage.searchQueries || 0,
-      uploads: dbUsage.knowledgeBaseUploads || 0,
       kbPages: dbUsage.knowledgeBasePages || 0,
       memories: dbUsage.memoriesIngested || 0,
       deepResearch: dbUsage.deepResearchJobs || 0,
@@ -163,7 +161,7 @@ export class PlanEnforcer {
    * Check whether an operation is allowed under the org's plan limits.
    *
    * @param {string} orgId
-   * @param {'tokens'|'searches'|'connectors'|'uploads'|'memories'|'deepResearch'|'webIntel'|'graphQueries'|'tara'} type
+   * @param {'tokens'|'searches'|'connectors'|'uploads'|'kbPages'|'memories'|'deepResearch'|'webIntel'|'graphQueries'|'tara'} type
    * @param {number} amount  How many units to consume (default 1).
    * @returns {{ allowed: boolean, reason?: string, limit?: number, current?: number, plan?: string }}
    */
@@ -230,20 +228,6 @@ export class PlanEnforcer {
           reason: `Monthly search limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} searches/month)`,
           limit,
           current: used,
-          plan: planDef.id,
-        };
-      }
-    }
-
-    if (type === 'uploads') {
-      const limit = limits.knowledgeBaseUploadsPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
-      if (counters.uploads + amount > limit) {
-        return {
-          allowed: false,
-          reason: `Monthly upload limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} uploads/month)`,
-          limit,
-          current: counters.uploads,
           plan: planDef.id,
         };
       }
@@ -409,7 +393,6 @@ export class PlanEnforcer {
     if (c && c.month === this._currentMonth()) {
       if (type === 'tokens') c.tokens += amount;
       if (type === 'searches') c.searches += amount;
-      if (type === 'uploads') c.uploads += amount;
       if (type === 'memories') c.memories += amount;
       if (type === 'deepResearch') c.deepResearch += amount;
       if (type === 'webIntel') c.webIntel += amount;
@@ -432,6 +415,7 @@ export class PlanEnforcer {
         this.usageTracker.recordKeyUsage?.(orgId, amount, _key, opts.model || null, opts.feature || null).catch(() => {});
       }
       if (type === 'searches') this.usageTracker.recordQuery(orgId).catch(() => {});
+      // Upload count is retained as internal anti-abuse telemetry only; it is not a plan limit.
       if (type === 'uploads') this.usageTracker.recordUpload(orgId).catch(() => {});
       if (type === 'kbPages') this.usageTracker.recordKbPages?.(orgId, amount).catch(() => {});
       if (type === 'memories') this.usageTracker.recordMemory(orgId).catch(() => {});
@@ -492,7 +476,6 @@ export class PlanEnforcer {
       period: { month, day: new Date().toISOString().slice(0, 10) },
       tokens: { used: Number(dbUsage.tokensProcessed) || 0, limit: limits.llmTokensPerMonth ?? -1 },
       searches: { used: Number(dbUsage.searchQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
-      uploads: { used: Number(dbUsage.knowledgeBaseUploads) || 0, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
       kbPages: { used: Number(dbUsage.knowledgeBasePages) || 0, limit: limits.knowledgeBasePagesPerMonth ?? -1 },
       memories: { used: memoriesUsed, limit: limits.maxMemories ?? -1 },
       deepResearch: { used: Number(dbUsage.deepResearchJobs) || 0, limit: limits.deepResearchPerMonth ?? -1 },
@@ -510,7 +493,6 @@ export class PlanEnforcer {
           used: Number(safeDailyUsage.searches || 0) + Number(safeDailyUsage.graphQueries || 0),
           limit: limits.searchQueriesPerDay ?? -1,
         },
-        uploads: { used: Number(safeDailyUsage.uploads) || 0, limit: limits.knowledgeBaseUploadsPerDay ?? -1 },
         kbPages: { used: Number(safeDailyUsage.kbPages) || 0, limit: limits.knowledgeBasePagesPerDay ?? -1 },
         deepResearch: { used: Number(safeDailyUsage.deepResearch) || 0, limit: limits.deepResearchPerDay ?? -1 },
         webIntel: { used: Number(safeDailyUsage.webIntel) || 0, limit: limits.webIntelPerDay ?? -1 },
@@ -526,7 +508,7 @@ export class PlanEnforcer {
     };
 
     const reminders = [];
-    const monthlyResources = ['tokens', 'searches', 'uploads', 'kbPages', 'memories', 'deepResearch', 'taraSeconds', 'hyperAgentRuns'];
+    const monthlyResources = ['tokens', 'searches', 'kbPages', 'memories', 'deepResearch', 'taraSeconds', 'hyperAgentRuns'];
     for (const resource of monthlyResources) {
       const reminder = buildReminder(resource, summary[resource].used, summary[resource].limit, resource === 'memories' ? 'total' : 'monthly');
       if (reminder) reminders.push(reminder);

@@ -3,7 +3,7 @@
  *
  * Pricing: flat monthly + overage. EUR currency.
  * Philosophy: all features available on all plans — pay for volume, not capabilities.
- * Limits: memories, LLM tokens/mo, deep research/mo, web intel/day, connectors, users, KB uploads/mo.
+ * Limits: memories, LLM tokens/mo, deep research/mo, web intel/day, connectors, users, KB pages/mo.
  */
 
 const BASE_FEATURES = {
@@ -44,8 +44,6 @@ export const PLANS = {
       maxUsers: 1,
       maxProjects: 3,
       maxConnectors: 3,
-      knowledgeBaseUploadsPerMonth: 10,
-      knowledgeBaseUploadsPerDay: 3,
       knowledgeBasePagesPerMonth: 100,
       knowledgeBasePagesPerDay: 25,
       maxHyperRooms: 1,
@@ -82,8 +80,6 @@ export const PLANS = {
       maxUsers: 5,
       maxProjects: 20,
       maxConnectors: 10,
-      knowledgeBaseUploadsPerMonth: -1, // unlimited
-      knowledgeBaseUploadsPerDay: 50,
       knowledgeBasePagesPerMonth: 1_000,
       knowledgeBasePagesPerDay: 250,
       maxHyperRooms: 5,
@@ -119,8 +115,6 @@ export const PLANS = {
       maxUsers: 25,
       maxProjects: 100,
       maxConnectors: -1, // unlimited
-      knowledgeBaseUploadsPerMonth: -1,
-      knowledgeBaseUploadsPerDay: 500,
       knowledgeBasePagesPerMonth: 10_000,
       knowledgeBasePagesPerDay: 2_500,
       maxHyperRooms: 25,
@@ -160,8 +154,6 @@ export const PLANS = {
       maxUsers: -1,
       maxProjects: -1,
       maxConnectors: -1,
-      knowledgeBaseUploadsPerMonth: -1,
-      knowledgeBaseUploadsPerDay: -1,
       knowledgeBasePagesPerMonth: -1,
       knowledgeBasePagesPerDay: -1,
       maxHyperRooms: -1,

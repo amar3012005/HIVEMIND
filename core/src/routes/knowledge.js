@@ -33,12 +33,6 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
   if (!persistentMemoryEngine) {
     return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
   }
-  if (planEnforcer && orgId) {
-    const upCheck = await planEnforcer.checkLimit(orgId, 'uploads', 1);
-    if (!upCheck.allowed) {
-      return jsonResponse(res, planLimitBody(upCheck, 'uploads'), upCheck.status || 402);
-    }
-  }
   try {
     const contentType = req.headers['content-type'] || '';
     if (!contentType.includes('multipart/form-data')) {

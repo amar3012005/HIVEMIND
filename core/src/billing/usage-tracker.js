@@ -5,7 +5,7 @@
  * Lightweight — single table, no external billing system needed.
  * Enforces soft (80%) and hard limits.
  *
- * Tracks: tokens, searches, KB uploads, memories, deep research, web intel,
+ * Tracks: tokens, searches, internal KB upload telemetry, KB pages, memories, deep research, web intel,
  *         connectors, graph queries, TARA usage
  */
 
@@ -559,7 +559,6 @@ export class UsageTracker {
 
     const tokenLimit = plan.limits.llmTokensPerMonth;
     const queryLimit = plan.limits.searchQueriesPerMonth;
-    const uploadLimit = plan.limits.knowledgeBaseUploadsPerMonth;
     const deepResearchLimit = plan.limits.deepResearchPerMonth;
     const taraSecondsLimit = plan.limits.taraTalkSecondsPerMonth;
     const hyperRunsLimit = plan.limits.hyperAgentRunsPerMonth;
@@ -586,14 +585,6 @@ export class UsageTracker {
         result.exceeded.push('searchQueriesPerMonth');
       } else if (pct >= 0.8) {
         result.warnings.push(`80% of query budget used.`);
-      }
-    }
-
-    // Check uploads
-    if (uploadLimit > 0) {
-      if (usage.knowledgeBaseUploads >= uploadLimit) {
-        result.allowed = false;
-        result.exceeded.push('knowledgeBaseUploadsPerMonth');
       }
     }
 
@@ -624,7 +615,6 @@ export class UsageTracker {
     const dailyChecks = [
       ['llmTokensPerDay', daily.tokens || 0, 'daily token'],
       ['searchQueriesPerDay', (daily.searches || 0) + (daily.graphQueries || 0), 'daily query'],
-      ['knowledgeBaseUploadsPerDay', daily.uploads || 0, 'daily upload'],
       ['knowledgeBasePagesPerDay', daily.kbPages || 0, 'daily KB page'],
       ['deepResearchPerDay', daily.deepResearch || 0, 'daily deep research'],
       ['webIntelPerDay', daily.webIntel || 0, 'daily web intel'],

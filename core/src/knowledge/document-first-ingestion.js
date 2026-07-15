@@ -31,7 +31,7 @@ function assertKbAllowedForOrg(orgId) {
 }
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
-import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
+import { validateEnvelope, normalizeProvenance, detectMode, canonicalMemoryType } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
@@ -2053,6 +2053,10 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
 
     const prov = normalizeProvenance(envelope);
     const mode = detectMode(envelope);
+    const durableMemoryType = canonicalMemoryType(
+      envelope.metadata?.memory_type || envelope.metadata?.memoryType,
+      mode === 'evidence' ? 'event' : 'fact',
+    );
     const sourceType = envelope.source.type;
     const callerTags = Array.isArray(envelope.tags) ? envelope.tags : [];
 
@@ -2127,7 +2131,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
         org_id: orgId,
         content: envelope.content,
         title: prov.title || undefined,
-        memory_type: envelope.metadata?.memory_type || 'event',
+        memory_type: durableMemoryType,
         source_type: sourceType,
         source_platform: prov.sourcePlatform,
         source_metadata: prov.sourceMetadata,
@@ -2156,7 +2160,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
       org_id: orgId,
       content: envelope.content,
       title: prov.title || undefined,
-      memory_type: envelope.metadata?.memory_type || 'fact',
+      memory_type: durableMemoryType,
       source_type: sourceType,
       source_platform: prov.sourcePlatform,
       source_metadata: prov.sourceMetadata,

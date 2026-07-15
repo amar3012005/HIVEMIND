@@ -18,15 +18,20 @@ export function isStructuredSourceNoise(value) {
   return styleOrCodeBlock || markupFragment;
 }
 
-const DURABLE_PROMOTION_TYPES = new Set([
-  'fact', 'decision', 'preference', 'goal', 'event', 'lesson', 'conversation',
+const ALLOWED_DURABLE_PROMOTION_TYPES = new Set([
+  'fact', 'decision', 'preference', 'goal', 'event', 'lesson', 'summary', 'synthesis',
+]);
+const SCORED_DURABLE_PROMOTION_TYPES = new Set([
+  'fact', 'decision', 'preference', 'goal', 'event', 'lesson',
 ]);
 
 export function isDurableKbPromotionAdmitted(memory, minImportance = 0.65) {
   const tags = Array.isArray(memory?.tags) ? memory.tags : [];
   const type = memory?.memory_type || memory?.memoryType;
-  if (!tags.includes('distilled-from-kb') || !DURABLE_PROMOTION_TYPES.has(type)) return true;
+  if (!tags.includes('distilled-from-kb')) return true;
+  if (!ALLOWED_DURABLE_PROMOTION_TYPES.has(type)) return false;
   if (isStructuredSourceNoise(memory?.content)) return false;
+  if (!SCORED_DURABLE_PROMOTION_TYPES.has(type)) return true;
   const importance = Number(memory?.importance_score ?? memory?.importanceScore);
   return Number.isFinite(importance) && importance >= minImportance;
 }

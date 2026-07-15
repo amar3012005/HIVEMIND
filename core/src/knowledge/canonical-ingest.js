@@ -36,7 +36,7 @@ export const INGEST_SCOPES = Object.freeze([
 // producers; source extraction itself never emits it.
 export const CANONICAL_MEMORY_TYPES = Object.freeze([
   'fact', 'preference', 'decision', 'lesson', 'goal', 'event',
-  'summary', 'synthesis', 'conversation',
+  'summary', 'synthesis',
 ]);
 
 const LEGACY_MEMORY_TYPE_MAP = Object.freeze({
@@ -45,6 +45,7 @@ const LEGACY_MEMORY_TYPE_MAP = Object.freeze({
   commitment: 'goal',
   observation: 'fact',
   insight: 'lesson',
+  conversation: 'summary',
 });
 
 /** Default per-source platform label when the caller does not name one. */
@@ -130,7 +131,7 @@ export function validateEnvelope(env) {
     return { ok: false, error: 'mode must be document|atomic|evidence' };
   }
   const memoryType = env.metadata?.memory_type || env.metadata?.memoryType;
-  if (memoryType && !CANONICAL_MEMORY_TYPES.includes(memoryType)) {
+  if (memoryType && !CANONICAL_MEMORY_TYPES.includes(canonicalMemoryType(memoryType, null))) {
     return { ok: false, error: `metadata.memory_type must be one of ${CANONICAL_MEMORY_TYPES.join('|')}` };
   }
   return { ok: true };

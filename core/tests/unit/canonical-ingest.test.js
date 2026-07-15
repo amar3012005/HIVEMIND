@@ -8,6 +8,7 @@ import {
   normalizeProvenance,
   validateEnvelope,
 } from '../../src/knowledge/canonical-ingest.js';
+import { DocumentFirstIngestionService } from '../../src/knowledge/document-first-ingestion.js';
 
 const base = {
   userId: 'user-1', orgId: 'org-1', content: 'A durable source claim.',
@@ -53,6 +54,38 @@ test('legacy source payloads normalize into the canonical envelope', () => {
 test('canonical compatibility mapping never creates relationship memories', () => {
   assert.equal(canonicalMemoryType('relationship'), 'fact');
   assert.equal(canonicalMemoryType('commitment'), 'goal');
+  assert.equal(canonicalMemoryType('conversation'), 'summary');
   assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'talk-to-hive' } }), 'chat');
   assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'google-drive' } }), 'connector');
+});
+
+test('legacy conversation input validates only through summary normalization', () => {
+  const envelope = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'A short conversation summary.',
+    memory_type: 'conversation', source_metadata: { source_platform: 'slack' },
+  });
+  assert.equal(envelope.metadata.memory_type, 'summary');
+  assert.deepEqual(validateEnvelope(envelope), { ok: true });
+});
+
+test('canonical dispatcher persists legacy conversation input as a summary', async () => {
+  let persisted = null;
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      ingestMemory: async (payload) => {
+        persisted = payload;
+        return { memoryId: 'memory-1' };
+      },
+    },
+    logger: { info() {}, warn() {} },
+  });
+  const result = await service.ingestSource({
+    ...base,
+    source: { type: 'chat', platform: 'talk-to-hive', sourceId: 'turn-1' },
+    mode: 'atomic',
+    metadata: { memory_type: 'conversation' },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(persisted.memory_type, 'summary');
 });

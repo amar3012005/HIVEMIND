@@ -259,7 +259,7 @@ const { EnterpriseChatService } = await import('./enterprise/chat/service.js');
 const { createEnterpriseChatRoutes } = await import('./enterprise/chat/routes.js');
 
 // TARA Voice Agent imports
-const { TaraStreamHandler } = await import('./tara/stream-handler.js');
+const { TaraStreamHandler, createTaraRecallFn } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
 const { TaraSkillsStore } = await import('./tara/skills-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
@@ -1745,6 +1745,14 @@ if (process.env.ENABLE_EVIDENCE_RECALL === 'true' && prisma && qdrantClient) {
   } catch (err) {
     console.warn('[Phase1] EvidenceRetrievalService failed to init:', err.message);
   }
+}
+
+// TARA uses the same bounded internal recall service as chat/MCP, with the
+// latency-sensitive fact plan and live expansion disabled by default.
+if (taraHandler && persistentMemoryStore) {
+  const { RecallRouter } = await import('./memory/recall-router.js');
+  const taraRecallRouter = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+  taraHandler.recallFn = createTaraRecallFn(taraRecallRouter);
 }
 
 // Durable outbox push worker (Phase 4 — remote/self-host orgs).

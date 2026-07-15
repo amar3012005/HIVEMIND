@@ -76,7 +76,8 @@ async def report_llm_usage(*, user_id: Optional[str], org_id: Optional[str], api
 
 async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                           api_key: str = "", max_memories: int = 8,
-                          project_id: Optional[str] = None) -> Dict[str, Any]:
+                          project_id: Optional[str] = None,
+                          mode: str = "explain") -> Dict[str, Any]:
     """Async recall that works even when the employee has no minted key, via
     master + emulation headers. Returns the raw /api/recall JSON."""
     settings = get_settings()
@@ -86,7 +87,12 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         timeout=httpx.Timeout(30.0, connect=5.0),
         headers=headers,
     ) as c:
-        body: Dict[str, Any] = {"query_context": query, "max_memories": max_memories}
+        recall_mode = mode if mode in {"fact", "explain", "full"} else "explain"
+        body: Dict[str, Any] = {
+            "query_context": query,
+            "max_memories": max_memories,
+            "mode": recall_mode,
+        }
         if project_id:
             # project_id (snake) is the HARD scope: core forces the access context to this
             # project and EXCLUDES other projects' memories (so a Solvis-project room never
@@ -315,6 +321,7 @@ class HivemindClient:
 
     # ── Memory ───────────────────────────────────────────────
     async def recall(self, query: str, max_memories: int = 5, **kwargs) -> Dict[str, Any]:
+        kwargs.setdefault("mode", "explain")
         r = await self.core.post(
             "/api/recall",
             json={"query_context": query, "max_memories": max_memories, **kwargs},

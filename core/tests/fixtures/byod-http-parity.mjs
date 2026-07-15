@@ -35,16 +35,19 @@ if (process.argv[2] === 'write') {
     record: {
       id: ids.parent, userId: '00000000-0000-4000-8000-00000000c301',
       title: 'Policy document', content: 'Document summary.', memoryType: 'summary',
-      tags: ['document-summary'], layer: 'memory', isLatest: true, scope: 'organization',
-      metadata: { source_metadata: { source_id: 'policy.md' } },
+      tags: ['document-summary', `doc-id:${ids.document}`], layer: 'memory', isLatest: true, scope: 'organization',
+      metadata: { source_metadata: { source_id: 'policy.md', document_id: ids.document } },
     }, vector: vector(0),
   })).payload.ok, true);
   assert.equal((await call('/v1/write', {
     record: {
       id: ids.claim, userId: '00000000-0000-4000-8000-00000000c301',
       title: 'Retention period', content: 'Records are retained for seven years.', memoryType: 'fact',
-      tags: ['promoted-memory', 'entity:retention-policy'], layer: 'memory', isLatest: true,
-      scope: 'organization', metadata: { segment_id: ids.segment, importance_score: 0.92 },
+      tags: ['promoted-memory', 'entity:retention-policy', `doc-id:${ids.document}`], layer: 'memory', isLatest: true,
+      scope: 'organization', metadata: {
+        segment_id: ids.segment, importance_score: 0.92,
+        source_metadata: { document_id: ids.document },
+      },
     }, vector: vector(1), rels: [{
       id: ids.edge, fromId: ids.claim, toId: ids.parent, type: 'PartOf', confidence: 1,
     }],
@@ -75,6 +78,25 @@ assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});
 assert.equal(stats.payload.memories, 2);
 assert.equal(stats.payload.relationships, 1);
+const checksumProbe = await call('/v1/kb-doc-by-checksum', {
+  checksum: 'parity-checksum', filename: 'policy.md', scope: 'organization',
+  primary_team_id: null, project_id: null,
+});
+assert.equal(checksumProbe.payload.document_id, ids.document);
+assert.equal(checksumProbe.payload.segment_count, 1);
+assert.equal(checksumProbe.payload.promoted_count, 2);
+
+if (process.argv[2] === 'delete-document') {
+  const deleted = await call('/v1/kb-doc-delete', { document_id: ids.document });
+  assert.deepEqual(deleted.payload, {
+    ok: true, deleted_documents: 1, deleted_segments: 1, deleted_memories: 2,
+  });
+  assert.deepEqual((await call('/v1/stats', {})).payload, { memories: 0, relationships: 0 });
+  assert.deepEqual((await call('/v1/kb-hydrate', { ids: [ids.segment] })).payload.segments, []);
+  assert.equal((await call('/v1/kb-doc-by-checksum', {
+    checksum: 'parity-checksum', filename: 'policy.md', scope: 'organization',
+  })).payload.document_id, null);
+}
 
 if (process.argv[2] === 'purge') {
   const purged = await call('/v1/purge', {});

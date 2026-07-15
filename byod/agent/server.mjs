@@ -522,6 +522,34 @@ const routes = {
     return { ok: true };
   },
 
+  // Idempotency probe used before parsing/distillation. The lookup includes
+  // filing scope so identical bytes may still be intentionally stored in a
+  // different personal/project/team/organization context.
+  '/v1/kb-doc-by-checksum': async (b) => {
+    if (!b.checksum || !b.filename) return { document_id: null, segment_count: 0, promoted_count: 0 };
+    const { rows } = await pg.query(
+      `SELECT d.id,
+              (SELECT count(*)::int FROM knowledge_segments s
+                WHERE s.org_id=d.org_id AND s.document_id=d.id) AS segment_count
+         FROM knowledge_documents d
+        WHERE d.org_id=$1 AND d.checksum=$2 AND d.filename=$3 AND d.deleted_at IS NULL
+          AND (d.metadata->>'scope') IS NOT DISTINCT FROM $4::text
+          AND (d.metadata->>'primary_team_id') IS NOT DISTINCT FROM $5::text
+          AND COALESCE(d.metadata->>'project_id', d.metadata->'project_ids'->>0)
+              IS NOT DISTINCT FROM $6::text
+        LIMIT 1`,
+      [ORG, b.checksum, b.filename, b.scope || null, b.primary_team_id || null, b.project_id || null],
+    );
+    if (!rows.length) return { document_id: null, segment_count: 0, promoted_count: 0 };
+    const documentId = rows[0].id;
+    const promoted = await countDerivedMemoriesByDocumentIds([documentId]);
+    return {
+      document_id: documentId,
+      segment_count: Number(rows[0].segment_count) || 0,
+      promoted_count: Number(promoted[documentId]) || 0,
+    };
+  },
+
   // Upsert one evidence segment: row + vector (layer='segment' in the shared Qdrant collection).
   '/v1/kb-segment': async (b) => {
     const s = b.segment || {};
@@ -845,6 +873,63 @@ const routes = {
     };
     const derivedCounts = await countDerivedMemoriesByDocumentIds([d.id]);
     return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
+  },
+
+  // Delete a document and every resident derivative. This is the remote
+  // equivalent of the managed cascade: source segments, promoted memories,
+  // graph edges, and both vector layers disappear together.
+  '/v1/kb-doc-delete': async (b) => {
+    if (!b.document_id && !b.filename) return { ok: false, error: 'document_id or filename required' };
+    const args = [ORG];
+    let selector;
+    if (b.document_id) { args.push(b.document_id); selector = `id=$${args.length}::uuid`; }
+    else { args.push(b.filename); selector = `filename=$${args.length}`; }
+    const { rows: docs } = await pg.query(
+      `SELECT id FROM knowledge_documents WHERE org_id=$1 AND deleted_at IS NULL AND ${selector}`,
+      args,
+    );
+    const documentIds = docs.map((doc) => doc.id);
+    if (!documentIds.length) return { ok: true, deleted_documents: 0, deleted_segments: 0, deleted_memories: 0 };
+    const tagIds = documentIds.map((id) => `doc-id:${id}`);
+    const { rows: memoryRows } = await pg.query(
+      `SELECT DISTINCT id FROM memories
+        WHERE org_id=$1 AND (
+          metadata->'source_metadata'->>'document_id' = ANY($2::text[])
+          OR metadata->>'document_id' = ANY($2::text[])
+          OR tags && $3::text[]
+        )`,
+      [ORG, documentIds, tagIds],
+    );
+    const memoryIds = memoryRows.map((row) => row.id);
+    const { rows: segmentRows } = await pg.query(
+      'SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[])',
+      [ORG, documentIds],
+    );
+    const segmentIds = segmentRows.map((row) => row.id);
+    if (memoryIds.length) {
+      await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))', [ORG, memoryIds]);
+      await pg.query('DELETE FROM memories WHERE org_id=$1 AND id = ANY($2::uuid[])', [ORG, memoryIds]);
+    }
+    const deletedSegments = await pg.query(
+      'DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[])',
+      [ORG, documentIds],
+    );
+    const deletedDocuments = await pg.query(
+      'DELETE FROM knowledge_documents WHERE org_id=$1 AND id = ANY($2::uuid[])',
+      [ORG, documentIds],
+    );
+    const vectorIds = [...memoryIds, ...segmentIds];
+    if (vectorIds.length) {
+      await qFetch(`/collections/${QCOLL}/points/delete`, {
+        method: 'POST', body: JSON.stringify({ points: vectorIds }),
+      }).catch(() => {});
+    }
+    return {
+      ok: true,
+      deleted_documents: deletedDocuments.rowCount,
+      deleted_segments: deletedSegments.rowCount,
+      deleted_memories: memoryIds.length,
+    };
   },
 
   // ── Per-memory edge counts (self-host READ) ───────────────────────────────

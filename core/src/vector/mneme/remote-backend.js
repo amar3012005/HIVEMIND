@@ -203,6 +203,10 @@ export async function remoteKbDoc(orgId, doc) {
   try { await _call(orgId, '/v1/kb-doc', { doc }); return true; }
   catch (e) { console.warn(`[mneme/remote] kb-doc failed org=${orgId}: ${e.message}`); return null; }
 }
+export async function remoteKbDocByChecksum(orgId, query) {
+  try { return await _call(orgId, '/v1/kb-doc-by-checksum', query || {}); }
+  catch (e) { console.warn(`[mneme/remote] kb-doc-by-checksum failed org=${orgId}: ${e.message}`); return null; }
+}
 export async function remoteKbSegment(orgId, segment, vector) {
   try { const out = await _call(orgId, '/v1/kb-segment', { segment, vector }); return out?.ok ? true : null; }
   catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }

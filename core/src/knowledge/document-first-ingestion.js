@@ -17,12 +17,10 @@ import { chatCompletion } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
-// RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
-// row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
-// the customer's document text would sit on our box. The KB-on-agent layer (agent-side knowledge
-// tables + segment vectors + read/write/recall routing) is a dedicated build; until it ships we
-// REFUSE self-host KB ingestion rather than leak. Chat + connector memories already route to the
-// agent correctly. Throw a clear, surfaced message.
+// RESIDENCY GUARD — managed ingestion may use central knowledge tables, while
+// remote orgs must route documents and segments through the resident agent.
+// Callers that are not on the remote route still fail closed here rather than
+// silently persisting customer source content in the wrong backend.
 function assertKbAllowedForOrg(orgId) {
   if (orgIsRemote(orgId)) {
     const e = new Error('Knowledge Base document ingestion is not yet available for self-hosted orgs — coming soon. Memories (chat, API, connectors) work normally and stay on your server.');
@@ -1560,7 +1558,7 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
               this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
               this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
             ]);
-            if (segs > 0 && memLinks > 0) {
+            if (segs > 0) {
               this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero tokens`);
               emit('skipped-unchanged', 100, { documentId: prior.id });
               return { documentId: prior.id, segmentCount: segs, candidateCount: 0, promotedCount: memLinks, skippedUnchanged: true };
@@ -1593,8 +1591,29 @@ Every memory MUST be fully supported by its support_indices. Do not invent, infe
               return { documentId: prior.id, segmentCount: Number(prior.segs), candidateCount: 0, promotedCount: 0, skippedUnchanged: true };
             }
           }
-          // True self-host (agent on the customer box): no cheap checksum probe route yet — full
-          // ingest proceeds (honest gap; add a /v1/kb-doc-by-checksum probe later).
+          // True self-host: ask the resident agent using the same checksum +
+          // filename + scope tuple. Raw source content remains on the box.
+          if (agentFor(orgId)?.url && agentFor(orgId)?.url !== 'local:') {
+            const { amrKbDocByChecksum } = await import('../vector/mneme/driver.js');
+            const prior = await amrKbDocByChecksum(orgId, {
+              checksum,
+              filename,
+              scope: metadata.scope || null,
+              primary_team_id: metadata.primary_team_id || null,
+              project_id: metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null,
+            });
+            if (prior?.document_id && Number(prior.segment_count) > 0) {
+              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} on resident agent (doc ${String(prior.document_id).slice(0, 8)})`);
+              emit('skipped-unchanged', 100, { documentId: prior.document_id });
+              return {
+                documentId: prior.document_id,
+                segmentCount: Number(prior.segment_count),
+                candidateCount: 0,
+                promotedCount: Number(prior.promoted_count),
+                skippedUnchanged: true,
+              };
+            }
+          }
         }
       } catch (e) { this.logger.warn?.(`[kb-ingest] skip-unchanged check failed (proceeding with full ingest): ${e.message}`); }
     }

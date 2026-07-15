@@ -5,7 +5,7 @@ import {
   assessRecallCoverage,
   chooseRecallEscalation,
 } from '../../src/agent/chat-recall-policy.js';
-import { answerStep } from '../../src/agent/react-agent-v2.js';
+import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
 
 test('document anchor with no exact source evidence produces one explain escalation', () => {
   const plan = { named_entities: [] };
@@ -96,4 +96,29 @@ test('source-specific chat fails closed when the single escalation still has no 
   assert.equal(answer.response, 'No grounded workspace evidence found');
   assert.equal(answer.confidence, 0);
   assert.deepEqual(answer.evidence_used, []);
+});
+
+test('validated claim citations become server-owned public document sources', () => {
+  const sources = buildChatCitationSources([{
+    sourceSections: [{
+      segment_id: 'seg-1',
+      document_id: 'doc-1',
+      document_title: 'Policy.pdf',
+      content: 'Every action requires human approval.',
+      score: 0.91,
+    }],
+    citations: [{ id: 'C1', segment_id: 'seg-1', document_id: 'doc-1', title: 'Policy.pdf' }],
+  }], [{ text: 'Approval is required.', grounded: true, citation_ids: ['P1-C1'] }]);
+
+  assert.deepEqual(sources, [{
+    id: 'seg-1',
+    citation_id: 'P1-C1',
+    segment_id: 'seg-1',
+    document_id: 'doc-1',
+    title: 'Policy.pdf',
+    snippet: 'Every action requires human approval.',
+    page: null,
+    source_type: 'document_evidence',
+    score: 0.91,
+  }]);
 });

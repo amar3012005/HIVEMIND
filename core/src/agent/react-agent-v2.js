@@ -1410,6 +1410,43 @@ export function buildChatCitationPacket(recallPackets = []) {
   return { citations };
 }
 
+export function buildChatCitationSources(recallPackets = [], claims = []) {
+  const usedIds = new Set(
+    (claims || [])
+      .filter((claim) => claim?.grounded === true)
+      .flatMap((claim) => Array.isArray(claim.citation_ids) ? claim.citation_ids : []),
+  );
+  const sources = [];
+  const seen = new Set();
+
+  for (const [packetIndex, packet] of (recallPackets || []).entries()) {
+    const sectionsById = new Map(
+      (packet?.sourceSections || [])
+        .filter((section) => section?.segment_id)
+        .map((section) => [section.segment_id, section]),
+    );
+    for (const citation of (packet?.citations || [])) {
+      if (!citation?.id) continue;
+      const citationId = `P${packetIndex + 1}-${citation.id}`;
+      if (!usedIds.has(citationId) || seen.has(citationId)) continue;
+      seen.add(citationId);
+      const section = sectionsById.get(citation.segment_id) || {};
+      sources.push({
+        id: citation.segment_id || citationId,
+        citation_id: citationId,
+        segment_id: citation.segment_id || null,
+        document_id: citation.document_id || section.document_id || null,
+        title: citation.title || citation.source_label || section.document_title || 'Workspace source',
+        snippet: section.snippet || section.content || '',
+        page: citation.page ?? section.page ?? null,
+        source_type: 'document_evidence',
+        score: Number.isFinite(section.score) ? section.score : null,
+      });
+    }
+  }
+  return sources;
+}
+
 export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKnowledge = false } = {}) {
   return validateGroundedClaims(
     payload,
@@ -1422,6 +1459,38 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const sys = answerPrompt({ language, assistantName, orgName });
   const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   if (deterministicRecall && evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
+    const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
+    const memorySources = evidence.memories.slice(0, 10).map(m => {
+      const tags = m.tags || [];
+      const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
+                   || (m.source_metadata?.source_type === 'synthesis-bridge')
+                   || tags.includes('synthesis:canonical')
+                   || tags.includes('synthesis:bridge');
+      const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
+                      : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
+                      : null;
+      return {
+        id: m.id,
+        title: m.title,
+        snippet: m.content,
+        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+        tags,
+        memory_type: m.memory_type,
+        rank_trace: {
+          is_synthesis: !!isSynth,
+          synthesis_type: synthType,
+          synthesis_confidence: m.synthesis_confidence ?? null,
+          synthesis_revision: m.synthesis_revision ?? null,
+          cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
+          cross_cluster_overlap: m._cross_cluster_overlap ?? null,
+          synthesis_boosted: !!m._synthesis_boosted,
+        },
+      };
+    });
+    const publicSources = evidence.coverage?.source_requested
+      ? citationSources
+      : [...citationSources, ...memorySources].slice(0, 10);
+
     return {
       response: 'No grounded workspace evidence found',
       claims: [],
@@ -2749,34 +2818,8 @@ export async function runReactAgentV2({
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps
       // users trust the answer + spot mis-ranking.
-      sources:       evidence.memories.slice(0, 10).map(m => {
-        const tags = m.tags || [];
-        const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
-                     || (m.source_metadata?.source_type === 'synthesis-bridge')
-                     || tags.includes('synthesis:canonical')
-                     || tags.includes('synthesis:bridge');
-        const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
-                        : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
-                        : null;
-        return {
-          id: m.id,
-          title: m.title,
-          snippet: m.content,
-          score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-          tags,
-          memory_type: m.memory_type,
-          // Recall-trace metadata — FE renders chips per memory.
-          rank_trace: {
-            is_synthesis: !!isSynth,
-            synthesis_type: synthType,
-            synthesis_confidence: m.synthesis_confidence ?? null,
-            synthesis_revision: m.synthesis_revision ?? null,
-            cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
-            cross_cluster_overlap: m._cross_cluster_overlap ?? null,
-            synthesis_boosted: !!m._synthesis_boosted,
-          },
-        };
-      }),
+      sources: publicSources,
+      citations: citationSources,
       // Typed graph edges between sources — FE renders edge chips.
       relationships: (evidence.relationships || []).slice(0, 30).map(e => ({
         from_id: e.from_id,

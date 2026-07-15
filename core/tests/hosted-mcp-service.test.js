@@ -65,3 +65,46 @@ test('hosted MCP revocation invalidates signed tokens across lookups', async () 
   assert.equal(await hostedService.validateConnectionToken(descriptor.connection.token, userId), false);
   assert.equal(await hostedService.getHostedServerByToken(descriptor.connection.token, userId), null);
 });
+
+test('hivemind_chat_context returns the server packet and escalates anchored fact recall once', async () => {
+  const hostedService = await loadHostedServiceModule(`hosted-mcp-context=${Date.now()}`);
+  const calls = [];
+  const packet = {
+    facts: [{ id: 'm1' }],
+    sourceSections: [{ segment_id: 's1' }],
+    citations: [{ id: 'C1', segment_id: 's1' }],
+    coverage: { facts: 1, source_sections: 1 },
+    cutoff_reason: null,
+  };
+  const apiClient = {
+    post: async (path, body) => {
+      calls.push({ path, body });
+      if (body.mode === 'fact') {
+        return {
+          memories: [{ id: 'm1', tags: ['filename:brief.pdf'] }],
+          evidence: [],
+          mode_used: 'fact',
+        };
+      }
+      return {
+        memories: [{ id: 'm1' }],
+        evidence: [{ segment_id: 's1' }],
+        evidence_packet: packet,
+        mode_used: 'explain',
+        latency_ms: 42,
+      };
+    },
+  };
+
+  const response = await hostedService.handleToolCall({
+    name: 'hivemind_chat_context',
+    arguments: { query: 'What does the brief say?', mode: 'fact' },
+  }, 'user-1', 'org-1', apiClient);
+  const parsed = JSON.parse(response.content[0].text);
+
+  assert.deepEqual(calls.map((call) => call.body.mode), ['fact', 'explain']);
+  assert.ok(calls.every((call) => call.path === '/api/recall'));
+  assert.equal(parsed.mode_used, 'explain');
+  assert.deepEqual(parsed.context, packet);
+  assert.equal(parsed.latency_ms, 42);
+});

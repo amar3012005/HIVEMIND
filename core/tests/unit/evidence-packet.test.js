@@ -267,6 +267,14 @@ test('named source hydration keeps a query-centred passage for the answer model'
   assert.ok(row.snippet.length <= 526);
 });
 
+test('query-centred snippets prefer the window covering the most lowercase query detail', () => {
+  const service = new EvidenceRetrievalService({ db: null, qdrantClient: null });
+  const content = `This brochure is an overview. ${'padding '.repeat(30)}Any action on client data requires human approval before execution.`;
+  const snippet = service._extractSnippet(content, 'what does the brochure say about human approval', 120);
+  assert.match(snippet, /human approval/);
+  assert.doesNotMatch(snippet, /^This brochure is an overview/);
+});
+
 test('named source hydration falls back to canonical segments when vector search hangs', async () => {
   const service = new EvidenceRetrievalService({
     db: { knowledgeSegment: { findMany: async () => [{ id: 's0', documentId: 'doc-1', content: 'raw', segmentIndex: 0 }] } },

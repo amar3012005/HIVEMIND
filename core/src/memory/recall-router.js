@@ -1127,17 +1127,18 @@ export class RecallRouter {
         Math.min(350, remainingBudget()),
         [],
       );
-      if (recallPlan.mode === 'full' && explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+      if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+        const fullSource = recallPlan.mode === 'full';
         explicitSourceHydration = withTimeout(
           this.evidence.hydrateSourceDocuments({
             documents: explicitSourceDocuments,
             query,
             userId: ctx.userId,
             orgId: ctx.orgId,
-            perDocument: 8,
-            total: 16,
+            perDocument: fullSource ? 8 : 3,
+            total: fullSource ? 16 : 8,
           }),
-          Math.min(2_200, remainingBudget()),
+          Math.min(fullSource ? 2_200 : 1_200, remainingBudget()),
           { timed_out: true },
         );
       }

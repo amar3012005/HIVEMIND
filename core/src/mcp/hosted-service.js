@@ -2719,6 +2719,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           const recallArgs = {
             query_context: args.query,
             mode: requestedMode,
+            explicit_mode: true,
             include_live: args.include_live === true,
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
             ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),

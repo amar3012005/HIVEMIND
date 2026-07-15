@@ -84,6 +84,7 @@ export function toPayload(rec) {
     document_date: rec.documentDate ?? null,
     valid_from: rec.validFrom ?? null,
     valid_to: rec.validTo ?? null,
+    importance_score: Number(rec.importanceScore ?? rec.confidence ?? rec.metadata?.importance_score ?? 0.5),
   };
 }
 

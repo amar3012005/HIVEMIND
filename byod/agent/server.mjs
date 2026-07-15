@@ -578,7 +578,9 @@ const routes = {
   '/v1/kb-recall': async (b) => {
     if (!Array.isArray(b.vector)) return { results: [] };
     const filter = { must: [{ key: 'org_id', match: { value: ORG } }, { key: 'layer', match: { value: 'segment' } }] };
+    const documentIds = Array.isArray(b.documentIds) ? [...new Set(b.documentIds.filter(Boolean))].slice(0, 20) : [];
     if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
+    else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
     const qr = await qFetch(`/collections/${QCOLL}/points/search`, { method: 'POST', body: JSON.stringify({
       vector: b.vector, limit: Math.min(b.limit || 20, 100), with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
     if (!qr.ok) return { results: [] };

@@ -780,7 +780,7 @@ const TOOL_HANDLERS = {
         },
         tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
         limit: 15,
-        mode: args.mode || 'explain',
+        mode: 'explain',
       },
       ctx
     );
@@ -793,7 +793,7 @@ const TOOL_HANDLERS = {
       throw new Error('diff requires valid from/to timestamps with from before to');
     }
     const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
-    const mode = args.mode || 'explain';
+    const mode = 'explain';
     const [a, b] = await Promise.all([
       TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: from.toISOString() }, tags, limit: 10, mode }, ctx),
       TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: to.toISOString() }, tags, limit: 10, mode }, ctx),

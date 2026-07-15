@@ -1320,7 +1320,7 @@ export class RecallRouter {
       : RECALL_DELIVER_LIMIT;
     try {
       const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
-      if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+      if (recallPlan.operation !== 'timeline' && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
     // Dreams-first quota: guarantee raw source evidence still appears in the

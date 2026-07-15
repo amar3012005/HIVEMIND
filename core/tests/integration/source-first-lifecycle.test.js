@@ -143,6 +143,25 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     assert.equal(repeated.skippedUnchanged, true);
     assert.equal(repeated.documentId, ingested.documentId);
 
+    const concurrentContent = Buffer.concat([content, Buffer.from('\n\nConcurrent upload sentinel.')]);
+    const concurrentBefore = await prisma.knowledgeDocument.count({ where: { userId, orgId } });
+    const concurrentResults = await Promise.all([
+      service.ingestKnowledgeDocument({
+        userId, orgId, filename: 'records-policy-concurrent.md', fileBuffer: concurrentContent,
+        contentType: 'text/markdown', metadata: { scope: 'organization', document_type: 'policy', tags: ['policy'] },
+      }),
+      service.ingestKnowledgeDocument({
+        userId, orgId, filename: 'records-policy-concurrent.md', fileBuffer: concurrentContent,
+        contentType: 'text/markdown', metadata: { scope: 'organization', document_type: 'policy', tags: ['policy'] },
+      }),
+    ]);
+    assert.equal(new Set(concurrentResults.map((result) => result.documentId)).size, 1);
+    assert.equal(concurrentResults.filter((result) => result.coalescedConcurrent === true).length, 1);
+    assert.equal(await prisma.knowledgeDocument.count({ where: { userId, orgId } }), concurrentBefore + 1);
+    const concurrentDocumentId = concurrentResults[0].documentId;
+    assert.equal(await prisma.knowledgeSegment.count({ where: { documentId: concurrentDocumentId } }), 1);
+    assert.equal(await prisma.memoryEvidenceLink.count({ where: { documentId: concurrentDocumentId } }), 1);
+
     await prisma.memoryEvidenceLink.deleteMany({ where: { documentId: document.id } });
     await prisma.memoryDerivation.deleteMany({ where: { memoryId: promoted.id } });
     await prisma.relationship.deleteMany({ where: { OR: [{ fromId: promoted.id }, { toId: promoted.id }] } });

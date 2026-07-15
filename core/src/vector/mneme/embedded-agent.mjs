@@ -66,6 +66,7 @@ async function ensureSchema() {
       confidence real,
       created_at timestamptz NOT NULL DEFAULT now(),
       valid_from timestamptz,
+      valid_to timestamptz,
       document_date timestamptz,
       project text,
       project_ids text[] NOT NULL DEFAULT '{}',
@@ -85,10 +86,13 @@ async function ensureSchema() {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS recall_count int NOT NULL DEFAULT 0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1.0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS valid_to timestamptz;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
     CREATE INDEX IF NOT EXISTS memories_latest_idx  ON memories(org_id, is_latest) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_created_idx ON memories(org_id, created_at) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_valid_idx   ON memories(org_id, valid_from, valid_to) WHERE deleted_at IS NULL;
     CREATE TABLE IF NOT EXISTS relationships (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -267,6 +271,8 @@ function payloadOf(org, rec) {
     memory_type: rec.memoryType || null, layer: rec.layer || 'memory',
     cognitive_layer_role: rec.cognitiveLayerRole || null,
     is_latest: rec.isLatest ?? true, created_at: rec.createdAt || null,
+    document_date: rec.documentDate || null, valid_from: rec.validFrom || null,
+    valid_to: rec.validTo || null,
   };
 }
 
@@ -435,7 +441,9 @@ function routesFor(ctx) {
     '/v1/kb-recall': async (b) => {
       if (!Array.isArray(b.vector)) return { results: [] };
       const filter = { must: [{ key: 'org_id', match: { value: org } }, { key: 'layer', match: { value: 'segment' } }] };
+      const documentIds = Array.isArray(b.documentIds) ? [...new Set(b.documentIds.filter(Boolean))].slice(0, 20) : [];
       if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
+      else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
       const qr = await qFetch(`/collections/${qcoll}/points/search`, { method: 'POST', body: JSON.stringify({
         vector: b.vector, limit: Math.min(b.limit || 20, 100), with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
       if (!qr.ok) return { results: [] };

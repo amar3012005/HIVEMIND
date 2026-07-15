@@ -1,5 +1,25 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-20e6e6cf - Recall plan, source safety, and temporal indexes
+
+- **Parent:** `codex/recall-phases-2-5` at `20e6e6cfc4f74bf43868e6825c5acd2859b30655`.
+- **Frontend:** unchanged; this is a core-only shared API release.
+- **Core image:** `hivemind/core-api:prod-20260716-20e6e6cf`, digest `sha256:9ea9db6eb9dba434f88c9c85cfd33ddfcb6def7abc9a8ac6c37e7985e7a17aae`.
+- **Runtime:** `VERSION` and `NEXT_VERSION` set to `prod-20260716-20e6e6cf`; only `hm-core` was recreated. Existing production Compose drift was preserved unchanged under explicit authorization.
+- **Migration:** additive indexes `memories_org_created_at_idx` and `memories_org_valid_window_idx` applied directly with PostgreSQL `CREATE INDEX IF NOT EXISTS`. `prisma migrate deploy` remains unavailable because the legacy production database is unbaselined (`P3005`); this is a known operational limitation, not a successful Prisma migration.
+- **Acceptance performed:** `hm-core` healthy; public `https://core.singulancelabs.com/health` returned `ok:true`, with DB, Qdrant, and Docling reachable; no fresh fatal, panic, uncaught, unhandled, or OOM log entries in the deployment window.
+- **Skipped by explicit operator instruction:** focused production-image suite and authenticated FOREST/MCP/BYOD behavior checks. This release is operationally healthy but not feature-acceptance-proven.
+- **Aliases:** `hivemind/core-api:stable` and `hivemind/core-api:latest` point to this immutable image.
+- **Rollback:** `hivemind/core-api:rollback-20260716-20e6e6cf-pre` points to `prod-20260716-3baea859`; env backups are `/root/hivemind/.env.bak-prod-20260716-20e6e6cf` and `/root/hivemind-next/.env.embedding-canary-runtime.bak-prod-20260716-20e6e6cf`.
+
+## 2026-07-16 - Runtime reconciliation audit
+
+- This entry records read-only production observations. It is not a new deployment or acceptance claim.
+- Runtime identity: `VERSION=prod-20260716-3baea859` and `NEXT_VERSION=prod-20260716-3baea859`.
+- Core: `hivemind/core-api:prod-20260716-3baea859`, healthy; immutable digest `sha256:bc89fb773c53df1f46c312401c2c9fe9780c04de59d076060fab557e146d6f77`.
+- Frontend, Control, Employees, TARA, BYOD broker, and Playwright remain on the prior `prod-20260715-8aa07a4b` line. This is a mixed-service runtime, not evidence of a full-platform promotion.
+- `/root/hivemind` and `/root/hivemind-next` are dirty shared checkouts. They are not build inputs. The next promotion must use a clean detached worktree and preserve the running core image as the rollback target.
+
 ## 2026-07-15 - Pre-release lineage reconciliation audit
 
 - This entry records observed state only. It is not a deployment or acceptance claim.

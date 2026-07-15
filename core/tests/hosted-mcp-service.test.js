@@ -104,7 +104,59 @@ test('hivemind_chat_context returns the server packet and escalates anchored fac
 
   assert.deepEqual(calls.map((call) => call.body.mode), ['fact', 'explain']);
   assert.ok(calls.every((call) => call.path === '/api/recall'));
+  assert.ok(calls.every((call) => call.body.explicit_mode === true));
   assert.equal(parsed.mode_used, 'explain');
   assert.deepEqual(parsed.context, packet);
   assert.equal(parsed.latency_ms, 42);
+});
+
+test('temporal MCP tools are thin presets over the shared recall endpoint', async () => {
+  const hostedService = await loadHostedServiceModule(`hosted-mcp-temporal=${Date.now()}`);
+  const calls = [];
+  const apiClient = {
+    post: async (path, body) => {
+      calls.push({ path, body });
+      return {
+        memories: body.operation === 'timeline'
+          ? [{ id: 'm1', valid_from: '2026-01-01T00:00:00.000Z' }]
+          : [{ id: body.time?.valid_at || body.time?.known_at || 'current' }],
+        evidence: [],
+        evidence_packet: { graphEvidence: [] },
+      };
+    },
+  };
+
+  await hostedService.handleToolCall({
+    name: 'hivemind_at',
+    arguments: {
+      memory_query: 'policy',
+      transaction_time: '2026-01-10T00:00:00.000Z',
+      valid_time: '2026-01-05T00:00:00.000Z',
+    },
+  }, 'user-1', 'org-1', apiClient);
+  await hostedService.handleToolCall({
+    name: 'hivemind_diff',
+    arguments: {
+      memory_query: 'policy changes',
+      time_a: '2026-01-01T00:00:00.000Z',
+      time_b: '2026-02-01T00:00:00.000Z',
+    },
+  }, 'user-1', 'org-1', apiClient);
+  await hostedService.handleToolCall({
+    name: 'hivemind_timeline',
+    arguments: { memory_id: 'm1' },
+  }, 'user-1', 'org-1', apiClient);
+
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every((call) => call.path === '/api/recall'));
+  assert.deepEqual(calls[0].body.time, {
+    known_at: '2026-01-10T00:00:00.000Z',
+    valid_at: '2026-01-05T00:00:00.000Z',
+  });
+  assert.deepEqual(calls.slice(1, 3).map((call) => call.body.time.valid_at), [
+    '2026-01-01T00:00:00.000Z',
+    '2026-02-01T00:00:00.000Z',
+  ]);
+  assert.equal(calls[3].body.operation, 'timeline');
+  assert.equal(calls[3].body.include_superseded, true);
 });

@@ -56,6 +56,31 @@ test('source-focused evidence admits only the resolved document id', async () =>
   assert.deepEqual(result.docIds, ['document-active']);
 });
 
+test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
+  let where;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: {
+        findMany: async (args) => {
+          where = args.where;
+          return [
+            { id: 'brochure', title: 'HIVEMIND Brochure.html.pdf', sourceId: 'hivemind-brochure', updatedAt: new Date('2026-07-15') },
+            { id: 'other', title: 'Other document', sourceId: 'other', updatedAt: new Date('2026-07-16') },
+          ];
+        },
+      },
+    },
+    qdrantClient: null,
+  });
+  const documents = await service.resolveSourceFromQuery({
+    userId: 'user-1', orgId: 'org-1', query: 'What exactly does the brochure say?',
+  });
+  assert.equal(where.userId, 'user-1');
+  assert.equal(where.orgId, 'org-1');
+  assert.equal(where.archivedAt, null);
+  assert.deepEqual(documents.map((document) => document.id), ['brochure']);
+});
+
 test('packet preserves partial results and exposes latency cutoff', () => {
   const packet = buildEvidencePacket({
     memories: [{ id: 'm1', content: 'fast fact' }],
@@ -88,6 +113,24 @@ test('typed graph expansion rejects inaccessible tenant scopes', async () => {
   assert.equal(where.toMemory.orgId, 'org-1');
   assert.equal(result.items.length, 2);
   assert.ok(result.items.some((item) => item.to_id === 'to-allowed'));
+});
+
+test('valid-time graph expansion keeps lifecycle edges while known-time remains bounded', async () => {
+  let where;
+  const prisma = { relationship: { findMany: async (args) => { where = args.where; return [edge('personal', 'personal')]; } } };
+  const knownAt = '2026-02-01T00:00:00.000Z';
+  const result = await loadTypedGraphEvidence({
+    prisma,
+    memoryIds: ['anchor'],
+    userId: 'user-1',
+    orgId: 'org-1',
+    accessContext: { projectIds: [], teamIds: [] },
+    time: { valid_at: '2026-01-01T00:00:00.000Z', known_at: knownAt },
+  });
+  assert.equal(where.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.createdAt.lte.toISOString(), knownAt);
+  assert.equal(where.fromMemory.AND, undefined);
+  assert.equal(result.items.length, 1);
 });
 
 test('hung event-driven evidence returns at the deadline for fast fallback', async () => {
@@ -247,6 +290,14 @@ test('named source hydration keeps a query-centred passage for the answer model'
   });
   assert.match(row.snippet, /human approval/);
   assert.ok(row.snippet.length <= 526);
+});
+
+test('query-centred snippets prefer the window covering the most lowercase query detail', () => {
+  const service = new EvidenceRetrievalService({ db: null, qdrantClient: null });
+  const content = `This brochure is an overview. ${'padding '.repeat(30)}Any action on client data requires human approval before execution.`;
+  const snippet = service._extractSnippet(content, 'what does the brochure say about human approval', 120);
+  assert.match(snippet, /human approval/);
+  assert.doesNotMatch(snippet, /^This brochure is an overview/);
 });
 
 test('named source hydration falls back to canonical segments when vector search hangs', async () => {

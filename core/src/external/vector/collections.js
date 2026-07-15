@@ -117,6 +117,21 @@ const MEMORIES_PAYLOAD_INDEXES = [
     description: 'When the interaction occurred (dual-layer timestamp)'
   },
   {
+    field_name: 'created_at',
+    field_schema: 'datetime',
+    description: 'Transaction-time eligibility for known_at recall'
+  },
+  {
+    field_name: 'valid_from',
+    field_schema: 'datetime',
+    description: 'Valid-time window start'
+  },
+  {
+    field_name: 'valid_to',
+    field_schema: 'datetime',
+    description: 'Valid-time window end'
+  },
+  {
     field_name: 'importance_score',
     field_schema: 'float',
     description: 'User/model assigned importance (0-1)'

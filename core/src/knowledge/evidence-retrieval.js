@@ -9,7 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
-import { orgIsRemote, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -57,6 +57,7 @@ export class EvidenceRetrievalService {
         const hits = await amrKbRecall(orgId, queryVector, {
           limit: limit * 2,
           documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
+          documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
           scoreThreshold: effectiveThreshold,
         });
         if (!hits || !hits.length) return [];
@@ -185,12 +186,19 @@ export class EvidenceRetrievalService {
       // its slots with OTHER segments — the count is fine, the right segment is
       // just missing. Lexical hits merge in, get re-ranked, and slice keeps top-N.
       {
-        const lexTokens = [...new Set(
+        const allQueryTokens = [...new Set(
           String(query || '')
             .split(/[^\p{L}\p{N}§°]+/u)
             .map(t => t.trim())
-            .filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^[A-ZÄÖÜ]/.test(t)))
-        )].slice(0, 8);
+            .filter(t => t.length >= 3)
+        )];
+        // A hard document filter makes a bounded lexical pass safe and cheap.
+        // Use every query token there so lowercase details work in any language;
+        // retain the narrower legacy lane for an unscoped corpus search.
+        const lexTokens = (docIdSet
+          ? allQueryTokens
+          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))))
+          .slice(0, 12);
         if (lexTokens.length) {
           try {
             // Scope the lexical pass to the SAME docs as the vector pass when a
@@ -209,7 +217,7 @@ export class EvidenceRetrievalService {
               include: {
                 document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
               },
-              take: limit * 2,
+              take: Math.min(docIdSet ? limit * 4 : limit * 2, 80),
             });
             for (const segment of lexSegments) {
               if (haveIds.has(segment.id)) continue;
@@ -218,8 +226,12 @@ export class EvidenceRetrievalService {
               // is a stronger literal match → must outrank doc-scoped vector hits
               // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
               const lc = String(segment.content || '').toLowerCase();
-              const matches = lexTokens.filter((t) => lc.includes(t.toLowerCase())).length;
-              results.push(fmt(segment, Math.min(0.9, 0.55 + 0.13 * matches), true));
+              const matched = lexTokens.filter((t) => lc.includes(t.toLowerCase()));
+              const coverage = matched.length / Math.max(1, lexTokens.length);
+              const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
+                lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
+              const score = Math.min(0.95, 0.55 + (0.3 * coverage) + (0.08 * orderedPairs));
+              results.push(fmt(segment, score, true));
               haveIds.add(segment.id);
             }
           } catch (lexErr) {
@@ -287,6 +299,62 @@ export class EvidenceRetrievalService {
       orderBy: { updatedAt: 'desc' },
       take: Math.max(1, Math.min(limit, 10)),
     });
+  }
+
+  /**
+   * Resolve a document mentioned in natural-language input before retrieval.
+   * This is metadata-only: source eligibility never depends on vector scores or
+   * an LLM extracting an English filename.
+   */
+  async resolveSourceFromQuery({ userId, orgId, query, limit = 1 }) {
+    const tokens = [...new Set(String(query || '')
+      .normalize('NFKC')
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((token) => token.toLocaleLowerCase())
+      .filter((token) => token.length >= 3))]
+      .slice(0, 12);
+    if (!tokens.length) return [];
+
+    const score = (document) => {
+      const haystack = [document.title, document.sourceId, document.filename]
+        .filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase();
+      const hits = tokens.filter((token) => haystack.includes(token)).length;
+      return hits / tokens.length;
+    };
+
+    if (orgIsRemote(orgId)) {
+      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+      return (listed?.documents || [])
+        .filter((document) => !document.userId || document.userId === userId)
+        .map((document) => ({ ...document, _sourceScore: score(document) }))
+        .filter((document) => document._sourceScore > 0)
+        .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+        .slice(0, Math.max(1, Math.min(limit, 3)));
+    }
+
+    if (!this.db?.knowledgeDocument) return [];
+    const documents = await this.db.knowledgeDocument.findMany({
+      where: {
+        userId,
+        orgId,
+        archivedAt: null,
+        OR: tokens.flatMap((token) => [
+          { title: { contains: token, mode: 'insensitive' } },
+          { sourceId: { contains: token, mode: 'insensitive' } },
+        ]),
+      },
+      select: {
+        id: true, title: true, sourceId: true, documentType: true,
+        sourcePlatform: true, sourceUrl: true, documentDate: true, updatedAt: true,
+      },
+      take: 30,
+    });
+    return documents
+      .map((document) => ({ ...document, _sourceScore: score(document) }))
+      .filter((document) => document._sourceScore > 0)
+      .sort((a, b) => b._sourceScore - a._sourceScore
+        || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, Math.max(1, Math.min(limit, 3)));
   }
 
   /**
@@ -611,11 +679,22 @@ export class EvidenceRetrievalService {
     if (index === -1) {
       const tokens = [...new Set(
         String(query || '').split(/[^\p{L}\p{N}§°]+/u).map(t => t.trim()).filter(t => t.length >= 3)
-      )].sort((a, b) => b.length - a.length);
-      for (const t of tokens) {
-        const i = contentLower.indexOf(t.toLowerCase());
-        if (i !== -1) { index = i; break; }
+      )];
+      let best = null;
+      for (const token of tokens) {
+        const needle = token.toLowerCase();
+        let position = contentLower.indexOf(needle);
+        while (position !== -1) {
+          const start = Math.max(0, position - Math.floor(contextLength / 2));
+          const window = contentLower.slice(start, Math.min(content.length, start + contextLength));
+          const covered = tokens.reduce((count, item) => count + Number(window.includes(item.toLowerCase())), 0);
+          const candidate = { position, covered, tokenLength: token.length };
+          if (!best || candidate.covered > best.covered
+            || (candidate.covered === best.covered && candidate.tokenLength > best.tokenLength)) best = candidate;
+          position = contentLower.indexOf(needle, position + needle.length);
+        }
       }
+      index = best?.position ?? -1;
     }
 
     if (index === -1) {

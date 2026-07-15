@@ -22,6 +22,26 @@
 
 export const MCP_CATALOG = [
   {
+    // Google Maps Platform (Places/Geocoding/Routes) — per-tenant API key via
+    // Nango (integration id 'google-maps', API-key auth: the user pastes their
+    // Maps key in the Connect UI; fetchBearerFromNango reads credentials.apiKey
+    // and the runner injects it as GOOGLE_MAPS_API_KEY for the stdio server).
+    // Prospecting backbone for outreach rooms: places_search_text/places_nearby
+    // return real local businesses with phone + website (feeds TARA dialing +
+    // impressum mining).
+    name: 'google-maps',
+    label: 'Google Maps',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', 'google-maps-mcp-server'],
+    nango_provider: 'google-maps',
+    token_inject: { kind: 'env', var: 'GOOGLE_MAPS_API_KEY', format: 'raw' },
+    mode: 'live',
+    supports_ingestion: false,
+    supports_live_tools: true,
+    category: 'geo',
+  },
+  {
     name: 'github',
     label: 'GitHub',
     transport: 'stdio',

@@ -21181,6 +21181,16 @@ exit \$RC
                       assistantName: agentAssistantName, orgName: agentOrgName,
                       language,
                       router: body?.router,
+                      recallMode: body?.recall_mode,
+                      recallSource: body?.source || {
+                        document_id: body?.source_document_id,
+                        title: body?.source_title,
+                      },
+                      recallTime: body?.time || {
+                        valid_at: body?.valid_at,
+                        known_at: body?.known_at,
+                        range: body?.date_range,
+                      },
                       allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
@@ -21215,6 +21225,16 @@ exit \$RC
                   assistantName: agentAssistantName, orgName: agentOrgName,
                   language,
                   router: body?.router,
+                  recallMode: body?.recall_mode,
+                  recallSource: body?.source || {
+                    document_id: body?.source_document_id,
+                    title: body?.source_title,
+                  },
+                  recallTime: body?.time || {
+                    valid_at: body?.valid_at,
+                    known_at: body?.known_at,
+                    range: body?.date_range,
+                  },
                   allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,

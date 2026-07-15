@@ -1376,6 +1376,9 @@ class Director:
             if name == "web_search":
                 return await self._web_search(str(args.get("query", "")))
 
+            if name == "places_search":
+                return await self._places_search(str(args.get("query", "")))
+
             if name == "debate":
                 return await self._debate(str(args.get("topic", "")), int(args.get("rounds", self.debate_max_rounds) or self.debate_max_rounds))
 
@@ -1407,6 +1410,55 @@ class Director:
         except Exception as exc:  # noqa: BLE001
             log.warning("[hyper-engine] browser_search fallback failed: %s", exc)
             return ""
+
+    # ── Google Places (New) — local-business prospect discovery ──────────────
+    async def _places_search(self, query: str) -> str:
+        """Find REAL local businesses via Google Places API (New) Text Search: name,
+        phone, website, address per result — dial-ready prospects for outreach rooms.
+        Key from GOOGLE_MAPS_API_KEY (deployment env). Writes prospect rows to the
+        blackboard + emits a `prospects` gather event so the FE can list them. Bounded
+        by the web budget so a room can't burn the API."""
+        query = (query or "").strip()
+        key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY") or ""
+        if not query:
+            return json.dumps({"error": "empty query"})
+        if not key:
+            return json.dumps({"error": "places search unavailable — no GOOGLE_MAPS_API_KEY configured"})
+        if self._web_calls >= self._web_budget:
+            return json.dumps({"error": "discovery budget for this turn is used."})
+        self._web_calls += 1
+        try:
+            body = {"textQuery": query, "maxResultCount": 20}
+            headers = {"Content-Type": "application/json", "X-Goog-Api-Key": key,
+                       "X-Goog-FieldMask": "places.displayName,places.internationalPhoneNumber,"
+                                           "places.websiteUri,places.formattedAddress"}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as c:
+                r = await c.post("https://places.googleapis.com/v1/places:searchText",
+                                 headers=headers, json=body)
+            if r.status_code != 200:
+                return json.dumps({"error": f"places {r.status_code}: {r.text[:160]}", "is_error": True})
+            places = (r.json() or {}).get("places") or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] places_search failed: %s", exc)
+            return json.dumps({"error": str(exc)[:200], "is_error": True})
+        rows = []
+        for pl in places[:20]:
+            rows.append({
+                "company": (pl.get("displayName") or {}).get("text", ""),
+                "phone": pl.get("internationalPhoneNumber", ""),
+                "website": pl.get("websiteUri", ""),
+                "address": pl.get("formattedAddress", ""),
+            })
+        rows = [x for x in rows if x["company"]]
+        # Onto the blackboard as sourced prospect facts (synth cites Google Places).
+        for x in rows:
+            self.blackboard.append(
+                f"- PROSPECT: {x['company']} | phone {x['phone'] or '—'} | {x['website'] or '—'} "
+                f"| {x['address']} (source: Google Places)")
+        self.gather_count += 1
+        await self.emit({"t": "prospects", "query": query, "count": len(rows), "prospects": rows})
+        log.info("[hyper-engine] places_search '%s' → %d firms", query[:60], len(rows))
+        return json.dumps({"found": len(rows), "prospects": rows})
 
     # ── live web search (HIVEMIND core Tavily-backed) ────────────────────────
     async def _web_search(self, query: str) -> str:
@@ -1688,10 +1740,11 @@ class Director:
                     "properties": {"name": {"type": "string"}, "args_json": {"type": "string"}},
                     "required": ["name", "args_json"], "additionalProperties": False}},
                 "web_query": {"type": ["string", "null"]},
+                "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "needs_debate", "method_skills"],
+            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills"],
             "additionalProperties": False,
         }
         sysp = (
@@ -1703,6 +1756,9 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
+            "- places_query: a local-business discovery query when the task is to FIND PROSPECTS/CLIENTS/companies "
+            "in a place (e.g. 'law firms in Hannover', 'dental clinics Hamburg') — returns real firms with phone + "
+            "website to reach out to. null when the task isn't prospect-finding.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "
@@ -1754,6 +1810,9 @@ class Director:
         plan["connector_calls"] = ccs[:4]
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        pq = plan.get("places_query")
+        _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
+        plan["places_query"] = pq if (isinstance(pq, str) and pq.strip() and _places_on) else None
         # Method skills: keep only real catalog names; auto-load the kind default
         # when the plan picked none (mirrors the polished-email auto-load).
         ms = [s for s in (plan.get("method_skills") or [])
@@ -1786,6 +1845,9 @@ class Director:
         if fn == "web_search":
             return (f"running a live web search for “{q}”…",
                     f"Brought back live web findings on “{q}” (sources on the board).")
+        if fn == "places_search":
+            return (f"scouting local businesses for “{q}”…",
+                    f"Found real firms for “{q}” — names, phones, sites on the board.")
         prov = fn.split("__")[0].replace("_", " ")
         return (f"reading {prov} ({fn.split('__')[-1]})…",
                 f"Checked {prov} — result is on the board.")
@@ -1847,6 +1909,9 @@ class Director:
                                           owner=self._gather_owner(_i, c["name"]))); _i += 1
         if plan["web_query"]:
             tasks.append(self._gather_one("web_search", {"query": plan["web_query"]},
+                                          owner=self._gather_owner(_i, "web_search"))); _i += 1
+        if plan.get("places_query"):
+            tasks.append(self._gather_one("places_search", {"query": plan["places_query"]},
                                           owner=self._gather_owner(_i, "web_search")))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

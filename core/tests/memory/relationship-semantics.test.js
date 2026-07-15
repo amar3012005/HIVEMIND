@@ -79,9 +79,26 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
 });
 
 test('LLM co-mention linker preserves Derives edge type', async () => {
-  const originalFetch = globalThis.fetch;
   const store = new InMemoryGraphStore();
-  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const memoryChatClient = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          entities: ['Project Zephyr'],
+          temporal: {},
+          memory_type: 'fact',
+          links: [{
+            index: 0,
+            entity: 'Project Zephyr',
+            type: 'Derives',
+            confidence: 0.9,
+            reason: 'new claim synthesizes the prior source',
+          }],
+        }),
+      },
+    }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false, memoryChatClient });
   const userId = '00000000-0000-4000-8000-000000009201';
   const orgId = '00000000-0000-4000-8000-000000009202';
 
@@ -109,30 +126,7 @@ test('LLM co-mention linker preserves Derives edge type', async () => {
     created_at: new Date().toISOString(),
   });
 
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{
-      message: {
-        content: JSON.stringify({
-          entities: ['Project Zephyr'],
-          temporal: {},
-          memory_type: 'fact',
-          links: [{
-            index: 0,
-            entity: 'Project Zephyr',
-            type: 'Derives',
-            confidence: 0.9,
-            reason: 'new claim synthesizes the prior source',
-          }],
-        }),
-      },
-    }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
-
-  try {
-    await engine._attachEntityCoMentionEdges(derived, store, [source]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await engine._attachEntityCoMentionEdges(derived, store, [source]);
 
   const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
   assert.equal(deriveEdges.length, 1);

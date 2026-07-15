@@ -423,6 +423,7 @@ export class MemoryGraphEngine {
     predictCalibrateOptions = {},
     smartIngestRouter = null,
     clusterIndex = null,
+    memoryChatClient = null,
   } = {}) {
     if (!store) {
       throw new Error('MemoryGraphEngine requires a store');
@@ -448,6 +449,11 @@ export class MemoryGraphEngine {
     // connectors) can skip building routedPayloads themselves and the
     // engine will route automatically.
     this.smartIngestRouter = smartIngestRouter;
+    // Injectable transport keeps relationship/enrichment tests deterministic
+    // and lets non-Groq deployments provide the same OpenAI-shaped contract.
+    // The production default retains the existing Groq -> OpenRouter funnel.
+    this.memoryChatClient = memoryChatClient || memoryChatFetch;
+    this.hasInjectedMemoryChatClient = typeof memoryChatClient === 'function';
     // Observer is superseded by MemoryProcessor (unified single-call pipeline).
     // this.observer is intentionally not initialized; Observer import kept for backward compat.
   }
@@ -502,6 +508,12 @@ export class MemoryGraphEngine {
   }
 
   async ingestMemory(input) {
+    // Preserve whether the relationship was explicitly authorized by the
+    // caller before smart routing / MemoryProcessor can infer one. Explicit
+    // Updates have a concrete predecessor target and are tenant-checked by
+    // applyUpdate; inferred Updates still require the destructive safety gate.
+    const callerAuthorizedRelationship = input?._authorized_relationship === true
+      || (Boolean(input?.relationship) && input?._smart_routed !== true);
     // Full data residency: run the whole ingest inside this org's context so every nested
     // getPrismaClient() resolves to the org's store (customer Postgres for a self-host org). Re-entrancy
     // guard: enter the context once, then proceed. Undefined org → central (managed), unchanged.
@@ -543,7 +555,11 @@ export class MemoryGraphEngine {
           return { skipped: true, reason: 'routed-empty' };
         }
         if (payloads.length === 1) {
-          input = { ...payloads[0], _smart_routed: true };
+          input = {
+            ...payloads[0],
+            _smart_routed: true,
+            ...(callerAuthorizedRelationship ? { _authorized_relationship: true } : {}),
+          };
         } else {
           const results = [];
           for (const p of payloads) {
@@ -1292,12 +1308,14 @@ export class MemoryGraphEngine {
           // overlap, not LLM confidence alone.
           const updatesTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
-          let entityOverlapOk = false;
+          const explicitUpdateAuthorized = callerAuthorizedRelationship
+            || input._authorized_relationship === true;
+          let entityOverlapOk = explicitUpdateAuthorized;
           let targetMem = null; // hoisted: also read by the H1 synthesis-guard below
           if (Number(updateConf) >= 0.85 && updatesTargetId) {
             try {
               targetMem = await store.getMemory(updatesTargetId);
-              if (targetMem) {
+              if (targetMem && !explicitUpdateAuthorized) {
                 const newEntsArr = (baseMemory.tags || [])
                   .filter(t => typeof t === 'string' && t.startsWith('entity:'))
                   .map(t => t.slice('entity:'.length).toLowerCase());
@@ -2124,7 +2142,7 @@ OUTPUT JSON only.`;
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
-    if (!process.env.GROQ_API_KEY) {
+    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient) {
       console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
       return;
     }
@@ -2444,7 +2462,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
-        const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
+        const resp = await this.memoryChatClient('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,

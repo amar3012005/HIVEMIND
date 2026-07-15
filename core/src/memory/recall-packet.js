@@ -40,6 +40,20 @@ export function buildRecallPacket({
       source_label: section.document_title || section.source_platform || 'Workspace source',
     }];
   });
+  for (const fact of citations.length === 0 ? facts : []) {
+    const memoryId = fact?.id || fact?.memory_id || fact?.memoryId || null;
+    if (!memoryId || seen.has(`memory:${memoryId}`)) continue;
+    seen.add(`memory:${memoryId}`);
+    citations.push({
+      id: `C${citations.length + 1}`,
+      memory_id: memoryId,
+      segment_id: null,
+      document_id: fact?.document_id || fact?.documentId || null,
+      title: fact?.title || null,
+      page: null,
+      source_label: fact?.title || 'Workspace memory',
+    });
+  }
 
   return {
     mode: plan.mode || 'fact',
@@ -95,9 +109,8 @@ export function validateGroundedClaims(payload, packet, { allowGeneralKnowledge 
     return { answer: NO_GROUNDED_EVIDENCE, claims: [], rejected_claims: rejected, grounded: false };
   }
   return {
-    answer: typeof payload?.answer === 'string' && payload.answer.trim()
-      ? payload.answer.trim()
-      : claims.map((claim) => claim.text).join('\n'),
+    // Never render prose outside the validated structured claims.
+    answer: claims.map((claim) => claim.text).join('\n'),
     claims,
     rejected_claims: rejected,
     grounded: claims.every((claim) => claim.grounded),

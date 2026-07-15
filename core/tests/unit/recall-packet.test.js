@@ -43,3 +43,13 @@ test('general knowledge is only retained with explicit opt-in', () => {
   }, packet, { allowGeneralKnowledge: true });
   assert.equal(answer.claims[0].grounded, false);
 });
+
+test('validated answer cannot retain prose outside accepted claims', () => {
+  const packet = buildRecallPacket({ facts: [{ id: 'm1', title: 'Approved budget' }] });
+  const answer = validateGroundedClaims({
+    answer: 'The budget was approved. Unsupported extra sentence.',
+    claims: [{ text: 'The budget was approved.', grounded: true, citation_ids: ['C1'] }],
+  }, packet);
+  assert.equal(answer.answer, 'The budget was approved.');
+  assert.equal(packet.citations[0].memory_id, 'm1');
+});

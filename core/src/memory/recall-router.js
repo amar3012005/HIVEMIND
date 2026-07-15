@@ -950,6 +950,18 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
     seen.add(key);
     citations.push({ id: `C${citations.length + 1}`, segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
   }
+  for (const memory of citations.length === 0 ? memories.slice(0, 5) : []) {
+    if (!memory?.id) continue;
+    citations.push({
+      id: `C${citations.length + 1}`,
+      memory_id: memory.id,
+      segment_id: null,
+      document_id: memory.document_id || memory.documentId || null,
+      title: memory.title || null,
+      page: null,
+      source_label: memory.title || 'Workspace memory',
+    });
+  }
   const conflicts = graph.filter((edge) => String(edge.type).toLowerCase() === 'contradicts');
   return {
     mode: plan?.mode || 'fact',

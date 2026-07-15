@@ -30,6 +30,7 @@
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
+import { validateGroundedClaims } from '../memory/recall-packet.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -1178,6 +1179,7 @@ memories as ground truth. Today's date is ${new Date().toISOString().slice(0, 10
 OUTPUT — STRICT JSON (no prose, no code fence):
 {
   "response":        "<final answer in ${lang}>",
+  "claims":          [{"text":"<one user-visible claim>","grounded":true,"citation_ids":["P1-C1"]}],
   "evidence_used":   [<memory_id_short>, ...],   // first 8 chars of each id you actually relied on
   "confidence":      0.0,                          // [0,1] — how grounded the answer is in evidence
   "gaps":            ["..."]                       // what the user might want but the evidence didn't cover
@@ -1190,6 +1192,9 @@ CORE RULES:
    DOCUMENT SEGMENTS block. Don't invent. When citing a LIVE WORKSPACE
    item, reference it naturally (e.g. "your last email from X on
    <date> said…"); don't paste raw IDs.
+   Every user-visible sentence must also appear as one item in claims.
+   Use only IDs from the CITATION REGISTRY. Set grounded=false only
+   when this request explicitly permits general knowledge.
 2. **PARTIAL coverage = USE IT, don't bail.** If even ONE evidence
    row touches the user's question, build the answer around it. Quote
    memory titles inline. Only respond "I don't have notes on X" when
@@ -1288,7 +1293,26 @@ CORE RULES:
     history. When in doubt, default to the literal absence of the edge.`;
 }
 
-async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx }) {
+export function buildChatCitationPacket(recallPackets = []) {
+  const citations = [];
+  for (const [packetIndex, packet] of recallPackets.entries()) {
+    for (const citation of (packet?.citations || [])) {
+      if (!citation?.id) continue;
+      citations.push({ ...citation, id: `P${packetIndex + 1}-${citation.id}` });
+    }
+  }
+  return { citations };
+}
+
+export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKnowledge = false } = {}) {
+  return validateGroundedClaims(
+    payload,
+    buildChatCitationPacket(recallPackets),
+    { allowGeneralKnowledge },
+  );
+}
+
+async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
 
   // Connector capability hint — built from active Nango connections so
@@ -1490,6 +1514,11 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
 
+  const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
+  const citationLines = citationPacket.citations.map((citation) =>
+    `[${citation.id}] ${citation.source_label || citation.title || 'Workspace source'}${citation.page ? ` p.${citation.page}` : ''}`,
+  ).join('\n');
+
   // When event-time ranking pre-filtered the evidence to the asked window,
   // tell the model these rows ARE "what happened" — docs/decisions/notes count
   // as activity. Stops the "no events" bail when in-window memories exist.
@@ -1517,7 +1546,7 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
 
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}${personaNote}
+${evidenceLines || '(none)'}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}${personaNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1601,8 +1630,16 @@ ${message}`;
     }
   }
 
+  const validated = validateChatAnswer({
+    answer: response,
+    claims: parsed.claims,
+  }, evidence.recall_packets || [], { allowGeneralKnowledge });
+
   return {
-    response,
+    response: validated.answer,
+    claims: validated.claims,
+    rejected_claims: validated.rejected_claims,
+    grounded: validated.grounded,
     evidence_used: Array.isArray(parsed.evidence_used) ? parsed.evidence_used : [],
     confidence:    Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
     gaps:          Array.isArray(parsed.gaps) ? parsed.gaps : [],
@@ -2050,6 +2087,7 @@ export async function runReactAgentV2({
   ctx,
   onEvent,
   router,
+  allowGeneralKnowledge = false,
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
@@ -2487,6 +2525,7 @@ export async function runReactAgentV2({
           }));
           const seen = new Set(evidence.memories.map(m => m.id));
           for (const r of extras) {
+            if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
             for (const m of (r?.memories || [])) {
               if (m?.id && !seen.has(m.id)) {
                 seen.add(m.id);
@@ -2503,7 +2542,7 @@ export async function runReactAgentV2({
     // STEP 5 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
+      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
     if (answer.usage) usages.push(answer.usage);
 
@@ -2525,6 +2564,7 @@ export async function runReactAgentV2({
         }));
         let mergedNew = 0;
         for (const r of extra) {
+          if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
           for (const m of (r?.memories || [])) {
             if (m?.id && !evidence.memories.some(e => e.id === m.id)) {
               evidence.memories.push(m);
@@ -2536,7 +2576,7 @@ export async function runReactAgentV2({
           // Re-run answer with augmented evidence (still FINAL_MODEL).
           const retry = await answerStep({
             message, history, evidence, plan, language, assistantName, orgName,
-            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
+            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
           });
           if (retry.usage) usages.push(retry.usage);
           if (retry.confidence >= answer.confidence) {
@@ -2614,6 +2654,9 @@ export async function runReactAgentV2({
       evidence_packets: (evidence.recall_packets || []).slice(0, 3),
       steps,
       evidence_used: answer.evidence_used,
+      claims:        answer.claims,
+      rejected_claims: answer.rejected_claims,
+      grounded:      answer.grounded,
       confidence:    answer.confidence,
       gaps:          answer.gaps,
       usage:         sumUsage(usages),

@@ -21173,6 +21173,7 @@ exit \$RC
                       assistantName: agentAssistantName, orgName: agentOrgName,
                       language,
                       router: body?.router,
+                      allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
                         projectId: requestProjectId,
@@ -21206,6 +21207,7 @@ exit \$RC
                   assistantName: agentAssistantName, orgName: agentOrgName,
                   language,
                   router: body?.router,
+                  allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,
                     projectId: requestProjectId,

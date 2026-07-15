@@ -144,3 +144,9 @@
 - **Verified:** 13 catalog connectors incl. google-maps seeded; elements markers (Gmail gate / EmailBlock / Maps tile) in served bundle; public 200×4; health green.
 - **Aliases:** stable + latest → this release (all services). Rollback: prior timestamped tags retained.
 - **Migrations:** none. **Action:** create Google Maps integration in Nango dashboard so tenants can connect.
+
+## prod-20260715-418d3b29 — Impressum contact enrichment (outreach recipients)
+- places_search now scrapes each firm Impressum/Kontakt → best email (named>role>weak, own-domain preferred).
+- Live: 20 Hannover consultancies → 9 with real emails (incl. named: Scheiber@rundstedt.de, mh@markus-huebner.com). Recipient resolution now passes.
+- Remaining block is USER-side: org Gmail grant is readonly; send 403s until reconnect grants compose+send.
+- Chain proven: places_search (phones) → impressum (emails) → recipient resolved → Gmail API reached.

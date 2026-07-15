@@ -1852,6 +1852,38 @@ class Director:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
 
+    # Room-kind report SKELETONS: each kind seals under FIXED headings so the
+    # report reads like that domain specialist's signed deliverable AND the FE
+    # can render known row-cards (known-heading parse — synth stays text-only,
+    # no JSON contract). general = today's structure, untouched fallback.
+    _REPORT_SKELETON = {
+        "market": (
+            "## Competitive Landscape — ranked competitor rows (one per REAL competitor), source per row\n"
+            "## Where We Win — the 2-4 sharpest asymmetries, each tied to evidence\n"
+            "## Threats & Gaps — what hurts us + what we could not verify\n"
+            "## Recommended Moves — lever + owner + measurable signal per move"),
+        "content": (
+            "## Content Pillars — 3-4 pillars, each mapped to an ICP pain\n"
+            "## Editorial Calendar — a table: week × piece × channel × success signal\n"
+            "## Hooks & Angles — real customer language, proof asset per angle\n"
+            "## Distribution — channels the company actually has, with reach"),
+        "outreach": (
+            "## Ideal Customer Profile — who we target and the disqualifiers\n"
+            "## Prospect List — ranked table, why-fit + contact + source per row\n"
+            "## Sequence — a table: touch × timing × message essence × CTA\n"
+            "## Success Metrics — reply/booking signals to track"),
+        "business": (
+            "## Unit Economics — table: metric × value/range × source or assumption\n"
+            "## Pricing & Positioning — anchor + packaging, tied to ICP budget trigger\n"
+            "## Key Risks — top risks with likelihood, impact, early signal, owner\n"
+            "## The One Thing That Kills This — the single fatal metric + cheap test"),
+        "strategy": (
+            "## Decision — the one-line DACI decision statement\n"
+            "## Options Considered — scored table incl. do-nothing\n"
+            "## Rationale — grounded bullets citing debate + evidence\n"
+            "## Tripwire — what would flip this decision, and who watches it"),
+    }
+
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
@@ -1913,6 +1945,20 @@ class Director:
                 f"ties to a lever + owner + measurable signal."
             )
         sysp += skills_block
+        # Kind-specific report skeleton — report-shaped deliverables only (an
+        # email/sheet keeps its own format contract). Existing discipline
+        # (citations, UNVERIFIED, Gaps to confirm, owner+metric) still applies
+        # inside each section.
+        _skeleton = self._REPORT_SKELETON.get(self.room_kind) if _io in ("answer", "doc", "notion") else None
+        if _skeleton:
+            sysp += (
+                f"\n\nREPORT STRUCTURE ({self.room_kind.upper()} room — this is a "
+                f"{self.room_kind} specialist's deliverable): structure the report under EXACTLY "
+                f"these '## ' headings, in this order (each line = heading + its content contract):\n"
+                f"{_skeleton}\n"
+                f"Open with a 2-3 sentence executive summary BEFORE the first heading; close with "
+                f"'## Gaps to confirm' when anything is UNVERIFIED."
+            )
 
         _org = (self.company_brief or "").strip()
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "

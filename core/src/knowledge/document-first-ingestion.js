@@ -594,10 +594,10 @@ Output the JSON object and nothing else.`;
         // the bulk of the "Derives noise"). Cross-fact relationships come from the co-mention linker.
         if (t.memoryId) {
           try {
-            await this.memoryGraphEngine.store.createRelationship({
-              id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
-              type: 'Derives', confidence: 0.9,
-              metadata: { created_by: 'kb_distill_v2', document_id: documentId },
+            await this.memoryGraphEngine.enqueueDerivation([t.memoryId], factId, {
+              confidence: 0.9,
+              reason: 'kb_distill_v2',
+              created_by: 'kb_distill_v2',
             });
           } catch { /* best-effort */ }
         }

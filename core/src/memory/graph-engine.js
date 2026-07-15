@@ -19,6 +19,7 @@ import {
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
 import { getEntityLinkQueue } from './entity-link-queue.js';
+import { hasVerifiedDerivationSource } from './derivation-validator.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -1411,13 +1412,16 @@ export class MemoryGraphEngine {
             : deriveSources;
 
           if (sourceIds.length > 0) {
-            Object.assign(result, await this.applyDerivesFromSources(sourceIds, baseMemory.id, {
-              store,
-              user_id: baseMemory.user_id,
-              org_id: baseMemory.org_id,
+            await this._enqueueDerivationJobs(store, sourceIds, baseMemory.id, {
               confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
-              startedAt,
-            }));
+              reason: semanticRelationship?.reason || 'Derives',
+              created_by: input.relationship_explicit === true ? 'explicit-ingest' : 'graph-engine',
+            });
+            result.operation = 'derivation_queued';
+            result.processingMs = Date.now() - startedAt;
+            await this._recordVersionSnapshot(store, baseMemory, {
+              reason: 'created', is_latest: true, related_memory_id: sourceIds[0] || null,
+            });
           } else {
             // sourceIds missing from both semanticRelationship and deriveSources —
             // skip the apply to avoid a no-op call; record a plain version snapshot instead.
@@ -1562,18 +1566,13 @@ export class MemoryGraphEngine {
         if (effectiveRelationshipType !== 'Derives' && input._derives_from && Array.isArray(input._derives_from)) {
           for (const source of input._derives_from) {
             try {
-              await store.createRelationship({
-                id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                from_id: source.id,
-                to_id: baseMemory.id,
-                type: 'Derives',
+              await this._enqueueDerivationJobs(store, [source.id], baseMemory.id, {
                 confidence: source.score || 0.6,
-                metadata: { auto_derived: true, source: 'smart_ingest_router' },
-                created_at: nowIso(),
+                reason: 'smart_ingest_router',
+                created_by: 'smart_ingest_router',
               });
-              result.edgesCreated.push({ type: 'Derives', from: source.id, to: baseMemory.id });
             } catch (err) {
-              // Non-fatal: edge creation should never block ingest
+              // Non-fatal: enrichment queueing should never block ingest.
             }
           }
         }
@@ -1593,16 +1592,11 @@ export class MemoryGraphEngine {
           if (candidates.length >= 2) {
             for (const cand of candidates.slice(0, 5)) {
               try {
-                await store.createRelationship({
-                  id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                  from_id: cand.id,
-                  to_id: baseMemory.id,
-                  type: 'Derives',
+                await this._enqueueDerivationJobs(store, [cand.id], baseMemory.id, {
                   confidence: 0.7,
-                  metadata: { auto_derived: true, source: 'ingest_synthesis' },
-                  created_at: nowIso(),
+                  reason: 'ingest_synthesis',
+                  created_by: 'ingest_synthesis',
                 });
-                result.edgesCreated.push({ type: 'Derives', from: cand.id, to: baseMemory.id });
               } catch (err) {
                 // Non-fatal
               }
@@ -2798,6 +2792,14 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       const isSupersede = edgeType === 'Updates';
 
       try {
+        if (edgeType === 'Derives') {
+          await this._enqueueDerivationJobs(writeStore, [cand.id], baseMemory.id, {
+            confidence,
+            reason: (l.reason || '').slice(0, 200),
+            created_by: 'entity_co_mention_llm',
+          });
+          continue;
+        }
         await writeStore.createRelationship({
           id: uuidv4(),
           from_id: baseMemory.id,
@@ -3122,7 +3124,10 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     return this.applyDerivesFromSources([sourceId], targetId, options);
   }
 
-  async applyDerivesFromSources(sourceIds, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now(), reason = 'Derives' } = {}) {
+  async applyDerivesFromSources(sourceIds, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now(), reason = 'Derives', async_verified = false, verification = null } = {}) {
+    if (!async_verified || verification?.approved !== true || Number(verification?.confidence) < this.deriveThreshold) {
+      throw new Error('Derives requires verified asynchronous processing');
+    }
     const uniqueSourceIds = [...new Set((sourceIds || []).filter(Boolean))];
     if (confidence < this.deriveThreshold) {
       return {
@@ -3145,6 +3150,9 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       for (const source of sources) {
         if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
           throw new Error('Tenant scope violation in applyDerives');
+        }
+        if (!hasVerifiedDerivationSource(source)) {
+          throw new Error('Derives requires verified source provenance');
         }
       }
 
@@ -3299,6 +3307,26 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       ingested_at: nowIso(),
       metadata: memory.metadata || {}
     });
+  }
+
+  async _enqueueDerivationJobs(store, sourceIds, targetId, { confidence = 0, reason = 'Derives', created_by = 'graph-engine' } = {}) {
+    const uniqueSourceIds = [...new Set((sourceIds || []).filter(Boolean))];
+    for (const sourceId of uniqueSourceIds) {
+      await store.enqueueDerivationJob({
+        id: uuidv4(),
+        source_memory_id: sourceId,
+        target_memory_id: targetId,
+        confidence: Number(confidence) || 0,
+        status: 'queued',
+        metadata: { reason, created_by },
+        created_at: nowIso(),
+      });
+    }
+    return uniqueSourceIds.length;
+  }
+
+  async enqueueDerivation(sourceIds, targetId, options = {}) {
+    return this._enqueueDerivationJobs(options.store || this.store, sourceIds, targetId, options);
   }
 
   async _enqueueDeriveCandidates(store, memory, latestMemories) {

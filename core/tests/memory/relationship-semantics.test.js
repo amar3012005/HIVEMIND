@@ -30,7 +30,7 @@ test('buildObservationPayload includes normalized derive semantics', () => {
   assert.deepEqual(payload.metadata.semantic_provenance.source_ids, ['src-a', 'src-b']);
 });
 
-test('ingestMemory persists explicit Derives semantics and creates derive edges', async () => {
+test('ingestMemory persists explicit Derives semantics and queues verification instead of creating edges', async () => {
   const store = new InMemoryGraphStore();
   const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
   const userId = '00000000-0000-4000-8000-000000009101';
@@ -71,14 +71,16 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
   const stored = await store.getMemory(derived.memoryId);
   const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
 
-  assert.equal(derived.operation, 'derived');
+  assert.equal(derived.operation, 'derivation_queued');
   assert.equal(stored.metadata.semantic_relationship.type, 'Derives');
   assert.deepEqual(stored.metadata.semantic_relationship.sourceIds.sort(), [sourceA.memoryId, sourceB.memoryId].sort());
-  assert.equal(deriveEdges.length, 2);
-  assert.ok(deriveEdges.every(edge => edge.metadata.semantic_relationship.type === 'Derives'));
+  assert.equal(deriveEdges.length, 0);
+  const explicitJobs = store.derivationJobs.filter(job => job.target_memory_id === derived.memoryId);
+  assert.equal(explicitJobs.length, 2);
+  assert.ok(explicitJobs.every(job => job.status === 'queued'));
 });
 
-test('LLM co-mention linker preserves Derives edge type', async () => {
+test('LLM co-mention linker queues Derives for asynchronous verification', async () => {
   const store = new InMemoryGraphStore();
   const memoryChatClient = async () => new Response(JSON.stringify({
     choices: [{
@@ -129,8 +131,9 @@ test('LLM co-mention linker preserves Derives edge type', async () => {
   await engine._attachEntityCoMentionEdges(derived, store, [source]);
 
   const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
-  assert.equal(deriveEdges.length, 1);
-  assert.equal(deriveEdges[0].from_id, derived.id);
-  assert.equal(deriveEdges[0].to_id, source.id);
-  assert.equal(deriveEdges[0].metadata.classification_source, 'llm');
+  assert.equal(deriveEdges.length, 0);
+  assert.equal(store.derivationJobs.length, 1);
+  assert.equal(store.derivationJobs[0].source_memory_id, source.id);
+  assert.equal(store.derivationJobs[0].target_memory_id, derived.id);
+  assert.equal(store.derivationJobs[0].metadata.created_by, 'entity_co_mention_llm');
 });

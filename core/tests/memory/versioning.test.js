@@ -96,7 +96,7 @@ test('Derives enforces confidence threshold', async () => {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
     content: 'Amar works on retrieval',
-    source_metadata: { source_type: 'manual' }
+    source_metadata: { source_type: 'manual', source_id: 'verified-source-211' }
   });
 
   const target = await engine.ingestMemory({
@@ -109,17 +109,60 @@ test('Derives enforces confidence threshold', async () => {
   const low = await engine.applyDerives(source.memoryId, target.memoryId, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
-    confidence: 0.5
+    confidence: 0.5,
+    async_verified: true,
+    verification: { approved: true, confidence: 0.9 },
   });
   const high = await engine.applyDerives(source.memoryId, target.memoryId, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
-    confidence: 0.82
+    confidence: 0.82,
+    async_verified: true,
+    verification: { approved: true, confidence: 0.82 },
   });
 
   assert.equal(low.edgesCreated.length, 0);
   assert.equal(high.edgesCreated.length, 1);
   assert.equal(store.relationships.filter(edge => edge.type === 'Derives').length, 1);
+});
+
+test('Derives rejects a synchronous or unverified edge write', async () => {
+  const { store, engine } = createEngine();
+  const source = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000311', org_id: '00000000-0000-4000-8000-000000000322',
+    content: 'Verified source', source_metadata: { source_type: 'manual', source_id: 'source-311' },
+  });
+  const target = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000311', org_id: '00000000-0000-4000-8000-000000000322',
+    content: 'Purported derived claim', source_metadata: { source_type: 'manual', source_id: 'target-322' },
+  });
+  await assert.rejects(
+    engine.applyDerives(source.memoryId, target.memoryId, {
+      user_id: '00000000-0000-4000-8000-000000000311', org_id: '00000000-0000-4000-8000-000000000322', confidence: 0.99,
+    }),
+    /verified asynchronous processing/,
+  );
+  assert.equal(store.relationships.filter(edge => edge.type === 'Derives').length, 0);
+});
+
+test('Derives rejects an async-approved edge when its source has no provenance', async () => {
+  const { store, engine } = createEngine();
+  const source = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000411', org_id: '00000000-0000-4000-8000-000000000422',
+    content: 'Unproven source', source_metadata: { source_type: 'manual' },
+  });
+  const target = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000411', org_id: '00000000-0000-4000-8000-000000000422',
+    content: 'Purported derived claim', source_metadata: { source_type: 'manual', source_id: 'target-422' },
+  });
+  await assert.rejects(
+    engine.applyDerives(source.memoryId, target.memoryId, {
+      user_id: '00000000-0000-4000-8000-000000000411', org_id: '00000000-0000-4000-8000-000000000422',
+      confidence: 0.9, async_verified: true, verification: { approved: true, confidence: 0.9 },
+    }),
+    /verified source provenance/,
+  );
+  assert.equal(store.relationships.filter(edge => edge.type === 'Derives').length, 0);
 });
 
 test('Conflict detector triggers update consideration above threshold', () => {

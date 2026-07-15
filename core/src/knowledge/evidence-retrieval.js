@@ -126,7 +126,8 @@ export class EvidenceRetrievalService {
         where: {
           id: { in: segmentIds },
           userId,
-          orgId
+          orgId,
+          document: { archivedAt: null },
         },
         include: {
           document: {
@@ -201,6 +202,7 @@ export class EvidenceRetrievalService {
               where: {
                 userId,
                 orgId,
+                document: { archivedAt: null },
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },
@@ -265,6 +267,7 @@ export class EvidenceRetrievalService {
       where: {
         userId,
         orgId,
+        archivedAt: null,
         ...(documentId ? { id: documentId } : {}),
         ...(!documentId && title ? {
           OR: [
@@ -322,6 +325,7 @@ export class EvidenceRetrievalService {
           userId,
           orgId,
           documentId: document.id,
+          document: { archivedAt: null },
           segmentIndex: { gte: start },
         },
         orderBy: { segmentIndex: 'asc' },
@@ -334,7 +338,7 @@ export class EvidenceRetrievalService {
           segmentId: segment.id,
           documentId: segment.documentId,
           content: segment.content,
-          snippet: segment.content,
+          snippet: this._extractSnippet(segment.content, query, 520),
           score: scoreById.get(segment.id) ?? null,
           document,
           metadata: {

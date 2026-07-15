@@ -37,6 +37,19 @@ import { validateGroundedClaims } from '../memory/recall-packet.js';
 // through immediately — those are not transient.
 const RETRYABLE_FAILURES = new Set(['TIMEOUT', 'RATE_LIMIT']);
 
+export function resolveDocumentAnchorFromMemories(memories = []) {
+  for (const memory of memories) {
+    const metadataId = memory?.source_metadata?.document_id;
+    if (metadataId) return { source_document_id: metadataId };
+    const tags = Array.isArray(memory?.tags) ? memory.tags : [];
+    const documentId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));
+    if (documentId) return { source_document_id: documentId.slice('doc-id:'.length) };
+    const filename = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'));
+    if (filename) return { source_title: filename.slice('filename:'.length) };
+  }
+  return null;
+}
+
 async function dispatchTool(name, args, ctx, opts = {}) {
   const t0 = Date.now();
   const first = await _dispatchTool(name, args, ctx, opts);
@@ -844,19 +857,20 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // explain pass for the original question. This prevents a summary anchor
   // from being treated as the whole document while keeping ordinary fact-only
   // chat on its fast path.
-  const hasDocumentAnchor = allRecallMems.some((memory) => {
-    const tags = memory?.tags || [];
-    return tags.some((tag) => typeof tag === 'string' && (
-      tag.startsWith('filename:') || tag.startsWith('doc-id:') || tag.startsWith('doc-hash:')
-    )) || !!memory?.source_metadata?.document_id;
-  });
+  const documentAnchor = resolveDocumentAnchorFromMemories(allRecallMems);
   if (
     process.env.HIVEMIND_CHAT_ANCHORED_EVIDENCE !== 'false'
-    && recallMode === 'quick'
+    && (recallMode === 'quick' || recallMode === 'fact')
     && evidenceItems.length === 0
-    && hasDocumentAnchor
+    && documentAnchor
   ) {
-    const args = { query: plan.user_message, mode: 'explain', limit: 12, ...recallExtras };
+    const args = {
+      query: plan.user_message,
+      mode: 'explain',
+      limit: 12,
+      ...recallExtras,
+      ...documentAnchor,
+    };
     try {
       const grounded = await dispatchTool('hivemind_recall', args, ctx);
       recordTool(

@@ -936,7 +936,9 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
       document_id: documentId,
       document_title: item.document?.title || item.document_title || null,
       source_platform: item.document?.sourcePlatform || item.source_platform || null,
-      content: String(item.content || item.snippet || item.excerpt || '').slice(0, full ? 2400 : 900),
+      // Snippets are query-centred by EvidenceRetrievalService. They are the
+      // precision payload; raw segment prefixes are only a fallback.
+      content: String(item.snippet || item.content || item.excerpt || '').slice(0, full ? 2400 : 900),
       score: item.score ?? null,
       page: item.metadata?.startPage || item.page || null,
       segment_index: item.metadata?.segmentIndex ?? null,
@@ -1025,8 +1027,9 @@ export class RecallRouter {
     let cutoffReason = null;
     let explicitSourceDocuments = [];
     let explicitSourceHydration = null;
-    if (recallPlan.mode === 'full' && this.evidence?.resolveSourceDocuments
-      && (options.source_document_id || options.source_title)) {
+    const explicitSourceRequested = !!(options.source_document_id || options.source_title);
+    if (recallPlan.mode !== 'fact' && this.evidence?.resolveSourceDocuments
+      && explicitSourceRequested) {
       explicitSourceDocuments = await withTimeout(
         this.evidence.resolveSourceDocuments({
           userId: ctx.userId,
@@ -1037,7 +1040,7 @@ export class RecallRouter {
         Math.min(350, remainingBudget()),
         [],
       );
-      if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+      if (recallPlan.mode === 'full' && explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
         explicitSourceHydration = withTimeout(
           this.evidence.hydrateSourceDocuments({
             documents: explicitSourceDocuments,
@@ -1056,17 +1059,21 @@ export class RecallRouter {
     // start the tenant-scoped evidence lane alongside memory recall instead of
     // waiting for asynchronous fact promotion to provide an anchor.
     const sourceFirstEvidence = recallPlan.expand_evidence
-      ? withTimeout(
+      ? (explicitSourceRequested && explicitSourceDocuments.length === 0
+        ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
+        : withTimeout(
         hop2Evidence({
           evidenceService: this.evidence,
           query,
           ctx,
-          inspection: inspectMemories([]),
+          inspection: explicitSourceDocuments.length
+            ? { ...inspectMemories([]), docIds: explicitSourceDocuments.map((document) => document.id) }
+            : inspectMemories([]),
           prisma: this.prisma,
         }),
         Math.min(2_300, remainingBudget()),
         { items: [], reason: 'timeout' },
-      )
+      ))
       : null;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────

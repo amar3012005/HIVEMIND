@@ -28,6 +28,22 @@ test('native AMR preserves canonical memory, evidence, graph, durability, and te
     assert.equal(reloaded.recalledId, '00000000-0000-4000-8000-00000000a102');
     assert.equal(reloaded.otherTenantId, 'pg-memory');
     assert.equal(reloaded.postgresCalls, 1);
+
+    assert.deepEqual(runPhase('mutate', root), { updated: true });
+    const updated = runPhase('verify-updated', root);
+    assert.equal(updated.predecessorLatest, false);
+    assert.equal(updated.replacementContent, 'Records are retained for eight years.');
+    assert.equal(updated.updateType, 'Updates');
+    assert.deepEqual(updated.latestIds, [
+      '00000000-0000-4000-8000-00000000a101',
+      '00000000-0000-4000-8000-00000000a103',
+    ]);
+
+    assert.deepEqual(runPhase('delete', root), { deleted: true });
+    assert.deepEqual(runPhase('verify-deleted', root), {
+      replacementPresent: false,
+      updateEdges: 0,
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

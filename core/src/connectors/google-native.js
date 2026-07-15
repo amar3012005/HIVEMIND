@@ -396,7 +396,10 @@ export const GOOGLE_TOOLS = {
     provider: 'gmail',
     description: 'Save an email as a Gmail DRAFT (not sent). args: { to, subject, body, cc, threadId (for replies) }. Returns draftId + a Drafts link.',
     run: async (token, a) => {
-      if (!a.to && !a.threadId) throw new Error('gmail_create_draft requires { to } (or threadId for a reply)');
+      // Empty `to` is VALID for a draft: the produce path deliberately drafts
+      // with no recipient when none was verified — the user adds recipients in
+      // Gmail (or the compose card) and sends. Gmail's API allows it.
+      // (Sends still require a recipient — gmail_send validates separately.)
       // markdown:true → draft saved with a polished HTML alternative (see gmail_send).
       const args = a.markdown
         ? { ...a, html: _mdToHtml(a.body, { hasAttachments: (a.attachments || []).length > 0 }), body: _mdToPlain(a.body) }

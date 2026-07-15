@@ -83,10 +83,13 @@ def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
     kind = _TAG_TO_KIND.get(str(task_tag or "").strip().upper())
     if kind and kind in METHOD_SKILLS:
         return kind
-    hay = f"{goal or ''} {message or ''}".lower()
-    for k, words in _KIND_KEYWORDS:
-        if k in METHOD_SKILLS and any(w in hay for w in words):
-            return k
+    # The TURN MESSAGE outranks the room goal: an HQ/task room's goal often
+    # embeds the whole onboarding task list (e.g. contains "Outreach"), which
+    # mis-typed a competitor question as an outreach turn. Two passes.
+    for hay in (str(message or "").lower(), str(goal or "").lower()):
+        for k, words in _KIND_KEYWORDS:
+            if k in METHOD_SKILLS and any(w in hay for w in words):
+                return k
     return "general"
 
 

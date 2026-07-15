@@ -1434,6 +1434,8 @@ export class MemoryGraphEngine {
           result.processingMs = Date.now() - startedAt;
         }
 
+        // Persist bounded queue admissions inside this transaction; derivation
+        // workers perform the expensive enrichment asynchronously afterward.
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
         // Detect contradictions and reconcile: determine correct edge type BEFORE creating
@@ -3298,20 +3300,25 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
   }
 
   async _enqueueDeriveCandidates(store, memory, latestMemories) {
-    for (const candidate of latestMemories) {
-      if (candidate.id === memory.id) continue;
+    const maxCandidates = Math.max(1, Number(process.env.DERIVATION_ENQUEUE_MAX || 16));
+    const timeoutMs = Math.max(25, Number(process.env.DERIVATION_ENQUEUE_TIMEOUT_MS || 250));
+    const jobs = latestMemories.slice(0, maxCandidates).flatMap((candidate) => {
+      if (candidate.id === memory.id) return [];
       const confidence = this.conflictDetector.detectCandidates(memory, [candidate])[0]?.similarity || 0;
-      if (confidence >= this.deriveThreshold) {
-        await store.enqueueDerivationJob({
-          id: uuidv4(),
-          source_memory_id: memory.id,
-          target_memory_id: candidate.id,
-          confidence,
-          status: 'queued',
-          created_at: nowIso()
-        });
-      }
-    }
+      if (confidence < this.deriveThreshold) return [];
+      return [Promise.race([
+          store.enqueueDerivationJob({
+            id: uuidv4(),
+            source_memory_id: memory.id,
+            target_memory_id: candidate.id,
+            confidence,
+            status: 'queued',
+            created_at: nowIso()
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('enqueue timeout')), timeoutMs)),
+        ]).catch((error) => console.warn('[derivation-queue] candidate skipped:', error.message))];
+    });
+    await Promise.all(jobs);
   }
 
   async _findLatestReplacement(store, target, source) {

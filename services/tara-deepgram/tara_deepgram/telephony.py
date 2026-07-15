@@ -97,7 +97,12 @@ async def dial(req: DialRequest) -> dict:
     campaigns, so no caller can bypass it through a different route."""
     if not _E164.match(req.to or ""):
         raise ValueError(f"Number {req.to!r} is not valid E.164 (e.g. +4915772925738).")
-    if req.to not in config.ALLOWED_NUMBERS:
+    # Allowlist semantics: "*" (or DIAL_ALLOW_ALL=true) opens dialing to any
+    # valid E.164 number — the workspace owner explicitly opted out of the
+    # fail-closed list. An empty/non-* list stays fail-closed.
+    _allow_all = "*" in config.ALLOWED_NUMBERS or str(
+        __import__("os").getenv("DIAL_ALLOW_ALL", "")).lower() in ("1", "true", "yes")
+    if not _allow_all and req.to not in config.ALLOWED_NUMBERS:
         raise ValueError(f"Number {req.to!r} not in the configured allowlist.")
     if config.TELEPHONY_PROVIDER == "twilio":
         return await _dial_twilio(req)

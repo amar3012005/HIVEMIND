@@ -1115,8 +1115,7 @@ export class RecallRouter {
     let explicitSourceDocuments = [];
     let explicitSourceHydration = null;
     const explicitSourceRequested = recallPlan.source.requested;
-    if (recallPlan.mode !== 'fact' && this.evidence?.resolveSourceDocuments
-      && explicitSourceRequested) {
+    if (this.evidence?.resolveSourceDocuments && explicitSourceRequested) {
       explicitSourceDocuments = await withTimeout(
         this.evidence.resolveSourceDocuments({
           userId: ctx.userId,
@@ -1142,6 +1141,25 @@ export class RecallRouter {
           { timed_out: true },
         );
       }
+    }
+    // A requested source is an authorization boundary, not a ranking hint.
+    // Never replace an unresolved source request with tenant-wide memories.
+    if (explicitSourceRequested && explicitSourceDocuments.length === 0) {
+      return {
+        memories: [], evidence: [], live: [],
+        trace: {
+          recall_plan: recallPlan,
+          hop1_count: 0,
+          sparse: true,
+          top_score: 0,
+          anchors: { filenames: [], doc_hashes: [], doc_ids: [], platforms: [], explicit_source_documents: [] },
+          evidence_trigger: 'source-not-found',
+          live_trigger: 'disabled',
+          tiers_fired: [],
+          cutoff_reason: 'source_not_found',
+          latency_ms: { total: Date.now() - startedAt },
+        },
+      };
     }
     // Source ingestion is immediately recallable. For explicit explain/full,
     // start the tenant-scoped evidence lane alongside memory recall instead of

@@ -76,7 +76,24 @@ const stats = await call('/v1/stats', {});
 assert.equal(stats.payload.memories, 2);
 assert.equal(stats.payload.relationships, 1);
 
+if (process.argv[2] === 'purge') {
+  const purged = await call('/v1/purge', {});
+  assert.equal(purged.status, 200);
+  assert.equal(purged.payload.ok, true);
+
+  const emptyStats = await call('/v1/stats', {});
+  assert.deepEqual(emptyStats.payload, { memories: 0, relationships: 0 });
+  assert.deepEqual((await call('/v1/hydrate', { ids: [ids.parent, ids.claim] })).payload.memories, []);
+  assert.deepEqual((await call('/v1/kb-hydrate', { ids: [ids.segment] })).payload.segments, []);
+  assert.deepEqual((await call('/v1/recall', {
+    vector: vector(1), limit: 5, filter: { layer: 'memory', is_latest: true },
+  })).payload.results, []);
+  assert.deepEqual((await call('/v1/kb-recall', {
+    vector: vector(1), limit: 5, documentId: ids.document,
+  })).payload.results, []);
+}
+
 process.stdout.write(JSON.stringify({
-  ok: true, memories: stats.payload.memories, relationships: stats.payload.relationships,
+  ok: true, phase: process.argv[2] || 'read', memories: stats.payload.memories, relationships: stats.payload.relationships,
   evidence: evidence.payload.results.length, auth: 'closed', orgIsolation: 'closed',
 }));

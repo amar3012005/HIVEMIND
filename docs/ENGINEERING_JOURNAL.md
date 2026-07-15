@@ -81,3 +81,20 @@ or uncommitted changes as completed work.
 - Production: consult `docs/PRODUCTION_RELEASE.md` and the running image tags.
 - Rollback: not applicable
 - Next: reconcile any new feature branch into `hivemind-main` before release.
+
+## 2026-07-16 UTC - Contextual durable-memory ingestion release
+
+- State: Accepted release with an entitlement-limited feature probe
+- Owner: Codex
+- Branch: `hivemind-main`
+- Base / commit: `3bf522e63ac7f76703c8252770c2a1211ae750d5` -> `2eb3d1da0be0c650d6f49a00fb2c1cbaab313609`
+- Scope: `hm-core` only; contextual extraction, document curation, and
+  source-provenance behavior.
+- Verification: running image source markers, health dependencies, public
+  Core/home/login curls, and fatal-log scan passed. The authenticated FOREST
+  upload probe was rejected by the active plan limit before data creation.
+- Production: `prod-20260716-2eb3d1da`, core image
+  `sha256:9e706bc9bba89a3ad80a91dc8df9e48a8e1884e6225907876862414937f0ef27`.
+- Rollback: `hivemind/core-api:rollback-20260715T225835Z-pre-prod-20260716-2eb3d1da`
+- Next: run a disposable upload/recall/delete probe in an entitled internal
+  workspace; do not bypass plan enforcement.

@@ -27,6 +27,7 @@ test('Updates transitions old node to is_latest=false', async () => {
     org_id: '00000000-0000-4000-8000-000000000022',
     project: 'alpha',
     content: 'Updated: the API now listens on port 3010',
+    relationship: { type: 'Updates', target_id: base.memoryId },
     source_metadata: { source_type: 'manual' }
   });
 
@@ -37,6 +38,29 @@ test('Updates transitions old node to is_latest=false', async () => {
   assert.equal(oldMemory.is_latest, false);
   assert.equal(newMemory.is_latest, true);
   assert.equal(store.relationships.filter(edge => edge.type === 'Updates').length, 1);
+});
+
+test('inferred Updates without shared entity evidence remain non-destructive', async () => {
+  const { store, engine } = createEngine();
+  const base = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000031',
+    org_id: '00000000-0000-4000-8000-000000000032',
+    project: 'alpha',
+    content: 'The API now listens on port 3000',
+    source_metadata: { source_type: 'manual' }
+  });
+
+  const inferred = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000000031',
+    org_id: '00000000-0000-4000-8000-000000000032',
+    project: 'alpha',
+    content: 'Updated: the API now listens on port 3010',
+    source_metadata: { source_type: 'manual' }
+  });
+
+  assert.equal(inferred.operation, 'updated');
+  assert.equal((await store.getMemory(base.memoryId)).is_latest, true);
+  assert.equal(store.relationships.filter(edge => edge.type === 'Updates').length, 0);
 });
 
 test('Extends keeps both nodes latest', async () => {
@@ -119,7 +143,7 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
     source_metadata: { source_type: 'manual' }
   });
 
-  await Promise.all([
+  const updates = await Promise.all([
     engine.ingestMemory({
       user_id: '00000000-0000-4000-8000-000000000311',
       org_id: '00000000-0000-4000-8000-000000000322',
@@ -146,4 +170,8 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
 
   assert.equal(latest.length, 1);
   assert.equal((await store.getMemory(base.memoryId)).is_latest, false);
+  const updateEdges = store.relationships.filter(edge => edge.type === 'Updates');
+  assert.equal(updateEdges.length, 2);
+  assert.equal(updateEdges.filter(edge => edge.to_id === base.memoryId).length, 1);
+  assert.ok(updateEdges.some(edge => updates.some(result => edge.to_id === result.memoryId)));
 });

@@ -1,0 +1,6 @@
+#!/command/with-contenv sh
+# hm-hermes management server (Phase 6h). Internal-only; bearer-auth via HERMES_MGMT_KEY.
+# Run as the hermes user (uid 1000) so all profile files it creates are owned by
+# the same user the per-profile gateways run as — avoids root-owned files that the
+# gateway (uid 1000) then can't write (kanban/session/memory PermissionError).
+exec s6-setuidgid hermes node /opt/hm-hermes/mgmt-server.mjs

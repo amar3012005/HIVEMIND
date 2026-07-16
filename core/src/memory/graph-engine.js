@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import { isMnemeOrg, mnemeMode, amrUpdateTags, orgIsRemote, amrListRecent } from '../vector/mneme/driver.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { memoryChatFetch } from '../llm/groq-fallback.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -420,6 +423,7 @@ export class MemoryGraphEngine {
     predictCalibrateOptions = {},
     smartIngestRouter = null,
     clusterIndex = null,
+    memoryChatClient = null,
   } = {}) {
     if (!store) {
       throw new Error('MemoryGraphEngine requires a store');
@@ -445,6 +449,11 @@ export class MemoryGraphEngine {
     // connectors) can skip building routedPayloads themselves and the
     // engine will route automatically.
     this.smartIngestRouter = smartIngestRouter;
+    // Injectable transport keeps relationship/enrichment tests deterministic
+    // and lets non-Groq deployments provide the same OpenAI-shaped contract.
+    // The production default retains the existing Groq -> OpenRouter funnel.
+    this.memoryChatClient = memoryChatClient || memoryChatFetch;
+    this.hasInjectedMemoryChatClient = typeof memoryChatClient === 'function';
     // Observer is superseded by MemoryProcessor (unified single-call pipeline).
     // this.observer is intentionally not initialized; Observer import kept for backward compat.
   }
@@ -499,6 +508,19 @@ export class MemoryGraphEngine {
   }
 
   async ingestMemory(input) {
+    // Preserve whether the relationship was explicitly authorized by the
+    // caller before smart routing / MemoryProcessor can infer one. Explicit
+    // Updates have a concrete predecessor target and are tenant-checked by
+    // applyUpdate; inferred Updates still require the destructive safety gate.
+    const callerAuthorizedRelationship = input?._authorized_relationship === true
+      || (Boolean(input?.relationship) && input?._smart_routed !== true);
+    // Full data residency: run the whole ingest inside this org's context so every nested
+    // getPrismaClient() resolves to the org's store (customer Postgres for a self-host org). Re-entrancy
+    // guard: enter the context once, then proceed. Undefined org → central (managed), unchanged.
+    const _org = input?.org_id;
+    if (_org && currentOrg() !== _org) {
+      return runWithOrg(_org, () => this.ingestMemory(input));
+    }
     // Canonical gateway: if a router is attached AND the caller hasn't
     // pre-routed (no `_smart_routed` flag) AND the caller hasn't explicitly
     // opted out (smartIngest: false), route through SmartIngestRouter so
@@ -533,7 +555,11 @@ export class MemoryGraphEngine {
           return { skipped: true, reason: 'routed-empty' };
         }
         if (payloads.length === 1) {
-          input = { ...payloads[0], _smart_routed: true };
+          input = {
+            ...payloads[0],
+            _smart_routed: true,
+            ...(callerAuthorizedRelationship ? { _authorized_relationship: true } : {}),
+          };
         } else {
           const results = [];
           for (const p of payloads) {
@@ -589,7 +615,8 @@ export class MemoryGraphEngine {
       }
       const c = String(input.content || '');
       // Avoid double-stamping when the content already ends with our marker.
-      if (c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
+      if (input.append_timestamp_to_content !== false
+        && c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
         input = { ...input, content: c.replace(/\s+$/, '') + ` (${dispTs})` };
       }
       input._ts_stamped = true;
@@ -622,8 +649,8 @@ export class MemoryGraphEngine {
       && (input.skip_relationship_classification === true || input.smartIngest === false)
       && input.skip_contradiction_detection === true;
     const _acquire = _pureInsert
-      ? (uid, fn) => fn(this.store)
-      : (uid, fn) => this.store.advisoryLock(uid, fn);
+      ? (uid, fn) => fn((isMnemeOrg(baseMemory.org_id) && mnemeMode() === 'sole') ? this.store.inProcessTx() : this.store)
+      : (uid, fn) => this.store.advisoryLock(uid, fn, baseMemory.org_id);
 
     return _acquire(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
@@ -1281,12 +1308,14 @@ export class MemoryGraphEngine {
           // overlap, not LLM confidence alone.
           const updatesTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
-          let entityOverlapOk = false;
+          const explicitUpdateAuthorized = callerAuthorizedRelationship
+            || input._authorized_relationship === true;
+          let entityOverlapOk = explicitUpdateAuthorized;
           let targetMem = null; // hoisted: also read by the H1 synthesis-guard below
           if (Number(updateConf) >= 0.85 && updatesTargetId) {
             try {
               targetMem = await store.getMemory(updatesTargetId);
-              if (targetMem) {
+              if (targetMem && !explicitUpdateAuthorized) {
                 const newEntsArr = (baseMemory.tags || [])
                   .filter(t => typeof t === 'string' && t.startsWith('entity:'))
                   .map(t => t.slice('entity:'.length).toLowerCase());
@@ -1405,6 +1434,8 @@ export class MemoryGraphEngine {
           result.processingMs = Date.now() - startedAt;
         }
 
+        // Persist bounded queue admissions inside this transaction; derivation
+        // workers perform the expensive enrichment asynchronously afterward.
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
         // Detect contradictions and reconcile: determine correct edge type BEFORE creating
@@ -1864,7 +1895,7 @@ OUTPUT JSON only.`;
       const useStrict = supportsStrictJson(modelName);
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1931,7 +1962,31 @@ OUTPUT JSON only.`;
       return null;
     }
 
-    // Persist on source_metadata.metadata.enrichment + mark status=done.
+    // Distilled high-signal tags from enrichment (independent of where the row lives).
+    const enrichTags = [];
+    if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
+    if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
+    if (Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
+      enrichTags.push(`has-action:${parsed.action_items.length}`);
+      for (const a of parsed.action_items.slice(0, 3)) {
+        if (a.owner) enrichTags.push(`owner:${String(a.owner).slice(0, 40).replace(/\s+/g, '_')}`);
+      }
+    }
+    if (Array.isArray(parsed.open_questions) && parsed.open_questions.length > 0) enrichTags.push(`open:${parsed.open_questions.length}`);
+    if (Array.isArray(parsed.blockers) && parsed.blockers.length > 0) enrichTags.push(`blocked:${parsed.blockers.length}`);
+
+    // Remote (self-host): no central source_metadata row — apply enrich tags to the AGENT (durable via
+    // the outbox) and return; the enrichment blob lives implicitly in the tags. Compute ran centrally.
+    const _enrichOrg = currentOrg();
+    if (orgIsRemote(_enrichOrg)) {
+      if (enrichTags.length > 0) {
+        const newTags = Array.from(new Set([...(tags || []), ...enrichTags]));
+        try { amrUpdateTags(_enrichOrg, memoryId, newTags); } catch { /* best-effort */ }
+      }
+      return parsed;
+    }
+
+    // Central: persist on source_metadata.metadata.enrichment + mark status=done, then apply tags.
     try {
       if (!client) return parsed;
       const fresh = await client.sourceMetadata.findFirst({
@@ -1953,22 +2008,6 @@ OUTPUT JSON only.`;
         data: { metadata: merged },
       });
 
-      // Distilled high-signal tags from enrichment.
-      const enrichTags = [];
-      if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
-      if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
-      if (Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
-        enrichTags.push(`has-action:${parsed.action_items.length}`);
-        for (const a of parsed.action_items.slice(0, 3)) {
-          if (a.owner) enrichTags.push(`owner:${String(a.owner).slice(0, 40).replace(/\s+/g, '_')}`);
-        }
-      }
-      if (Array.isArray(parsed.open_questions) && parsed.open_questions.length > 0) {
-        enrichTags.push(`open:${parsed.open_questions.length}`);
-      }
-      if (Array.isArray(parsed.blockers) && parsed.blockers.length > 0) {
-        enrichTags.push(`blocked:${parsed.blockers.length}`);
-      }
       if (enrichTags.length > 0) {
         const cur = (tags || []);
         const newTags = Array.from(new Set([...cur, ...enrichTags]));
@@ -2006,7 +2045,12 @@ OUTPUT JSON only.`;
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
     const q = getEntityLinkQueue(this);
     if (!q) return;
-    q.enqueueBatch(memories.filter((m) => m && m.id));
+    const items = memories.filter((m) => m && m.id);
+    // noPeers: enqueue individually so the co-mention linker does NOT receive same-batch siblings as
+    // candidates — used by the unified KB extractor, which already created intra-doc edges; this pass
+    // only adds CROSS-DOC/TIME edges (candidates come from listLatestMemories = other docs/time).
+    if (_opts.noPeers) { for (const it of items) q.enqueue(it); }
+    else q.enqueueBatch(items);
   }
 
   /**
@@ -2100,7 +2144,7 @@ OUTPUT JSON only.`;
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
-    if (!process.env.GROQ_API_KEY) {
+    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient) {
       console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
       return;
     }
@@ -2139,6 +2183,31 @@ OUTPUT JSON only.`;
       });
       existingIds.add(h.id);
     }
+    // RESIDENCY: remote (self-host) orgs need a RELIABLE candidate pool. The agent's vector recall leg
+    // is eventually-consistent — embeddings lag the row write (mid-ingest, the just-saved peer often has
+    // no vector yet), so `similar` arrives empty or thin and the linker would degrade to an 8-row recency
+    // fallback (cross-person noise, missed same-entity supersessions). Pull the org's latest memories from
+    // the agent (PG-backed via listLatestMemories → /v1/list, always current + carries entity:* tags) and
+    // merge them in, freshest-first. This gives the co-mention LLM the same same-entity peers central gets
+    // from vector recall, so Updates/Extends/Contradicts/Mentions classify identically across org types.
+    if (orgIsRemote(baseMemory.org_id)) {
+      try {
+        const REMOTE_LINK_CANDIDATES = Number(process.env.REMOTE_LINK_CANDIDATES || 12);
+        const latest = await (store || this.store).listLatestMemories({
+          user_id: baseMemory.user_id,
+          org_id: baseMemory.org_id,
+        });
+        for (const m of (latest || [])) {
+          if (candidates.length >= REMOTE_LINK_CANDIDATES) break;
+          if (!m?.id || m.id === baseMemory.id || existingIds.has(m.id) || !(m.content || m.title)) continue;
+          candidates.push({ id: m.id, title: m.title, content: m.content, tags: m.tags || [], _searchMethod: 'remote_latest' });
+          existingIds.add(m.id);
+        }
+      } catch (e) {
+        console.warn('[entity-co-mention] remote latest augmentation failed:', e.message);
+      }
+    }
+
     const deriveCandidates = Array.isArray(baseMemory.metadata?._llm_derive_candidates)
       ? baseMemory.metadata._llm_derive_candidates
       : [];
@@ -2241,37 +2310,51 @@ OUTPUT JSON only.`;
     // strong heuristic for coreference candidates.
     if (candidates.length === 0) {
       try {
-        const prismaClient = (store && store.client) || this.store.client;
-        if (prismaClient && prismaClient.memory) {
-          const recent = await prismaClient.memory.findMany({
-            where: {
-              userId: baseMemory.user_id,
-              orgId: baseMemory.org_id,
-              deletedAt: null,
-              isLatest: true,
-              id: { not: baseMemory.id },
-            },
-            select: { id: true, title: true, content: true, tags: true },
-            orderBy: { createdAt: 'desc' },
-            take: 15,
-          });
-          candidates = recent.map(r => ({
-            id: r.id,
-            title: r.title,
-            content: r.content,
-            tags: r.tags,
-            _searchMethod: 'recent_fallback',
-          })).slice(0, 8);
-          console.log(`[entity-co-mention] recall empty → recency fallback: ${candidates.length} candidates`);
+        if (orgIsRemote(baseMemory.org_id)) {
+          // Remote (self-host) orgs have NO central rows — the candidate pool lives on the agent.
+          // Pull recent peers over HTTP so co-mention edges can form on self-host too.
+          const recent = await amrListRecent(baseMemory.org_id, baseMemory.user_id, 15);
+          candidates = recent
+            .filter((r) => r.id && r.id !== baseMemory.id)
+            .map((r) => ({ id: r.id, title: r.title, content: r.content, tags: r.tags, _searchMethod: 'remote_recent_fallback' }))
+            .slice(0, 8);
+          console.log(`[entity-co-mention] remote recall empty → agent recency fallback: ${candidates.length} candidates`);
+        } else {
+          const prismaClient = (store && store.client) || this.store.client;
+          if (prismaClient && prismaClient.memory) {
+            const recent = await prismaClient.memory.findMany({
+              where: {
+                userId: baseMemory.user_id,
+                orgId: baseMemory.org_id,
+                deletedAt: null,
+                isLatest: true,
+                id: { not: baseMemory.id },
+              },
+              select: { id: true, title: true, content: true, tags: true },
+              orderBy: { createdAt: 'desc' },
+              take: 15,
+            });
+            candidates = recent.map(r => ({
+              id: r.id,
+              title: r.title,
+              content: r.content,
+              tags: r.tags,
+              _searchMethod: 'recent_fallback',
+            })).slice(0, 8);
+            console.log(`[entity-co-mention] recall empty → recency fallback: ${candidates.length} candidates`);
+          }
         }
       } catch (fallbackErr) {
         console.warn('[entity-co-mention] recency fallback failed:', fallbackErr.message);
       }
     }
 
+    // NOTE: candidates may still be 0 here (genuinely first memory in the org). We do NOT bail —
+    // the linker LLM ALSO extracts this memory's own entity:* + temporal tags from its content, and
+    // those tags must land regardless of peers (they're the overlap signal for the NEXT ingest).
+    // With an empty candidate block the prompt simply returns links:[]; the edge loop no-ops.
     if (candidates.length === 0) {
-      console.log('[entity-co-mention] no candidates at all — skipping');
-      return;
+      console.log('[entity-co-mention] no candidates — extracting self-tags only (no edges)');
     }
 
     const candidateBlock = candidates.map((c, i) =>
@@ -2381,7 +2464,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
-        const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        const resp = await this.memoryChatClient('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
@@ -2506,6 +2589,9 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           ...temporalTags,
         ]);
         await store.updateMemory(baseMemory.id, { tags: newTags });
+        // Resync the entity:* tags into the .amr (remote/self-host) so recalled candidates carry their
+        // tags and the co-mention overlap gate finds shared entities on the NEXT ingest.
+        try { amrUpdateTags(baseMemory.org_id, baseMemory.id, newTags); } catch { /* best-effort */ }
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);
         // Postgres 25P02 = transaction aborted by earlier failure.
@@ -2531,7 +2617,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true)
       ? 6
       : (_isGmailish || _isNoise) ? 2 : 3;
-    const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
+    const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts', 'Derives']);
 
     // Per-type confidence floor. Updates is destructive (flips
     // is_latest=false on target) so demand high confidence + entity
@@ -2579,6 +2665,35 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         .filter((e) => e && !OWNER_COMMON.has(e)),
     );
 
+    // Candidate content, normalized once for the tag-lag fallback below.
+    const candContentNorm = (cand) => normEntity(`${cand?.title || ''} ${cand?.content || ''}`);
+
+    // Count shared non-owner entities between the new memory and a candidate.
+    // PRIMARY signal = candidate entity:* tags. But entity tags are extracted
+    // ASYNCHRONOUSLY (deferred entity-linking — server.js sets defer_entity_linking
+    // on every /api/memories save), so a peer created seconds earlier in the same
+    // session often has NO tags yet at link-time. Without a fallback the overlap
+    // gate drops every edge to a fresh peer (observed: "N links proposed, 0 survived").
+    // Fallback when the candidate has no entity tags: scan its raw content for the
+    // new memory's LLM-extracted entities. The LLM already read both texts and cited
+    // the shared entity, so a content hit is a sound same-topic signal. Applies to
+    // ALL org types (central is usually masked by the vector-recall smart-ingest path;
+    // self-host relies entirely on this co-mention path).
+    const sharedEntityCount = (cand) => {
+      const cset = candEntsNorm(cand);
+      if (cset.size > 0) {
+        let n = 0;
+        for (const e of cset) if (newEntitiesLower.has(e)) n += 1;
+        return n;
+      }
+      const hay = candContentNorm(cand);
+      let n = 0;
+      for (const e of newEntitiesLower) {
+        if (e.length >= 3 && (hay === e || hay.includes(` ${e} `) || hay.startsWith(`${e} `) || hay.endsWith(` ${e}`))) n += 1;
+      }
+      return n;
+    };
+
     // New memory's entity set (LLM-extracted + own entity tags), normalized,
     // owner stripped. Union both so a tag the LLM didn't re-emit still counts.
     const baseTagEnts = (baseMemory.tags || [])
@@ -2596,26 +2711,33 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         const floor = MIN_CONFIDENCE_BY_TYPE[type] ?? 0.55;
         return typeof l.confidence === 'number' && l.confidence >= floor;
       })
-      // For Updates (destructive — flips target is_latest=false): demand
-      // ≥2 shared non-owner entities. Strong evidence required.
+      // For Updates (destructive — flips target is_latest=false): demand ≥1 shared
+      // non-owner entity. This MATCHES the smart-ingest supersede policy (graph-engine
+      // line ~1320: sharedNonCommon.length >= 1 + conf≥0.85, the floor already enforced
+      // above). Person-centric supersessions ("Greta moved to Netflix" vs "Greta works
+      // at Amazon") share exactly ONE non-owner entity — the person — so the old ≥2
+      // requirement made co-mention NEVER supersede a job/role change; central got the
+      // flip from the vector-recall classifier instead, which self-host can't rely on.
+      // sharedEntityCount falls back to candidate-content scan when tags lag (async).
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type !== 'Updates') return true;
-        const cset = candEntsNorm(candidates[l.index]);
-        let shared = 0;
-        for (const e of cset) if (newEntitiesLower.has(e)) shared += 1;
-        return shared >= 2;
+        return sharedEntityCount(candidates[l.index]) >= 1;
       })
-      // For Mentions/Extends/Contradicts: ≥1 shared non-owner entity, OR the
-      // LLM-cited entity itself is present on both sides (trust the model).
+      // For Mentions/Extends/Contradicts: ≥1 shared non-owner entity (tag or
+      // content fallback), OR the LLM-cited entity present on both sides.
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type === 'Updates') return true; // handled above
-        const cset = candEntsNorm(candidates[l.index]);
-        for (const e of cset) if (newEntitiesLower.has(e)) return true;
-        // LLM-cited entity bridge: cited entity present on both sides.
+        if (sharedEntityCount(candidates[l.index]) >= 1) return true;
+        // LLM-cited entity bridge: cited entity present on both sides (tags OR content).
         const cited = normEntity(l.entity);
-        if (cited && !OWNER_COMMON.has(cited) && newEntitiesLower.has(cited) && cset.has(cited)) return true;
+        if (cited && !OWNER_COMMON.has(cited) && newEntitiesLower.has(cited)) {
+          const cset = candEntsNorm(candidates[l.index]);
+          if (cset.has(cited)) return true;
+          const hay = candContentNorm(candidates[l.index]);
+          if (cited.length >= 3 && (hay === cited || hay.includes(` ${cited} `) || hay.startsWith(`${cited} `) || hay.endsWith(` ${cited}`))) return true;
+        }
         return false;
       })
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
@@ -2640,7 +2762,10 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // (candidate may have been deleted / superseded between recall and
     // edge create). One FK violation poisons the outer Postgres txn so
     // verify existence BEFORE any createRelationship attempt.
-    if (sorted.length > 0) {
+    // Remote (self-host) orgs: candidates came from the agent's /v1/list, which already filters
+    // deleted_at IS NULL — they're known-live. A central existence check would query empty central
+    // Postgres and drop EVERY edge. Skip it; the agent enforces FK/existence on its own insert.
+    if (sorted.length > 0 && !orgIsRemote(baseMemory.org_id)) {
       try {
         const targetIds = Array.from(new Set(sorted.map((l) => candidates[l.index]?.id).filter(Boolean)));
         const prismaClient = (writeStore && writeStore.client) || this.store.client;
@@ -2675,6 +2800,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           id: uuidv4(),
           from_id: baseMemory.id,
           to_id: cand.id,
+          org_id: baseMemory.org_id,
           type: edgeType,
           confidence,
           created_by: 'entity_co_mention_llm',
@@ -2709,6 +2835,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
             id: uuidv4(),
             from_id: baseMemory.id,
             to_id: cand.id,
+          org_id: baseMemory.org_id,
             type: 'Extends',
             confidence,
             created_by: 'entity_co_mention_llm',
@@ -2860,7 +2987,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
 
   async applyUpdate(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {
     const activeStore = storeOverride || this.store;
-    return activeStore.transaction(async store => {
+    let vectorPatch = null;
+    const result = await activeStore.transaction(async store => {
       const source = await store.getMemory(sourceId);
       let target = await store.getMemory(targetId);
 
@@ -2880,10 +3008,20 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         throw new Error('Tenant scope violation in applyUpdate');
       }
 
+      const sourceEffectiveAt = source.valid_from || source.document_date || source.created_at || nowIso();
+      const targetEffectiveAt = target.valid_from || target.document_date || target.created_at || sourceEffectiveAt;
+      const sourceEffectiveMs = new Date(sourceEffectiveAt).getTime();
+      const targetEffectiveMs = new Date(targetEffectiveAt).getTime();
+      const closeAt = new Date(Math.max(
+        Number.isFinite(sourceEffectiveMs) ? sourceEffectiveMs : Date.now(),
+        Number.isFinite(targetEffectiveMs) ? targetEffectiveMs : 0,
+      )).toISOString();
       await store.updateMemory(targetId, {
         is_latest: false,
+        valid_to: closeAt,
         updated_at: nowIso()
       });
+      vectorPatch = { memoryId: targetId, payload: { is_latest: false, valid_to: closeAt } };
 
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
@@ -2931,6 +3069,23 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         processingMs: Date.now() - startedAt
       };
     });
+
+    // Never perform network I/O inside the database transaction. The canonical
+    // write commits first; Qdrant is a candidate index and is synchronized
+    // best-effort. Canonical hydration below prevents stale payloads from
+    // changing eligibility if this patch temporarily fails.
+    if (vectorPatch && this.vectorStore?.updateMemoryPayload && !orgIsRemote(org_id)) {
+      try {
+        await runWithOrg(org_id, () => this.vectorStore.updateMemoryPayload(
+          vectorPatch.memoryId,
+          vectorPatch.payload,
+          { orgId: org_id },
+        ));
+      } catch (error) {
+        console.warn('[graph-engine] Qdrant lifecycle payload sync failed:', error.message);
+      }
+    }
+    return result;
   }
 
   async applyExtends(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {
@@ -3173,20 +3328,25 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
   }
 
   async _enqueueDeriveCandidates(store, memory, latestMemories) {
-    for (const candidate of latestMemories) {
-      if (candidate.id === memory.id) continue;
+    const maxCandidates = Math.max(1, Number(process.env.DERIVATION_ENQUEUE_MAX || 16));
+    const timeoutMs = Math.max(25, Number(process.env.DERIVATION_ENQUEUE_TIMEOUT_MS || 250));
+    const jobs = latestMemories.slice(0, maxCandidates).flatMap((candidate) => {
+      if (candidate.id === memory.id) return [];
       const confidence = this.conflictDetector.detectCandidates(memory, [candidate])[0]?.similarity || 0;
-      if (confidence >= this.deriveThreshold) {
-        await store.enqueueDerivationJob({
-          id: uuidv4(),
-          source_memory_id: memory.id,
-          target_memory_id: candidate.id,
-          confidence,
-          status: 'queued',
-          created_at: nowIso()
-        });
-      }
-    }
+      if (confidence < this.deriveThreshold) return [];
+      return [Promise.race([
+          store.enqueueDerivationJob({
+            id: uuidv4(),
+            source_memory_id: memory.id,
+            target_memory_id: candidate.id,
+            confidence,
+            status: 'queued',
+            created_at: nowIso()
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('enqueue timeout')), timeoutMs)),
+        ]).catch((error) => console.warn('[derivation-queue] candidate skipped:', error.message))];
+    });
+    await Promise.all(jobs);
   }
 
   async _findLatestReplacement(store, target, source) {

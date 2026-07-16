@@ -119,6 +119,7 @@ def build_hivemind_tools(
             with _client(api_key) as c:
                 r = c.post("/api/recall", json={
                     "query_context": query, "max_memories": max_memories,
+                    "mode": "explain",
                 })
                 r.raise_for_status()
                 return json.dumps(r.json())

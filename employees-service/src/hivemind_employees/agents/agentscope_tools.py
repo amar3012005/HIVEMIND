@@ -131,13 +131,16 @@ def drain_artifacts() -> List[Dict[str, Any]]:
     return list(arts) if isinstance(arts, list) else []
 
 
-def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") -> str:
+def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "",
+                         body_md: str = "") -> str:
     """Orchestrator-side: record a produced draft as an artifact AND queue its
     send for the user's approval. Used as a deterministic fallback when the
     agents composed an email but did not fire gmail_send themselves — so an
-    email turn ALWAYS yields a draft + approval card. Returns the approval_id."""
+    email turn ALWAYS yields a draft + approval card. Returns the approval_id.
+    body_md (the draft's markdown) rides the artifact + approval events so the
+    FE can PREVIEW / edit / one-click-send in-app without opening Gmail."""
     _record_artifact("gmail", url or "https://mail.google.com/mail/u/0/#drafts",
-                     title=subject or "Draft", label="Review draft")
+                     title=subject or "Draft", label="Review draft", body_md=body_md)
     approval_id = uuid.uuid4().hex[:12]
     rec = {
         "approval_id": approval_id,
@@ -145,6 +148,7 @@ def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") ->
         "summary": f"Send email to {to} — “{subject}”",
         "bridge": "google",
         "descriptor": {"tool": "gmail_send_draft", "arguments": {"draftId": draft_id}},
+        "to": to, "subject": subject, "body_md": str(body_md or "")[:20000],
     }
     pend = _PENDING_WRITES.get()
     if isinstance(pend, list):
@@ -166,20 +170,24 @@ def _consensus_gate(label: str) -> Optional[ToolResponse]:
     )
 
 
-def _record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def _record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                     body_md: str = "") -> None:
     """Record a produced artifact (doc/sheet) so the orchestrator can emit a
     `connector_logo` 'view in new tab' event to the FE. After the FIRST artifact
     lands, RE-LOCK output so the turn produces ONE high-quality deliverable
-    rather than a pile of near-duplicate drafts from racing agents/retries."""
+    rather than a pile of near-duplicate drafts from racing agents/retries.
+    body_md: the artifact's textual content (bounded) → in-app FE preview."""
     arts = _TURN_ARTIFACTS.get()
     if isinstance(arts, list) and url:
-        arts.append({"connector": connector, "url": url, "title": title, "label": label})
+        arts.append({"connector": connector, "url": url, "title": title, "label": label,
+                     "body_md": str(body_md or "")[:20000]})
         _OUTPUT_UNLOCKED.set(False)
 
 
-def record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                    body_md: str = "") -> None:
     """Public: orchestrator records a produced doc/sheet artifact (→ connector_logo)."""
-    _record_artifact(connector, url, title=title, label=label)
+    _record_artifact(connector, url, title=title, label=label, body_md=body_md)
 
 
 def _artifact_url(payload: object) -> str:
@@ -968,6 +976,52 @@ def _register_connector_tools(
         tk.register_tool_function(cll, group_name=safe)
 
 
+def register_experience_tool(tk: Toolkit, org_id: Optional[str], slug: Optional[str]) -> None:
+    """Register `recall_experience` — the LAZY, read-only accessor for an agent's
+    GLOBAL learned playbook (operating lessons distilled across ALL rooms, stored on
+    digital_employees.evo_playbook). Surfaced as a TOOL — not injected wholesale every
+    turn — so it stays token-lean and scales as the playbook grows, loaded only when
+    the agent decides it's relevant. The agent reads its OWN lessons on demand; this
+    path NEVER writes (a private chat is not journalised — only a sealed room turn's
+    post-verify reflection appends). Org-scoped by (org_id, slug); no-op if either is
+    missing. Uniform across personal/managed/self-host: reads the deployment-local
+    digital_employees row, the same relational anchor every org type uses."""
+    if not org_id or not slug:
+        return
+
+    async def recall_experience(topic: str = "") -> ToolResponse:
+        """Recall YOUR own learned operating lessons from past work across every room
+        (your global playbook). Call this when a task resembles one you have handled
+        before and you want to apply what you learned. `topic` narrows to the most
+        relevant lessons by keyword; empty returns your most recent. These are lessons
+        to APPLY, not facts to cite to the user."""
+        try:
+            from ..db import get_employee_playbook
+            lessons = await get_employee_playbook(str(org_id), str(slug))
+        except Exception as exc:  # noqa: BLE001 — experience is optional, never fatal
+            return _tool_response_text(f"(could not load your experience: {str(exc)[:120]})")
+        lessons = [str(l).strip() for l in (lessons or []) if str(l).strip()]
+        if not lessons:
+            return _tool_response_text("You have no learned lessons yet.")
+        t = (topic or "").lower().strip()
+        if t:
+            toks = [w for w in re.split(r"\W+", t) if len(w) > 2]
+            hits = [l for l in lessons if any(w in l.lower() for w in toks)]
+            chosen = (hits or lessons[-8:])[:8]
+        else:
+            chosen = lessons[-8:]
+        body = "\n".join(f"- {l}" for l in chosen)
+        return _tool_response_text(
+            "YOUR LEARNED LESSONS (apply these, do not cite as facts):\n" + body,
+            metadata={"count": len(lessons), "returned": len(chosen)},
+        )
+
+    try:
+        tk.register_tool_function(recall_experience)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_experience_tool failed: %s", exc)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],
@@ -1111,13 +1165,13 @@ def build_hivemind_toolkit(
                 max_memories: Max memories to return (default 5).
             """
             with _client(api_key, user_id, org_id) as c:
-                body = {"query_context": query, "max_memories": max_memories}
+                body = {"query_context": query, "max_memories": max_memories, "mode": "explain"}
                 # Room scope: when the room belongs to a project HIVEMIND, every
                 # agent recall is scoped to that project so the room stays on-topic.
-                # core /api/recall reads `project`/`preferred_project` (NOT
-                # `project_id`) — same keys recall_emulated sends — so the agents
-                # hit the exact project-scoped recall path the grounding pass uses.
+                # project_id is the hard tenant-validated scope. The legacy
+                # project/preferred_project fields remain ranking hints only.
                 if project_id:
+                    body["project_id"] = project_id
                     body["project"] = project_id
                     body["preferred_project"] = project_id
                 r = c.post("/api/recall", json=body)

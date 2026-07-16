@@ -31,6 +31,7 @@ ARG CACHE_BUST=1
 
 # Copy source code
 COPY core/src ./src
+COPY core/scripts ./scripts
 COPY core/config ./config
 
 # Generate Prisma client
@@ -79,6 +80,7 @@ USER nodejs
 
 # Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+COPY --from=builder --chown=nodejs:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./

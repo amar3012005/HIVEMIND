@@ -30,11 +30,26 @@
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
+import { validateGroundedClaims } from '../memory/recall-packet.js';
+import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation, resolveCanonicalEntityQuery, resolveSourceArtifact } from './chat-recall-policy.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
 // through immediately — those are not transient.
 const RETRYABLE_FAILURES = new Set(['TIMEOUT', 'RATE_LIMIT']);
+
+export function resolveDocumentAnchorFromMemories(memories = []) {
+  for (const memory of memories) {
+    const metadataId = memory?.source_metadata?.document_id;
+    if (metadataId) return { source_document_id: metadataId };
+    const tags = Array.isArray(memory?.tags) ? memory.tags : [];
+    const documentId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));
+    if (documentId) return { source_document_id: documentId.slice('doc-id:'.length) };
+    const filename = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'));
+    if (filename) return { source_title: filename.slice('filename:'.length) };
+  }
+  return null;
+}
 
 async function dispatchTool(name, args, ctx, opts = {}) {
   const t0 = Date.now();
@@ -218,7 +233,7 @@ Output STRICT JSON (no prose, no code fence):
                                   // imperative verb is ALWAYS 'lookup'. Never 'save' just because the user
                                   // dropped a filename — they want to RECALL it, not store it again.
   "intents": ["..."],            // 1-3 short phrases describing what the user actually wants
-  "sub_queries": ["..."],        // 1-4 English recall queries, each focused on ONE entity/concept
+  "sub_queries": ["..."],        // 1-4 recall queries in the user's language, each focused on ONE entity/concept
   "named_entities": ["..."],     // proper nouns the user mentioned (people, projects, files, brands)
   "needs_traverse": false,        // true if recall should follow graph edges to find related memories
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
@@ -238,7 +253,7 @@ Output STRICT JSON (no prose, no code fence):
                                   //   here is WRONG; emit action_intent and let the action path handle it.
   "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
-  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Threshold confidence >= 0.70 fires the save.
+  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}. Relationships are typed graph edges, never memory objects. Threshold confidence >= 0.70 fires the save.
                                   // MOOD IS THE PRIMARY SIGNAL: an INTERROGATIVE ("what is X?", "who is Y?", "tell me about Z") → recall ONLY, never save. A DECLARATIVE assertion (a statement, no question mark, not a question word) that teaches a durable fact → recall to check existing AND emit auto_save_intent for the new fact. When the user TELLS you something true about their world, you SAVE it; when they ASK, you recall.
                                   // THIRD-PERSON DECLARATIVES FIRE TOO — not just first-person "I" narration. Any statement asserting a NEW STATE or RELATIONSHIP about a company, product, project, org, or person the user works with MUST fire: "X is Y", "X is now Y", "X is the parent/owner/subsidiary of Y", "we renamed/rebranded X to Y", "X acquired/merged with Y", "X replaced Y", "X reports to Y", "X moved to Y". These are the user teaching the system durable structural facts and are the MOST important to capture.
                                   // DO NOT fire on: pure questions ("What is X?"), recall requests ("tell me about Y"), hypotheticals ("what if I did X"), or opinions / general-knowledge about the OUTSIDE world ("AI is overhyped", "Paris is in France"). CRITICAL: a factual declaration about the USER's OWN company / org / products / projects / people is NEVER an "external topic" — it fires even when phrased encyclopedically ("Acme is now a subsidiary of Globex"). If in doubt whether a declarative is about the user's world, FIRE (over-saving is cheap; smart-ingest dedups).
@@ -249,7 +264,7 @@ Output STRICT JSON (no prose, no code fence):
   // - (third-person structural fact — placeholder names) "Acme is now the parent company of Beta Corp and is the rebranded name of Gamma AI" → {title: "Acme parent of Beta Corp, rebrand of Gamma AI", content: "Acme is the parent company of Beta Corp and is the new rebranded name of the former Gamma AI.", tags: ["entity:Acme", "entity:Beta_Corp", "entity:Gamma_AI", "topic:org-structure"], memory_type: "fact", confidence: 0.9}
   // Be liberal — missing an auto-save is worse than over-saving (smart-ingest NOOP detects duplicates). A declarative statement teaching a NEW fact about the user's world should almost always fire.
   "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
-  "recall_mode": "quick",         // 'quick' (default — fast semantic), 'panorama' (temporal/historical browse), or 'insight' (deep — expands synthesis evidence chains + traverses bridges). Use 'insight' when the user asks about RELATIONSHIPS between memories, multi-entity connections, or cross-topic context ("how is X connected to Y", "what's the relation between X and Y", "what links X to my work on Y", "give me the full story on X"). Use 'panorama' for "what happened last week", "show me my history with X", "timeline of Y". Default 'quick' for direct lookups.
+  "recall_mode": "quick",         // 'quick' (fast current facts), 'panorama' (temporal/history), or 'insight' (source-grounded explanation). Use 'insight' for questions about uploaded files, meetings, emails, knowledge-base material, decisions, relationships, cross-topic context, or when the answer must be supported by workspace evidence. Use 'panorama' for history/timelines. Use 'quick' only for a direct current lookup that does not need source reconstruction. Never choose full automatically; full is caller-explicit only.
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
 
@@ -332,7 +347,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
         title: rawAS.title.trim().slice(0, 200),
         content: rawAS.content.trim().slice(0, 4000),
         tags: Array.isArray(rawAS.tags) ? rawAS.tags.filter(t => typeof t === 'string').slice(0, 12) : [],
-        memory_type: ['fact','decision','preference','event','goal','lesson','relationship'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
+        memory_type: ['fact','decision','preference','event','goal','lesson'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
         confidence: rawAS.confidence,
       };
     }
@@ -448,9 +463,224 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   return { plan, usage };
 }
 
+// ── STEP 2 (ALT) — Tool-decision router (CHAT_ROUTER=tool) ──────────────
+// Language-agnostic replacement for the regex gate + the big JSON planStep.
+// ONE cheap LLM call with a TINY tool set decides what to do:
+//   • recall(queries, mode) → memory lookup (the common path)
+//   • act(provider)         → connector action (delegated to the existing
+//                             action_intent flow downstream)
+//   • no tool call          → direct answer (greeting / smalltalk / general),
+//                             already produced in the user's language → carried
+//                             on plan._direct_answer so the caller short-circuits.
+// Returns the SAME { plan, usage } contract as planStep so every downstream
+// step (gather/reflect/answer/confidence-retry/save/return) is reused verbatim.
+// Connector tool schemas are NOT loaded here — only when act() is chosen does
+// the downstream action sub-loop load them (lazy, token-cheap).
+const ROUTER_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'recall',
+      description: 'Search the organisation memory. Use for ANY question about specific facts, the org, its people, products, projects, documents, history, numbers, or the world. When in doubt, recall — never answer specific questions from your own knowledge.',
+      parameters: {
+        type: 'object',
+        properties: {
+          queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 semantic search queries. Preserve names and meaning in the user\'s language; multilingual retrieval handles them directly.' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full'], description: 'fact = cheap current answer; explain = evidence and typed relations; full = explicit source reconstruction only when the user asks for complete context.' },
+          entities: { type: 'array', items: { type: 'string' }, description: 'Exact named entities explicitly present in the request.' },
+          source_title: { type: 'string', description: 'Exact filename/title explicitly named by the user, if any.' },
+          valid_at: { type: 'string', description: 'ISO timestamp when the fact was true, only when the request explicitly supplies a date.' },
+          known_at: { type: 'string', description: 'ISO timestamp for what the workspace knew by then, only when explicitly requested.' },
+        },
+        required: ['queries'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'act',
+      description: 'Perform an action through a connector (send / create / schedule / draft a message). Use ONLY when the user explicitly asks to perform such an action.',
+      parameters: {
+        type: 'object',
+        properties: {
+          provider: { type: 'string', enum: ['slack', 'notion', 'gmail', 'github', 'linear'] },
+        },
+        required: ['provider'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'live_lookup',
+      description: 'Pull FRESH/LIVE data straight from the user\'s connected apps (email, chat, docs, notes) to answer about recent or real-time things — "my latest emails", "what was said in the #channel", "today\'s calendar", "the latest Notion page". Use when the answer needs current connector data rather than (or in addition to) stored memory. Only connected apps are queried; pick the relevant ones. You may ALSO let recall run by including a query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          providers: { type: 'array', items: { type: 'string', enum: ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'] }, description: 'Which connected app(s) to pull live data from' },
+          query: { type: 'string', description: 'ENGLISH search query / what to look for in those apps' },
+        },
+        required: ['providers'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description: 'Save a durable fact to memory. Call this when the user (a) explicitly asks to save/remember/note something, OR (b) STATES a durable fact about their own world — their org, people, products, projects, decisions, plans ("X is now Y", "we decided Z", "the launch is March 2026"). Do NOT call for questions, opinions, or general world knowledge. The fact is also recalled to check for existing/conflicting memory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short title for the fact' },
+          content: { type: 'string', description: 'The fact as a clear, self-contained statement (3rd person, ENGLISH)' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'optional entity:/topic: tags' },
+        },
+        required: ['content'],
+      },
+    },
+  },
+];
+
+async function routerPlan({ message, history, language, assistantName, orgName, model, apiKey, signal, onEvent }) {
+  const basePlan = {
+    intent_kind: 'lookup', user_message: message, action_intent: null, intents: [],
+    sub_queries: [], named_entities: [], needs_traverse: false, needs_time_travel: false,
+    time_travel: null, needs_web: false, save_intent: null, auto_save_intent: null,
+    ask_for_project: false, update_intent: null, recall_mode: 'fact', expected_evidence_types: [],
+  };
+
+  const name = assistantName || 'HIVE';
+  const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
+  const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
+- Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
+- Call remember(content) when the user asks to save/remember something OR STATES a durable fact about their own world (org/people/products/projects/decisions/plans — "X is now Y", "we decided Z", "launch is March 2026"). NOT for questions, opinions, or general world knowledge.
+- Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
+- Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
+- Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
+CRITICAL: preserve the user's wording, names, filenames, and language in recall queries. Multilingual retrieval handles semantic matching; never replace exact source or entity names with translated guesses.
+Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote in.`;
+
+  const histMsgs = Array.isArray(history)
+    ? history.slice(-4).filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
+        .map(h => ({ role: h.role, content: String(h.content).slice(0, 1500) }))
+    : [];
+
+  const routerModel = process.env.CHAT_ROUTER_MODEL || model || INTERNAL_MODEL;
+  const body = {
+    model: routerModel,
+    messages: [{ role: 'system', content: sys }, ...histMsgs, { role: 'user', content: message }],
+    tools: ROUTER_TOOLS,
+    tool_choice: 'auto',
+    max_tokens: 500,
+    temperature: 0,
+  };
+
+  let data = null;
+  try {
+    const resp = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!resp.ok) {
+      const t = (await resp.text().catch(() => '')).slice(0, 200);
+      throw new Error(`router ${resp.status}: ${t}`);
+    }
+    data = await resp.json();
+  } catch (err) {
+    // Router call failed → safe default: recall the raw message (never strand the user).
+    onEvent?.({ type: 'plan', routed: 'recall_fallback', reason: err.message });
+    return { plan: { ...basePlan, sub_queries: [message] }, usage: null };
+  }
+
+  const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+  const usage = data.usage || null;
+  const tc = Array.isArray(msg.tool_calls) ? msg.tool_calls[0] : null;
+
+  if (!tc) {
+    // No tool → direct answer already written in the user's language.
+    const direct = (msg.content || '').trim();
+    onEvent?.({ type: 'plan', routed: 'direct' });
+    // Empty content (model emitted nothing) → fall back to recall so the user
+    // still gets a grounded answer rather than silence.
+    if (!direct) return { plan: { ...basePlan, sub_queries: [message] }, usage };
+    return { plan: { ...basePlan, sub_queries: [], _direct_answer: direct }, usage };
+  }
+
+  let args = {};
+  try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { args = {}; }
+  const fn = tc.function?.name;
+
+  if (fn === 'act') {
+    const VALID = ['slack', 'notion', 'gmail', 'github', 'linear'];
+    const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
+    onEvent?.({ type: 'plan', routed: 'act', provider });
+    return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
+  }
+
+  if (fn === 'remember') {
+    const content = (typeof args.content === 'string' && args.content.trim()) ? args.content.trim() : message;
+    const title = (typeof args.title === 'string' && args.title.trim()) ? args.title.trim() : content.slice(0, 60);
+    const tags = Array.isArray(args.tags) ? args.tags.filter(t => typeof t === 'string' && t.trim()).slice(0, 8) : [];
+    onEvent?.({ type: 'plan', routed: 'remember' });
+    // Save the fact AND recall to surface existing/conflicting memory (mirrors
+    // v2's save+recall). intent_kind 'save' + save_intent → maybeSaveOrUpdate fires.
+    return {
+      plan: {
+        ...basePlan,
+        intent_kind: 'save',
+        save_intent: { title, content, tags },
+        sub_queries: [content.slice(0, 120)],
+        recall_mode: 'fact',
+      },
+      usage,
+    };
+  }
+
+  if (fn === 'live_lookup') {
+    const VALID = ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'];
+    const providers = (Array.isArray(args.providers) ? args.providers : [])
+      .map(p => String(p || '').toLowerCase()).filter(p => VALID.includes(p));
+    const q = (typeof args.query === 'string' && args.query.trim()) ? args.query.trim() : message;
+    onEvent?.({ type: 'plan', routed: 'live_lookup', providers });
+    // Run memory recall on the query AND fetch live from the chosen connected
+    // apps (gatherEvidence honours plan.live_providers). Combined evidence.
+    return { plan: { ...basePlan, sub_queries: [q], recall_mode: 'fact', live_providers: providers }, usage };
+  }
+
+  // Default: recall (also the safe catch-all for an unknown tool name).
+  const queries = (Array.isArray(args.queries) ? args.queries : [])
+    .filter(q => typeof q === 'string' && q.trim()).slice(0, 3);
+  const mode = ['fact', 'explain'].includes(args.mode) ? args.mode : 'fact';
+  onEvent?.({ type: 'plan', routed: 'recall', queries });
+  return {
+    plan: {
+      ...basePlan,
+      sub_queries: queries.length ? queries : [message],
+      recall_mode: mode,
+      named_entities: Array.isArray(args.entities)
+        ? args.entities.filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8)
+        : [],
+      needs_traverse: args.mode === 'explain',
+      source: typeof args.source_title === 'string' && args.source_title.trim()
+        ? { title: args.source_title.trim().slice(0, 512) }
+        : null,
+      time: {
+        ...(typeof args.valid_at === 'string' ? { valid_at: args.valid_at } : {}),
+        ...(typeof args.known_at === 'string' ? { known_at: args.known_at } : {}),
+      },
+    },
+    usage,
+  };
+}
+
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
-async function gatherEvidence({ plan, ctx, onEvent }) {
+async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
+  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   const steps = [];
   const memoriesById = new Map();
   const liveItems = [];
@@ -465,6 +695,28 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // memories. Passed to answerStep so the LLM can cite synth claims AND
   // their source rows in the same answer.
   const synthesisChains = new Map(); // key = synthesis_id → chain
+  const recallPackets = [];
+  let activeDeadlineAt = deadlineAt;
+  const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
+  const beforeDeadline = (promise) => {
+    const ms = remaining();
+    return ms > 0
+      ? Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('recall deadline exceeded')), ms))])
+      : Promise.reject(new Error('recall deadline exceeded'));
+  };
+
+  if (!plan.source) {
+    try {
+      plan.source = await resolveSourceArtifact({
+        evidenceRetrieval: ctx.evidenceRetrieval,
+        query: plan.user_message,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        deadlineAt,
+      });
+    } catch { /* ordinary recall remains available when source resolution fails */ }
+  }
+  if (!plan.source) activeDeadlineAt = Date.now() + TURN_BUDGET_MS;
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -504,7 +756,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   }
   // Also overwrite plan.time_travel so the hivemind_at branch below
   // uses the corrected date (planner often hallucinated year=2024).
-  if (derivedValidAt) {
+  if (!deterministicRecall && derivedValidAt) {
     plan.needs_time_travel = true;
     plan.time_travel = { ...(plan.time_travel || {}), valid_time: derivedValidAt };
   }
@@ -548,26 +800,46 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   }
 
   const recallExtras = {
-    ...(userConnector ? { tags: [userConnector] } : {}),
-    ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
-    ...(derivedDateRange ? { date_range: derivedDateRange } : {}),
+    ...(!deterministicRecall && userConnector ? { tags: [userConnector] } : {}),
+    ...((deterministicRecall ? plan.time?.valid_at : derivedValidAt) ? { valid_at: deterministicRecall ? plan.time.valid_at : derivedValidAt } : {}),
+    ...(deterministicRecall && plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
+    ...((deterministicRecall ? plan.time?.range : derivedDateRange) ? { date_range: deterministicRecall ? plan.time.range : derivedDateRange } : {}),
+    ...(deterministicRecall && plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
+    ...(deterministicRecall && plan.source?.title ? { source_title: plan.source.title } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
   // default, insight for relation queries, panorama for time/history).
   // Insight mode pulls synthesis_evidence_chains so the agent sees the
   // multi-source claim AND its source memories without a second call.
-  const recallMode = plan.recall_mode || 'quick';
+  const recallMode = deterministicRecall
+    ? (plan.explicit_recall_mode || 'fact')
+    : (plan.recall_mode || 'quick');
   // T1-4: mode-aware candidate limit. Quick mode (common path) fetches 8, not
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
   // smaller set and downstream dedup carries less.
-  const recallLimit = recallMode === 'panorama' ? 14 : recallMode === 'insight' ? 12 : 8;
-  if (plan.sub_queries.length > 0) {
+  const recallLimit = recallMode === 'full' || recallMode === 'panorama'
+    ? 14
+    : recallMode === 'explain' || recallMode === 'insight'
+      ? 12
+      : 8;
+  const evidenceSeen = new Set();
+  const recallQueries = deterministicRecall
+    ? [plan.user_message || plan.sub_queries[0]].filter(Boolean)
+    : plan.sub_queries;
+  if (recallQueries.length > 0) {
     const recallResults = await Promise.all(
-      plan.sub_queries.map(async (q) => {
+      recallQueries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: recallLimit, ...recallExtras }, ctx);
+          const r = await beforeDeadline(dispatchTool('hivemind_recall', {
+            query: q,
+            mode: recallMode,
+            limit: recallLimit,
+            _explicit_mode: !!plan.explicit_recall_mode,
+            deadline_at: activeDeadlineAt,
+            ...recallExtras,
+          }, ctx));
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -588,7 +860,6 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     // T1-3: dedup evidence + live items by id across all recall passes so
     // the render slices (.slice(0,8) DOC, .slice(0,10) LIVE) hold distinct
     // rows instead of repeats — recovers prompt tokens AND improves coverage.
-    const evidenceSeen = new Set();
     const liveSeen = new Set();
     for (const r of recallResults) {
       for (const m of (r?.memories || [])) {
@@ -607,6 +878,12 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         evidenceSeen.add(k);
         evidenceItems.push(ev);
       }
+      for (const edge of (r?.relationships || [])) {
+        if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
+        const key = `${edge.from_id}|${edge.to_id}|${edge.type}`;
+        if (!edgesByKey.has(key)) edgesByKey.set(key, edge);
+      }
+      if (r?.evidence_packet) recallPackets.push(r.evidence_packet);
       // Synthesis evidence chains — pulled when recall_mode='insight'.
       // Each chain: { synthesis_id, synthesis_title, conf, rev, evidence[] }
       for (const chain of (r?.synthesis_evidence_chains || [])) {
@@ -634,6 +911,112 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   //   4. If hop1 returned ≤1 memory AND the query has a connector keyword
   //      → re-recall with looser filters (drop is_latest, widen tags).
   const allRecallMems = Array.from(memoriesById.values());
+
+  // A document-backed memory is an event, not a guess about user wording. If
+  // quick recall found one but returned no source evidence, make one bounded
+  // explain pass for the original question. This prevents a summary anchor
+  // from being treated as the whole document while keeping ordinary fact-only
+  // chat on its fast path.
+  const documentAnchor = resolveDocumentAnchorFromMemories(allRecallMems);
+  if (
+    !deterministicRecall
+    &&
+    process.env.HIVEMIND_CHAT_ANCHORED_EVIDENCE !== 'false'
+    && (recallMode === 'quick' || recallMode === 'fact')
+    && evidenceItems.length === 0
+    && documentAnchor
+  ) {
+    const args = {
+      query: plan.user_message,
+      mode: 'explain',
+      limit: 12,
+      ...recallExtras,
+      ...documentAnchor,
+    };
+    try {
+      const grounded = await dispatchTool('hivemind_recall', args, ctx);
+      recordTool(
+        'hivemind_recall',
+        args,
+        `${grounded?.memories?.length || 0} memories + ${grounded?.evidence_count || 0} evidence (source-grounding)`,
+        grounded,
+      );
+      for (const memory of (grounded?.memories || [])) {
+        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+      }
+      for (const evidence of (grounded?.evidence || [])) {
+        const key = evidence?.id || `${evidence?.document_title || '?'}|${evidence?.page || ''}|${(evidence?.content || evidence?.snippet || '').slice(0, 40)}`;
+        if (evidenceSeen.has(key)) continue;
+        evidenceSeen.add(key);
+        evidenceItems.push(evidence);
+      }
+      if (grounded?.evidence_packet) recallPackets.push(grounded.evidence_packet);
+    } catch (error) {
+      recordTool('hivemind_recall', args, `source-grounding error: ${error.message}`, null);
+    }
+  }
+
+  let coverage = assessRecallCoverage({
+    plan,
+    memories: [...memoriesById.values()],
+    evidence: evidenceItems,
+    relationships: [...edgesByKey.values()],
+  });
+  let escalationCount = 0;
+  if (deterministicRecall && remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
+    const canonicalEntityQuery = !coverage.evidence_found
+      ? await beforeDeadline(resolveCanonicalEntityQuery({
+          prisma: ctx.prisma,
+          orgId: ctx.orgId,
+          query: plan.user_message,
+        })).catch(() => null)
+      : null;
+    const escalation = chooseRecallEscalation({
+      plan,
+      coverage,
+      query: canonicalEntityQuery || plan.user_message || recallQueries[0],
+    });
+    if (escalation) {
+      escalationCount = 1;
+      try {
+        const expanded = await beforeDeadline(dispatchTool('hivemind_recall', {
+          ...recallExtras,
+          ...escalation.args,
+          deadline_at: activeDeadlineAt,
+        }, ctx));
+        recordTool(
+          'hivemind_recall',
+          escalation.args,
+          `${expanded?.memories?.length || 0} memories + ${expanded?.evidence_count || 0} evidence (${escalation.reason})`,
+          expanded,
+        );
+        for (const memory of (expanded?.memories || [])) {
+          if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+        }
+        for (const item of (expanded?.evidence || [])) {
+          const key = item?.id || `${item?.document_title || '?'}|${item?.page || ''}|${(item?.content || item?.snippet || '').slice(0, 40)}`;
+          if (!evidenceSeen.has(key)) {
+            evidenceSeen.add(key);
+            evidenceItems.push(item);
+          }
+        }
+        for (const edge of (expanded?.relationships || [])) {
+          if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
+          edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
+        }
+        if (expanded?.evidence_packet) recallPackets.push(expanded.evidence_packet);
+      } catch (error) {
+        recordTool('hivemind_recall', escalation.args, `escalation error: ${error.message}`, null);
+      }
+      coverage = assessRecallCoverage({
+        plan,
+        memories: [...memoriesById.values()],
+        evidence: evidenceItems,
+        relationships: [...edgesByKey.values()],
+      });
+    }
+  }
+
   const hasConnectorTagged = allRecallMems.some(m => (m.tags || []).some(t => CONNECTORS.includes(t)));
   const hasEntityTagged = allRecallMems.some(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:')));
   const TEMPORAL_HINT = /\b(latest|last|recent|today|yesterday|this week|now|currently|as of)\b/i;
@@ -651,7 +1034,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // as-of-scoped (recallExtras.valid_at set from the same derived date) AND
   // returned enough rows — it would re-fetch the same window. Keep it as a
   // safety net when recall came back thin (<3) or wasn't date-scoped.
-  if (wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
+  if (!deterministicRecall && wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
     try {
       // Derive valid_time: planner first, else "now" (latest snapshot).
       const validTime = plan.time_travel?.valid_time
@@ -687,7 +1070,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const isRelational = (plan.named_entities?.length || 0) > 0 || plan.recall_mode === 'insight';
   const shouldTraverse = memoriesById.size > 0
     && (!traverseRelationalOnly || (isRelational && memoriesById.size < 8));
-  if (shouldTraverse) {
+  if (!deterministicRecall && shouldTraverse) {
     // Smarter seed selection. Build a ranked candidate list:
     //   1. Memories matching ANY named_entity in title/content/tags
     //   2. Memories with entity:* tags
@@ -788,38 +1171,55 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     },
     gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
   };
-  const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
   const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
   const lowRecall = memoriesById.size < 3;
   // NB: removed !plan.action_intent gate — planner sometimes flags read
   // queries as action_intent. Live-read should always fire when query has
   // explicit read verb + connector keyword + extractable target.
-  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma) {
+  //
+  // Connectors to live-fetch come from TWO sources:
+  //   (1) plan.live_providers — the tool-router's EXPLICIT, language-robust
+  //       choice (CHAT_ROUTER=tool → live_lookup). Always fires (the model
+  //       already judged live data is needed), no lowRecall gate.
+  //   (2) userConnector — the keyword-detected connector (legacy path), which
+  //       fires only on low recall / slack read-verb.
+  // Filtered to providers that have a READ_CONNECTOR_TRIGGER (notion/slack).
+  // gmail live flows via recall's live tier already; drive/calendar/docs have
+  // no read-trigger yet (recall live tier / future read sub-loop).
+  const explicitLive = Array.isArray(plan.live_providers) ? plan.live_providers : [];
+  const keywordLive = (userConnector && READ_CONNECTOR_TRIGGERS[userConnector]
+    && (lowRecall || (liveReadIntent && userConnector === 'slack'))) ? [userConnector] : [];
+  const connectorsToFetch = [...new Set([...explicitLive, ...keywordLive])]
+    .filter(p => READ_CONNECTOR_TRIGGERS[p]);
+  if (connectorsToFetch.length > 0 && ctx.prisma) {
     try {
       const { buildToolkitForUser } = await import('./toolkit-factory.js');
       const tk = await buildToolkitForUser({
         prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId, hivemindTools: [],
       });
-      tk.resetEquippedTools([userConnector]);
-      const cfg = connectorTriggered;
-      const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
-      if (!cfg.requires || cfg.requires(arg)) {
-        const resp = await tk.execute(cfg.tool, arg, {
-          userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
-          persistentMemoryEngine: ctx.persistentMemoryEngine,
-        });
-        const text = resp.content?.[0]?.text || '';
-        recordTool(cfg.tool, arg, `${text.length}b live`, resp);
-        if (text) {
-          liveItems.push({
-            source: userConnector,
-            title: `live ${userConnector} result`,
-            snippet: text.slice(0, 600),
-          });
+      for (const provider of connectorsToFetch) {
+        try {
+          tk.resetEquippedTools([provider]);
+          const cfg = READ_CONNECTOR_TRIGGERS[provider];
+          const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
+          if (!cfg.requires || cfg.requires(arg)) {
+            const resp = await tk.execute(cfg.tool, arg, {
+              userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
+              persistentMemoryEngine: ctx.persistentMemoryEngine,
+              ingestCanonicalPayload: ctx.ingestCanonicalPayload,
+            });
+            const text = resp.content?.[0]?.text || '';
+            recordTool(cfg.tool, arg, `${text.length}b live`, resp);
+            if (text) {
+              liveItems.push({ source: provider, title: `live ${provider} result`, snippet: text.slice(0, 600) });
+            }
+          }
+        } catch (e) {
+          recordTool('connector_live_fallback', { provider }, `error: ${e.message}`, null);
         }
       }
     } catch (err) {
-      recordTool('connector_live_fallback', { provider: userConnector }, `error: ${err.message}`, null);
+      recordTool('connector_live_fallback', { providers: connectorsToFetch }, `error: ${err.message}`, null);
     }
   }
 
@@ -848,6 +1248,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     relationships: [...edgesByKey.values()],
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
+    recall_packets: recallPackets,
+    coverage,
+    escalation_count: escalationCount,
     steps,
     webJob,
   };
@@ -915,6 +1318,7 @@ memories as ground truth. Today's date is ${new Date().toISOString().slice(0, 10
 OUTPUT — STRICT JSON (no prose, no code fence):
 {
   "response":        "<final answer in ${lang}>",
+  "claims":          [{"text":"<one user-visible claim>","grounded":true,"citation_ids":["P1-C1"]}],
   "evidence_used":   [<memory_id_short>, ...],   // first 8 chars of each id you actually relied on
   "confidence":      0.0,                          // [0,1] — how grounded the answer is in evidence
   "gaps":            ["..."]                       // what the user might want but the evidence didn't cover
@@ -927,6 +1331,9 @@ CORE RULES:
    DOCUMENT SEGMENTS block. Don't invent. When citing a LIVE WORKSPACE
    item, reference it naturally (e.g. "your last email from X on
    <date> said…"); don't paste raw IDs.
+   Every user-visible sentence must also appear as one item in claims.
+   Use only IDs from the CITATION REGISTRY. Set grounded=false only
+   when this request explicitly permits general knowledge.
 2. **PARTIAL coverage = USE IT, don't bail.** If even ONE evidence
    row touches the user's question, build the answer around it. Quote
    memory titles inline. Only respond "I don't have notes on X" when
@@ -1025,8 +1432,77 @@ CORE RULES:
     history. When in doubt, default to the literal absence of the edge.`;
 }
 
-async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx }) {
+export function buildChatCitationPacket(recallPackets = []) {
+  const citations = [];
+  for (const [packetIndex, packet] of recallPackets.entries()) {
+    for (const citation of (packet?.citations || [])) {
+      if (!citation?.id) continue;
+      citations.push({ ...citation, id: `P${packetIndex + 1}-${citation.id}` });
+    }
+  }
+  return { citations };
+}
+
+export function buildChatCitationSources(recallPackets = [], claims = []) {
+  const usedIds = new Set(
+    (claims || [])
+      .filter((claim) => claim?.grounded === true)
+      .flatMap((claim) => Array.isArray(claim.citation_ids) ? claim.citation_ids : []),
+  );
+  const sources = [];
+  const seen = new Set();
+
+  for (const [packetIndex, packet] of (recallPackets || []).entries()) {
+    const sectionsById = new Map(
+      (packet?.sourceSections || [])
+        .filter((section) => section?.segment_id)
+        .map((section) => [section.segment_id, section]),
+    );
+    for (const citation of (packet?.citations || [])) {
+      if (!citation?.id) continue;
+      const citationId = `P${packetIndex + 1}-${citation.id}`;
+      if (!usedIds.has(citationId) || seen.has(citationId)) continue;
+      seen.add(citationId);
+      const section = sectionsById.get(citation.segment_id) || {};
+      sources.push({
+        id: citation.segment_id || citationId,
+        citation_id: citationId,
+        segment_id: citation.segment_id || null,
+        document_id: citation.document_id || section.document_id || null,
+        title: citation.title || citation.source_label || section.document_title || 'Workspace source',
+        snippet: section.snippet || section.content || '',
+        page: citation.page ?? section.page ?? null,
+        source_type: 'document_evidence',
+        score: Number.isFinite(section.score) ? section.score : null,
+      });
+    }
+  }
+  return sources;
+}
+
+export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKnowledge = false } = {}) {
+  return validateGroundedClaims(
+    payload,
+    buildChatCitationPacket(recallPackets),
+    { allowGeneralKnowledge },
+  );
+}
+
+export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
+  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
+  if (deterministicRecall && evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
+    return {
+      response: 'No grounded workspace evidence found',
+      claims: [],
+      rejected_claims: [],
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['The requested source was not covered by retrieved source evidence.'],
+      usage: null,
+    };
+  }
 
   // Connector capability hint — built from active Nango connections so
   // the LLM knows write access exists + which channels/recipients are
@@ -1185,7 +1661,10 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   const evLines = (evidence.evidence || []).slice(0, 8).map((e) => {
     const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
     const page = e.page ? ` p.${e.page}` : '';
-    const body = (e.content || e.snippet || '').replace(/\n/g, ' ').slice(0, 320);
+    // Evidence retrieval produces a query-centred snippet. Prefer it over the
+    // start of a long source segment so exact policy questions retain the
+    // matching sentence in the bounded answer prompt.
+    const body = (e.snippet || e.content || '').replace(/\n/g, ' ').slice(0, 520);
     return `[DOC/${doc}${page}] ${body}`;
   }).join('\n');
 
@@ -1224,6 +1703,11 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
 
+  const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
+  const citationLines = citationPacket.citations.map((citation) =>
+    `[${citation.id}] ${citation.source_label || citation.title || 'Workspace source'}${citation.page ? ` p.${citation.page}` : ''}`,
+  ).join('\n');
+
   // When event-time ranking pre-filtered the evidence to the asked window,
   // tell the model these rows ARE "what happened" — docs/decisions/notes count
   // as activity. Stops the "no events" bail when in-window memories exist.
@@ -1250,8 +1734,12 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     }
   } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
 
+  const sourceFirst = evidence.coverage?.source_requested === true;
+  const groundedEvidence = sourceFirst
+    ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
+    : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}${personaNote}
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1270,7 +1758,7 @@ ${message}`;
   // re-ask the LLM once with an explicit nudge. Catches LLM stubbornness
   // when grounding rules are clear but the model gave up anyway.
   const bailedOut = /\b(i (don'?t|do not) have|no (record|records|memory|memories|notes) (of|about|on|for)|i can'?t find|nothing (in|about) (my )?memor)/i.test(response);
-  if (bailedOut && evidence.memories.length > 0) {
+  if (!deterministicRecall && bailedOut && evidence.memories.length > 0) {
     const ml = String(message).toLowerCase();
     const connectorMentioned = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence']
       .find(k => ml.includes(k));
@@ -1335,8 +1823,16 @@ ${message}`;
     }
   }
 
+  const validated = validateChatAnswer({
+    answer: response,
+    claims: parsed.claims,
+  }, evidence.recall_packets || [], { allowGeneralKnowledge });
+
   return {
-    response,
+    response: validated.answer,
+    claims: validated.claims,
+    rejected_claims: validated.rejected_claims,
+    grounded: validated.grounded,
     evidence_used: Array.isArray(parsed.evidence_used) ? parsed.evidence_used : [],
     confidence:    Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
     gaps:          Array.isArray(parsed.gaps) ? parsed.gaps : [],
@@ -1750,7 +2246,7 @@ Decide ONE thing: is the user TEACHING a new durable fact about THEIR OWN world 
 
 If YES, extract a self-contained THIRD-PERSON note. If NO, return {"save": false}.
 Output JSON only:
-{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}
+{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}
 OR {"save": false}`;
   try {
     const { parsed, usage } = await callJsonLLM({ messages: [{ role: 'user', content: prompt }], model, apiKey, maxTokens: 400, signal });
@@ -1759,7 +2255,7 @@ OR {"save": false}`;
         title: String(parsed.title).slice(0, 200),
         content: String(parsed.content).slice(0, 2000),
         tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 12) : [],
-        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson', 'relationship'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
+        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
         confidence: Number(parsed.confidence),
         _rescued: true,
       };
@@ -1783,9 +2279,18 @@ export async function runReactAgentV2({
   language,
   ctx,
   onEvent,
+  router,
+  recallMode,
+  recallSource,
+  recallTime,
+  allowGeneralKnowledge = false,
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
+  const recallDeadlineAt = Date.now() + 3_000;
+  // Tool-decision router (per-request `router:'tool'` OR env CHAT_ROUTER=tool).
+  // Per-request lets us A/B test safely without flipping the deployment default.
+  const useRouter = (router || process.env.CHAT_ROUTER) === 'tool';
 
   const abortCtrl = new AbortController();
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
@@ -1830,7 +2335,9 @@ export async function runReactAgentV2({
     const hasBrowserContext = /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');
 
     // STEP 1 — Quick gate (no LLM). Browser context bypasses the gate.
-    const gateKind = hasBrowserContext ? null : quickGateClassify(message);
+    // CHAT_ROUTER=tool also bypasses it — the LLM router (STEP 2 ALT) decides
+    // greetings/smalltalk in ANY language, so no regex routing is relied upon.
+    const gateKind = (useRouter || hasBrowserContext) ? null : quickGateClassify(message);
     if (gateKind) {
       onEvent?.({ type: 'gate', kind: gateKind });
       // Quick gate (greeting/math/definition) is user-facing → FINAL_MODEL
@@ -1852,13 +2359,38 @@ export async function runReactAgentV2({
       };
     }
 
-    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning)
-    const planResult = await planStep({
-      message, history, language, assistantName, orgName, hasBrowserContext,
-      model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
-    });
+    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning).
+    // CHAT_ROUTER=tool swaps the big JSON planStep for the tiny-tool routerPlan
+    // (language-robust, ~token-cheap). Same { plan, usage } contract → every
+    // downstream step is reused unchanged.
+    const planResult = (useRouter)
+      ? await routerPlan({
+          message, history, language, assistantName, orgName,
+          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
+        })
+      : await planStep({
+          message, history, language, assistantName, orgName, hasBrowserContext,
+          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
+        });
     if (planResult.usage) usages.push(planResult.usage);
-    const plan = planResult.plan;
+    const plan = applyExplicitRecallControls(planResult.plan, {
+      mode: recallMode,
+      source: recallSource,
+      time: recallTime,
+    });
+
+    // Router direct-answer short-circuit: the router already wrote a
+    // language-correct reply (no tool needed) → skip the extra answerDirectly
+    // call + save-rescue. 1 LLM call total for greetings/smalltalk.
+    if (useRouter && plan._direct_answer) {
+      onEvent?.({ type: 'finish', text: plan._direct_answer });
+      return {
+        response: plan._direct_answer,
+        sources: [], steps, evidence_used: [], confidence: 0.9, gaps: [],
+        usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
+        assistant_name: assistantName || null,
+      };
+    }
 
     // Save-classifier rescue: catch declarative facts the small planner missed
     // (3rd-person "X is now Y" teachings). Runs on the strong answer model, only
@@ -2168,11 +2700,16 @@ export async function runReactAgentV2({
     }
 
     // STEP 3 — Evidence
-    const evidence = await gatherEvidence({ plan, ctx, onEvent });
+    const evidence = await gatherEvidence({ plan, ctx, onEvent, deadlineAt: recallDeadlineAt });
     steps.push(...evidence.steps);
+    trace.recall = {
+      coverage: evidence.coverage,
+      escalation_count: evidence.escalation_count,
+    };
 
     // STEP 4 — Reflect (only when evidence sparse + plan asked for stuff)
-    if (evidence.memories.length < 2 && plan.sub_queries.length > 0) {
+    const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
+    if (!deterministicRecall && evidence.memories.length < 2 && plan.sub_queries.length > 0) {
       try {
         // Reflection on sparse evidence → INTERNAL_MODEL (gap analysis)
         const reflect = await reflectStep({
@@ -2183,7 +2720,7 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'reflect', extra_queries: reflect.extra_queries, reason: reflect.reason });
           const extras = await Promise.all(reflect.extra_queries.map(async (q) => {
             try {
-              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
+              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
               steps.push({ tool: 'hivemind_recall', args: { query: q }, result_summary: `${r?.memories?.length || 0} memories` });
               onEvent?.({ type: 'tool_call', name: 'hivemind_recall', arguments: JSON.stringify({ query: q }) });
               onEvent?.({ type: 'tool_result', name: 'hivemind_recall', summary: `${r?.memories?.length || 0} memories` });
@@ -2194,6 +2731,7 @@ export async function runReactAgentV2({
           }));
           const seen = new Set(evidence.memories.map(m => m.id));
           for (const r of extras) {
+            if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
             for (const m of (r?.memories || [])) {
               if (m?.id && !seen.has(m.id)) {
                 seen.add(m.id);
@@ -2210,7 +2748,7 @@ export async function runReactAgentV2({
     // STEP 5 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
+      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
     if (answer.usage) usages.push(answer.usage);
 
@@ -2218,20 +2756,21 @@ export async function runReactAgentV2({
     // If the answer confidence is low AND we have explicit gaps[], re-recall
     // on those gaps + re-synthesize. Caps at 1 retry to avoid runaway loops.
     const CONF_THRESHOLD = Number(process.env.HIVEMIND_CONF_RETRY_THRESHOLD || 0.45);
-    if (answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
+    if (!deterministicRecall && answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
       onEvent?.({ type: 'reflect_low_confidence', confidence: answer.confidence, gaps: answer.gaps });
       try {
         // Take up to 2 gap phrases as targeted recall queries.
         const gapQueries = answer.gaps.filter(g => typeof g === 'string' && g.trim().length > 0).slice(0, 2);
         const extra = await Promise.all(gapQueries.map(async (q) => {
           try {
-            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
+            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
             recordTool('hivemind_recall', { query: q, mode: 'retry' }, `${r?.memories?.length || 0} memories`, r);
             return r;
           } catch { return null; }
         }));
         let mergedNew = 0;
         for (const r of extra) {
+          if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
           for (const m of (r?.memories || [])) {
             if (m?.id && !evidence.memories.some(e => e.id === m.id)) {
               evidence.memories.push(m);
@@ -2243,7 +2782,7 @@ export async function runReactAgentV2({
           // Re-run answer with augmented evidence (still FINAL_MODEL).
           const retry = await answerStep({
             message, history, evidence, plan, language, assistantName, orgName,
-            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
+            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
           });
           if (retry.usage) usages.push(retry.usage);
           if (retry.confidence >= answer.confidence) {
@@ -2271,6 +2810,38 @@ export async function runReactAgentV2({
 
     onEvent?.({ type: 'finish', text: answer.response });
 
+    const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
+    const memorySources = evidence.memories.slice(0, 10).map(m => {
+      const tags = m.tags || [];
+      const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
+                   || (m.source_metadata?.source_type === 'synthesis-bridge')
+                   || tags.includes('synthesis:canonical')
+                   || tags.includes('synthesis:bridge');
+      const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
+                      : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
+                      : null;
+      return {
+        id: m.id,
+        title: m.title,
+        snippet: m.content,
+        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+        tags,
+        memory_type: m.memory_type,
+        rank_trace: {
+          is_synthesis: !!isSynth,
+          synthesis_type: synthType,
+          synthesis_confidence: m.synthesis_confidence ?? null,
+          synthesis_revision: m.synthesis_revision ?? null,
+          cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
+          cross_cluster_overlap: m._cross_cluster_overlap ?? null,
+          synthesis_boosted: !!m._synthesis_boosted,
+        },
+      };
+    });
+    const publicSources = evidence.coverage?.source_requested
+      ? citationSources
+      : [...citationSources, ...memorySources].slice(0, 10);
+
     return {
       project_choice: recallProjectChoice,
       // When a save was deferred for project choice, don't claim it was saved —
@@ -2281,34 +2852,8 @@ export async function runReactAgentV2({
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps
       // users trust the answer + spot mis-ranking.
-      sources:       evidence.memories.slice(0, 10).map(m => {
-        const tags = m.tags || [];
-        const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
-                     || (m.source_metadata?.source_type === 'synthesis-bridge')
-                     || tags.includes('synthesis:canonical')
-                     || tags.includes('synthesis:bridge');
-        const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
-                        : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
-                        : null;
-        return {
-          id: m.id,
-          title: m.title,
-          snippet: m.content,
-          score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-          tags,
-          memory_type: m.memory_type,
-          // Recall-trace metadata — FE renders chips per memory.
-          rank_trace: {
-            is_synthesis: !!isSynth,
-            synthesis_type: synthType,
-            synthesis_confidence: m.synthesis_confidence ?? null,
-            synthesis_revision: m.synthesis_revision ?? null,
-            cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
-            cross_cluster_overlap: m._cross_cluster_overlap ?? null,
-            synthesis_boosted: !!m._synthesis_boosted,
-          },
-        };
-      }),
+      sources: publicSources,
+      citations: citationSources,
       // Typed graph edges between sources — FE renders edge chips.
       relationships: (evidence.relationships || []).slice(0, 30).map(e => ({
         from_id: e.from_id,
@@ -2318,8 +2863,12 @@ export async function runReactAgentV2({
       })),
       // Synthesis chains (insight-mode only) — FE renders claim + sources tree.
       synthesis_chains: (evidence.synthesis_chains || []).slice(0, 5),
+      evidence_packets: (evidence.recall_packets || []).slice(0, 3),
       steps,
       evidence_used: answer.evidence_used,
+      claims:        answer.claims,
+      rejected_claims: answer.rejected_claims,
+      grounded:      answer.grounded,
       confidence:    answer.confidence,
       gaps:          answer.gaps,
       usage:         sumUsage(usages),

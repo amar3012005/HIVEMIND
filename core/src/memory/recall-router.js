@@ -28,7 +28,10 @@ import { ClusterIndex } from './cluster-index.js';
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
+import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
+import { scopedMemoryWhere } from './prisma-graph-store.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -48,6 +51,104 @@ const HOP3_LIVE_LIMIT          = 5;
 // algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
 // beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
 const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
+const MAX_TEMPORAL_RANGE_MS    = 366 * 24 * 60 * 60 * 1000;
+
+function normalizedIso(value) {
+  if (typeof value !== 'string' && !(value instanceof Date)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function boundedString(value, maxLength) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function normalizeTemporalRange(value) {
+  if (!value || typeof value !== 'object') return null;
+  const start = normalizedIso(value.start);
+  const end = normalizedIso(value.end);
+  if (!start && !end) return null;
+  const boundedEnd = end || new Date(new Date(start).getTime() + MAX_TEMPORAL_RANGE_MS).toISOString();
+  const boundedStart = start || new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString();
+  if (new Date(boundedStart) > new Date(boundedEnd)) return null;
+  if (new Date(boundedEnd) - new Date(boundedStart) > MAX_TEMPORAL_RANGE_MS) {
+    return {
+      start: new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString(),
+      end: boundedEnd,
+      clamped: true,
+    };
+  }
+  return { start: boundedStart, end: boundedEnd, clamped: false };
+}
+
+// Server-owned normalization for the additive recall contract. Legacy modes
+// retain their current behavior; only fact/explain/full opt into the new plan.
+// This keeps HTTP and MCP callers on the same public endpoint while preventing
+// callers from bypassing bounded retrieval with arbitrary plan fields.
+export function resolveRecallPlan(input = {}) {
+  const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
+  const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
+  const fullAllowed = requested !== 'full' || input.explicit_mode === true;
+  const mode = requested === 'full' && !fullAllowed
+    ? 'explain'
+    : explicit ? requested : 'fact';
+  const operation = input.operation === 'timeline' ? 'timeline' : 'recall';
+  const structuredSource = input.source && typeof input.source === 'object' ? input.source : {};
+  const structuredTime = input.time && typeof input.time === 'object' ? input.time : {};
+  // Explicit flat arguments are the established public contract and win over
+  // inferred/structured values during the additive migration.
+  const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
+  const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
+  const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
+  const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
+  const range = normalizeTemporalRange(input.date_range || structuredTime.range);
+  const temporal = knownAt
+    ? 'known_at'
+    : validAt
+      ? 'valid_at'
+      : range
+        ? 'range'
+        : input.temporal === 'known_at'
+          ? 'known_at'
+          : 'current';
+  const budget = mode === 'full' ? 24_000 : mode === 'explain' ? 8_000 : 2_000;
+
+  return {
+    mode,
+    requested_mode: requested,
+    legacy: !explicit,
+    operation,
+    mode_downgraded: requested === 'full' && !fullAllowed ? 'full_requires_explicit_caller' : null,
+    temporal,
+    source: {
+      requested: !!(sourceDocumentId || sourceTitle),
+      document_id: sourceDocumentId,
+      title: sourceTitle,
+    },
+    time: {
+      mode: temporal,
+      valid_at: validAt,
+      known_at: knownAt,
+      range,
+    },
+    max_graph_hops: mode === 'fact' ? 0 : 1,
+    max_memories: operation === 'timeline' ? Math.min(Math.max(Number(input.limit) || 20, 1), 50) : 5,
+    context_budget: budget,
+    // Existing mode values retain their event-driven behavior. New modes are
+    // deliberate: fact is fast-only; explain/full permit evidence expansion.
+    expand_evidence: !explicit
+      ? requested === 'auto' || requested === 'hybrid' || requested === 'evidence'
+      : mode !== 'fact',
+    include_live: explicit && mode === 'fact'
+      ? false
+      : (!explicit ? input.include_live !== false : input.include_live === true),
+    // These are end-to-end retrieval budgets. A full request degrades to the
+    // completed explain-grade packet at the deadline; it never extends chat.
+    latency_budget_ms: mode === 'fact' ? 1_500 : 3_000,
+  };
+}
 
 // Event-time ranking boost: when the query carries a temporal token
 // (today/yesterday/last week/ISO date/month-name), multiplicatively lift
@@ -127,10 +228,37 @@ const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ 
 const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
 const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
+const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+
+// Legacy KB promotions can receive a strong retrieval score even when their
+// ingestion importance was below today's durable-memory admission threshold.
+// Keep those rows out of normal memory recall without hiding source evidence,
+// summaries, or syntheses used for explicit source reconstruction.
+export function filterLowSaliencePromotedMemories(memories, minImportance = KB_DURABLE_MIN_IMPORTANCE) {
+  return memories.filter((memory) => isDurableKbPromotionAdmitted(memory, minImportance));
+}
+
+export function mergePromotionImportance(memories, rows) {
+  const byId = new Map((rows || []).map((row) => [row.id, row.importanceScore]));
+  return memories.map((memory) => byId.has(memory.id)
+    ? { ...memory, importance_score: byId.get(memory.id) }
+    : memory);
+}
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
 ]);
+
+// Live data is expensive and may be broader than the source evidence already
+// selected for an answer. It is therefore a bounded expansion only: an
+// explicit live intent, or a retrieved connector/source anchor, plus surface
+// policy. No query-language heuristic decides this across languages.
+export function isLiveExpansionEligible({ includeLive, inspection, liveIntent = false, surfacePolicyAllowsLive = true }) {
+  if (!includeLive || !surfacePolicyAllowsLive) return false;
+  return liveIntent
+    || inspection?.docIds?.length > 0
+    || inspection?.platforms?.some((platform) => WORKSPACE_PLATFORMS.has(platform));
+}
 
 // ── Utility: with-timeout wrapper ───────────────────────────────────────────
 
@@ -196,16 +324,15 @@ async function hop1Memory({ store, query, options, ctx }) {
   // always carry the word "last").
   const inferredTags = matchedConnector && (isRecentish || hasValidAt) ? [matchedConnector] : null;
 
-  // Bi-temporal `valid_at` filter: snap recall to a past moment so the
-  // agent sees only memories whose document_date <= valid_at AND that
-  // were already known by then (created_at <= valid_at). recallPersisted
-  // honors a date_range param keyed on created_at; we also rely on the
-  // tag-anchored override below to apply document_date filter for the
-  // connector path. Anything else uses created_at as the bi-temporal
-  // baseline.
+  // Bi-temporal controls are independent: valid_at constrains the effective
+  // interval, while known_at constrains when HIVEMIND learned the record.
   const validAtDate = options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
     ? new Date(options.valid_at)
     : null;
+  const knownAtDate = options.known_at && !Number.isNaN(new Date(options.known_at).getTime())
+    ? new Date(options.known_at)
+    : null;
+  const snapshotValidAtDate = validAtDate;
   // Fast-path: if we already know we'll use the tag-anchored override,
   // skip the expensive FTS+vector recall — it adds ~1.5s and we'd discard
   // its output anyway. HOP1_TIMEOUT_MS=1500 was eating these calls.
@@ -230,7 +357,11 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
     ...(explicitDateRange
       ? { date_range: explicitDateRange }
-      : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
+      : {}),
+    ...(options.valid_at ? { valid_at: options.valid_at } : {}),
+    ...(options.known_at ? { known_at: options.known_at } : {}),
+    include_superseded: options.include_superseded === true,
+    exact_source: !!(options.source_document_id || options.source_title),
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -246,46 +377,62 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Also fires as a hard fallback when FTS returned 0 hits.
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
+  const missingPromotionImportance = mems.filter((memory) => {
+    const tags = Array.isArray(memory.tags) ? memory.tags : [];
+    return tags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  if (missingPromotionImportance.length && store.client?.memory?.findMany) {
+    try {
+      const importanceRows = await store.client.memory.findMany({
+        where: { id: { in: missingPromotionImportance.map((memory) => memory.id) } },
+        select: { id: true, importanceScore: true },
+      });
+      mems = mergePromotionImportance(mems, importanceRows);
+    } catch (error) {
+      console.warn('[recall-router] promotion importance hydration failed:', error.message);
+    }
+  }
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
   // Time-travel override: when valid_at is set and we have tags (caller-
   // supplied or inferred), also drop into the direct-fetch path so the
   // document_date <= valid_at filter applies AND we order by date.
-  const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
+  const timeTravelOverride = (validAtDate || knownAtDate) && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
   const callerTagOverride = callerTags && store.client?.memory;
   if ((recencyOverride || timeTravelOverride || callerTagOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
-      const orFilters = [];
-      if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
-      if (ctx.userId) orFilters.push({ userId: ctx.userId });
+      const accessWhere = scopedMemoryWhere({
+        user_id: ctx.userId,
+        org_id: ctx.orgId,
+        project: options.project || undefined,
+        access_context: scopedAccessCtx,
+      });
       const tagOnly = await store.client.memory.findMany({
         where: {
+          ...accessWhere,
           deletedAt: null,
           // valid_at queries need superseded versions too — show what was
           // current at that past moment (isLatest at valid_at, not now).
-          ...(validAtDate ? {} : { isLatest: true }),
+          ...(validAtDate || knownAtDate ? {} : { isLatest: true }),
           tags: { hasSome: effectiveTags },
-          ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
           // Time-travel: filter by EVENT TIME (document_date) only —
           // that's what users mean by "as of May 13" (msgs sent by then),
           // not "memories known by then". Bi-temporal createdAt filter
           // was excluding memories ingested today but sent earlier.
-          ...(validAtDate ? {
-            OR: [
-              { documentDate: { lte: validAtDate } },
-              {
-                AND: [
-                  { documentDate: null },
-                  { createdAt: { lte: validAtDate } },
-                ],
-              },
+          ...(snapshotValidAtDate ? {
+            AND: [
+              { OR: [{ validFrom: null }, { validFrom: { lte: snapshotValidAtDate } }] },
+              { OR: [{ validTo: null }, { validTo: { gt: snapshotValidAtDate } }] },
             ],
           } : {}),
+          ...(knownAtDate ? { createdAt: { lte: knownAtDate } } : {}),
         },
         orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
         take: Math.min((options.limit || HOP1_DEFAULT_LIMIT) * 4, 50),
         select: {
-          id: true, title: true, content: true, memoryType: true, tags: true,
-          createdAt: true, documentDate: true, importanceScore: true, sourceMetadata: true,
+          id: true, title: true, content: true, memoryType: true, tags: true, isLatest: true,
+          createdAt: true, documentDate: true, validFrom: true, validTo: true,
+          importanceScore: true, sourceMetadata: true,
         },
       });
       // Connector-specific quality filter. A memory tagged "slack" that
@@ -315,8 +462,12 @@ async function hop1Memory({ store, query, options, ctx }) {
         tags: m.tags || [],
         score: Number(m.importanceScore) || 0.5,
         created_at: m.createdAt,
-        valid_at: m.documentDate || m.createdAt,
+        valid_at: m.validFrom || m.documentDate || m.createdAt,
+        valid_from: m.validFrom || null,
+        valid_to: m.validTo || null,
+        is_latest: m.isLatest,
         source_metadata: m.sourceMetadata || null,
+        importance_score: m.importanceScore,
         _searchMethod: 'tag_fallback',
       }));
     } catch (err) {
@@ -335,6 +486,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     created_at: m.created_at,
     valid_at: m.valid_at || m.document_date,
     source_metadata: m.source_metadata || null,
+    importance_score: m.importance_score ?? m.importanceScore,
     // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
     ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
     ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),
@@ -396,7 +548,26 @@ export function inspectMemories(memories) {
 // (legacy data pre-`aebf344`).
 
 async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) {
-  if (!prisma?.knowledgeDocument || !filenames.length) return [];
+  if (!filenames.length) return [];
+  // Remote (self-host): KB docs live on the agent — list them and match filename→title client-side.
+  if (orgIsRemote(orgId)) {
+    try {
+      const out = await amrKbDocs(orgId, { limit: 200 });
+      const docs = out?.documents || [];
+      const lows = filenames.map((f) => String(f).toLowerCase());
+      return docs
+        .filter((d) => {
+          const t = String(d.title || d.filename || '').toLowerCase();
+          return lows.some((f) => t.includes(f));
+        })
+        .slice(0, 12)
+        .map((d) => d.id || d.document_id)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: {
@@ -416,7 +587,11 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
 // hop-2 dig the WHOLE project corpus when hop-1 gave no doc anchors — so a
 // buried term in a project doc that hop-1 never surfaced still reaches evidence.
 async function resolveProjectDocIds({ prisma, projectId, orgId }) {
-  if (!prisma?.knowledgeDocument || !projectId) return [];
+  if (!projectId) return [];
+  // Remote (self-host): agent kb-docs listing doesn't expose the scope-key project tag —
+  // return [] and let the caller's lexical fallback cover it.
+  if (orgIsRemote(orgId)) return [];
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: { orgId, tags: { has: `scope-key:project:${projectId}` } },
@@ -692,28 +867,70 @@ export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) 
 // @returns {Promise<{ evidence, live, trace }>}
 export async function recallEnhance({
   memories, query, ctx, evidenceService, prisma, includeLive = true,
+  includeGraph = false, includeAdjacent = false, deadlineMs = null,
+  liveIntent = false, surfacePolicyAllowsLive = true, liveQuery = hop3Live,
 }) {
   const startedAt = Date.now();
   const inspection = inspectMemories(memories || []);
+  const cap = (normal) => deadlineMs ? Math.min(normal, deadlineMs) : normal;
 
-  const [hop2, hop3] = await Promise.all([
+  const liveEligible = isLiveExpansionEligible({ includeLive, inspection, liveIntent, surfacePolicyAllowsLive });
+  const [hop2, hop3, graph] = await Promise.all([
     withTimeout(
       hop2Evidence({ evidenceService, query, ctx, inspection, prisma }),
-      HOP2_TIMEOUT_MS,
+      cap(HOP2_TIMEOUT_MS),
       { items: [], reason: 'timeout' },
     ),
-    !includeLive
+    !liveEligible
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : withTimeout(
+          liveQuery({ prisma, query, ctx, inspection }),
+          cap(HOP3_TIMEOUT_MS),
+          { items: [], reason: 'timeout' },
+        ),
+    !includeGraph
       ? Promise.resolve({ items: [], reason: 'disabled' })
       : withTimeout(
-          hop3Live({ prisma, query, ctx, inspection }),
-          HOP3_TIMEOUT_MS,
+          loadTypedGraphEvidence({
+            prisma,
+            memoryIds: (memories || []).map((m) => m.id).filter(Boolean),
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            accessContext: ctx.accessContext,
+          }),
+          cap(700),
           { items: [], reason: 'timeout' },
         ),
   ]);
 
+  let evidence = hop2.items;
+  let adjacentReason = 'disabled';
+  if (includeAdjacent && evidence.length && evidenceService?.hydrateAdjacentEvidence) {
+    const elapsed = Date.now() - startedAt;
+    const remaining = deadlineMs ? Math.max(1, deadlineMs - elapsed) : 900;
+    const adjacent = await withTimeout(
+      evidenceService.hydrateAdjacentEvidence({
+        anchors: evidence,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        perDocument: 3,
+        total: 12,
+      }),
+      Math.min(900, remaining),
+      null,
+    );
+    if (adjacent) {
+      evidence = adjacent;
+      adjacentReason = 'ordered-window';
+    } else {
+      adjacentReason = 'timeout';
+    }
+  }
+
   return {
-    evidence: hop2.items,
+    evidence,
     live:     hop3.items,
+    graph:    graph.items,
     trace: {
       sparse:            inspection.sparse,
       anchors: {
@@ -724,8 +941,135 @@ export async function recallEnhance({
       },
       evidence_trigger:  hop2.reason,
       live_trigger:      hop3.reason,
+      live_eligible:     liveEligible,
+      graph_trigger:     graph.reason,
+      adjacent_trigger:  adjacentReason,
       latency_ms:        { enhance: Date.now() - startedAt },
     },
+  };
+}
+
+export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {} }) {
+  if (!prisma?.relationship || !memoryIds.length || !orgId) return { items: [], reason: null };
+  const knownAt = normalizedIso(time.known_at);
+  const memoryTimeWhere = {
+    ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+  };
+  const rows = await prisma.relationship.findMany({
+    where: {
+      OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }],
+      ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+      fromMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
+      toMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
+    },
+    select: {
+      fromId: true, toId: true, type: true, confidence: true, metadata: true, createdAt: true,
+      fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
+      toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
+    },
+    take: 24,
+  });
+  const projectIds = new Set(accessContext?.projectIds || []);
+  const teamIds = new Set(accessContext?.teamIds || []);
+  const visible = (m) => {
+    if (!m) return false;
+    if (m.scope === 'personal') return m.userId === userId;
+    if (m.scope === 'project') {
+      const ids = [m.projectId, ...(m.memoryProjects || []).map((p) => p.projectId)].filter(Boolean);
+      return ids.some((id) => projectIds.has(id));
+    }
+    if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
+    if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
+    return false;
+  };
+  return {
+    reason: rows.length ? 'typed-one-hop' : null,
+    items: rows.filter((r) => visible(r.fromMemory) && visible(r.toMemory)).map((r) => ({
+      type: r.type,
+      from_id: r.fromId,
+      to_id: r.toId,
+      confidence: r.confidence,
+      created_at: r.createdAt,
+      metadata: r.metadata || {},
+      related: [r.fromMemory, r.toMemory]
+        .filter((m) => !memoryIds.includes(m.id))
+        .map((m) => ({ id: m.id, title: m.title, content: String(m.content || '').slice(0, 400), is_latest: m.isLatest })),
+    })),
+  };
+}
+
+export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], plan, trace, cutoffReason = null }) {
+  const full = plan?.mode === 'full';
+  const totalCap = full ? 12 : 8;
+  const perDocCap = full ? 8 : 3;
+  const perDoc = new Map();
+  const sourceSections = [];
+  for (const item of evidence) {
+    const documentId = item.documentId || item.document_id || item.document?.id || null;
+    const key = documentId || 'unknown';
+    if ((perDoc.get(key) || 0) >= perDocCap || sourceSections.length >= totalCap) continue;
+    perDoc.set(key, (perDoc.get(key) || 0) + 1);
+    sourceSections.push({
+      segment_id: item.segmentId || item.segment_id || null,
+      document_id: documentId,
+      document_title: item.document?.title || item.document_title || null,
+      source_platform: item.document?.sourcePlatform || item.source_platform || null,
+      // Snippets are query-centred by EvidenceRetrievalService. They are the
+      // precision payload; raw segment prefixes are only a fallback.
+      content: String(item.snippet || item.content || item.excerpt || '').slice(0, full ? 2400 : 900),
+      score: item.score ?? null,
+      page: item.metadata?.startPage || item.page || null,
+      segment_index: item.metadata?.segmentIndex ?? null,
+    });
+  }
+  const citations = [];
+  const seen = new Set();
+  for (const section of sourceSections) {
+    const key = section.segment_id || `${section.document_id}:${section.page || ''}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    citations.push({ id: `C${citations.length + 1}`, segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
+  }
+  for (const memory of citations.length === 0 ? memories.slice(0, 5) : []) {
+    if (!memory?.id) continue;
+    citations.push({
+      id: `C${citations.length + 1}`,
+      memory_id: memory.id,
+      segment_id: null,
+      document_id: memory.document_id || memory.documentId || null,
+      title: memory.title || null,
+      page: null,
+      source_label: memory.title || 'Workspace memory',
+    });
+  }
+  const conflicts = graph.filter((edge) => String(edge.type).toLowerCase() === 'contradicts');
+  return {
+    mode: plan?.mode || 'fact',
+    anchors: memories.slice(0, 5).map((m) => ({ id: m.id, title: m.title || null, score: m.score ?? null })),
+    facts: memories.slice(0, 5),
+    source_sections: sourceSections,
+    sourceSections,
+    graph_evidence: graph,
+    graphEvidence: graph,
+    conflicts,
+    live_evidence: live,
+    liveEvidence: live,
+    citations,
+    source_coverage: {
+      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
+      segments: sourceSections.length,
+      graph_edges: graph.length,
+      live_items: live.length,
+    },
+    coverage: {
+      facts: Math.min(memories.length, 5),
+      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
+      source_sections: sourceSections.length,
+      graph_edges: graph.length,
+      live_items: live.length,
+    },
+    cutoff_reason: cutoffReason,
+    trace,
   };
 }
 
@@ -756,12 +1100,93 @@ export class RecallRouter {
 
     const traceLatency = {};
     const startedAt = Date.now();
+    const recallPlan = resolveRecallPlan(options);
+    options = {
+      ...options,
+      source_document_id: recallPlan.source.document_id,
+      source_title: recallPlan.source.title,
+      valid_at: recallPlan.time.valid_at,
+      known_at: recallPlan.time.known_at,
+      date_range: recallPlan.time.range,
+      include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
+    };
+    const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
+    let cutoffReason = null;
+    let explicitSourceDocuments = [];
+    let explicitSourceHydration = null;
+    const explicitSourceRequested = recallPlan.source.requested;
+    if (this.evidence?.resolveSourceDocuments && explicitSourceRequested) {
+      explicitSourceDocuments = await withTimeout(
+        this.evidence.resolveSourceDocuments({
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          documentId: options.source_document_id || null,
+          title: options.source_title || null,
+        }),
+        Math.min(350, remainingBudget()),
+        [],
+      );
+      if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+        const fullSource = recallPlan.mode === 'full';
+        explicitSourceHydration = withTimeout(
+          this.evidence.hydrateSourceDocuments({
+            documents: explicitSourceDocuments,
+            query,
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            perDocument: fullSource ? 8 : 3,
+            total: fullSource ? 16 : 8,
+          }),
+          Math.min(fullSource ? 2_200 : 1_200, remainingBudget()),
+          { timed_out: true },
+        );
+      }
+    }
+    // A requested source is an authorization boundary, not a ranking hint.
+    // Never replace an unresolved source request with tenant-wide memories.
+    if (explicitSourceRequested && explicitSourceDocuments.length === 0) {
+      return {
+        memories: [], evidence: [], live: [],
+        trace: {
+          recall_plan: recallPlan,
+          hop1_count: 0,
+          sparse: true,
+          top_score: 0,
+          anchors: { filenames: [], doc_hashes: [], doc_ids: [], platforms: [], explicit_source_documents: [] },
+          evidence_trigger: 'source-not-found',
+          live_trigger: 'disabled',
+          tiers_fired: [],
+          cutoff_reason: 'source_not_found',
+          latency_ms: { total: Date.now() - startedAt },
+        },
+      };
+    }
+    // Source ingestion is immediately recallable. For explicit explain/full,
+    // start the tenant-scoped evidence lane alongside memory recall instead of
+    // waiting for asynchronous fact promotion to provide an anchor.
+    const sourceFirstEvidence = recallPlan.expand_evidence
+      ? (explicitSourceRequested && explicitSourceDocuments.length === 0
+        ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
+        : withTimeout(
+        hop2Evidence({
+          evidenceService: this.evidence,
+          query,
+          ctx,
+          inspection: explicitSourceDocuments.length
+            ? { ...inspectMemories([]), docIds: explicitSourceDocuments.map((document) => document.id) }
+            : inspectMemories([]),
+          prisma: this.prisma,
+        }),
+        Math.min(2_300, remainingBudget()),
+        { items: [], reason: 'timeout' },
+      ))
+      : null;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
     let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
-      HOP1_TIMEOUT_MS,
+      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
     // Project-scope fallback: if user has a project active but recall came
@@ -774,10 +1199,20 @@ export class RecallRouter {
     let projectFallbackFired = false;
     const _projectFallbackEnabled = process.env.RECALL_PROJECT_FALLBACK !== 'false';
     if (_projectFallbackEnabled && memories.length === 0 && ctx.projectId) {
-      const ctxBroad = { ...ctx, projectId: null };
+      // ISOLATION: the broad retry may escape to personal/org/team knowledge,
+      // but must NEVER surface ANOTHER project's scoped memories — asking about
+      // "Solvis" inside the Singulance project must not answer from the SOLVIS
+      // project. projectIds:[] makes every scope='project' memory fail the
+      // access check in the retrieval scope filter while personal/org/team
+      // memories still pass.
+      const ctxBroad = {
+        ...ctx,
+        projectId: null,
+        accessContext: { ...(ctx.accessContext || {}), projectIds: [] },
+      };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
-        HOP1_TIMEOUT_MS,
+        Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
         [],
       );
       projectFallbackFired = memories.length > 0;
@@ -792,18 +1227,25 @@ export class RecallRouter {
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
     const t2Start = Date.now();
     const [hop2, hop3] = await Promise.all([
-      withTimeout(
+      !recallPlan.expand_evidence
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : sourceFirstEvidence || withTimeout(
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
-        HOP2_TIMEOUT_MS,
+        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
         { items: [], reason: 'timeout' },
       ),
-      options.include_live === false
+      !isLiveExpansionEligible({
+        includeLive: recallPlan.include_live,
+        inspection,
+        liveIntent: options.live_intent === true,
+        surfacePolicyAllowsLive: options.surface_policy_allows_live !== false,
+      })
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
-            HOP3_TIMEOUT_MS,
+            Math.min(HOP3_TIMEOUT_MS, remainingBudget()),
             { items: [], reason: 'timeout' },
           ),
     ]);
@@ -817,10 +1259,14 @@ export class RecallRouter {
     // Fire in try/catch — never block recall on boost failure.
     if (this.clusterIndex && ctx.orgId) {
       try {
-        rankedMemories = await crossClusterEntityBoost(rankedMemories, {
-          clusterIndex:   this.clusterIndex,
-          organizationId: ctx.orgId,
-        });
+        rankedMemories = await withTimeout(
+          crossClusterEntityBoost(rankedMemories, {
+            clusterIndex:   this.clusterIndex,
+            organizationId: ctx.orgId,
+          }),
+          Math.min(350, remainingBudget()),
+          rankedMemories,
+        );
       } catch (boostErr) {
         console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
       }
@@ -844,6 +1290,7 @@ export class RecallRouter {
     if (!callerWantsAudit) {
       rankedMemories = rankedMemories.filter((m) => !(m.tags || []).includes('internal-audit'));
     }
+    rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
     rankedMemories = applyEventTimeBoost(rankedMemories, query);
@@ -869,7 +1316,13 @@ export class RecallRouter {
       const docId = m.source_metadata?.document_id;
       if (docId && !memoryByDocId.has(docId)) memoryByDocId.set(docId, m.id);
     }
-    const evidenceWithLineage = (hop2.items || []).map((e) => ({
+    let selectedEvidence = hop2.items || [];
+    if (explicitSourceHydration) {
+      const hydrated = await explicitSourceHydration;
+      if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
+      else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
+    }
+    const evidenceWithLineage = selectedEvidence.map((e) => ({
       ...e,
       linked_memory_id: memoryByDocId.get(e.documentId) || null,
     }));
@@ -880,10 +1333,12 @@ export class RecallRouter {
 
     // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
-    let deliverN = RECALL_DELIVER_LIMIT;
+    let deliverN = recallPlan.operation === 'timeline'
+      ? Math.min(options.limit || recallPlan.max_memories, 50)
+      : RECALL_DELIVER_LIMIT;
     try {
-      const cfg = await getRetrievalConfig(ctx.orgId);
-      if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
+      if (recallPlan.operation !== 'timeline' && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
     // Dreams-first quota: guarantee raw source evidence still appears in the
@@ -908,7 +1363,22 @@ export class RecallRouter {
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
-    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+    const rerankBudget = remainingBudget();
+    let deliverMemories = rerankBudget > 1
+      ? await withTimeout(
+        rerank(query, rankedMemories, { topN: deliverN }),
+        rerankBudget,
+        rankedMemories.slice(0, deliverN),
+      )
+      : rankedMemories.slice(0, deliverN);
+    if (recallPlan.operation === 'timeline') {
+      deliverMemories = [...deliverMemories].sort((left, right) => {
+        const leftTime = new Date(left.valid_from || left.valid_at || left.created_at || 0).getTime();
+        const rightTime = new Date(right.valid_from || right.valid_at || right.created_at || 0).getTime();
+        return leftTime - rightTime;
+      });
+    }
+    if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
 
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
@@ -958,6 +1428,7 @@ export class RecallRouter {
       })),
       live: hop3.items,
       trace: {
+        recall_plan:     recallPlan,
         hop1_count:      memories.length,
         sparse:          inspection.sparse,
         top_score:       Number(inspection.topScore.toFixed(3)),
@@ -966,10 +1437,15 @@ export class RecallRouter {
           doc_hashes: inspection.docHashes,
           doc_ids:    inspection.docIds,
           platforms:  inspection.platforms,
+          explicit_source_documents: explicitSourceDocuments.map((document) => ({
+            id: document.id,
+            title: document.title || null,
+          })),
         },
         evidence_trigger: hop2.reason,
         live_trigger:     hop3.reason,
         tiers_fired:      tiersFired,
+        cutoff_reason:    cutoffReason,
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
       },
     };

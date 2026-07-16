@@ -310,9 +310,13 @@ export class KbIngestQueue {
 
     try {
       const fileBuffer = fs.readFileSync(filePath); // durable bytes
-      const work = this.dfi.ingestKnowledgeDocument({
-        userId, orgId, filename, fileBuffer,
-        contentType: contentType || 'application/octet-stream',
+      // Canonical front door: file uploads normalize into the IngestEnvelope
+      // (source.type='kb'); ingestSource routes document+file → the same
+      // ingestKnowledgeDocument pipeline, adding uniform provenance.
+      const work = this.dfi.ingestSource({
+        userId, orgId,
+        source: { type: 'kb', filename },
+        file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
         metadata: metadata || {},
         onProgress: (p) => {
           try {

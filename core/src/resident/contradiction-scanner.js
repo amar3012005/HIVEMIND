@@ -11,6 +11,7 @@
  */
 
 import { chatCompletion, getDefaultModel } from '../knowledge/enterprise/litellm-client.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const SYSTEM_PROMPT = `You compare two short knowledge memories about the same topic and decide if they CONTRADICT.
 
@@ -42,6 +43,11 @@ export class ContradictionScanner {
 
   async scanForOrg(orgId) {
     const proposals = [];
+    // Remote (self-host): entity/memory tables are central-empty — the agent-routed cognition loop covers contradiction handling; skip this central-batch job.
+    if (orgIsRemote(orgId)) {
+      this.logger.log?.(`[contradiction-scanner] skip remote org=${String(orgId).slice(0, 8)} — central-batch scan not applicable`);
+      return proposals;
+    }
     try {
       // Find entities with most mentions in last 30 days
       const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);

@@ -940,6 +940,22 @@ Use only when the user explicitly asks to rename the assistant. NOT for setting 
       },
     },
     {
+      name: 'hivemind_chat_context',
+      description: `Build the same event-driven, source-grounded context used by /api/chat without generating the final answer. Returns facts, source sections, citations, coverage, and cutoff state for another LLM. A document-backed fact result receives one bounded evidence expansion; full raw-document hydration remains explicit-only.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The user question verbatim.' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full'], default: 'fact' },
+          project_id: { type: 'string', description: 'Optional accessible project UUID.' },
+          source_document_id: { type: 'string', description: 'Known document UUID; use with full.' },
+          source_title: { type: 'string', description: 'Known source title; use with full.' },
+          include_live: { type: 'boolean', default: false, description: 'Allow eligible live connector evidence.' },
+        },
+        required: ['query'],
+      },
+    },
+    {
       name: 'hivemind_set_voice',
       description: `Define how HIVEMIND speaks — tone, terminology, do/don't rules, signature phrases. Loaded into every Talk-to-HIVE system prompt. Re-calling with the same scope updates the profile.
 Use when the user wants to calibrate HIVEMIND's communication style for themselves (scope="personal") or for the whole org (scope="organization"). NOT for renaming the assistant — use hivemind_set_assistant_name. Organization scope overrides personal scope for shared members; personal scope applies only to the calling user. Content should be in freeform markdown (see parameter description for examples).`,
@@ -2490,30 +2506,42 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         // smart-ingest + entity_co_mention + relationship edges fire
         // before we return. Wall time ~3-8s on the canonical pipeline,
         // acceptable for an interactive save.
-        const saveResp = await apiClient.post('/api/memories?sync=true', {
+        // Canonical front door: MCP save_memory (and chat autosave, which calls
+        // this same tool) routes through POST /api/ingest/source as an ATOMIC
+        // ingest. Provenance is normalized to source:mcp; the engine still owns
+        // supersession (relationship carries {type,target_id}) + entity/edge
+        // creation via the smart router — ingestSource atomic does NOT skip it,
+        // so behaviour matches the old sync /api/memories path. Identity flows
+        // through the X-HM-User-Id/Org-Id headers apiClient already sets, so the
+        // endpoint resolves the correct principal (no body user_id/org_id).
+        const _proj = SCOPE_FIELDS.project_id
+          || (autoAttachedProjectId && !resolvedProjectId ? autoAttachedProjectId : null);
+        const _projIds = SCOPE_FIELDS.project_ids
+          || (autoAttachedProjectId && !resolvedProjectId ? [autoAttachedProjectId] : undefined);
+        const ingestResp = await apiClient.post('/api/ingest/source', {
+          mode: 'atomic',
           title,
           content,
-          memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
-          source_platform: 'mcp',
+          source: { type: 'mcp', source_id: 'mcp' },
           tags: normalizeTags(args.tags),
-          project: normalizeMemoryText(args.project, null) || null,
+          ...(_proj ? { scope: 'project', project_id: _proj } : {}),
+          ...(SCOPE_FIELDS.primary_team_id ? { primary_team_id: SCOPE_FIELDS.primary_team_id } : {}),
           relationship,
           metadata: {
-            source_type: args.source_type || 'text'
+            memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
+            source_type: args.source_type || 'text',
+            project: normalizeMemoryText(args.project, null) || null,
+            ...(_projIds ? { project_ids: _projIds } : {}),
           },
-          user_id: userId,
-          org_id: orgId,
-          smartIngest: true,
-          sync: true,
-          ...SCOPE_FIELDS,
-          // Auto-attach needs the same shape as explicit scoping: project_ids[]
-          // drives resolveScopedIngestPayload; bare project_id alone is ignored
-          // by the scope resolver and the save lands org-wide/personal.
-          ...(autoAttachedProjectId && !resolvedProjectId
-            ? { project_id: autoAttachedProjectId, project_ids: [autoAttachedProjectId], scope: 'project' }
-            : {}),
-          __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
+        const newId = ingestResp.memoryId || (Array.isArray(ingestResp.memoryIds) ? ingestResp.memoryIds[0] : null);
+        const saveResp = {
+          saved: ingestResp.ok === true && !!newId,
+          id: newId,
+          memory_id: newId,
+          operation: ingestResp.operation || 'created',
+          skipped: ingestResp.skipped || false,
+        };
         return formatToolContent({
           ...saveResp,
           scope: resolvedProjectId ? { project_id: resolvedProjectId } : { scope: 'org-wide' },
@@ -2684,6 +2712,46 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           return formatToolContent({ created: false, error: err.message });
         }
       }
+
+      case 'hivemind_chat_context':
+        {
+          const requestedMode = ['fact', 'explain', 'full'].includes(args.mode) ? args.mode : 'fact';
+          const recallArgs = {
+            query_context: args.query,
+            mode: requestedMode,
+            explicit_mode: true,
+            include_live: args.include_live === true,
+            ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
+            ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+            ...(args.source_title ? { source_title: args.source_title } : {}),
+          };
+          let result = await apiClient.post('/api/recall', recallArgs);
+
+          // Use returned provenance, not query wording, to decide whether the
+          // fact-only packet needs bounded source evidence. Never infer full.
+          const hasDocumentAnchor = (result.memories || []).some((memory) => {
+            const tags = memory?.tags || [];
+            return tags.some((tag) => typeof tag === 'string' && (
+              tag.startsWith('filename:') || tag.startsWith('doc-id:') || tag.startsWith('doc-hash:')
+            )) || !!memory?.source_metadata?.document_id;
+          });
+          if (requestedMode === 'fact' && !(result.evidence || []).length && hasDocumentAnchor) {
+            result = await apiClient.post('/api/recall', { ...recallArgs, mode: 'explain' });
+          }
+
+          return formatToolContent({
+            mode_used: result.mode_used || requestedMode,
+            context: result.evidence_packet || {
+              facts: result.memories || [],
+              sourceSections: result.evidence || [],
+              liveEvidence: result.live || [],
+              citations: [],
+              coverage: {},
+              cutoff_reason: result.cutoff_reason || null,
+            },
+            latency_ms: result.latency_ms || null,
+          });
+        }
 
       case 'hivemind_recall':
         {
@@ -3393,42 +3461,30 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.transaction_time && !args.valid_time) {
           throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
         }
-        // Default transaction_time to "now" when only valid_time is given —
-        // and warn callers passing a TX-time earlier than any memory's
-        // creation: empty result is correct, not a bug.
         const txTime = args.transaction_time || null;
         const validTime = args.valid_time || null;
-        const res = await apiClient.post('/api/temporal/as-of', {
-          transaction_time: txTime,
-          valid_time: validTime,
+        const query = args.memory_query || args.file_path || 'workspace memory';
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          time: {
+            ...(txTime ? { known_at: txTime } : {}),
+            ...(validTime ? { valid_at: validTime } : {}),
+          },
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
           project_id: args.project_id || null,
         });
-        let memories = res.memories || [];
-        if (args.file_path) {
-          memories = memories.filter(m => (m.tags || []).includes(`file:${args.file_path}`));
-        }
-        if (args.project) {
-          memories = memories.filter(m => m.project === args.project);
-        }
-        // Enterprise semantic filter (post-filter on title+content tokens)
-        if (args.memory_query && typeof args.memory_query === 'string') {
-          const q = args.memory_query.toLowerCase();
-          const tokens = q.split(/\s+/).filter(t => t.length >= 3);
-          if (tokens.length > 0) {
-            memories = memories.filter(m => {
-              const haystack = `${m.title || ''} ${m.content || ''}`.toLowerCase();
-              return tokens.some(t => haystack.includes(t));
-            });
-          }
-        }
-        const polished = polishMemories(memories);
+        const polished = polishMemories(res.memories || []);
         const hint = (polished.length === 0 && txTime)
           ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
           : null;
         return formatToolContent({
-          query: res.query || { transaction_time: txTime, valid_time: validTime },
+          query: { text: query, transaction_time: txTime, valid_time: validTime },
           count: polished.length,
           memories: polished,
+          evidence: res.evidence || [],
+          evidence_packet: res.evidence_packet || null,
+          cutoff_reason: res.cutoff_reason || null,
           ...(hint ? { hint } : {})
         });
       }
@@ -3438,34 +3494,53 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.time_a || !args.time_b) {
           throw new Error('hivemind_code_diff requires time_a and time_b');
         }
-        const tagsFilter = [];
-        if (args.file_path) tagsFilter.push(`file:${args.file_path}`);
-        if (Array.isArray(args.tags) && args.tags.length) tagsFilter.push(...args.tags);
-
-        const diff = await apiClient.post('/api/temporal/diff', {
-          time_a: args.time_a,
-          time_b: args.time_b,
-          tags_filter: tagsFilter.length ? tagsFilter : undefined
+        const from = new Date(args.time_a);
+        const to = new Date(args.time_b);
+        if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+          throw new Error('hivemind_diff requires valid time_a/time_b with time_a before time_b');
+        }
+        const tags = [...(Array.isArray(args.tags) ? args.tags : []), ...(args.file_path ? [`file:${args.file_path}`] : [])];
+        const query = args.memory_query || args.file_path || tags.join(' ') || 'workspace changes';
+        const recallAt = (value) => apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          time: { valid_at: value.toISOString() },
+          ...(tags.length ? { tags } : {}),
         });
-        return formatToolContent({ ...diff, file_path: args.file_path || null });
+        const [a, b] = await Promise.all([recallAt(from), recallAt(to)]);
+        const fromIds = new Set((a.memories || []).map((memory) => memory.id));
+        const toIds = new Set((b.memories || []).map((memory) => memory.id));
+        const added = (b.memories || []).filter((memory) => !fromIds.has(memory.id));
+        const removed = (a.memories || []).filter((memory) => !toIds.has(memory.id));
+        const persisted = (b.memories || []).filter((memory) => fromIds.has(memory.id));
+        const changedIds = new Set([...added, ...removed].map((memory) => memory.id));
+        const edges = [...(a.evidence_packet?.graphEvidence || []), ...(b.evidence_packet?.graphEvidence || [])];
+        const seenEdges = new Set();
+        const changes = edges.filter((edge) => {
+          const type = String(edge.type || '').toLowerCase();
+          const key = `${edge.from_id}|${edge.to_id}|${type}`;
+          if (!['updates', 'contradicts'].includes(type) || seenEdges.has(key)) return false;
+          if (!changedIds.has(edge.from_id) && !changedIds.has(edge.to_id)) return false;
+          seenEdges.add(key);
+          return true;
+        });
+        return formatToolContent({ query, from_date: args.time_a, to_date: args.time_b, added, removed, persisted, changes, from: a, to: b });
       }
 
       case 'hivemind_timeline':
       case 'hivemind_code_timeline': {
-        let memoryId = args.memory_id;
-        if (!memoryId && args.file_path) {
-          // Resolve latest memory tagged file:<path>
-          const list = await apiClient.get('/api/memories', {
-            params: { tags: `file:${args.file_path}`, limit: 1 }
-          });
-          const memories = Array.isArray(list) ? list : (list?.memories || list?.data || []);
-          memoryId = memories[0]?.id || null;
-        }
-        if (!memoryId) {
+        if (!args.memory_id && !args.file_path) {
           throw new Error('hivemind_code_timeline requires memory_id or a resolvable file_path');
         }
-        const res = await apiClient.post('/api/temporal/timeline', { memory_id: memoryId });
-        return formatToolContent(res);
+        const query = args.memory_query || args.file_path || args.memory_id;
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          operation: 'timeline',
+          include_superseded: true,
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
+        });
+        return formatToolContent({ query, timeline: res.memories || [], evidence_packet: res.evidence_packet || null, cutoff_reason: res.cutoff_reason || null });
       }
 
       default:

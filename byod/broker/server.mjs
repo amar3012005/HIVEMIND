@@ -1,0 +1,123 @@
+// hm-broker — runs on OUR side, next to the core. Accepts hm-agent enrollment: the customer's agent
+// presents the org API key + its reachable endpoint; the broker validates the key against Postgres,
+// resolves the orgId, and writes the agent into the shared registry file the core's remote-backend
+// reads (MNEME_AGENT_REGISTRY_FILE). From then on the core routes that org's recall/write/edge to the
+// agent (MNEME_MODE per-org = remote). No change to the core process — only the shared file.
+//
+// Env: DATABASE_URL, MNEME_AGENT_REGISTRY_FILE, BROKER_PORT (default 8790).
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import Pg from 'pg';
+
+const PORT = Number(process.env.BROKER_PORT || 8790);
+const REG = process.env.MNEME_AGENT_REGISTRY_FILE || die('MNEME_AGENT_REGISTRY_FILE required');
+const pool = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'), max: 4 });
+
+function die(m) { console.error(`[hm-broker] ${m}`); process.exit(1); }
+const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+const MAX_BODY_BYTES = 32 * 1024;
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch { resolve({}); } });
+  req.on('error', reject);
+});
+
+function loadReg() { try { return existsSync(REG) ? JSON.parse(readFileSync(REG, 'utf8')) : {}; } catch { return {}; } }
+function saveReg(o) {
+  const temp = `${REG}.tmp-${process.pid}`;
+  writeFileSync(temp, JSON.stringify(o), 'utf8');
+  renameSync(temp, REG);
+}
+
+function isSecureAgentUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:') return true;
+    if (url.protocol !== 'http:') return false;
+    const host = url.hostname.toLowerCase();
+    return host === 'localhost' || host === '::1' || host.endsWith('.ts.net')
+      || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
+      || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host);
+  } catch { return false; }
+}
+
+// Validate only self-hosted org keys. Managed tenants must never be able to
+// redirect core traffic to an arbitrary external endpoint through this broker.
+async function resolveOrg(apiKey) {
+  if (!apiKey) return null;
+  const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
+  const { rows } = await pool.query(
+    `SELECT k.org_id FROM api_keys k
+       JOIN organizations o ON o.id = k.org_id
+      WHERE k.key_hash = $1 AND k.revoked_at IS NULL AND o.hosting_mode = 'self_host'
+      LIMIT 1`,
+    [hash],
+  );
+  return rows[0]?.org_id || null;
+}
+
+http.createServer(async (req, res) => {
+  if (req.url === '/health') return send(res, 200, { ok: true });
+  if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
+  try {
+    const body = await readBody(req);
+    if (req.url === '/v1/byod/enroll') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      if (!body.agentUrl || !body.agentToken) return send(res, 400, { error: 'agentUrl + agentToken required' });
+      if (!isSecureAgentUrl(body.agentUrl)) return send(res, 400, { error: 'agentUrl must use HTTPS, or HTTP only over private/Tailscale/LAN networking' });
+      const reg = loadReg();
+      reg[orgId] = { url: body.agentUrl.replace(/\/$/, ''), token: body.agentToken };
+      saveReg(reg);
+      console.log(`[hm-broker] enrolled org=${orgId} → ${body.agentUrl}`);
+      return send(res, 200, { ok: true, orgId });
+    }
+    // Self-host model: the customer runs the FULL engine on their box. enroll = "validate my key, tell
+    // me which org I am" (called at setup, before the stack is up). register = "my instance is live at
+    // this URL" (so the central dashboard can reach/manage it).
+    if (req.url === '/v1/selfhost/enroll') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      console.log(`[hm-broker] selfhost enroll org=${orgId}`);
+      return send(res, 200, { ok: true, orgId });
+    }
+    if (req.url === '/v1/selfhost/register') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      if (!body.instanceUrl && !body.pgUrl) return send(res, 400, { error: 'instanceUrl or pgUrl required' });
+      if (body.instanceUrl && !isSecureAgentUrl(body.instanceUrl)) return send(res, 400, { error: 'instanceUrl must use HTTPS, or HTTP only over private/Tailscale/LAN networking' });
+      const reg = loadReg();
+      reg[orgId] = {
+        url: (body.instanceUrl || '').replace(/\/$/, ''),
+        token: body.agentToken || '',
+        pgUrl: body.pgUrl || '',          // full residency: the customer's Postgres (via their tunnel)
+        qdrantUrl: body.qdrantUrl || '',  // and their Qdrant, if hosted on-box
+        kind: 'selfhost',
+      };
+      saveReg(reg);
+      console.log(`[hm-broker] selfhost register org=${orgId} → ${body.instanceUrl}`);
+      return send(res, 200, { ok: true, orgId });
+    }
+    if (req.url === '/v1/byod/disenroll') {
+      const orgId = await resolveOrg(body.apiKey);
+      if (!orgId) return send(res, 401, { error: 'invalid api key' });
+      const reg = loadReg(); delete reg[orgId]; saveReg(reg);
+      return send(res, 200, { ok: true, orgId });
+    }
+    return send(res, 404, { error: 'not found' });
+  } catch (e) {
+    console.error('[hm-broker]', e.message);
+    return send(res, e.statusCode || 500, { error: e.message });
+  }
+}).listen(PORT, () => console.log(`[hm-broker] listening :${PORT} → registry ${REG}`));

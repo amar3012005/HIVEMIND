@@ -22,6 +22,9 @@
  * Source/raw memories and unparented manual syntheses are never touched.
  */
 
+import { orgIsRemote } from '../vector/mneme/driver.js';
+import { currentOrg } from '../db/prisma.js';
+
 const COGNITION_TAGS = ['cognition-loop', 'distilled-from-kb'];
 
 function isCognitionOutput(m) {
@@ -40,6 +43,12 @@ function isCognitionOutput(m) {
 export async function collectDerivedCandidates(prisma, rootIds) {
   const ids = Array.from(new Set((rootIds || []).filter(Boolean)));
   if (!ids.length) return [];
+  // Remote (self-host): edges/evidence live on the agent — agent-side orphan pruning not yet implemented.
+  const _collectOrg = currentOrg();
+  if (_collectOrg && orgIsRemote(_collectOrg)) {
+    console.log(`[orphan-pruner] skip remote org=${String(_collectOrg).slice(0, 8)} — agent-side orphan pruning not yet implemented`);
+    return [];
+  }
   const candidates = new Set();
   // Derives edges point FROM the synthesis TO its source — so a source in `ids`
   // is the `toId`; the derived memory is the `fromId`.
@@ -72,6 +81,11 @@ export async function collectDerivedCandidates(prisma, rootIds) {
  */
 export async function sweepOrphanedCognition({ prisma, orgId, limit = 2000, logger = console, qdrantUrl, qdrantKey }) {
   if (!prisma || !orgId) return { scanned: 0, prunedIds: [] };
+  // Remote (self-host): cognition rows live on the agent — agent-side orphan pruning not yet implemented.
+  if (orgIsRemote(orgId)) {
+    logger?.log?.(`[orphan-pruner] skip remote org=${String(orgId).slice(0, 8)} — agent-side orphan pruning not yet implemented`);
+    return { scanned: 0, prunedIds: [] };
+  }
   let cog = [];
   try {
     cog = await prisma.memory.findMany({
@@ -162,6 +176,11 @@ async function purgeDerived(prisma, ids, { orgId, qdrantUrl, qdrantKey, logger }
  * @returns {Promise<{ prunedIds: string[] }>}
  */
 export async function pruneOrphanedCognition({ prisma, orgId, candidateIds = [], maxDepth = 5, logger = console, qdrantUrl, qdrantKey }) {
+  // Remote (self-host): cognition rows/edges live on the agent — agent-side orphan pruning not yet implemented.
+  if (orgId && orgIsRemote(orgId)) {
+    logger?.log?.(`[orphan-pruner] skip remote org=${String(orgId).slice(0, 8)} — agent-side orphan pruning not yet implemented`);
+    return { prunedIds: [] };
+  }
   const prunedIds = [];
   const seen = new Set();
   let frontier = Array.from(new Set((candidateIds || []).filter(Boolean)));

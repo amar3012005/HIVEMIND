@@ -171,6 +171,31 @@ export class GmailAdapter extends BaseProviderAdapter {
     } catch (err) {
       console.warn(`[gmail-adapter] extractStructured failed: ${err.message}`);
     }
+    // ── Closed-loop reply detection ─────────────────────────────
+    // If this thread contains an INBOUND message (no SENT label = not our own
+    // copy) and we previously sent an outbound email on this thread (HyperAgents
+    // approved send → outbound_actions ledger), mark it replied. Runs on both
+    // the scheduled sync and the Pub/Sub webhook (both go through SyncEngine).
+    // Idempotent: `outcome IS NULL` guard means the FIRST reply wins. Raw SQL
+    // (not the Prisma model) so a client generated before the outbound_actions
+    // migration still works. Never blocks ingest — own try/catch.
+    try {
+      const hasInbound = (thread.messages || []).some(
+        (m) => !(m.labelIds || []).includes('SENT') && !(m.labelIds || []).includes('DRAFT'),
+      );
+      if (hasInbound && thread.id && ctx.org_id) {
+        const n = await ctx.prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."outbound_actions"
+              SET outcome = 'replied', outcome_at = now()
+            WHERE org_id = $1::uuid AND thread_id = $2 AND channel = 'email'
+              AND status = 'sent' AND outcome IS NULL`,
+          ctx.org_id, String(thread.id),
+        );
+        if (n > 0) console.log(`[gmail-adapter] reply detected on thread ${thread.id} → ${n} outbound action(s) marked replied`);
+      }
+    } catch (err) {
+      console.warn(`[gmail-adapter] reply-match failed (non-fatal): ${err.message}`);
+    }
   }
 
   // ─── Internal transport ──────────────────────────────────────

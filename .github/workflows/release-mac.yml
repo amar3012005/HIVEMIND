@@ -41,8 +41,8 @@ jobs:
       - name: Build Da-vinci React app
         working-directory: frontend/Da-vinci
         env:
-          REACT_APP_CONTROL_PLANE_URL: https://api.hivemind.davinciai.eu:8040
-          REACT_APP_CORE_API_URL: https://core.hivemind.davinciai.eu:8050
+          REACT_APP_CONTROL_PLANE_URL: https://api.singulancelabs.com
+          REACT_APP_CORE_API_URL: https://core.singulancelabs.com
           REACT_APP_HIVEMIND_SITE_HOST: electron
           CI: false
         run: npm run build
@@ -56,12 +56,30 @@ jobs:
           rm -rf electron-app/react-build
           cp -r frontend/Da-vinci/build electron-app/react-build
 
-      - name: Build & package DMG (unsigned, no notarization)
+      - name: Build, sign, notarize & publish (signs only if Apple secrets present)
         working-directory: electron-app
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-          ELECTRON_BUILDER_PUBLISH: never
-        run: npx electron-builder build --mac --publish=never
+          # Developer ID signing (base64 .p12 + password). If absent → unsigned build.
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # Notarization (afterSign hook skips when these are empty).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            echo "→ signing + notarizing build"
+            export CSC_IDENTITY_AUTO_DISCOVERY=true
+          else
+            echo "→ UNSIGNED build (no MAC_CSC_LINK secret) — set Apple secrets for robust auto-update"
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            npx electron-builder build --mac --publish always
+          else
+            npx electron-builder build --mac --publish never
+          fi
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
@@ -71,17 +89,6 @@ jobs:
             electron-app/dist/*.dmg
             electron-app/dist/*.zip
           if-no-files-found: error
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            electron-app/dist/*.dmg
-            electron-app/dist/*.zip
-            electron-app/dist/*.yml
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # NOTE: on tags, electron-builder (--publish always) creates the GitHub
+        # release and uploads dmg/zip/latest-mac.yml itself — the canonical
+        # electron-updater feed. No separate release step (avoids double-publish).

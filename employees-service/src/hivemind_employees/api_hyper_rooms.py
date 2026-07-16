@@ -64,6 +64,14 @@ from .db import (
     get_room_quality_mode,
     get_room_sim_mode,
     get_room_sim_agents,
+    get_room_evo_mode,
+    get_recent_turn_context,
+    get_employee_playbooks_map,
+    update_employee_playbook,
+    get_room_playbook,
+    get_connected_gmail,
+    update_room_playbook,
+    get_company_name,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -72,10 +80,12 @@ from .db import (
 from .hivemind_client import (
     connector_exec_emulated,
     google_exec_emulated,
+    list_canon_emulated,
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import run_director
+from .hyper.engine import (_openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
+                           _persona_fields, _evo_recall)
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +173,17 @@ _PLAN_BY_TURN: Dict[str, Dict[str, Any]] = {}
 _PENDING_APPROVALS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _PENDING_APPROVALS_CAP = 500
 
+# Phase 6 fix — goalkeeper seal ordering. The FE's SSE closes ON `seal`, and the
+# control-plane marks the turn sealed on the FIRST seal event — so a goalkeeper
+# re-round after a per-round seal streamed into a CLOSED pipe (its artifact only
+# appeared on refresh) and the second seal was dropped. While a turn_id is in
+# _GK_ACTIVE, the single-agent handler STASHES its seal here instead of emitting;
+# the goalkeeper emits ONE final seal (total cost + true duration) after the last
+# round. Same-process safe (the loop awaits the handler). Bounded.
+_GK_ACTIVE: Dict[str, bool] = {}
+_SEAL_BY_TURN: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_SEAL_BY_TURN_CAP = 200
+
 
 async def _register_and_emit_approvals(
     req: "RoomTurnRequest", pending: List[Dict[str, Any]]
@@ -193,6 +214,10 @@ async def _register_and_emit_approvals(
             # control-plane can resolve + execute the approval durably (survives
             # sidecar restarts / replicas). The FE ignores it.
             "descriptor": rec.get("descriptor"),
+            # Draft content → the FE's in-app Preview/edit/one-click-send popup
+            # (no Gmail redirect needed). Bounded; absent for non-email writes.
+            "to": rec.get("to"), "subject": rec.get("subject"),
+            "body_md": str(rec.get("body_md") or "")[:20000] or None,
         })
     log.info("[approval] room=%s queued=%d writes for approval",
              req.room_id, len(pending))
@@ -897,6 +922,25 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
         text = re.sub(r"<function=[\s\S]*?</function>", "", text).strip()
         # Also nuke residual single-line variants
         text = re.sub(r"<function=[^\n>]+>", "", text).strip()
+    # Strip leaked reasoning-model chain-of-thought so the bubble shows only
+    # the final humanised persona answer — never the model's private planning
+    # ("We need to respond as Theo, concise, 3-5 sentences..."). Two shapes:
+    #   • <think>…</think>  — deepseek-r1 / qwen (OpenRouter path)
+    #   • Harmony channel markers — gpt-oss analysis channel if reasoning_format
+    #     didn't fully suppress it. Keep only the `final` channel payload.
+    if "<think" in text.lower():
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+        # Unclosed <think> (truncated stream) → drop everything up to it.
+        text = re.sub(r"^[\s\S]*?<think>[\s\S]*$", "", text, flags=re.IGNORECASE).strip()
+    if "<|channel|>" in text or "<|message|>" in text:
+        # Prefer the explicit final-channel payload if present.
+        m = re.search(r"<\|channel\|>final<\|message\|>([\s\S]*?)(?:<\|end\|>|<\|return\|>|$)", text)
+        if m:
+            text = m.group(1).strip()
+        else:
+            # No final marker — strip the analysis block and any residual markers.
+            text = re.sub(r"<\|channel\|>analysis<\|message\|>[\s\S]*?(?=<\||$)", "", text)
+            text = re.sub(r"<\|[^>]*\|>", "", text).strip()
     return text
 
 
@@ -1635,6 +1679,9 @@ class RoomTurnRequest(BaseModel):
     # stored sim_mode is read. Optional so existing callers are unaffected (additive).
     sim_mode: Optional[str] = None
     sim_agents: Optional[int] = None  # population-sim cast size (10-100); per-turn override
+    # Self-evolving employees toggle ("on" reflects+injects per-agent playbooks). Per-turn override;
+    # else the room's stored evo_mode is read. Optional (existing callers unaffected, additive).
+    evo_mode: Optional[str] = None
     # Phase 4 — write-approval policy: "ask" holds side-effectful connector
     # writes for the user's approval; "auto" lets them fire. When unset, the
     # gate defaults to "ask" if the room has connectors enabled, else "auto".
@@ -1717,6 +1764,31 @@ def _is_deep_sim_prompt(user_message: str) -> bool:
     return any(t in msg for t in triggers)
 
 
+# Standing, orthogonal probes for the company brief — recall the org's identity, people,
+# customers, and direction so the brief grounds a turn even when the user's query alone
+# wouldn't surface them. Fanned out concurrently with the query (query-first, so query hits
+# win dedup ties). NOTE: this was previously undefined → _build_company_brief always raised
+# NameError → empty brief everywhere; defining it makes the brief actually load.
+_COMPANY_BRIEF_PROBES = [
+    "company overview — what this organisation does, its products, services, and market",
+    "founders, leadership, key people, and team",
+    "customers, clients, partners, and target market",
+    "goals, strategy, priorities, and current initiatives",
+]
+
+# Per-(org, project) TTL cache for the company brief. The brief is STANDING identity
+# (who the org is / products / customers / goals) — it changes slowly, but was rebuilt
+# via a 5-probe recall fan-out on EVERY turn, sitting on the critical path (up to 8s
+# before the director starts). Within the TTL every turn reuses it: latency ~0, recall
+# load -5 probes/turn. Query-specific facts still arrive fresh via the gather plan's
+# own recalls, so staleness only affects the standing block. Empty briefs (recall
+# outage) are never cached — the next turn retries.
+_BRIEF_CACHE: Dict[str, tuple] = {}
+# Standing identity changes slowly — 30min keeps sporadic rooms warm (was 600s: any
+# turn >10min after the last re-paid the 5-probe fan-out).
+_BRIEF_TTL_S = max(60, int(os.environ.get("HYPER_BRIEF_TTL_S", "1800") or "1800"))
+
+
 async def _build_company_brief(query: str, user_id: str, org_id: str,
                                api_key: str = "", max_memories: int = 25,
                                project_id: Optional[str] = None) -> str:
@@ -1725,6 +1797,10 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
     COMPANY CONTEXT block. Recalls via master+emulation (recall_emulated) so
     it reaches the org brain even when the rotated lead has no minted key.
     Best-effort: returns '' on any failure so the turn still runs."""
+    _ck = f"{org_id}|{project_id or ''}"
+    _hit = _BRIEF_CACHE.get(_ck)
+    if _hit and (time.time() - _hit[0]) < _BRIEF_TTL_S:
+        return _hit[1]
     seen_ids: Set[str] = set()
     seen_titles: Set[str] = set()
     collected: List[Dict[str, Any]] = []
@@ -1741,8 +1817,28 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
             return []
 
     # Probes are orthogonal — fan out concurrently so the brief adds one
-    # recall-latency to the pre-round phase, not five.
-    probe_results = await asyncio.gather(*[_probe(p) for p in probes])
+    # recall-latency to the pre-round phase, not five. The org-canon lane rides
+    # the same gather: tag-filtered PINNED company canon (identity/mission/
+    # positioning/ICP/team filed by onboarding) that is GUARANTEED into the
+    # brief regardless of vector scores — a dense KB corpus can't bury it.
+    probe_results_and_canon = await asyncio.gather(
+        list_canon_emulated(user_id=user_id, org_id=org_id, api_key=api_key, limit=8),
+        *[_probe(p) for p in probes],
+    )
+    canon_rows = probe_results_and_canon[0] or []
+    probe_results = probe_results_and_canon[1:]
+    canon_lines: List[str] = []
+    for r in canon_rows:
+        mid = str(r.get("id") or r.get("memory_id") or "")
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            continue
+        if mid:
+            seen_ids.add(mid)
+        if title:
+            seen_titles.add(title.lower())
+        canon_lines.append(f"- {content[:260]}{'…' if len(content) > 260 else ''}")
     # Preserve probe order (query first) when deduping so the query-specific
     # hits win ties over the generic company probes.
     for rows in probe_results:
@@ -1759,7 +1855,7 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
             if key_title:
                 seen_titles.add(key_title)
             collected.append(r)
-    if not collected:
+    if not collected and not canon_lines:
         return ""
     # Highest-scored first so the budget keeps the strongest signal.
     collected.sort(key=lambda r: float(r.get("score", 0)), reverse=True)
@@ -1772,17 +1868,27 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
         snippet = content[:220] + ("…" if len(content) > 220 else "")
         prefix = f'"{title}" — ' if title else ""
         lines_out.append(f"- {prefix}{snippet}")
-    if not lines_out:
+    if not lines_out and not canon_lines:
         return ""
-    log.info("[brief] built company context: %d memories from %d probes",
-             len(lines_out), len(probes))
-    return (
+    log.info("[brief] built company context: %d memories from %d probes + %d canon",
+             len(lines_out), len(probes), len(canon_lines))
+    _canon_block = (
+        "COMPANY CANON — the authoritative identity of this organisation "
+        "(mission, positioning, ICP, team), filed at onboarding. This overrides "
+        "any conflicting stray fact below:\n" + "\n".join(canon_lines) + "\n\n"
+    ) if canon_lines else ""
+    _brief = (
+        _canon_block +
         "COMPANY CONTEXT — standing facts about this business, its people, "
         "products, customers and goals. Ground every claim in these; this is "
         "WHO and WHAT you are reasoning about:\n"
         + "\n".join(lines_out)
         + "\n"
     )
+    _BRIEF_CACHE[_ck] = (time.time(), _brief)
+    if len(_BRIEF_CACHE) > 512:  # bound: multi-tenant sidecar, never grow unbounded
+        _BRIEF_CACHE.pop(next(iter(_BRIEF_CACHE)), None)
+    return _brief
 
 
 # ─── Main orchestrator ─────────────────────────────────────────────────
@@ -1796,7 +1902,16 @@ _PLAN_OUTPUTS = {"email", "doc", "sheet", "slack", "ticket", "crm", "decision", 
 _SEND_INTENT_RE = re.compile(
     r"\b(e-?mail|send|sent|sending|reply|replies|replying|respond|responding|"
     r"forward|cc\b|draft(?:ing)?\s+(?:an?\s+)?(?:e-?mail|mail|message|note|reply)|"
-    r"write\s+(?:back|to|an?\s+(?:e-?mail|mail|note|message)))\b",
+    r"write\s+(?:back|to|an?\s+(?:e-?mail|mail|note|message))|"
+    # softer-but-clear outreach phrasings (precision-guarded so nouns don't misfire):
+    r"reach(?:ing)?\s+out|follow[\s-]?up\s+with|following\s+up\s+with|get(?:ting)?\s+in\s+touch|"
+    r"outreach|cold[\s-]?email|"
+    r"shoot\s+(?:an?\s+)?(?:e-?mail|mail|message|note)|"
+    r"drop\s+(?:an?\s+)?(?:line|note|message|mail)\s+to|"
+    # ping/notify/message/contact only when followed by @ or a Capitalized name/org "
+    # (inline case-sensitive (?-i:[A-Z]) so the global IGNORECASE doesn't defeat the guard):
+    r"(?:ping|notify|message|contact)\s+(?:@\w+|(?-i:[A-Z]\w*))|"
+    r"intro(?:duce)?\b[^.\n]{0,30}?\bto\b)\b",
     re.IGNORECASE,
 )
 
@@ -1841,6 +1956,8 @@ async def _verify_turn(
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
+    company_name: str = "",
+    company_context_missing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Phase 5 — recon/verify pass. Before the turn seals, cross-check the
     produced evidence against the lead's `done_criterion`: artifact exists (or
@@ -1868,6 +1985,8 @@ async def _verify_turn(
         "writes_pending_approval": [p.get("label") for p in pending],
         "produced_artifacts": produced,
         "memory_hits": int((blackboard or {}).get("hit_count", 0) or 0),
+        "company_name": company_name or None,
+        "company_context_missing": bool(company_context_missing),
         "gathered_facts": [str(f)[:200] for f in ((blackboard or {}).get("facts") or [])][:24],
         "final_excerpt": (final_text or "")[:1600],
     }
@@ -1930,6 +2049,12 @@ async def _verify_turn(
         "when hivemind_web_search was NOT used this turn (if web_search WAS used, a web citation backed "
         "by its result IS grounded). A claim the text marks UNVERIFIED is honest and NEVER lowers "
         "grounded_ok.\n"
+        "- COMPANY IDENTITY: when company_name is set, the deliverable must be about THAT company. "
+        "If the text asserts facts about the organisation's identity/market/products under a DIFFERENT "
+        "organisation name with no backing in gathered_facts, that is a fabrication → grounded_ok=false. "
+        "When company_context_missing is true, any confident company-specific claim (its market, its "
+        "customers, its positioning) is UNGROUNDED by definition → grounded_ok=false + a gap naming the "
+        "missing company context.\n"
         "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
@@ -1972,6 +2097,23 @@ async def _verify_turn(
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
     }
+    # ── Deterministic company-grounding gate (does NOT trust the LLM verdict) ──
+    # A company-scoped turn with NO company context cannot be grounded: the room
+    # had nothing real to stand on, so a plausible-sounding deliverable is exactly
+    # the failure mode to block. Same when a known canonical company name never
+    # appears in a company-scoped deliverable (identity substitution).
+    _company_scoped = bool(re.search(r"\b(our|we|us|company)\b", f"{req.room_goal or ''} {req.user_message or ''}", re.I))
+    if _company_scoped and company_context_missing:
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
+            "company context missing — the room had no company brief/canon, so company-specific claims cannot be grounded"]
+        verdict["company_context_missing"] = True
+    elif _company_scoped and company_name and company_name.lower() not in (final_text or "").lower():
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
+            f"deliverable never references the company's canonical name ({company_name}) — possible identity substitution"]
     return verdict
 
 
@@ -2065,7 +2207,7 @@ async def _produce_doc(req: "RoomTurnRequest", plan: Dict[str, Any],
         "docs_create", {"title": title, "content": body}, user_id=req.user_id, org_id=req.org_id)
     url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url")
     if url:
-        record_artifact("google-docs", url, title=title, label=f"Open “{title}”")
+        record_artifact("google-docs", url, title=title, label=f"Open “{title}”", body_md=ctx.get("body") or "")
         log.info("[produce] doc → %s", url)
         return {"url": url, "title": title}
     if isinstance(res, dict) and res.get("error"):
@@ -2135,7 +2277,7 @@ async def _produce_notion(req: "RoomTurnRequest", plan: Dict[str, Any],
         user_id=req.user_id, org_id=req.org_id)
     url = _extract_notion_url(res)
     if url:
-        record_artifact("notion", url, title=title, label=f"Open “{title}” in Notion")
+        record_artifact("notion", url, title=title, label=f"Open “{title}” in Notion", body_md=ctx.get("body") or "")
         log.info("[produce] notion page → %s", url)
         return {"url": url, "title": title}
     err = (res or {}).get("error") if isinstance(res, dict) else None
@@ -2164,23 +2306,57 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
     # Agent-driven recipient fallback: an owner may have RECALLED the contact from
     # HIVEMIND during EXECUTE — scan the executed work + synthesis for a real email.
     if not to:
-        _pool = " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + (ctx.get("body") or "")
+        # Prefer the enriched PROSPECT rows on the board (real Impressum emails)
+        # over a stray address in the body — the synthesis signature often carries
+        # the SENDER's own placeholder (e.g. email@ourcompany.com), which must NEVER
+        # become the recipient. Own-domain + placeholder local-parts are excluded.
+        own = set()
+        try:
+            for tok in re.findall(r"[\w.+-]+@([\w.-]+\.\w+)", (ctx.get("sender_email") or "")):
+                own.add(tok.lower())
+        except Exception:  # noqa: BLE001
+            pass
+        # Own brand from the room's company (done_criterion carries "Company: X").
+        _dc = str(plan.get("done_criterion") or "")
+        _m = re.search(r"Company:\s*([A-Za-z0-9][\w&.\- ]{1,40})", _dc)
+        brand = (_m.group(1).strip().split()[0].lower() if _m else "")
+        _PLACEHOLDER_LOCAL = {"email", "your", "yourname", "name", "firstname", "lastname",
+                              "recipient", "sender", "me", "user", "you", "prospect"}
+        # Rank prospect-board emails first, then body emails.
+        board = "\n".join(x for x in (ctx.get("prospect_emails") or []))
+        _pool = board + "\n" + " ".join(c.get("contribution", "") for c in (plan.get("execution") or [])) + " " + (ctx.get("body") or "")
         for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", _pool):
-            low = addr.lower()
+            low = addr.lower(); local = low.split("@", 1)[0]; dom = low.split("@", 1)[1]
             if "noreply" in low or "no-reply" in low or "example." in low:
+                continue
+            if local in _PLACEHOLDER_LOCAL:
+                continue
+            if dom in own:
+                continue
+            if brand and len(brand) >= 4 and brand in dom:
                 continue
             to = addr
             break
-    if not to:
-        log.info("[produce] email skipped — no recipient")
-        return {"skipped": "no verified recipient (org directory / Gmail / HIVEMIND recall all empty)"}
+    # No verified recipient → DON'T skip to nothing (which degrades to a generic doc). Still DRAFT
+    # the email in the owner's Gmail (empty To) so they review + add recipients + send themselves.
+    # Never auto-sends (no approval queued). Honors intended_output=email instead of a report.
+    _no_recipient = not to
     # Dependency gate: if an EARLIER step was meant to create the artifact this
     # email links but it was NOT produced, do NOT draft an email with a fabricated
     # link — skip honestly so the seal reports the real blocker.
     if ctx.get("expects_prior_artifact") and not ctx.get("last_artifact_url"):
         return {"skipped": "the file this email was meant to link was never created, so no email was drafted"}
     body = ctx.get("body") or ""
-    subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
+    # Synth appends non-email material (prospect tables, timelines) under this marker —
+    # it stays in the room; ONLY the part above it is the email.
+    body = re.split(r"^-{3,}\s*SUPPORTING MATERIAL\s*-{3,}\s*$", body,
+                    maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)[0].strip() or body
+    _subj_m = re.search(r"^\s*subject\s*:\s*(.+)$", body, flags=re.IGNORECASE | re.MULTILINE)
+    _subj = (_subj_m.group(1).strip().strip("*") if _subj_m else "")
+    if _subj and "supporting material" not in _subj.lower():
+        subject = _subj
+    else:
+        subject = step.get("title") or _derive_title(plan, body, req.room_goal or "A message")
     email_body = re.sub(r"^\s*(subject|title)\s*:.*$", "", body, count=1,
                         flags=re.IGNORECASE | re.MULTILINE).strip() or body
     # Thread the REAL upstream artifact URL in; strip/replace any fabricated link.
@@ -2198,17 +2374,28 @@ async def _produce_email(req: "RoomTurnRequest", plan: Dict[str, Any],
         email_body = _PLACEHOLDER_URL_RE.sub("", email_body)
         email_body = _GDOCS_URL_RE.sub("", email_body).strip()
     res = await google_exec_emulated(
-        "gmail_create_draft", {"to": to, "subject": subject, "body": email_body},
+        # markdown:True → the core bridge converts the agent's markdown into a polished
+        # HTML alternative (real bold/tables, mermaid stripped) instead of raw ** | ``` in Gmail.
+        "gmail_create_draft", {"to": to, "subject": subject, "body": email_body, "markdown": True},
         user_id=req.user_id, org_id=req.org_id)
     draft_id = ((res or {}).get("result") or res or {}).get("draftId") or (res or {}).get("draftId")
     url = ((res or {}).get("result") or res or {}).get("url") or (res or {}).get("url") or ""
     if draft_id:
-        queue_email_approval(to, subject, draft_id, url)
+        if _no_recipient:
+            log.info("[produce] email drafted with NO recipient — review + add recipients in Gmail")
+            return {"draft_id": draft_id, "url": url, "to": "", "needs_recipient": True,
+                    "note": "Drafted in Gmail with no recipient — no verified contact was found. "
+                            "Review it, add recipients, and send from Gmail."}
+        queue_email_approval(to, subject, draft_id, url, body_md=email_body)
         log.info("[produce] email draft → %s", to)
         return {"draft_id": draft_id, "url": url, "to": to}
     if isinstance(res, dict) and res.get("error"):
         await _surface_produce_error(req, plan, "Gmail draft", res.get("error"))
-    return {"skipped": "the Gmail draft could not be created"}
+    # Draft couldn't be saved. The email TEXT was still written by synth (intended_output=email),
+    # so say that honestly rather than implying nothing was produced.
+    return {"skipped": ("no verified recipient and the Gmail draft could not be saved — the email text is "
+                        "in the answer above; add recipients to send" if _no_recipient
+                        else "the Gmail draft could not be created")}
 
 
 # "deliver X through/via/in a sheet|doc" → the artifact is a PREREQUISITE the
@@ -2333,7 +2520,8 @@ async def _produce_output(req: "RoomTurnRequest", final_text: str) -> None:
     # A non-terminal doc/sheet step is a prerequisite the terminal step references.
     has_prereq_artifact = any(s.get("kind") in ("doc", "sheet") for s in steps[:-1])
     ctx: Dict[str, Any] = {"body": body, "artifacts": [], "last_artifact_url": None,
-                           "expects_prior_artifact": has_prereq_artifact}
+                           "expects_prior_artifact": has_prereq_artifact,
+                           "sender_email": str(plan.get("sender_email") or "")}
     skips: List[str] = []
     last_result: Dict[str, Any] = {}
     try:
@@ -2379,6 +2567,8 @@ async def _verify_and_emit(
     tool_call_counts: Optional[Dict[str, int]] = None,
     blackboard: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
+    company_name: str = "",
+    company_context_missing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Run the verify pass, emit a `verify` event, stash the verdict on the
     plan (so the handler/P6 goalkeeper can read it), and return it."""
@@ -2388,6 +2578,7 @@ async def _verify_and_emit(
     verdict = await _verify_turn(
         req, lead, final_text=final_text,
         tool_call_counts=tool_call_counts, blackboard=blackboard, model=model,
+        company_name=company_name, company_context_missing=company_context_missing,
     )
     if verdict is None:
         return None
@@ -2626,9 +2817,103 @@ async def _orchestrate_single_agent(
             _sim_agents = await get_room_sim_agents(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _sim_agents = 24
-    log.info("[single] room=%s quality=%s sim=%s/%d models=(%s, %s, %s)",
-             req.room_id, _qmode, _sim_mode, _sim_agents, _dir_m, _per_m, _syn_m)
+    # Self-evolving employees (ADDITIONAL, opt-in) — req.evo_mode (eval override) wins, else the
+    # room's stored toggle. When on, load each participant's GLOBAL playbook (lessons across ALL
+    # rooms, on digital_employees) for this turn. Never raises (additive, dormant).
+    _evo_mode = str(getattr(req, "evo_mode", "") or "").strip().lower()
+    if not _evo_mode:
+        try:
+            _evo_mode = await get_room_evo_mode(req.room_id, org_id=req.org_id)
+        except Exception:  # noqa: BLE001
+            _evo_mode = "off"
+    _evo_playbooks: Dict[str, list] = {}
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
+        try:
+            _p_slugs = [str(p.get("slug")) for p in (participants or []) if p.get("slug")]
+            _evo_playbooks = await get_employee_playbooks_map(req.org_id, _p_slugs)
+        except Exception:  # noqa: BLE001
+            _evo_playbooks = {}
+    log.info("[single] room=%s quality=%s sim=%s/%d evo=%s/%d models=(%s, %s, %s)",
+             req.room_id, _qmode, _sim_mode, _sim_agents, _evo_mode, len(_evo_playbooks),
+             _dir_m, _per_m, _syn_m)
 
+    # FIRST PAINT ≤ ~0.3s: a typing note BEFORE the brief build. The cold brief takes up
+    # to 8s and the engine's own first typing only fires after it — the room looked dead
+    # from send until then.
+    try:
+        await _emit({"t": "typing", "agent": (lead or {}).get("slug") or "director",
+                     "note": f"{(lead or {}).get('name') or 'The lead'} — on it, pulling the company context…"})
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Org grounding — recall a standing COMPANY CONTEXT (name, products, customers, market) ONCE
+    # before the director plans, so its gather-PLAN (recall_queries + web_query) AND the synthesis
+    # are specific to THIS company, not a generic industry. Master+emulation recall (no minted key
+    # needed — reaches the org brain); bounded + best-effort so it never stalls or sinks the turn.
+    _company_brief = ""
+    try:
+        _company_brief = await asyncio.wait_for(
+            _build_company_brief(req.user_message, req.user_id, req.org_id, "", project_id=req.project_id),
+            timeout=8.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — grounding is best-effort, never fatal
+        log.warning("[single] company brief failed (non-fatal): %s", exc)
+        _company_brief = ""
+    if not _company_brief:
+        # One retry with a longer window: an empty brief on a company-scoped task
+        # now HARD-FAILS verification (grounding gate), so a transient recall miss
+        # is worth 12 more seconds — much cheaper than an escalated turn.
+        try:
+            _company_brief = await asyncio.wait_for(
+                _build_company_brief(req.user_message, req.user_id, req.org_id, "", project_id=req.project_id),
+                timeout=12.0,
+            )
+        except Exception:  # noqa: BLE001
+            _company_brief = ""
+    # Canonical company identity for the verification gate: the onboarded company
+    # name + whether the room is flying blind on company context.
+    _company_name = ""
+    try:
+        _company_name = await get_company_name(req.org_id)
+    except Exception:  # noqa: BLE001
+        _company_name = ""
+    _company_ctx_missing = not (_company_brief or "").strip()
+    if _company_ctx_missing:
+        await _emit({"t": "warning", "code": "company_context_missing",
+                     "note": "No company brief/canon could be recalled — company-specific claims will fail verification."})
+    log.info("[single] room=%s company_brief=%d chars company=%s ctx_missing=%s",
+             req.room_id, len(_company_brief or ""), _company_name or "-", _company_ctx_missing)
+
+    # Derive the intended deliverable + capability-gate it BEFORE the run, so SYNTH writes the right
+    # FORMAT (a ready-to-send email vs a generic report). If the artifact's connector isn't enabled
+    # for the room, downgrade to a text answer — never write the wrong format or call an absent connector.
+    intended_output = _derive_intended_output(req.user_message)
+    # EVENT-DRIVEN outreach intent: a room whose GOAL is outreach-shaped (the
+    # onboarding task's own text — "outreach", "cold email", "messaging" — rides
+    # into the room goal at task-open) upgrades a generic first turn to a
+    # ready-to-send EMAIL deliverable. No task is hardcoded: the trigger is the
+    # task's language, so any outreach-tagged task drives the compose card.
+    if intended_output == "answer" and re.search(
+            r"\b(outreach|cold[- ]?email|email (campaign|sequence|messaging)|messaging)\b",
+            f"{req.room_goal or ''}", re.I):
+        intended_output = "email"
+    if not _artifact_connector_enabled(intended_output, conns):
+        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
+                 intended_output, req.room_id, conns)
+        intended_output = "answer"
+    # Room-level learned method lessons (skill sequences that worked for this room
+    # kind) prime the planner's skill choice. Best-effort — [] pre-migration.
+    _room_playbook: list = []
+    try:
+        _room_playbook = await get_room_playbook(req.room_id, org_id=req.org_id)
+    except Exception:  # noqa: BLE001
+        _room_playbook = []
+
+    _sender_email = ""
+    try:
+        _sender_email = await get_connected_gmail(req.user_id, req.org_id)
+    except Exception:  # noqa: BLE001
+        _sender_email = ""
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2639,6 +2924,9 @@ async def _orchestrate_single_agent(
             room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
             director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
             sim_mode=_sim_mode, sim_agents=_sim_agents,
+            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
+            company_brief=_company_brief, intended_output=intended_output,
+            room_playbook=_room_playbook, sender_email=_sender_email,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
@@ -2653,16 +2941,8 @@ async def _orchestrate_single_agent(
     _io = result.get("io") or {}
     _tok_by = result.get("tok_by") or {}
 
-    # 2. PLAN — derive output kind + a plan dict the producer + verifier consume.
-    intended_output = _derive_intended_output(req.user_message)
-    # Capability gate: a connector-backed artifact (doc/sheet→Google, email→Gmail,
-    # notion→Notion) can only be produced if that connector is TOGGLED ON for this room.
-    # If it isn't, downgrade to a TEXT answer — never call a connector the room didn't
-    # enable (it would hang on an absent/dead token and block a complete deliverable).
-    if not _artifact_connector_enabled(intended_output, conns):
-        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
-                 intended_output, req.room_id, conns)
-        intended_output = "answer"
+    # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
+    # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
     done_txt = req.room_goal or req.user_message
     contributions = [
         {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",
@@ -2709,6 +2989,7 @@ async def _orchestrate_single_agent(
         "execution": contributions,
         "verified_contacts": _vc,
         "enabled_connectors": conns,
+        "sender_email": _sender_email,
     }
 
     # 3. PRODUCE (centralized, idempotent).
@@ -2724,7 +3005,9 @@ async def _orchestrate_single_agent(
         await _verify_and_emit(req, lead, final_text=final_text,
                                blackboard={"hit_count": gather_count,
                                            "facts": result.get("gather_facts") or []},
-                               model=_m_recon)
+                               model=_m_recon,
+                               company_name=_company_name,
+                               company_context_missing=_company_ctx_missing)
     except Exception as exc:  # noqa: BLE001
         log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
@@ -2739,13 +3022,92 @@ async def _orchestrate_single_agent(
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
 
-    await _emit({"t": "seal", "cost_tokens": cost_tokens, "status": status,
-                 "duration_ms": int((time.time() - started) * 1000), "engine": "single",
-                 "tokens_in": int(_io.get("input", 0) or 0),
-                 "tokens_out": int(_io.get("output", 0) or 0),
-                 "tokens_cached": int(_io.get("cached", 0) or 0),
-                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
-                 "quality_mode": _qmode})
+    # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal so the FE (SSE closes on
+    # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL
+    # outcome, then persists to the GLOBAL playbook (digital_employees) — learning compounds across
+    # ALL rooms. Best-effort + org-scoped; any failure never blocks the seal.
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
+        try:
+            _outcome = {
+                "verdict": _gv if isinstance(_gv, dict) else {},
+                "status": status,
+                "pending_writes": bool(pending),
+                "user_signal": (str(getattr(req, "user_signal", "") or "").strip() or None),
+            }
+            _merged, _room_lessons = await evo_reflect_and_merge(
+                evo_playbooks=_evo_playbooks, transcript=transcript, participants=participants,
+                final_text=final_text, outcome=_outcome, reflect_model=None,
+                skills_used=list(result.get("skills_used") or []),
+                room_kind=str(result.get("room_kind") or ""),
+                room_playbook=_room_playbook,
+            )
+            # ROOM-level method lessons (which skill sequences worked for this room
+            # kind) persist on the room itself and prime the next turn's planner.
+            if isinstance(_room_lessons, list) and _room_lessons:
+                _rok = await update_room_playbook(req.room_id, req.org_id, _room_lessons)
+                log.info("[single] room=%s room_playbook persisted=%s lessons=%d",
+                         req.room_id, _rok, len(_room_lessons))
+            if isinstance(_merged, dict) and _merged:
+                _oks = [await update_employee_playbook(req.org_id, str(_slug), _lessons)
+                        for _slug, _lessons in _merged.items()]
+                ok = any(_oks)
+                _names = {str(p.get("slug")): (p.get("name") or p.get("slug")) for p in (participants or [])}
+                _evo_emp = []
+                for _slug, _lessons in _merged.items():
+                    _added = max(0, len(_lessons) - len(_evo_playbooks.get(_slug, [])))
+                    _evo_emp.append({"slug": _slug, "name": _names.get(str(_slug), _slug),
+                                     "added": _added, "total": len(_lessons)})
+                _evo_added_total = sum(e["added"] for e in _evo_emp)
+                if ok and _evo_added_total > 0:
+                    await _emit({"t": "self_evolve", "employees": _evo_emp,
+                                 "added": _evo_added_total, "playbooks": _merged})
+                log.info("[single] room=%s evo reflected+persisted=%s employees=%d added=%d status=%s",
+                         req.room_id, ok, len(_merged), _evo_added_total, status)
+        except Exception as exc:  # noqa: BLE001 — learning must never fail the turn
+            log.warning("[single] evo reflection/persist failed (non-fatal): %s", exc)
+
+    # ── Next-task guidance: distill 2-3 clickable follow-up tasks from the
+    # sealed report so the user always knows the next move (one click = a new
+    # auto-run turn in this room). One cheap 120b call (Cerebras pin), wrapped —
+    # a failure never delays the seal.
+    if status == "complete" and (final_text or "").strip():
+        try:
+            _nt_body = {"model": "openai/gpt-oss-120b", "temperature": 0.4, "max_tokens": 400,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content":
+                             'From this team report, propose the 2-3 most valuable FOLLOW-UP tasks the user should run next '
+                             '(concrete, doable by AI agents with memory + web + email — e.g. "Find 10 prospect firms matching our ICP and fetch contact info", '
+                             '"Draft the 3-touch email sequence to the shortlist"). Ground them in the report\'s own gaps/next-steps. '
+                             'JSON only: {"tasks":[{"title":"<imperative, <=9 words>","detail":"<1 sentence scope>","tag":"RESEARCH|OUTREACH|MARKETING|STRATEGY"}]}'},
+                            {"role": "user", "content": f"ROOM GOAL: {req.room_goal or ''}\n\nREPORT:\n{(final_text or '')[:5000]}"},
+                        ]}
+            _nt = await _openrouter_chat(_nt_body, timeout=httpx.Timeout(12.0, connect=5.0))
+            _nt_content = ((((_nt or {}).get("choices") or [{}])[0]).get("message") or {}).get("content") or "{}"
+            _nt_tasks = (json.loads(_nt_content) or {}).get("tasks")
+            _nt_tasks = [t for t in (_nt_tasks or []) if isinstance(t, dict) and str(t.get("title", "")).strip()][:3]
+            if _nt_tasks:
+                await _emit({"t": "next_tasks", "tasks": [
+                    {"title": str(t["title"])[:80], "detail": str(t.get("detail", ""))[:220],
+                     "tag": str(t.get("tag", "RESEARCH")).upper()[:12]} for t in _nt_tasks]})
+        except Exception as exc:  # noqa: BLE001
+            log.info("[single] next-task suggestion skipped: %s", exc)
+
+    _seal_ev = {"t": "seal", "cost_tokens": cost_tokens, "status": status,
+                "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+                "tokens_in": int(_io.get("input", 0) or 0),
+                "tokens_out": int(_io.get("output", 0) or 0),
+                "tokens_cached": int(_io.get("cached", 0) or 0),
+                "tok_by": {k: int(v) for k, v in _tok_by.items()},
+                "quality_mode": _qmode}
+    if _GK_ACTIVE.get(req.turn_id):
+        # Goalkeeper owns the seal: stash this round's payload; the loop emits ONE
+        # final seal after the last round so the FE stream stays open across re-rounds.
+        _SEAL_BY_TURN[req.turn_id] = _seal_ev
+        while len(_SEAL_BY_TURN) > _SEAL_BY_TURN_CAP:
+            _SEAL_BY_TURN.popitem(last=False)
+    else:
+        await _emit(_seal_ev)
     resp = RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
     if pending:
         resp.pending_approvals = [{k: v for k, v in r.items() if k != "descriptor"} for r in pending]
@@ -2907,11 +3269,107 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         _ag_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _ag_conns = []
+    # ── @MENTION FAST-PATH — "@maya do X" tags ONE employee: she answers directly,
+    #    in character, with her global playbook + the org brief + a fresh recall.
+    #    No director, no debate, no produce — a direct exchange with that employee
+    #    (the room sees it; nothing is journalised/reflected — single voice, no verify).
+    _mm = re.match(r"^\s*@([A-Za-z0-9_-]{2,32})\b", req.user_message or "")
+    if _mm:
+        _tag = _mm.group(1).lower()
+        def _first_name(p: Dict[str, Any]) -> str:
+            # A blank/missing name → "".split() is [] → [0] IndexError crashed the turn.
+            parts = str(p.get("name", "") or "").split()
+            return parts[0].lower() if parts else ""
+        _target = next((p for p in participants
+                        if str(p.get("slug", "") or "").lower() == _tag
+                        or _first_name(p) == _tag), None)
+        if _target is not None:
+            return await _run_mention_turn(req, _target, started)
+
     # The room executor: a single Groq native-tool-calling director. Everything above
     # this line (tenant scope, participant resolution, router/template/skeptic/trust) is
     # shared. The legacy AgentScope swarm orchestrator was removed — git history + the
     # box api_hyper_rooms.py.pre-single backup are the rollback; this is the only path.
     return await _orchestrate_single_agent(req, participants, lead, _ag_conns, started, room_template)
+
+
+async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started: float) -> RoomTurnResponse:
+    """Direct single-employee turn for an @mention. Grounding: cached company brief +
+    the employee's GLOBAL learned playbook (lexical top-k on the message) + one recall.
+    One LLM call, events typing → line → seal (the same contract the FE renders).
+    Read-only: no artifact produce, no reflection write-back, no approval gate."""
+    async def _emit(ev: Dict[str, Any]) -> None:
+        await _emit_event(req.callback_url, req.turn_id, ev)
+
+    name, lane, sysp = _persona_fields(emp)
+    slug = emp.get("slug") or emp.get("id")
+    msg = re.sub(r"^\s*@[A-Za-z0-9_-]{2,32}\b[,:]?\s*", "", req.user_message or "").strip() or req.user_message
+    await _emit({"t": "typing", "agent": slug, "note": f"{name} — on it…"})
+
+    brief, facts, lessons = "", [], []
+    try:
+        brief = await asyncio.wait_for(
+            _build_company_brief(msg, req.user_id, req.org_id, "", project_id=req.project_id), timeout=8.0)
+    except Exception:  # noqa: BLE001
+        brief = ""
+    try:
+        resp = await recall_emulated(msg, user_id=req.user_id, org_id=req.org_id,
+                                     api_key="", max_memories=6, project_id=req.project_id)
+        rows = resp.get("memories") or resp.get("combined") or []
+        facts = [f"- {str(r.get('content') or r.get('summary') or '')[:300]}" for r in rows[:6]
+                 if (r.get("content") or r.get("summary"))]
+        if facts:
+            await _emit({"t": "gather", "sources": ["hivemind"], "memory_hits": len(facts), "query": msg[:160]})
+    except Exception:  # noqa: BLE001
+        facts = []
+    try:
+        _pb = await get_employee_playbooks_map(req.org_id, [str(slug)])
+        lessons = _evo_recall(_pb.get(str(slug), []), f"{req.room_goal or ''} {msg}")
+    except Exception:  # noqa: BLE001
+        lessons = []
+
+    sys_parts = [f"You are {name}, a {lane} on this team. {sysp}".strip(),
+                 "The user tagged YOU directly in the room — answer them yourself, in character, "
+                 "concise and concrete. Ground every specific in the context; never invent facts; "
+                 "flag anything unverifiable as UNVERIFIED. No process narration."]
+    if brief:
+        sys_parts.append(brief[:1500])
+    if lessons:
+        sys_parts.append("YOUR LEARNED LESSONS (apply them):\n" + "\n".join(f"- {l}" for l in lessons))
+    # Event-driven room memory: the last few sealed turns (who asked what, which agent
+    # answered what) — read from the turn rows themselves. Without this, "@maya do you
+    # agree with jonah?" fails: Jonah's answer lives in the PRIOR turn's events, and the
+    # mention prompt never saw it (live-observed miss).
+    history = []
+    try:
+        recent = await get_recent_turn_context(req.room_id, org_id=req.org_id, limit=4)
+        for h in recent:
+            history.append(f"USER asked: {h['user_message'][:220]}")
+            history.append(f"{(h.get('agent') or 'team').upper()} answered: {h['answer'][:700]}")
+    except Exception:  # noqa: BLE001
+        history = []
+    user_parts = []
+    if history:
+        user_parts.append("RECENT ROOM DISCUSSION (oldest first — this is what your team already said; "
+                          "when asked about a teammate's position, it is HERE):\n" + "\n".join(history)[:3000])
+    if facts:
+        user_parts.append("RELEVANT COMPANY FACTS:\n" + "\n".join(facts))
+    user_parts.append(f"MESSAGE TO YOU: {msg}")
+
+    content, usage = await run_mention_reply(
+        [{"role": "system", "content": "\n\n".join(sys_parts)},
+         {"role": "user", "content": "\n\n".join(user_parts)}])
+    if not content:
+        content = f"({name} could not reply this turn — the model was unreachable. Please retry.)"
+    tokens = int((usage or {}).get("total", 0))
+    await _emit({"t": "line", "agent": slug, "kind": "lead", "content": content})
+    await _emit({"t": "seal", "cost_tokens": tokens, "status": "complete",
+                 "duration_ms": int((time.time() - started) * 1000), "engine": "mention",
+                 "tokens_in": int((usage or {}).get("in", 0)),
+                 "tokens_out": int((usage or {}).get("out", 0)),
+                 "tokens_cached": int((usage or {}).get("cached", 0))})
+    log.info("[mention] room=%s agent=%s tokens=%d", req.room_id, slug, tokens)
+    return RoomTurnResponse(ok=True, cost_tokens=tokens, status="complete")
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     """Phase 4 — pick the write-approval policy for this turn. Explicit
@@ -2958,6 +3416,60 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     return (not verdict.get("artifact_ok")) or (not verdict.get("grounded_ok"))
 
 
+class PrewarmRequest(BaseModel):
+    room_id: str = ""
+    user_id: str
+    org_id: str
+    project_id: Optional[str] = None
+    goal: str = ""
+    connectors: List[str] = []
+
+
+_PREWARM_GUARD: Dict[str, float] = {}  # org|room → last prewarm ts (throttle repeated opens)
+
+
+@router.post("/prewarm")
+async def post_prewarm(
+    body: PrewarmRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Room-open prewarm — fire-and-forget from the control-plane when a user OPENS a
+    room, so by the time they type their first message the caches are hot: the company
+    brief (5-probe recall, ~5s cold) and every non-Google connector inspect (~20-30s
+    cold MCP spin-up, the dominant initial-latency source). Returns 202-style instantly;
+    the warm work runs as a background task. Throttled per (org, room) so FE re-opens /
+    refreshes don't stampede the bridge."""
+    _require_master_key(x_api_key)
+    key = f"{body.org_id}|{body.room_id}"
+    now = time.time()
+    if now - _PREWARM_GUARD.get(key, 0.0) < 300:
+        return {"ok": True, "skipped": "recently prewarmed"}
+    _PREWARM_GUARD[key] = now
+    if len(_PREWARM_GUARD) > 1024:
+        _PREWARM_GUARD.pop(next(iter(_PREWARM_GUARD)), None)
+
+    async def _warm() -> None:
+        try:
+            await _build_company_brief(body.goal or "", body.user_id, body.org_id, "",
+                                       project_id=body.project_id)
+        except Exception as exc:  # noqa: BLE001 — prewarm must never surface
+            log.info("[prewarm] brief warm failed (non-fatal): %s", exc)
+        try:
+            from .hyper.engine import _inspect_connector_tools, _norm_connector, _GOOGLE_READ_TOOLS
+            need = [n for n in dict.fromkeys(_norm_connector(c) for c in (body.connectors or []))
+                    if n not in _GOOGLE_READ_TOOLS]
+            if need:
+                await asyncio.gather(
+                    *[_inspect_connector_tools(n, user_id=body.user_id, org_id=body.org_id) for n in need],
+                    return_exceptions=True)
+            log.info("[prewarm] room=%s brief+%d connector inspects warm", body.room_id, len(need))
+        except Exception as exc:  # noqa: BLE001
+            log.info("[prewarm] inspect warm failed (non-fatal): %s", exc)
+
+    asyncio.create_task(_warm())
+    return {"ok": True}
+
+
 @router.post("/room-turn", response_model=RoomTurnResponse)
 async def post_room_turn(
     req: RoomTurnRequest,
@@ -2978,47 +3490,66 @@ async def post_room_turn(
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None
-    for rnd in range(1, max_rounds + 1):
-        resp = await _orchestrate(req)
-        total_cost += int(resp.cost_tokens or 0)
-        plan = _PLAN_BY_TURN.get(req.turn_id)
-        verdict = plan.get("verification") if isinstance(plan, dict) else None
-        # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
-        # the source data genuinely doesn't exist) is NOT re-plannable — re-running
-        # would only re-discover the same wall and burn rounds. Stop and let the
-        # honest dead-end surface, rather than loop to the cap emitting placeholders.
-        if isinstance(plan, dict) and plan.get("dead_end"):
-            log.info("[goalkeeper] room=%s dead-end (un-fixable) → stop honestly", req.room_id)
-            break
-        # Recon-driven rework: a produced deliverable is NOT an automatic stop.
-        # Loop only stops when the verdict is met (or a pending draft is both
-        # produced AND grounded), or the round cap is hit. A recon-rejected
-        # draft (ungrounded / incomplete) gets reworked — we don't surface a
-        # known-bad result. Same shape as Claude `/goal`: keep going to success.
-        if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
-            break
-        # Discard the rejected round's draft/artifacts so the rework round
-        # produces a FRESH deliverable (else `_produce_output`'s idempotency
-        # guard would short-circuit on the stale draft).
-        reset_turn_outputs()
-        gaps = list((verdict or {}).get("gaps") or [])
-        gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "goalkeeper_round",
-            "round": rnd,
-            "next_round": rnd + 1,
-            "met": False,
-            "gaps": gaps,
-        })
-        log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
-                 req.room_id, rnd, gap_str)
-        # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
-        # so preambles don't stack; the planner re-plans against the gaps.
-        req.user_message = (
-            f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
-            f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
-            f"Address these gaps and COMPLETE the task this round: {gap_str}."
-        )
+    # Seal ordering: while the goalkeeper owns this turn, per-round seals are stashed
+    # (not emitted) so the FE stream stays open across re-rounds; ONE final seal — with
+    # the TOTAL cost and TRUE duration — goes out after the last round, in `finally`
+    # so it can never be lost to an exception between rounds.
+    _GK_ACTIVE[req.turn_id] = True
+    _gk_started = time.time()
+    rnd = 0
+    try:
+        for rnd in range(1, max_rounds + 1):
+            resp = await _orchestrate(req)
+            total_cost += int(resp.cost_tokens or 0)
+            plan = _PLAN_BY_TURN.get(req.turn_id)
+            verdict = plan.get("verification") if isinstance(plan, dict) else None
+            # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
+            # the source data genuinely doesn't exist) is NOT re-plannable — re-running
+            # would only re-discover the same wall and burn rounds. Stop and let the
+            # honest dead-end surface, rather than loop to the cap emitting placeholders.
+            if isinstance(plan, dict) and plan.get("dead_end"):
+                log.info("[goalkeeper] room=%s dead-end (un-fixable) → stop honestly", req.room_id)
+                break
+            # Recon-driven rework: a produced deliverable is NOT an automatic stop.
+            # Loop only stops when the verdict is met (or a pending draft is both
+            # produced AND grounded), or the round cap is hit. A recon-rejected
+            # draft (ungrounded / incomplete) gets reworked — we don't surface a
+            # known-bad result. Same shape as Claude `/goal`: keep going to success.
+            if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
+                break
+            # Discard the rejected round's draft/artifacts so the rework round
+            # produces a FRESH deliverable (else `_produce_output`'s idempotency
+            # guard would short-circuit on the stale draft).
+            reset_turn_outputs()
+            gaps = list((verdict or {}).get("gaps") or [])
+            gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "goalkeeper_round",
+                "round": rnd,
+                "next_round": rnd + 1,
+                "met": False,
+                "gaps": gaps,
+            })
+            log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
+                     req.room_id, rnd, gap_str)
+            # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
+            # so preambles don't stack; the planner re-plans against the gaps.
+            req.user_message = (
+                f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
+                f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
+                f"Address these gaps and COMPLETE the task this round: {gap_str}."
+            )
+            # Re-rounds close GAPS — they never re-simulate the stakeholder population
+            # (the sim's report doesn't change; it cost 11-31s per round for nothing).
+            req.sim_mode = "off"
+    finally:
+        _GK_ACTIVE.pop(req.turn_id, None)
+    # The turn's ONE seal — held past the approvals/artifacts drain below and emitted
+    # right before return, so the FE stream (which CLOSES on seal) has already received
+    # every approval card + connector_logo button. (First fix emitted it here in the
+    # loop's finally — the artifact drain runs after the loop, so connector_logo still
+    # landed post-seal into a closed pipe. Verified ordering: ... → connector_logo → seal.)
+    _final_seal = _SEAL_BY_TURN.pop(req.turn_id, None)
 
     if resp is None:  # defensive — loop always runs ≥1
         resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
@@ -3054,6 +3585,9 @@ async def post_room_turn(
                 "url": art.get("url"),
                 "title": art.get("title"),
                 "label": art.get("label") or "Open",
+                # Textual content (bounded) → in-app FE Preview popup for ANY
+                # textual artifact (email/doc/notion) without leaving the room.
+                "body_md": str(art.get("body_md") or "")[:20000] or None,
             })
         resp.artifacts = final_artifacts
         log.info("[artifacts] room=%s produced=%d", req.room_id, len(final_artifacts))
@@ -3073,6 +3607,17 @@ async def post_room_turn(
         resp.status = "blocked"
         log.info("[dead-end] room=%s blocked honestly: %s",
                  req.room_id, (_vplan.get("dead_end") or {}).get("reason"))
+    # LAST event, always: the goalkeeper-held seal (total cost, true duration across
+    # all rounds). Everything the FE must render live — approval cards, artifact
+    # buttons, the dead-end line — has been emitted above. _emit_event is non-fatal.
+    if _final_seal:
+        _final_seal["cost_tokens"] = total_cost
+        _final_seal["duration_ms"] = int((time.time() - _gk_started) * 1000)
+        if rnd > 1:
+            _final_seal["gk_rounds"] = rnd
+        if resp.status and str(resp.status) != str(_final_seal.get("status")):
+            _final_seal["status"] = resp.status  # dead-end downgrade (blocked) wins
+        await _emit_event(req.callback_url, req.turn_id, _final_seal)
     return resp
 
 

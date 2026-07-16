@@ -1,0 +1,33 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hivemind-splash",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-s", "electron-app/src", "-l", "4200", "--no-clipboard"],
+      "cwd": "/Users/amar/HIVE-MIND",
+      "port": 4200
+    },
+    {
+      "name": "davinci-fe",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "cwd": "frontend/Da-vinci",
+      "port": 3000
+    },
+    {
+      "name": "birthday-love",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "birthday-love",
+      "port": 3000
+    },
+    {
+      "name": "singulance",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "singulance-portal",
+      "port": 5173
+    }
+  ]
+}

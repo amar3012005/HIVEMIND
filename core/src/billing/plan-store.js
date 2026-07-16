@@ -7,6 +7,7 @@
  */
 
 import { getPlan } from './plans.js';
+import { getEffectivePlan } from './entitlements.js';
 
 export class PlanStore {
   constructor(prisma) {
@@ -22,16 +23,15 @@ export class PlanStore {
     if (!this.prisma || !orgId) return getPlan('free');
 
     const cached = this._cache.get(orgId);
-    if (cached && Date.now() - cached.ts < 300_000) return cached.plan;
+    if (cached && Date.now() < cached.expiresAt) return cached.plan;
 
     try {
-      const org = await this.prisma.organization.findUnique({
-        where: { id: orgId },
-        select: { plan: true },
-      });
-      const planId = org?.plan || 'free';
-      const plan = getPlan(planId || 'free');
-      this._cache.set(orgId, { plan, ts: Date.now() });
+      const { plan, entitlement } = await getEffectivePlan(this.prisma, orgId);
+      const transitionAt = entitlement?.effectiveUntil ? new Date(entitlement.effectiveUntil).getTime() : Infinity;
+      // Entitlements can be changed by a Stripe webhook in another process;
+      // keep their cache short while ordinary fallback plans remain cheap.
+      const ttl = entitlement ? 30_000 : 300_000;
+      this._cache.set(orgId, { plan, expiresAt: Math.min(Date.now() + ttl, transitionAt) });
       return plan;
     } catch {
       return getPlan('free');

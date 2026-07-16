@@ -578,3 +578,9 @@ cryptsetup status /dev/mapper/hivemind-postgres
 ---
 
 **END OF DEPLOYMENT GUIDE**
+
+## Data residency (push model) — 2026-06-27
+Enterprise/self-host orgs run a per-org **agent** (Postgres + Qdrant; `.amr` later) — see
+`docs/PRODUCTION_COMPASS.md`. The engine PUSHES finished memories to the agent over bearer HTTP
+(`/v1/write`); it never connects to a customer DB. Client bundle: the `byod` branch (`byod/setup.sh`).
+Registry per org = `{url, token}` ONLY (pgUrl MUST be empty — a stale pgUrl revives the dead direct-PG path).

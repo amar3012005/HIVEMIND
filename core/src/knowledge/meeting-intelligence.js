@@ -283,6 +283,47 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso, pri
     .slice(0, 8);
   const relatedCount = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length + related.length;
   const has = entities.length || cont.length || loops.length || related.length;
+
+  // FINAL STAGE — high-level, ORG-GROUNDED, notes-aware strategic synthesis over
+  // the meeting + the recalled HIVEMIND lanes. The user's meeting NOTES are the
+  // primary intent signal. Resilient: any failure → synthesis null (panel hides
+  // it). Only runs when there's real signal (grounding or substantive notes) so
+  // a contentless meeting doesn't get padded with generic advice.
+  let synthesis = null;
+  try {
+    const notes = (meeting?.notes || '').toString().slice(0, 4000);
+    const actions = (Array.isArray(ins.action_items) ? ins.action_items : [])
+      .map((a) => (typeof a === 'string' ? a : (a?.task || a?.text || ''))).filter(Boolean).slice(0, 12);
+    const payload = {
+      task: 'synthesis',
+      notes,
+      summary: (ins.summary || meeting?.summary || '').toString().slice(0, 2000),
+      decisions: (Array.isArray(ins.decisions) ? ins.decisions : []).slice(0, 12),
+      actions,
+      risks: (Array.isArray(ins.risks) ? ins.risks : []).slice(0, 8),
+      entity_briefs: entities.map((e) => ({ name: e.name, brief: e.brief })).filter((e) => e.brief).slice(0, 8),
+      continuity: cont.map((c) => ({ decision: c.decision, relation: c.relation, reason: c.reason })).slice(0, 8),
+      open_loops: loops.map((l) => ({ text: l.text, status: l.status })).slice(0, 8),
+      related: related.map((r) => (r.title || r.content || '').toString().slice(0, 160)).filter(Boolean).slice(0, 8),
+    };
+    const hasSignal = payload.entity_briefs.length || payload.continuity.length || payload.open_loops.length || payload.related.length || notes.length > 20;
+    if (hasSignal && typeof judge === 'function') {
+      const out = await judge(payload);
+      const s = out && out.synthesis;
+      if (s && typeof s === 'object' && (s.headline || (Array.isArray(s.strategic_points) && s.strategic_points.length))) {
+        synthesis = {
+          headline: typeof s.headline === 'string' ? s.headline : '',
+          strategic_points: Array.isArray(s.strategic_points) ? s.strategic_points.filter((x) => typeof x === 'string') : [],
+          whats_changed: Array.isArray(s.whats_changed) ? s.whats_changed.filter((x) => typeof x === 'string') : [],
+          risks_opportunities: Array.isArray(s.risks_opportunities)
+            ? s.risks_opportunities.filter((x) => x && typeof x.text === 'string').map((x) => ({ type: x.type === 'opportunity' ? 'opportunity' : 'risk', text: x.text })).slice(0, 8)
+            : [],
+          recommended_focus: Array.isArray(s.recommended_focus) ? s.recommended_focus.filter((x) => typeof x === 'string') : [],
+        };
+      }
+    }
+  } catch { synthesis = null; }
+
   return {
     generated_at: nowIso || new Date().toISOString(),
     related_count: relatedCount,
@@ -290,6 +331,7 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso, pri
     continuity: cont,
     open_loops: loops,
     related,
-    status: has ? 'ready' : 'empty',
+    synthesis,
+    status: (has || synthesis) ? 'ready' : 'empty',
   };
 }

@@ -20,6 +20,25 @@ import { SessionManager } from './session-manager.js';
 import { TaraConfigStore, DEFAULT_INTERNAL_PROMPT } from './config-store.js';
 import { buildPrompt } from './prompt-builder.js';
 import { ClinicalReasoningEngine } from './clinical-reasoning.js';
+import { mapModelToOpenRouter } from '../llm/groq-fallback.js';
+
+export function createTaraRecallFn(recallRouter) {
+  return (_store, opts = {}) => recallRouter.recall(
+    opts.query_context || '',
+    {
+      mode: 'fact',
+      limit: opts.max_memories || 8,
+      include_live: false,
+      tags: opts.tags || [],
+      date_range: opts.date_range || null,
+    },
+    {
+      userId: opts.user_id,
+      orgId: opts.org_id,
+      accessContext: opts.access_context || null,
+    },
+  );
+}
 
 export class TaraStreamHandler {
   constructor({ memoryStore, recallFn, llmBaseUrl, llmApiKey, defaultModel, qdrantClient }) {
@@ -38,12 +57,37 @@ export class TaraStreamHandler {
       model: process.env.CLINICAL_MODEL || 'openai/gpt-oss-120b',
     });
 
+    // OpenRouter-primary streaming: the buffered groqFetch fallback cannot replay
+    // a stream, so when Groq is down/restricted (LLM_PRIMARY=openrouter) the voice
+    // token stream must originate at OpenRouter directly, else every turn 400s.
+    this.orPrimary = process.env.LLM_PRIMARY === 'openrouter';
+    this.orBaseUrl = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+    this.orApiKey = process.env.OPENROUTER_API_KEY || '';
+
     // ── Config cache (avoids DB read every turn) ──
     this._configCache = new Map();  // key: tenant:agent → { config, cachedAt }
     this._configCacheTTL = 60_000;  // 60s — config rarely changes mid-call
 
     // ── Memory stats tracking per session ──
     this._sessionMemoryStats = new Map();  // session_id → { chunks_saved, chunks_candidates, chunks_skipped, turns }
+  }
+
+  /**
+   * Resolve the streaming LLM endpoint for a model. When OpenRouter is primary
+   * and the model has a valid OR slug, stream from OpenRouter (Groq is down);
+   * otherwise use the configured (Groq) base. Returns null slug → caller keeps
+   * the Groq path.
+   * @param {string} model
+   * @returns {{ url: string, key: string, model: string, openrouter: boolean }}
+   */
+  _streamTarget(model) {
+    if (this.orPrimary && this.orApiKey) {
+      const orModel = mapModelToOpenRouter(model);
+      if (orModel) {
+        return { url: `${this.orBaseUrl}/chat/completions`, key: this.orApiKey, model: orModel, openrouter: true };
+      }
+    }
+    return { url: `${this.llmBaseUrl}/chat/completions`, key: this.llmApiKey, model, openrouter: false };
   }
 
   async handleStream(params, { userId, orgId, accessContext = null, res }) {
@@ -123,11 +167,17 @@ export class TaraStreamHandler {
       });
 
       // ── STEP 2: Build prompt (< 5ms) ──
-      const model = config.model || this.defaultModel;
+      // voice_model override (voice-v2 shim): lets the caller force a fast model
+      // (e.g. gpt-oss-120b on Cerebras) for low-latency spoken recall answers.
+      const model = params.voice_model || config.model || this.defaultModel;
       // mode='internal' → direct humanized recall, NO clinical reasoning layer.
       // mode='external' (default) → full current behavior (clinical if configured).
       const internalMode = (params.mode || 'external') === 'internal';
-      const hasClinical = !internalMode && !!config.clinical_prompt;
+      // skip_clinical=true (voice-v2 shim): the caller runs its own strategic
+      // per-turn directive and passes it as voice_directive — the accumulating
+      // clinical loop is skipped entirely for these sessions (token saving).
+      const skipClinical = params.skip_clinical === true;
+      const hasClinical = !internalMode && !skipClinical && !!config.clinical_prompt;
 
       // Store clinical config in session state for post-turn use
       if (hasClinical) {
@@ -156,8 +206,12 @@ export class TaraStreamHandler {
         voiceOptimized: config.voice_optimized !== false,
         interruptedText,
         interruptionType,
-        // Pass the latest clinical insight (single directive, not the full history)
-        clinicalInsight: hasClinical ? (sessionState.clinical_insights || null) : null,
+        // Pass the latest clinical insight (single directive, not the full history).
+        // voice_directive: caller-supplied one-line strategy (voice-v2 shim) —
+        // same prompt slot, no clinical engine run.
+        clinicalInsight: params.voice_directive
+          ? { directive: String(params.voice_directive).slice(0, 300) }
+          : (hasClinical ? (sessionState.clinical_insights || null) : null),
       });
 
       this._writeLine(res, {
@@ -170,18 +224,29 @@ export class TaraStreamHandler {
       let fullResponse = '';
       const llmStartMs = Date.now();
 
-      const llmResp = await fetch(`${this.llmBaseUrl}/chat/completions`, {
+      const tgt = this._streamTarget(model);
+      const llmResp = await fetch(tgt.url, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.llmApiKey}`,
+          'Authorization': `Bearer ${tgt.key}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model,
+          model: tgt.model,
           messages,
           temperature: config.temperature ?? 0.7,
           max_tokens: config.max_tokens ?? 2048,  // gpt-oss reasoning models need headroom
           stream: true,
+          // OpenRouter provider routing. voice_provider (voice-v2 shim) pins a
+          // specific fast provider (e.g. Cerebras); else fastest-throughput.
+          ...(tgt.openrouter ? {
+            provider: params.voice_provider
+              ? { order: String(params.voice_provider).split(',').map(s => s.trim()).filter(Boolean), allow_fallbacks: true }
+              : { sort: 'throughput', allow_fallbacks: true },
+          } : {}),
+          // Low reasoning effort for gpt-oss on voice = fewer pre-answer tokens.
+          ...(params.voice_reasoning_effort && /gpt-oss/.test(tgt.model)
+            ? { reasoning: { effort: String(params.voice_reasoning_effort) } } : {}),
         }),
       });
 

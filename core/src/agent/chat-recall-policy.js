@@ -1,0 +1,180 @@
+function normalized(value) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+export async function resolveCanonicalEntityQuery({ prisma, orgId, query } = {}) {
+  if (!prisma?.entity || !orgId || !query) return null;
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+  const forms = new Set();
+  for (const part of segmenter.segment(String(query))) {
+    const token = part.isWordLike ? part.segment.trim() : '';
+    if (token.length < 3) continue;
+    forms.add(token);
+    forms.add(token.toLocaleLowerCase());
+    forms.add(token.toLocaleUpperCase());
+  }
+  const candidates = [...forms].slice(0, 24);
+  if (!candidates.length) return null;
+  const entities = await prisma.entity.findMany({
+    where: {
+      orgId,
+      isActive: true,
+      OR: [
+        ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+        { aliases: { hasSome: candidates } },
+      ],
+    },
+    orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
+    select: { canonicalName: true },
+    take: 1,
+  });
+  return entities[0]?.canonicalName || null;
+}
+
+function documentIdentity(item) {
+  const tags = Array.isArray(item?.tags) ? item.tags : [];
+  const taggedId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));
+  const taggedTitle = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'));
+  const explicitTitle = item?.document_title || item?.documentTitle || null;
+  return {
+    document_id: item?.source_metadata?.document_id || item?.document_id || item?.documentId
+      || (taggedId ? taggedId.slice('doc-id:'.length) : null),
+    title: explicitTitle
+      || (taggedTitle ? taggedTitle.slice('filename:'.length) : null)
+      || item?.title || null,
+    anchored: !!(taggedId || taggedTitle || explicitTitle || item?.source_metadata?.document_id || item?.document_id || item?.documentId),
+  };
+}
+
+export function resolveDocumentArtifact(memories = []) {
+  for (const memory of memories) {
+    const identity = documentIdentity(memory);
+    if (identity.anchored) return { document_id: identity.document_id, title: identity.title };
+  }
+  return null;
+}
+
+export async function resolveSourceArtifact({ evidenceRetrieval, query, userId, orgId, deadlineAt }) {
+  if (!evidenceRetrieval?.resolveSourceFromQuery || !query) return null;
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return null;
+  const resolved = await Promise.race([
+    evidenceRetrieval.resolveSourceFromQuery({ query, userId, orgId, deadlineAt }),
+    new Promise((resolve) => setTimeout(resolve, remaining, null)),
+  ]);
+  const source = Array.isArray(resolved) ? resolved[0] : resolved;
+  if (!source) return null;
+  const document_id = source.document_id || source.documentId || source.id || null;
+  const title = source.title || source.document_title || source.documentTitle || null;
+  return document_id || title ? { document_id, title } : null;
+}
+
+export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], relationships = [] } = {}) {
+  const source = plan.source || resolveDocumentArtifact(memories);
+  const evidenceFound = memories.length > 0 || evidence.length > 0;
+  const sourceIds = new Set(evidence.map((item) => documentIdentity(item).document_id).filter(Boolean));
+  const sourceTitles = new Set(evidence.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
+  const sourceCovered = !source || (
+    (source.document_id && sourceIds.has(source.document_id))
+    || (source.title && sourceTitles.has(normalized(source.title)))
+  );
+
+  const entities = Array.isArray(plan.named_entities) ? plan.named_entities.filter(Boolean) : [];
+  const searchable = [...memories, ...evidence].map((item) => normalized([
+    item?.title,
+    item?.document_title,
+    item?.content,
+    item?.snippet,
+    ...(Array.isArray(item?.tags) ? item.tags : []),
+  ].filter(Boolean).join(' ')));
+  const coveredEntities = entities.filter((entity) => searchable.some((text) => text.includes(normalized(entity))));
+  const temporalRequested = !!(plan.time?.valid_at || plan.time?.known_at || plan.time?.range
+    || plan.time_travel?.valid_time || plan.time_travel?.transaction_time);
+  const graphRequested = plan.needs_traverse === true;
+
+  return {
+    source,
+    evidence_found: evidenceFound,
+    source_requested: !!source,
+    source_covered: sourceCovered,
+    entities_requested: entities.length,
+    entities_covered: coveredEntities.length,
+    temporal_requested: temporalRequested,
+    temporal_covered: !temporalRequested || memories.length > 0,
+    graph_requested: graphRequested,
+    graph_covered: !graphRequested || relationships.length > 0,
+    complete: evidenceFound
+      && sourceCovered
+      && coveredEntities.length === entities.length
+      && (!temporalRequested || memories.length > 0)
+      && (!graphRequested || relationships.length > 0),
+  };
+}
+
+export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {}) {
+  if (!coverage.evidence_found) {
+    return {
+      reason: 'empty_anchor_coverage',
+      args: { query, mode: 'explain', limit: 12 },
+    };
+  }
+  if (coverage.source_requested && !coverage.source_covered) {
+    return {
+      reason: 'source_coverage',
+      args: {
+        query,
+        mode: 'explain',
+        limit: 12,
+        ...(coverage.source?.document_id ? { source_document_id: coverage.source.document_id } : {}),
+        ...(!coverage.source?.document_id && coverage.source?.title ? { source_title: coverage.source.title } : {}),
+      },
+    };
+  }
+  if (coverage.temporal_requested && !coverage.temporal_covered) {
+    const validAt = plan.time?.valid_at || plan.time_travel?.valid_time || null;
+    const knownAt = plan.time?.known_at || plan.time_travel?.transaction_time || null;
+    return {
+      reason: 'temporal_coverage',
+      args: {
+        query,
+        mode: 'explain',
+        limit: 12,
+        time: {
+          ...(validAt ? { valid_at: validAt } : {}),
+          ...(knownAt ? { known_at: knownAt } : {}),
+          ...(plan.time?.range ? { range: plan.time.range } : {}),
+        },
+      },
+    };
+  }
+  if (coverage.graph_requested && !coverage.graph_covered) {
+    return { reason: 'graph_coverage', args: { query, mode: 'explain', limit: 12 } };
+  }
+  return null;
+}
+
+export function applyExplicitRecallControls(plan, { mode, source, time } = {}) {
+  const next = { ...plan };
+  if (['fact', 'explain', 'full'].includes(mode)) {
+    next.explicit_recall_mode = mode;
+    next.recall_mode = mode;
+  }
+  if (source && typeof source === 'object') {
+    const explicitSource = {
+      ...(typeof source.document_id === 'string' && source.document_id.trim()
+        ? { document_id: source.document_id.trim() }
+        : {}),
+      ...(typeof source.title === 'string' && source.title.trim() ? { title: source.title.trim() } : {}),
+    };
+    if (Object.keys(explicitSource).length > 0) next.source = explicitSource;
+  }
+  if (time && typeof time === 'object') {
+    const explicitTime = {
+      ...(typeof time.valid_at === 'string' ? { valid_at: time.valid_at } : {}),
+      ...(typeof time.known_at === 'string' ? { known_at: time.known_at } : {}),
+      ...(time.range && typeof time.range === 'object' ? { range: time.range } : {}),
+    };
+    if (Object.keys(explicitTime).length > 0) next.time = explicitTime;
+  }
+  return next;
+}

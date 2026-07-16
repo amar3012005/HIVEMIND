@@ -1,5 +1,20 @@
 ## MCP Tools: code-review-graph
 
+## Mandatory Production Release Rule
+
+Before any production edit, build, migration, restart, or deployment, read and follow
+[`docs/PRODUCTION_RELEASE_PROTOCOL.md`](docs/PRODUCTION_RELEASE_PROTOCOL.md). Compare the intended
+commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop rather than deploy from
+a dirty checkout, stale frontend gitlink, mutable image tag, unpushed commit, or conflicting session.
+SINGULANCE production is only `ssh singulance`; never use `myserver` for this release path.
+
+## Mandatory Engineering Journal
+
+Read and maintain [`docs/ENGINEERING_JOURNAL.md`](docs/ENGINEERING_JOURNAL.md).
+Git is the source of truth: journal entries must cite pushed SHAs and must
+separate `Committed` from `Accepted release`. Append entries only; never
+rewrite history or describe an uncommitted change as complete.
+
 **IMPORTANT: Project has knowledge graph. ALWAYS use
 code-review-graph MCP tools BEFORE Grep/Glob/Read for codebase exploration.** Graph faster, cheaper (fewer tokens), gives
 structural context (callers, dependents, test coverage) file

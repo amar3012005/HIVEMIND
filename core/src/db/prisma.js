@@ -1,6 +1,76 @@
 import { PrismaClient } from '@prisma/client';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { configureDriver, wrapPrisma, anyMnemeOrg } from '../vector/mneme/driver.js';
+import { pgUrlFor } from '../vector/mneme/remote-backend.js';
+import { ROUTED_MODELS } from '../vector/mneme/prisma-proxy.js';
 
-let prisma;
+let prisma; // the real Postgres client (singleton)
+
+// Full data residency (self-host): the tenant's MEMORY subgraph lives in the CUSTOMER's Postgres
+// (their box, via tunnel). Everything else — User/Organization/ApiKey/memberships/billing/settings,
+// the "data information" — stays in the ONE global central Postgres for ALL users, like today.
+// So a self-host org gets a SPLIT client: memory models → customer PG, everything else → central.
+// Managed orgs (no pgUrl) → central for everything, unchanged. runWithOrg() scopes the context;
+// AsyncLocalStorage means the 35 getPrismaClient() call sites stay as-is.
+const _orgCtx = new AsyncLocalStorage();
+const _orgClients = new Map(); // orgId -> split client (memory→customer PG, rest→central)
+// apiKeyId (optional) rides in the SAME store so the LLM chokepoint can attribute every completion to
+// the org's HIVEMIND API key, not just the org. Defaulted null → existing runWithOrg(orgId, fn) callers
+// (background jobs, workers, re-scoped remote-org ingest) are unchanged and record org-level (null-key)
+// spend; the request path threads the real key via enterOrgContext below.
+export function runWithOrg(orgId, fn, apiKeyId = null) { return _orgCtx.run({ orgId, apiKeyId }, fn); }
+export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
+// The org's API key id for the current async context (null for system/background/master-key calls).
+export function currentApiKey() { return _orgCtx.getStore()?.apiKeyId || null; }
+// Set the org context for the REST of the current request (no callback to wrap). Used at the auth
+// seam so every downstream handler + synchronous write in this request routes to the org's store.
+// enterWith persists through the awaiting continuation; each HTTP request is its own async context,
+// so there is no cross-request leak. A null/empty orgId is ignored (resolution falls back to central).
+// apiKeyId is threaded from the resolved request principal so the LLM meter can attribute per key.
+export function enterOrgContext(orgId, apiKeyId = null) { if (orgId) _orgCtx.enterWith({ orgId, apiKeyId }); }
+// Bridge for CommonJS modules (ingestion pipeline) that can't statically import this ESM module.
+// Set synchronously at load so CJS code reads the SAME AsyncLocalStorage instance with no import race.
+globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, currentApiKey, enterOrgContext };
+
+// Proxy for a self-host org's split client:
+//   • memory-subgraph models (ROUTED_MODELS)            → customer PG (the data plane)
+//   • raw SQL + transactions ($transaction/$queryRaw/…) → CENTRAL. Under Model B (current arch) a
+//     self-host org's memory data lives in its .amr (served by the driver seam), NOT the customer PG, so
+//     raw memory-graph SQL is not on the remote path. Routing raw → customer (the abandoned Model-A
+//     assumption) broke raw reads of CENTRAL tables (organizations cognition flags, retrieval_config,
+//     OrgUsage) which have no row on the customer box. Global tables are central; raw stays central.
+//   • everything else                                   → central global client.
+const CUSTOMER_RAW = new Set();
+function makeSplitClient(central, customer) {
+  return new Proxy(central, {
+    get(target, prop) {
+      if (typeof prop === 'string' && ROUTED_MODELS.has(prop)) return customer[prop];
+      if (typeof prop === 'string' && CUSTOMER_RAW.has(prop)) {
+        const cv = customer[prop];
+        return typeof cv === 'function' ? cv.bind(customer) : cv;
+      }
+      const v = target[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
+function clientForOrg(orgId) {
+  const url = pgUrlFor(orgId);
+  if (!url) return null; // not a full-residency org → caller uses the central client for everything
+  let split = _orgClients.get(orgId);
+  if (!split) {
+    const customer = new PrismaClient({ datasources: { db: { url: tunedDatabaseUrl(url) } }, log: ['error'] });
+    installTenantIsolationMiddleware(customer);
+    split = makeSplitClient(buildRealClient(), customer); // memory→customer PG, global→central
+    _orgClients.set(orgId, split);
+  }
+  return split;
+}
+// .amr routing lives entirely behind the driver seam (vector/mneme/driver.js). getPrismaClient()
+// returns ONE stable proxy that routes the configured .amr orgs' memory subgraph to their .amr stores
+// per-call, everything else to Postgres. ONE config value (MNEME_ORGS) drives it.
+let _mnemeProxy = null;
+let _driverConfigured = false;
 
 /**
  * Append connection pool tuning to DATABASE_URL if not already specified.
@@ -31,11 +101,7 @@ function tunedDatabaseUrl(rawUrl) {
   }
 }
 
-export function getPrismaClient() {
-  if (!process.env.DATABASE_URL) {
-    return null;
-  }
-
+function buildRealClient() {
   if (!prisma) {
     const tunedUrl = tunedDatabaseUrl(process.env.DATABASE_URL);
     prisma = new PrismaClient({
@@ -44,9 +110,74 @@ export function getPrismaClient() {
     });
     installTenantIsolationMiddleware(prisma);
   }
-
   return prisma;
 }
+
+// Inject the native binding + backends into the driver once (the driver then opens each .amr org's
+// shard lazily on first use). Fire-and-forget; until configured, .amr orgs transparently use Postgres.
+async function configureMnemeDriver() {
+  if (_driverConfigured) return;
+  _driverConfigured = true;
+  try {
+    const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend } = await import('../vector/mneme/amr-store-backend.mjs');
+    const bindingPath = process.env.MNEME_BINDING || new URL('../vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url).pathname;
+    const bind = loadBinding(bindingPath);
+    configureDriver({
+      backend: { openStore: (r, c, d) => bind.MnemeStore.open(r, c, d), MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend },
+      realPrisma: buildRealClient(),
+      dataRoot: process.env.MNEME_DATA_ROOT || '/app/data/mneme',
+      dim: process.env.EMBEDDING_DIMENSION,
+    });
+  } catch (e) {
+    _driverConfigured = false; // allow retry
+    console.warn('[mneme] driver configure failed, all orgs on Postgres:', e.message);
+  }
+}
+
+// Resolve the underlying client for the CURRENT org context (per call): a self-host org → its customer
+// PG split client; an .amr org → the .amr-routing proxy; else the central real client.
+function _resolveClient() {
+  if (!process.env.DATABASE_URL) return null;
+  const ctxOrg = _orgCtx.getStore()?.orgId;
+  if (ctxOrg) {
+    const c = clientForOrg(ctxOrg); // full residency: memory→customer PG, global→central
+    if (process.env.MNEME_DEBUG_ROUTING) console.log('[resolve] ctxOrg', ctxOrg, 'split?', !!c);
+    if (c) return c;
+  }
+  const real = buildRealClient();
+  if (!anyMnemeOrg()) return real;
+  if (!_mnemeProxy) { configureMnemeDriver(); _mnemeProxy = wrapPrisma(real); }
+  return _mnemeProxy;
+}
+
+// getPrismaClient() returns ONE stable proxy that re-resolves the client on every property access by
+// the current runWithOrg() context. So a module that captures `const db = getPrismaClient()` ONCE at
+// construction STILL routes per-org per-call — the captured-client problem disappears, and wrapping an
+// entry point in runWithOrg(orgId) is enough to send all its DB work to that org's store.
+let _ctxProxy = null;
+export function getPrismaClient() {
+  if (!process.env.DATABASE_URL) return null;
+  if (!_ctxProxy) {
+    _ctxProxy = new Proxy({}, {
+      get(_t, prop) {
+        const c = _resolveClient();
+        if (!c) return undefined;
+        const v = c[prop];
+        return typeof v === 'function' ? v.bind(c) : v;
+      },
+    });
+  }
+  return _ctxProxy;
+}
+
+// The RAW central client — bypasses ALL org routing (.amr proxy / customer-PG split). Use for tables
+// that are ALWAYS central regardless of the current org context (B1): the agent registry, org-config,
+// and the memory_outbox (Phase 4). enqueuePush runs INSIDE a remote org's runWithOrg() context, so
+// getPrismaClient() there would return the mneme proxy and silently drop a central-only write.
+export function getCentralPrismaClient() { return buildRealClient(); }
+
+// kept for back-compat with any external caller; no longer used by the boot path.
+export function setMnemeProxy(p) { _mnemeProxy = p; }
 
 /**
  * Phase 1 tenant-isolation middleware.

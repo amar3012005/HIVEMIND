@@ -133,15 +133,22 @@ export class WebhookProcessor {
         // documentFirstIngestion not wired (back-compat).
         const dfi = this._dfiGetter?.();
         if (dfi && resource?.content) {
-          await dfi.ingestConnectorRecord({
+          // Canonical front door: every connector record normalizes into the
+          // same IngestEnvelope. source.provider highlights WHICH connector
+          // (platform → connector:<provider>); occurredAt carries the real
+          // event timestamp. Routes to the same _promoteMemories pipeline.
+          await dfi.ingestSource({
             userId: sub.userId,
             orgId: sub.orgId,
-            providerKey: sub.providerKey,
-            sourceId: resource.id || resource.resourceId || `${sub.providerKey}-${Date.now()}`,
-            title: resource.title || resource.subject || null,
             content: resource.content,
-            sourceUrl: resource.sourceUrl || resource.url || null,
-            documentDate: resource.timestamp ? new Date(resource.timestamp) : null,
+            source: {
+              type: 'connector',
+              provider: sub.providerKey,
+              sourceId: resource.id || resource.resourceId || `${sub.providerKey}-${Date.now()}`,
+              url: resource.sourceUrl || resource.url || null,
+              title: resource.title || resource.subject || null,
+            },
+            occurredAt: resource.timestamp ? new Date(resource.timestamp) : null,
             metadata: { ...(resource.metadata || {}), webhookEventId: eventId, eventType: type },
           });
         } else if (this.smartIngestRouter) {

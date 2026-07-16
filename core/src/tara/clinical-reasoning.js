@@ -17,6 +17,7 @@
  */
 
 import { DEFAULT_CLINICAL_PROMPT } from './config-store.js';
+import { groqFetch } from '../llm/groq-fallback.js';
 
 export class ClinicalReasoningEngine {
   /**
@@ -124,7 +125,11 @@ ALWAYS include these JSON fields (in addition to any others):
 Respond with valid JSON only.`;
 
     try {
-      const resp = await fetch(`${this.llmBaseUrl}/chat/completions`, {
+      // groqFetch (not raw fetch): non-streaming, so it transparently honors
+      // LLM_PRIMARY=openrouter and maps the Groq model id → OpenRouter slug when
+      // Groq is down/restricted. Otherwise clinical reasoning 400s and external
+      // mode loses its insights.
+      const resp = await groqFetch(`${this.llmBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.llmApiKey}`,

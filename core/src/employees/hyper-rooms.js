@@ -14,6 +14,7 @@
  */
 
 import crypto from 'node:crypto';
+import { publishTurnEvent, publishTurnSeal } from '../realtime/hyper-turn-events.js';
 
 // CSI role lanes. Maps from existing DigitalEmployee.roleArchetype
 // (which may already be set) into one of these canonical lanes.
@@ -124,7 +125,7 @@ export function buildIdempotencyKey({ roomId, seq, userMessage }) {
  * @param {object} event   JSONL event ({t, ts, ...})
  */
 export async function appendTurnEvent(prisma, turnId, event) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const row = await tx.hyperTurn.findUnique({
       where: { id: turnId },
       select: { lines: true },
@@ -140,6 +141,8 @@ export async function appendTurnEvent(prisma, turnId, event) {
     });
     return stamped;
   });
+  publishTurnEvent(turnId, result);
+  return result;
 }
 
 /**
@@ -158,6 +161,7 @@ export async function sealTurn(prisma, turnId, { status = 'complete', costTokens
     where: { id: turnId },
     data: { status, costTokens, sealedAt: new Date() },
   });
+  publishTurnSeal(turnId, { status, costTokens });
   return true;
 }
 

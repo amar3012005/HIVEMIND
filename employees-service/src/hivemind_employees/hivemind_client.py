@@ -43,9 +43,41 @@ def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str
     return headers
 
 
+async def report_llm_usage(*, user_id: Optional[str], org_id: Optional[str], api_key: str = "",
+                           model: str = "hyperagents-director", total_tokens: int = 0,
+                           prompt_tokens: int = 0, completion_tokens: int = 0,
+                           feature: str = "hyperagents-room") -> None:
+    """Report the director's LLM token spend to HIVEMIND core so it records against the org's
+    HIVEMIND API key (org_id + key from the emulation headers + model + feature). The director runs
+    in this Python service — its LLM calls never touch core's JS metering chokepoint, so without this
+    bridge HyperAgents spend is invisible to per-key accounting. Fire-and-forget: never raise into a
+    room turn. No-op when there are no tokens or no org."""
+    if not org_id or not total_tokens or total_tokens <= 0:
+        return
+    try:
+        settings = get_settings()
+        headers = _emulated_headers(api_key, user_id, org_id)
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(8.0, connect=4.0),
+            headers=headers,
+        ) as c:
+            await c.post("/api/usage/llm-report", json={
+                "model": model,
+                "total_tokens": int(total_tokens),
+                "prompt_tokens": int(prompt_tokens or 0),
+                "completion_tokens": int(completion_tokens or 0),
+                "feature": feature,
+            })
+    except Exception:
+        # Metering must never break a turn — swallow transport/auth errors silently.
+        return
+
+
 async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                           api_key: str = "", max_memories: int = 8,
-                          project_id: Optional[str] = None) -> Dict[str, Any]:
+                          project_id: Optional[str] = None,
+                          mode: str = "explain") -> Dict[str, Any]:
     """Async recall that works even when the employee has no minted key, via
     master + emulation headers. Returns the raw /api/recall JSON."""
     settings = get_settings()
@@ -55,7 +87,12 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         timeout=httpx.Timeout(30.0, connect=5.0),
         headers=headers,
     ) as c:
-        body: Dict[str, Any] = {"query_context": query, "max_memories": max_memories}
+        recall_mode = mode if mode in {"fact", "explain", "full"} else "explain"
+        body: Dict[str, Any] = {
+            "query_context": query,
+            "max_memories": max_memories,
+            "mode": recall_mode,
+        }
         if project_id:
             # project_id (snake) is the HARD scope: core forces the access context to this
             # project and EXCLUDES other projects' memories (so a Solvis-project room never
@@ -68,6 +105,66 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         r = await c.post("/api/recall", json=body)
         r.raise_for_status()
         return r.json()
+
+
+async def list_canon_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                              api_key: str = "", limit: int = 8) -> list:
+    """Fetch the org's PINNED canon memories (tag `org-canon` — company identity,
+    mission, positioning, ICP, team; filed by HyperAgents onboarding) via the core
+    list endpoint. This is the GUARANTEED company-context lane: tag-filtered, not
+    score-ranked, so the canon surfaces even when vector recall would bury it under
+    a dense KB corpus. Best-effort: [] on any failure."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(12.0, connect=4.0),
+            headers=headers,
+        ) as c:
+            r = await c.get("/api/memories", params={
+                "tags": "org-canon", "is_latest": "true", "limit": max(1, min(int(limit or 8), 12)),
+            })
+            r.raise_for_status()
+            j = r.json()
+            return j.get("memories") or j.get("results") or []
+    except Exception:
+        return []
+
+
+async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
+                              api_key: str = "", limit: int = 6, timeout_s: float = 45.0) -> Dict[str, Any]:
+    """Live web search via HIVEMIND core's Tavily-backed web-intel — the SAME engine
+    behind the hivemind_web_search MCP tool (so the director reuses it, not a bespoke
+    Tavily client). Submits a job, polls until terminal, returns the succeeded payload
+    {status, results:[{title,url,snippet,score}], ...}. Best-effort: returns
+    {"error": ...} instead of raising (web is optional gathering, never fatal)."""
+    import asyncio
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(timeout_s, connect=5.0),
+            headers=headers,
+        ) as c:
+            sub = await c.post("/api/web/search/jobs", json={"query": query, "limit": max(1, min(int(limit or 6), 10))})
+            if sub.status_code not in (200, 202):
+                return {"error": f"web submit {sub.status_code}", "detail": sub.text[:200]}
+            job_id = (sub.json() or {}).get("job_id")
+            if not job_id:
+                return {"error": "no job_id"}
+            for _ in range(max(6, int(timeout_s))):
+                await asyncio.sleep(1)
+                g = await c.get(f"/api/web/jobs/{job_id}")
+                if g.status_code != 200:
+                    continue
+                p = g.json() or {}
+                if p.get("status") in ("succeeded", "failed", "completed", "error", "done"):
+                    return p
+            return {"status": "timeout", "job_id": job_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
 
 
 async def org_members_emulated(
@@ -224,6 +321,7 @@ class HivemindClient:
 
     # ── Memory ───────────────────────────────────────────────
     async def recall(self, query: str, max_memories: int = 5, **kwargs) -> Dict[str, Any]:
+        kwargs.setdefault("mode", "explain")
         r = await self.core.post(
             "/api/recall",
             json={"query_context": query, "max_memories": max_memories, **kwargs},

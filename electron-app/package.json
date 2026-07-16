@@ -1,37 +1,49 @@
 {
-  "name": "hivemind",
-  "version": "1.0.3",
-  "description": "HIVEMIND — AI Memory & HyperAgent Platform",
+  "name": "singulance",
+  "version": "2.0.3",
+  "description": "SINGULANCE \u2014 the sovereign AI memory workspace (HIVEMIND desktop)",
   "main": "src/main.js",
   "author": "amarsai3012005",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "dev": "ELECTRON_IS_DEV=1 electron .",
-    "build:react": "cd ../frontend/Da-vinci && npm run build",
+    "build:react": "cd ../frontend/Da-vinci && REACT_APP_CONTROL_PLANE_URL=${REACT_APP_CONTROL_PLANE_URL:-https://api.singulancelabs.com} REACT_APP_CORE_API_URL=${REACT_APP_CORE_API_URL:-https://core.singulancelabs.com} REACT_APP_HIVEMIND_SITE_HOST=${REACT_APP_HIVEMIND_SITE_HOST:-electron} CI=false npm run build",
     "copy:react": "rm -rf react-build && cp -r ../frontend/Da-vinci/build react-build",
-    "prebuild": "npm run build:react && npm run copy:react",
     "build": "electron-builder build --mac",
     "build:arm64": "electron-builder build --mac --arm64",
     "build:x64": "electron-builder build --mac --x64",
     "build:universal": "electron-builder build --mac --universal",
-    "dist": "npm run prebuild && electron-builder build --mac --publish=never"
+    "dist": "electron-builder build --mac --publish=never"
   },
   "build": {
-    "appId": "eu.davinciai.hivemind",
-    "productName": "HIVEMIND",
-    "copyright": "Copyright © 2026 HIVEMIND",
+    "appId": "com.singulancelabs.desktop",
+    "productName": "SINGULANCE",
+    "copyright": "Copyright \u00a9 2026 SINGULANCE",
+    "afterSign": "scripts/notarize.js",
+    "protocols": [
+      {
+        "name": "SINGULANCE",
+        "schemes": [
+          "singulance"
+        ]
+      }
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
       "target": [
         {
           "target": "dmg",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         }
       ],
       "darkModeSupport": true,
@@ -41,7 +53,7 @@
       "entitlementsInherit": "entitlements.mac.plist"
     },
     "dmg": {
-      "title": "HIVEMIND",
+      "title": "SINGULANCE",
       "window": {
         "width": 540,
         "height": 380
@@ -62,7 +74,6 @@
     },
     "files": [
       "src/**/*",
-      "react-build/**/*",
       "assets/**/*",
       "node_modules/**/*",
       "package.json"
@@ -77,10 +88,12 @@
     }
   },
   "dependencies": {
-    "electron-updater": "^6.3.4"
+    "electron-updater": "^6.3.4",
+    "electron-log": "^5.2.0"
   },
   "devDependencies": {
     "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "@electron/notarize": "^2.5.0"
   }
 }

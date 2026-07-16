@@ -33,6 +33,12 @@ export class ZitadelOidcClient {
     if (options.idpHint) {
       params.set('idp_hint', options.idpHint);
     }
+    // ZITADEL federated-IdP pinning: appending the urn:zitadel:iam:org:idp:id:<id>
+    // scope jumps straight to that external IdP (Microsoft/Apple/Google) instead
+    // of showing the ZITADEL login chooser.
+    if (options.idpId) {
+      params.set('scope', `${this.config.scope} urn:zitadel:iam:org:idp:id:${options.idpId}`);
+    }
     if (options.loginHint) {
       params.set('login_hint', options.loginHint);
     }

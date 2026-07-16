@@ -1,59 +1,56 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { getPlan, getAllPlans, isFeatureEnabled, getLimit, PLANS } from '../../src/billing/plans.js';
+import { getPlan, getAllPlans, isFeatureEnabled, getLimit } from '../../src/billing/plans.js';
 
 describe('Plans', () => {
-  it('has 4 tiers', () => {
-    assert.equal(getAllPlans().length, 4);
+  it('publishes the B2C free, pro, and scale tiers plus enterprise', () => {
+    assert.deepEqual(getAllPlans().map(plan => plan.id), ['free', 'pro', 'scale', 'enterprise']);
   });
 
-  it('free plan has correct limits', () => {
+  it('defines daily and monthly hard limits for free', () => {
     const plan = getPlan('free');
     assert.equal(plan.price, 0);
-    assert.equal(plan.limits.tokensPerMonth, 1_000_000);
-    assert.equal(plan.limits.searchQueriesPerMonth, 10_000);
-    assert.equal(plan.limits.maxConnectors, 1);
+    assert.equal(plan.limits.llmTokensPerDay, 100_000);
+    assert.equal(plan.limits.llmTokensPerMonth, 1_000_000);
+    assert.equal(plan.limits.searchQueriesPerDay, 1_000);
+    assert.equal(plan.limits.knowledgeBasePagesPerDay, 25);
+    assert.equal(plan.limits.knowledgeBasePagesPerMonth, 100);
     assert.equal(plan.overage, null);
   });
 
-  it('pro plan costs EUR 19', () => {
-    const plan = getPlan('pro');
-    assert.equal(plan.price, 19);
-    assert.equal(plan.currency, 'EUR');
-    assert.equal(plan.limits.tokensPerMonth, 5_000_000);
+  it('keeps paid B2C tiers hard-capped until metered overage is enabled', () => {
+    const pro = getPlan('pro');
+    const scale = getPlan('scale');
+    assert.equal(pro.price, 79);
+    assert.equal(pro.limits.llmTokensPerDay, 1_000_000);
+    assert.equal(pro.limits.llmTokensPerMonth, 10_000_000);
+    assert.equal(pro.overage, null);
+    assert.equal(scale.price, 239);
+    assert.equal(scale.limits.llmTokensPerDay, 10_000_000);
+    assert.equal(scale.limits.llmTokensPerMonth, 100_000_000);
+    assert.equal(scale.overage, null);
   });
 
-  it('scale plan has agent swarm enabled', () => {
-    assert.equal(isFeatureEnabled('scale', 'agentSwarm'), true);
-    assert.equal(isFeatureEnabled('pro', 'agentSwarm'), false);
-    assert.equal(isFeatureEnabled('free', 'agentSwarm'), false);
+  it('keeps the shared feature set available on B2C plans', () => {
+    assert.equal(isFeatureEnabled('free', 'agentSwarm'), true);
+    assert.equal(isFeatureEnabled('free', 'webIntelligence'), true);
+    assert.equal(isFeatureEnabled('free', 'llmObserver'), true);
   });
 
-  it('web intelligence is pro+ only', () => {
-    assert.equal(isFeatureEnabled('free', 'webIntelligence'), false);
-    assert.equal(isFeatureEnabled('pro', 'webIntelligence'), true);
-    assert.equal(isFeatureEnabled('scale', 'webIntelligence'), true);
-  });
-
-  it('enterprise has unlimited everything', () => {
+  it('keeps enterprise limits unlimited', () => {
     const plan = getPlan('enterprise');
-    assert.equal(plan.limits.tokensPerMonth, -1);
-    assert.equal(plan.limits.searchQueriesPerMonth, -1);
+    assert.equal(plan.limits.llmTokensPerDay, -1);
+    assert.equal(plan.limits.llmTokensPerMonth, -1);
+    assert.equal(plan.limits.searchQueriesPerDay, -1);
     assert.equal(plan.limits.maxUsers, -1);
   });
 
-  it('unknown plan defaults to free', () => {
-    const plan = getPlan('nonexistent');
-    assert.equal(plan.id, 'free');
+  it('defaults unknown plans to free', () => {
+    assert.equal(getPlan('nonexistent').id, 'free');
   });
 
-  it('getLimit returns correct value', () => {
-    assert.equal(getLimit('free', 'tokensPerMonth'), 1_000_000);
+  it('returns canonical limit fields', () => {
+    assert.equal(getLimit('free', 'llmTokensPerMonth'), 1_000_000);
     assert.equal(getLimit('scale', 'maxUsers'), 25);
-  });
-
-  it('LLM observer is pro+ only', () => {
-    assert.equal(isFeatureEnabled('free', 'llmObserver'), false);
-    assert.equal(isFeatureEnabled('pro', 'llmObserver'), true);
   });
 });

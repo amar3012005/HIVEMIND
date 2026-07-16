@@ -31,7 +31,7 @@ from agentscope.formatter import (
 from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
-from .agentscope_tools import build_hivemind_toolkit
+from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
 
 log = logging.getLogger(__name__)
 
@@ -311,6 +311,18 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     # send it for gpt-oss.
     if "gpt-oss" in (routed_model or "").lower():
         _kwargs["reasoning_effort"] = "low"
+        # reasoning_format="hidden": gpt-oss uses the Harmony format, whose
+        # `analysis` channel (the model's private chain-of-thought, e.g.
+        # "We need to respond as Theo, concise, 3-5 sentences...") otherwise
+        # bleeds into `message.content` and surfaces verbatim in the room
+        # bubble. "hidden" makes Groq drop the analysis channel entirely and
+        # return ONLY the final answer in content — the humanised persona
+        # response users should see. (generate_kwargs forwards it to the
+        # chat.completions call.)
+        _kwargs["generate_kwargs"] = {
+            **(_kwargs.get("generate_kwargs") or {}),
+            "reasoning_format": "hidden",
+        }
     return OpenAIChatModel(**_kwargs)
 
 
@@ -444,6 +456,20 @@ def build_react_agent(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("connector group activation failed: %s", exc)
+
+        # GLOBAL learned playbook → lazy `recall_experience` tool + a one-line pointer
+        # (not a wholesale inject). The agent loads the relevant lessons on demand, the
+        # same way it reaches for recall/web. Read-only: private chat never journalises.
+        register_experience_tool(toolkit, org_id, name)
+        _pb = employee_row.get("evo_playbook") or []
+        _pb_n = len([x for x in _pb if str(x).strip()]) if isinstance(_pb, list) else 0
+        if _pb_n:
+            persona = (
+                persona
+                + f"\n\nYou have {_pb_n} learned lesson(s) from your past work across all rooms. "
+                  "When a task resembles something you have handled before, call "
+                  "recall_experience(topic) to load the relevant lessons and apply them."
+            )
 
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)

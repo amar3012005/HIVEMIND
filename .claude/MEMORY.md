@@ -6,6 +6,92 @@ entry after each meaningful task. Newest at top within a date. Pair with
 
 ---
 
+## 2026-07-09
+
+### Personal AMR storage policy rollout
+- Added `Organization.memoryStorageMode` with values `amr_embedded`, `hybrid`,
+  `hybrid_amr_index`, `byod_amr`, and `byod_hybrid`. Existing organizations default to
+  `hybrid`; there is no silent migration of existing customer data.
+- New managed personal/free organizations now persist `amr_embedded` and register `local:` in
+  the agent registry at creation. Their primary memory records, vectors, recall, lexical search,
+  graph, and relationships route through the embedded `.amr` store. Enterprise/managed/scale
+  organizations default to `hybrid`; self-host defaults to `byod_amr`.
+- Important boundary: embedded `.amr` does not make every feature Postgres/Qdrant-free. KB
+  documents/segments and selected operational side tables still use the `hm` PostgreSQL schema and
+  Qdrant. Do not claim full data-plane elimination until those domains have separate migration work.
+- Platform Admin now reports each user's workspace type, effective storage modes, `.amr`/hybrid
+  filesystem label, and routed memory count. AMR counts are read from the agent stats path and
+  cached for 15 seconds; unavailable agent counts return `Unavailable`, never a false zero.
+- Migration `20260709211000_add_memory_storage_mode` was applied directly to legacy production
+  Postgres because Prisma migrate deploy is not baselined there (`P3005`). Preserve this operational
+  fact: use an idempotent SQL migration plus verification for this production database unless the
+  migration ledger is formally baselined first.
+
+### vNext B2B/B2C parallel canary
+- Deployed `codex/production-hardening-runtime` beside production from clean
+  `/root/hivemind-next`; never pulled, reset, or edited dirty `/root/hivemind`.
+- Exposed isolated endpoints: `b2b-next-core`, `b2b-next-api`,
+  `b2c-next-core`, and `b2c-next-api` on separate loopback ports and Caddy
+  routes. All four plus existing production health/bootstrap endpoints returned
+  HTTP 200 after rollout.
+- vNext has independent Postgres, Qdrant, Redis volumes and generated secrets.
+  It uses a production **schema-only** export, never production rows, because
+  historical Prisma migrations contain `public.*` references and cannot replay
+  safely against the authoritative `hivemind` schema.
+- B2B/B2C app, control-plane, maintenance, and HyperAgent pools are separately
+  capped. This is a canary topology, not yet the final paid-customer traffic
+  router or a physically isolated B2B data plane.
+
+### Singulance production topology and deployment baseline
+- Production host: `root@singulancelabs.com` (`46.224.4.164`). Live source checkout is
+  `/root/hivemind` and is intentionally dirty; never pull, reset, or build from it.
+  Clean build/canary checkout is `/root/hivemind-next` on branch
+  `codex/production-hardening-runtime`.
+- Production Compose: `/root/hivemind/infra/docker-compose.hetzner.yml`, always invoked
+  with `--env-file /root/hivemind/.env`. Core/control are Compose-managed only: never
+  `docker run` them. Caddy config is `/root/hivemind/infra/Caddyfile`; after a Caddy edit,
+  restart `hm-caddy` (reload alone is not sufficient in this installation).
+- Public routing: `core.singulancelabs.com` -> core `:2026`,
+  `api.singulancelabs.com` -> control plane `:2027`, and the production-compatible vNext
+  frontend is `https://next.singulancelabs.com/hivemind/app` via loopback `:2388`.
+  The vNext FE calls the existing production core/control hosts, preserving OAuth callback,
+  connector, Cartesia, and BYOD behavior. `next.singulancelabs.com` is in production CORS.
+- Temporary B2B/B2C backend canaries remain isolated and must never receive customer traffic.
+  Do not create two frontend applications: one frontend with existing callback URLs is the
+  deliberate production design.
+- The 16 GB server runs many containers and React production builds are CPU/memory slow.
+  Do not add k3s/kubernetes on this single host: it does not provide host failover and adds
+  overhead. First reduce idle canaries, enforce resource limits, add off-host backups and
+  monitoring; consider k3s only for a multi-node deployment with external/shared data.
+
+### Safe Singulance rollout rules
+- Build images from `/root/hivemind-next`, tag the new image separately first, retain the
+  current image under a timestamped `rollback-<timestamp>` tag, then retag the approved
+  image and recreate only the changed Compose service with `--no-deps --force-recreate`.
+- Never run `docker compose` against production without `--env-file /root/hivemind/.env`.
+  Missing it injects blank secrets and causes control-plane health failures/502s.
+- Mandatory cold checks after a core/control/frontend rollout:
+  `https://core.singulancelabs.com/health`,
+  `https://api.singulancelabs.com/v1/bootstrap`, and the changed frontend route. Confirm
+  `hm-control` is `running/healthy` and inspect recent logs. Roll back to the retained image
+  tag and recreate through Compose on failure; never use `git reset --hard` on production.
+- The frontend submodule is deployed by committing/pushing its branch, then committing the
+  parent gitlink update. Verify the exact submodule SHA in `/root/hivemind-next` before build.
+
+### Platform admin console
+- Public route: `/hivemind/platform-admin` on `next.singulancelabs.com`. It lists B2B/B2C,
+  active/sleeping users and last activity. The route fallback is absolute
+  `/hivemind/app/overview`; do not change it to a relative path or it recurses.
+- Admin unlock is `POST /admin/api/platform/unlock`. `HIVEMIND_ADMIN_SECRET` is server-only;
+  never store, print, commit, or place its value in browser code or Claude memory. Unlock
+  creates a 15-minute `Secure`, `HttpOnly`, `SameSite=Strict` signed cookie. It is rate-limited
+  to five failed attempts per IP per 15 minutes.
+- `GET /admin/api/platform/users` and `GET /admin/api/platform/logs` require that cookie.
+  The admin page polls the latter every two seconds. The old public `/api/logs` endpoint was
+  intentionally removed; do not restore unauthenticated raw log access.
+- Service-worker cache is `hive-shell-v2`; Umami gateway loader was removed. If an old shell
+  appears, hard reload/unregister the stale service worker before debugging application code.
+
 ## 2026-05-30
 
 ### CSI / MiroFish + Employees architecture docs

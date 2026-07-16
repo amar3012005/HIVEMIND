@@ -12,6 +12,8 @@
 
 import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
+import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
+import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -21,16 +23,19 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_recall',
       description:
-        `Unified retrieval — the ONLY recall entry point. Memory-first sequential pipeline; you do NOT pick storage tiers, the router does.\n\nReturns three lanes:\n  memories[]  — canonical facts (chat, decisions, people, projects, KB summaries)\n  evidence[]  — full document segments when the query anchors a doc (filename tag, doc-hash, or sparse memory match)\n  live[]      — fresh Gmail / Drive / Calendar items when memory layer hints at workspace data\nPlus trace{} explaining what fired.\n\nHow to call:\n  • query: pass user's literal wording — include filenames verbatim ("Dachmarke (1).pdf") when mentioned\n  • Issue 2-4 broad sub-queries varying in scope (entity-only, entity+topic, side-topic, filename) — the router de-dupes across them\n  • limit: 12 default, 25 for "summarize everything about X"\n\nHow to read:\n  • If memories[] OR evidence[] OR live[] has ANY relevant row, USE IT — don't say "I don't have notes"\n  • Cite memory titles inline, reference evidence as "[Doc Title — p.N]"\n  • Synthesize across rows, don't list silos\n  • trace.tiers_fired tells you which tiers contributed`,
+        `Unified retrieval — the ONLY recall entry point. It runs bounded memory/evidence lanes and typed graph expansion under one tenant-scoped plan.\n\nReturns memories[], evidence[], relationships[], live[], evidence_packet, and trace.\n\nCall once with the user's complete question. Use fact for the initial fast path and explain only for one policy-driven expansion. Full is caller-explicit only. Never fan out paraphrase queries or loop until satisfied.`,
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Natural-language query.' },
-          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
           source_type: { type: 'string', enum: ['text', 'code', 'conversation', 'documentation', 'decision'] },
+          source_document_id: { type: 'string', description: 'Known KnowledgeDocument id. Hard-filters evidence in explain/full.' },
+          source_title: { type: 'string', description: 'Exact or partial source filename/title. Resolves to a hard document filter in explain/full.' },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
+          known_at: { type: 'string', description: 'ISO timestamp for what the workspace had learned by that time.' },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
         },
         required: ['query'],
@@ -49,7 +54,7 @@ export const TOOL_SCHEMAS = [
           title: { type: 'string', description: '3-8 words, searchable.' },
           content: { type: 'string', description: 'The fact, one claim per memory.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
-          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship'] },
+          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson'] },
           project_id: {
             type: 'string',
             description: 'Project UUID. Use when you already know it (e.g. from a prior hivemind_list_projects call).',
@@ -339,30 +344,65 @@ const TOOL_HANDLERS = {
     // Single entry point — RecallRouter owns tier orchestration.
     // Memory-first, event-driven, no regex classifier. Memory layer's tags
     // are the routing oracle for evidence + live workspace lookups.
-    const { RecallRouter } = await import('../memory/recall-router.js');
+    const { RecallRouter, resolveRecallPlan, buildEvidencePacket, loadTypedGraphEvidence } = await import('../memory/recall-router.js');
     const router = new RecallRouter({
       persistentMemoryStore: ctx.persistentMemoryStore,
       evidenceRetrieval:     ctx.evidenceRetrieval,
       prisma:                ctx.prisma,
     });
 
-    const mode = args.mode || 'quick';
+    const requestedMode = args.mode || 'fact';
+    const mode = normalizeAgentRecallMode(requestedMode);
+    const recallPlan = resolveRecallPlan({ ...args, mode, explicit_mode: args._explicit_mode === true });
+    const planMode = recallPlan.mode;
+    const recallStartedAt = Date.now();
     const result = await router.recall(args.query, {
-      mode,
+      mode:           planMode,
+      explicit_mode:  args._explicit_mode === true,
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
-      valid_at:       args.valid_at,
+      source:         recallPlan.source,
+      time:           recallPlan.time,
+      operation:      recallPlan.operation,
+      include_superseded: recallPlan.operation === 'timeline' || args.include_superseded === true,
       // Date range — { start, end } ISO timestamps. Filters memories whose
       // document_date OR created_at falls in window. Used by agent's
       // today/yesterday/this-week shortcuts.
-      date_range:     args.date_range,
-      include_live:   args.include_live,
+      include_live:   args.include_live === true,
+      live_intent:    args.live_intent === true,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
       projectId:     ctx.projectId,
       accessContext: ctx.accessContext,
+    });
+
+    let graph = [];
+    const graphBudget = recallPlan.latency_budget_ms - (Date.now() - recallStartedAt);
+    if (recallPlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
+      const loaded = await Promise.race([
+        loadTypedGraphEvidence({
+          prisma: ctx.prisma,
+          memoryIds: result.memories.map((memory) => memory.id).filter(Boolean),
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          accessContext: ctx.accessContext,
+          time: recallPlan.time,
+        }),
+        new Promise((resolve) => setTimeout(() => resolve({ items: [], reason: 'timeout' }), Math.min(500, graphBudget))),
+      ]);
+      graph = loaded.items || [];
+    }
+    const cutoffReason = result.trace?.cutoff_reason || null;
+    const evidencePacket = buildEvidencePacket({
+      memories: result.memories,
+      evidence: result.evidence,
+      graph,
+      live: result.live,
+      plan: recallPlan,
+      trace: result.trace,
+      cutoffReason,
     });
 
     // P2 salience feedback: reinforce every recalled memory (agent + MCP
@@ -380,6 +420,8 @@ const TOOL_HANDLERS = {
             strength: { increment: 0.05 },
           },
         }).catch(() => {});
+        // Self-host: central updateMany no-ops (rows on the agent) — mirror to agent.
+        try { amrBumpRecall(ctx.orgId, recalledIds); } catch { /* best-effort */ }
       }
     }
 
@@ -388,7 +430,8 @@ const TOOL_HANDLERS = {
     // mode already returns the top synthesis + 2 evidence ids; insight mode
     // expands ALL synthesis rows up to 4 evidence ids each. Bound by ctx.prisma.
     let synthEvidenceChains = null;
-    if (mode === 'insight' && ctx.prisma) {
+    const remainingRecallBudget = () => Math.max(0, recallPlan.latency_budget_ms - (Date.now() - recallStartedAt));
+    if ((mode === 'explain' || mode === 'full') && ctx.prisma && remainingRecallBudget() > 1) {
       const synthRows = (result.memories || []).filter(m => {
         const srcType = m.source_metadata?.source_type;
         const tags = m.tags || [];
@@ -396,39 +439,61 @@ const TOOL_HANDLERS = {
             || tags.includes('synthesis:canonical') || tags.includes('synthesis:bridge');
       });
       if (synthRows.length > 0) {
-        synthEvidenceChains = [];
-        for (const synth of synthRows.slice(0, 5)) {
-          const evIds = synth.synthesis_evidence_ids || synth.synthesisEvidenceIds || [];
-          if (!evIds.length) continue;
-          try {
-            const rows = await ctx.prisma.memory.findMany({
-              where: { id: { in: evIds.slice(0, 4) }, deletedAt: null },
-              select: { id: true, title: true, content: true, tags: true, createdAt: true },
-            });
-            synthEvidenceChains.push({
-              synthesis_id: synth.id,
-              synthesis_title: synth.title,
-              evidence: rows.map(r => ({
-                id: r.id, title: r.title,
-                content: (r.content || '').slice(0, 240),
-                created_at: r.createdAt,
+        const boundedSynthRows = synthRows.slice(0, 5);
+        const evidenceIds = [...new Set(boundedSynthRows.flatMap((synth) =>
+          (synth.synthesis_evidence_ids || synth.synthesisEvidenceIds || []).slice(0, 4)))];
+        try {
+          const hydration = orgIsRemote(ctx.orgId)
+            ? remoteHydrate(ctx.orgId, evidenceIds)
+            : ctx.prisma.memory.findMany({
+                where: { id: { in: evidenceIds }, deletedAt: null },
+                select: { id: true, title: true, content: true, tags: true, createdAt: true },
+              });
+          const rawRows = await Promise.race([
+            hydration,
+            new Promise((resolve) => setTimeout(() => resolve([]), remainingRecallBudget())),
+          ]);
+          const rows = (rawRows || []).map((r) => ({
+            id: r.memory_id || r.id,
+            title: r.title || null,
+            content: r.content || '',
+            tags: r.tags || [],
+            createdAt: r.created_at || r.createdAt || null,
+          }));
+          const byId = new Map(rows.map((row) => [row.id, row]));
+          synthEvidenceChains = boundedSynthRows.map((synth) => ({
+            synthesis_id: synth.id,
+            synthesis_title: synth.title,
+            evidence: (synth.synthesis_evidence_ids || synth.synthesisEvidenceIds || [])
+              .slice(0, 4)
+              .map((id) => byId.get(id))
+              .filter(Boolean)
+              .map((row) => ({
+                id: row.id,
+                title: row.title,
+                content: row.content.slice(0, 240),
+                created_at: row.createdAt,
               })),
-            });
-          } catch (chainErr) {
-            console.warn('[hivemind_recall] insight chain fetch failed:', chainErr.message);
-          }
+          })).filter((chain) => chain.evidence.length > 0);
+        } catch (chainErr) {
+          console.warn('[hivemind_recall] insight chain fetch failed:', chainErr.message);
         }
       }
     }
 
     return {
-      mode,
+      mode: requestedMode,
+      mode_used: planMode,
+      recall_plan: recallPlan,
       count:          result.memories.length,
       memories:       result.memories,
       live_count:     result.live.length,
       live:           result.live,
       evidence_count: result.evidence.length,
       evidence:       result.evidence,
+      timeline:       recallPlan.operation === 'timeline' ? result.memories : [],
+      relationships:  graph,
+      evidence_packet: evidencePacket,
       ...(synthEvidenceChains ? { synthesis_evidence_chains: synthEvidenceChains } : {}),
       trace:          result.trace,
     };
@@ -441,12 +506,12 @@ const TOOL_HANDLERS = {
     // Coerce memory_type to a valid Prisma enum value. Models routinely
     // emit 'note', 'observation', 'todo' etc — they're sensible English
     // but not in our locked enum. Map known synonyms; fall back to 'fact'.
-    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship']);
+    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson']);
     const TYPE_ALIAS = {
       note: 'fact', observation: 'fact', todo: 'goal', task: 'goal',
       reminder: 'goal', insight: 'lesson', learning: 'lesson',
       idea: 'fact', knowledge: 'fact', context: 'fact',
-      contact: 'relationship', person: 'relationship', user: 'relationship',
+      contact: 'fact', person: 'fact', user: 'fact', relationship: 'fact',
       meeting: 'event', appointment: 'event',
       synthesis: 'fact', summary: 'fact', // canonical-summary cognition rows
     };
@@ -559,17 +624,15 @@ const TOOL_HANDLERS = {
       project_ids: resolvedProjectId ? [resolvedProjectId] : [],
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
-    const [routed] = await ctx.buildRoutedIngestPayloads(payload, {
-      smartIngestRouter: ctx.smartIngestRouter,
-    });
-    // Use tree-aware dispatcher when provided so conversation/document
-    // sessions with multiple turns/sections produce parent + children +
-    // PartOf edges in one transaction. Falls back to ingestMemory for
-    // legacy flat payloads or older server.js versions without the
-    // dispatcher attached on ctx.
-    const saved = ctx.ingestRoutedPayload
-      ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-      : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    let saved;
+    if (ctx.ingestCanonicalPayload) {
+      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
+    } else {
+      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
+      saved = ctx.ingestRoutedPayload
+        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
+        : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    }
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
     return {
       saved: true,
@@ -700,19 +763,24 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_at(args, ctx) {
-    // Accept both `valid_at` (canonical) and `valid_time` / `transaction_time`
-    // (planner's naming). memory_query falls back to query.
-    const rawValidAt = args.valid_at || args.valid_time || args.transaction_time;
-    const valid_at = new Date(rawValidAt);
-    if (Number.isNaN(valid_at.getTime())) throw new Error('invalid valid_at date');
+    const rawValidAt = args.valid_at || args.valid_time || null;
+    const rawKnownAt = args.known_at || args.transaction_time || null;
+    const validAt = rawValidAt ? new Date(rawValidAt) : null;
+    const knownAt = rawKnownAt ? new Date(rawKnownAt) : null;
+    if ((!validAt && !knownAt) || (validAt && Number.isNaN(validAt.getTime())) || (knownAt && Number.isNaN(knownAt.getTime()))) {
+      throw new Error('hivemind_at requires a valid valid_at and/or known_at date');
+    }
     if (args.memory_query && !args.query) args.query = args.memory_query;
     return TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query,
-        valid_at: valid_at.toISOString(),
+        time: {
+          ...(validAt ? { valid_at: validAt.toISOString() } : {}),
+          ...(knownAt ? { known_at: knownAt.toISOString() } : {}),
+        },
         tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
         limit: 15,
-        mode: args.mode || 'quick',
+        mode: 'explain',
       },
       ctx
     );
@@ -721,11 +789,14 @@ const TOOL_HANDLERS = {
   async hivemind_diff(args, ctx) {
     const from = new Date(args.from);
     const to = new Date(args.to);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+      throw new Error('diff requires valid from/to timestamps with from before to');
+    }
     const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
-    const mode = args.mode || 'quick';
+    const mode = 'explain';
     const [a, b] = await Promise.all([
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: from.toISOString() }, tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: to.toISOString() }, tags, limit: 10, mode }, ctx),
     ]);
     // Compute structured delta — added/removed/persisted by memory id.
     const fromIds = new Set((a.memories || []).map(m => m.id));
@@ -733,6 +804,17 @@ const TOOL_HANDLERS = {
     const added    = (b.memories || []).filter(m => !fromIds.has(m.id));
     const removed  = (a.memories || []).filter(m => !toIds.has(m.id));
     const persisted = (b.memories || []).filter(m => fromIds.has(m.id));
+    const changedIds = new Set([...added, ...removed].map((memory) => memory.id));
+    const typedEdges = [...(a.relationships || []), ...(b.relationships || [])]
+      .filter((edge) => ['updates', 'contradicts'].includes(String(edge.type || '').toLowerCase()))
+      .filter((edge) => changedIds.has(edge.from_id) || changedIds.has(edge.to_id));
+    const edgeKeys = new Set();
+    const changes = typedEdges.filter((edge) => {
+      const key = `${edge.from_id}|${edge.to_id}|${String(edge.type).toLowerCase()}`;
+      if (edgeKeys.has(key)) return false;
+      edgeKeys.add(key);
+      return true;
+    });
     return {
       query: args.query,
       from_date: args.from,
@@ -743,6 +825,7 @@ const TOOL_HANDLERS = {
       added,
       removed,
       persisted,
+      changes,
       from: a,
       to: b,
     };
@@ -752,11 +835,13 @@ const TOOL_HANDLERS = {
     return TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query,
-        mode: 'panorama',
+        mode: 'explain',
+        operation: 'timeline',
+        include_superseded: true,
         limit: args.limit || 20,
         tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
         ...(args.valid_at && !Number.isNaN(new Date(args.valid_at).getTime())
-          ? { valid_at: new Date(args.valid_at).toISOString() }
+          ? { time: { valid_at: new Date(args.valid_at).toISOString() } }
           : {}),
       },
       ctx
@@ -832,12 +917,15 @@ const TOOL_HANDLERS = {
       org_id: ctx.orgId,
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
-    const [routed] = await ctx.buildRoutedIngestPayloads(payload, {
-      smartIngestRouter: ctx.smartIngestRouter,
-    });
-    const saved = ctx.ingestRoutedPayload
-      ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-      : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    let saved;
+    if (ctx.ingestCanonicalPayload) {
+      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
+    } else {
+      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
+      saved = ctx.ingestRoutedPayload
+        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
+        : await ctx.persistentMemoryEngine.ingestMemory(routed);
+    }
     return { logged: true, id: saved?.parentId || saved?.id || saved?.memoryId || null };
   },
 
@@ -908,6 +996,12 @@ const TOOL_HANDLERS = {
     };
   },
 };
+
+export function normalizeAgentRecallMode(mode) {
+  const value = String(mode || 'fact').toLowerCase();
+  return ({ quick: 'fact', panorama: 'explain', insight: 'explain' })[value]
+    || (['fact', 'explain', 'full'].includes(value) ? value : 'fact');
+}
 
 // ── Dispatch entry ───────────────────────────────────────────────────────────
 

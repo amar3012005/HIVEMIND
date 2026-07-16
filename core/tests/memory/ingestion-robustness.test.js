@@ -55,7 +55,7 @@ test('ingestion still runs memory processing when predict-calibrate is skipped',
   }
 });
 
-test('skipProcessing preserves raw memories without relationship merging', async () => {
+test('explicit raw-ingest flags preserve memories without relationship merging', async () => {
   let classifierCalls = 0;
   const relationshipClassifier = {
     classifyRelationship() {
@@ -83,7 +83,8 @@ test('skipProcessing preserves raw memories without relationship merging', async
     project: 'benchmark',
     content: 'I attended the Effective Time Management workshop last Saturday.',
     metadata: { session_date: '2023/05/28 (Sun) 21:04' },
-    skipProcessing: true
+    skipProcessing: true,
+    skip_relationship_classification: true,
   });
 
   const second = await engine.ingestMemory({
@@ -93,7 +94,8 @@ test('skipProcessing preserves raw memories without relationship merging', async
     project: 'benchmark',
     content: 'I attended the Data Analysis using Python webinar two months ago.',
     metadata: { session_date: '2023/05/28 (Sun) 07:17' },
-    skipProcessing: true
+    skipProcessing: true,
+    skip_relationship_classification: true,
   });
 
   const latest = await store.listLatestMemories({ user_id: userId, org_id: orgId, project: 'benchmark' });
@@ -182,4 +184,31 @@ test('benchmark enrichment adds fact metadata without relationship classificatio
   assert.ok(Array.isArray(stored.metadata.extracted_facts.dates));
   assert.ok(Array.isArray(stored.metadata.extracted_facts.keyphrases));
   assert.equal(stored.metadata.question_id, 'gpt4_2487a7cb');
+});
+
+test('derivation queue delay is bounded for durable ingest', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false, deriveThreshold: 0 });
+  const userId = '00000000-0000-4000-8000-000000001241';
+  const orgId = '00000000-0000-4000-8000-000000001242';
+
+  await engine.ingestMemory({
+    id: 'queue-base', user_id: userId, org_id: orgId,
+    content: 'The retention policy is seven years.', skipProcessing: true,
+  });
+
+  let enqueueStarted = false;
+  store.enqueueDerivationJob = async () => {
+    enqueueStarted = true;
+    await new Promise(() => {});
+  };
+  const started = Date.now();
+  const result = await engine.ingestMemory({
+    id: 'queue-new', user_id: userId, org_id: orgId,
+    content: 'The retention policy remains seven years.', skipProcessing: true,
+  });
+
+  assert.equal(result.memoryId, 'queue-new');
+  assert.equal(enqueueStarted, true);
+  assert.ok(Date.now() - started < 400, 'durable ingest exceeded the queue admission budget');
 });

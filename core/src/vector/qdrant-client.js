@@ -10,7 +10,15 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
+// mneme (.amr) per-org shadow backend — inert unless MNEME_ENABLED_ORGS lists the org.
+import { mnemeOn, mirrorStore, mirrorDelete, search as mnemeSearch } from './mneme-backend.js';
+import { amrRecall, amrWrite, isMnemeOrg, orgIsRemote, memoryBackend } from './mneme/driver.js';
+import { qdrantUrlFor } from './mneme/remote-backend.js';
+import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
+
+// Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
+const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -48,6 +56,43 @@ function filterMatchValue(filter, key) {
   if (!Array.isArray(must)) return null;
   const clause = must.find((c) => c?.key === key);
   return clause?.match?.value ?? null;
+}
+
+export function buildHybridSearchFilter(filters = {}) {
+  const must = [];
+  if (filters.user_id) must.push({ key: 'user_id', match: { value: filters.user_id } });
+  if (filters.org_id) must.push({ key: 'org_id', match: { value: filters.org_id } });
+  if (filters.project) must.push({ key: 'project', match: { value: filters.project } });
+  if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
+    must.push({ key: 'project_ids', match: { any: filters.project_ids } });
+  } else if (typeof filters.project_id === 'string' && filters.project_id.trim()) {
+    must.push({ key: 'project_ids', match: { any: [filters.project_id.trim()] } });
+  }
+  if (typeof filters.team_id === 'string' && filters.team_id.trim()) {
+    must.push({ key: 'team_id', match: { value: filters.team_id.trim() } });
+  }
+  if (Array.isArray(filters.tags) && filters.tags.length > 0) {
+    must.push({ key: 'tags', match: { any: filters.tags } });
+  }
+  if (filters.is_latest !== undefined) {
+    must.push({ key: 'is_latest', match: { value: filters.is_latest } });
+  }
+  if (filters.known_at) must.push({ key: 'created_at', range: { lte: filters.known_at } });
+  if (filters.valid_at) {
+    must.push({
+      should: [
+        { is_empty: { key: 'valid_from' } },
+        { key: 'valid_from', range: { lte: filters.valid_at } },
+      ],
+    });
+    must.push({
+      should: [
+        { is_empty: { key: 'valid_to' } },
+        { key: 'valid_to', range: { gt: filters.valid_at } },
+      ],
+    });
+  }
+  return must.length > 0 ? { must } : undefined;
 }
 
 // Central tenant routing. When QDRANT_PER_TENANT is off this returns the legacy
@@ -105,11 +150,11 @@ export class QdrantClient {
 
     try {
       const resolvedCollectionName = resolveCollectionName(collectionName);
-      const response = await fetch(`${QDRANT_URL}/collections/${resolvedCollectionName}`, { headers });
+      const response = await fetch(`${qbase()}/collections/${resolvedCollectionName}`, { headers });
       // getQdrantCollections takes positional args (url, apiKey, region) —
       // passing an object made `url` itself an object, blowing up later
       // with `url.startsWith is not a function`.
-      const collections = getQdrantCollections(QDRANT_URL, API_KEY);
+      const collections = getQdrantCollections(qbase(), API_KEY);
 
       if (response.ok) {
         await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
@@ -243,6 +288,8 @@ export class QdrantClient {
         content: memory.content,
         is_latest: memory.is_latest ?? true,
         created_at: memory.created_at || new Date().toISOString(),
+        valid_from: memory.valid_from || null,
+        valid_to: memory.valid_to || null,
         source: memory.source || memory.source_metadata?.source_platform || null,
         source_platform: memory.source_metadata?.source_platform || memory.source || null,
         document_date: memory.document_date,
@@ -258,14 +305,35 @@ export class QdrantClient {
         decay_factor: memory.decay_factor,
         // Layer discriminator — org containers hold memory + evidence in one
         // collection. Default 'memory'; evidence ingest passes options.layer.
-        layer: options.layer || memory.layer || 'memory',
+        layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
         metadata: memory.metadata || {}
       }
     };
 
+    // Remote .amr org (Model B, self-host): the vector + record belong on the CUSTOMER's hm-agent .amr,
+    // NOT central Qdrant. Write to the agent and return — never touch central Qdrant for this org's data.
+    if (orgIsRemote(memory.org_id)) {
+      const _rrec = {
+        id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+        content: memory.content, title: memory.title || null, tags: memory.tags || [],
+        memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
+        layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
+        cognitiveLayerRole: memory.cognitive_layer_role || null,
+        confidence: memory.importance_score ?? memory.strength ?? null,
+        createdAt: memory.created_at || new Date().toISOString(),
+        project: memory.project || null, projectIds: memory.project_ids || [],
+        validFrom: memory.valid_from || null, validTo: memory.valid_to || null,
+        documentDate: memory.document_date || null,
+        metadata: memory.metadata || {},
+      };
+      try { await amrWrite(memory.org_id, _rrec, point.vector); }
+      catch (e) { console.warn('[mneme] remote .amr write failed:', e.message); }
+      return { id: memory.id, status: 'amr-remote' };
+    }
+
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${collectionName}/points`,
+        `${qbase()}/collections/${collectionName}/points`,
         {
           method: 'PUT',
           headers,
@@ -281,12 +349,61 @@ export class QdrantClient {
         throw new Error(`Qdrant upsert failed: ${JSON.stringify(error)}`);
       }
 
+      // mneme dual-write (best-effort): mirror this point into the org's .amr shard so reads can
+      // be served from mneme for enabled orgs. Qdrant above remains the source of truth.
+      if (mnemeOn(memory.org_id)) {
+        mirrorStore(collectionName, point).catch(() => {});
+      }
+
+      // Path B: for the .amr-sole-store org, write the FULL record + vector into the adapter so
+      // reads served from .amr carry the embedding + Prisma-shaped fields. Flag-gated; inert otherwise.
+      if (isMnemeOrg(memory.org_id)) {
+        try {
+          const _rec = {
+            id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+            content: memory.content, title: memory.title || null, tags: memory.tags || [],
+            memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
+            layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'), deletedAt: null,
+            cognitiveLayerRole: memory.cognitive_layer_role || null,
+            confidence: memory.importance_score ?? memory.strength ?? null,
+            createdAt: memory.created_at || new Date().toISOString(),
+            project: memory.project || null, projectIds: memory.project_ids || [], primaryTeamId: memory.primary_team_id || null, scope: memory.scope || null, visibility: memory.visibility || null, validFrom: memory.valid_from || null, validTo: memory.valid_to || null, documentDate: memory.document_date || null, metadata: memory.metadata || {},
+          };
+          await amrWrite(memory.org_id, _rec, point.vector);
+        } catch (e) { console.warn('[mneme] unified write failed:', e.message); }
+      }
+
       return memory.id;
     } catch (error) {
       console.error('Failed to store memory in Qdrant:', error.message);
       // Don't throw - allow in-memory storage to succeed
       return memory.id;
     }
+  }
+
+  /**
+   * Patch lifecycle metadata without replacing the vector. PostgreSQL remains
+   * canonical; this keeps Qdrant's indexed eligibility fields synchronized so
+   * metadata-first candidate generation does not admit a superseded point.
+   */
+  async updateMemoryPayload(memoryId, payload, { orgId, collectionName } = {}) {
+    if (!memoryId || !orgId || !payload || typeof payload !== 'object') return false;
+    if (orgIsRemote(orgId)) return true; // The BYOD agent updates its own point.
+
+    const resolvedCollection = await routeCollection({ explicit: collectionName, orgId });
+    const response = await fetch(
+      `${qbase()}/collections/${resolvedCollection}/points/payload`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ payload, points: [memoryId], wait: true }),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Qdrant payload update failed: ${response.status} ${detail}`);
+    }
+    return true;
   }
 
   /**
@@ -323,6 +440,18 @@ export class QdrantClient {
     if (effectiveLayer && filter && Array.isArray(filter.must) && !filter.must.some((c) => c?.key === 'layer')) {
       filter = { ...filter, must: [...filter.must, { key: 'layer', match: { value: effectiveLayer } }] };
     }
+    // Belt-and-braces with the layer filter: `promoted-from-segment` rows are raw
+    // document sections promoted verbatim. They SHOULD be the evidence layer, but
+    // legacy/untagged ones default to layer:'memory' and leak into recall as raw
+    // multi-hundred-char dumps. Exclude the tag from auto-routed MEMORY recall so
+    // recall returns distilled facts only. Mirrors the mneme backend exclusion
+    // (mneme-backend.js:250). Explicit-collection callers (evidence retrieval) untouched.
+    if (autoResolved && filter) {
+      const mn = Array.isArray(filter.must_not) ? filter.must_not : [];
+      if (!mn.some((c) => c?.key === 'tags' && c?.match?.value === 'promoted-from-segment')) {
+        filter = { ...filter, must_not: [...mn, { key: 'tags', match: { value: 'promoted-from-segment' } }] };
+      }
+    }
     const collectionReady = await this.ensureCollection(resolvedCollection);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
@@ -343,6 +472,34 @@ export class QdrantClient {
     const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
       ? 0
       : score_threshold;
+
+    // mneme read path: for enabled orgs, serve recall from the org's .amr shard with the SAME
+    // score threshold + is_latest filter Qdrant would apply. Returns null on empty/error -> we
+    // transparently fall through to Qdrant below.
+    // Resolve the org from the filter OR the request's org context (the filter shape is unreliable —
+    // hybridSearch passes org_id as an option and may not surface it in filter.must). The ONE seam,
+    // memoryBackend(org), then decides: non-'central' → serve from the agent/.amr via amrRecall.
+    const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
+    if (_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central') {
+      try {
+        const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
+        if (_out) {
+        console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
+        return _out;
+        }
+      } catch (e) { console.warn('[mneme] adapter recall failed, fallback to qdrant:', e.message); }
+    }
+    if (mnemeOn(_mnemeOrg)) {
+      const mres = await mnemeSearch(resolvedCollection, searchVector, limit, {
+        isLatest: true,
+        scoreThreshold: effectiveScoreThreshold
+      });
+      if (mres) {
+        console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
+        return mres;
+      }
+      console.log(`[mneme] recall fallback=qdrant org=${_mnemeOrg} coll=${resolvedCollection}`);
+    }
 
     const searchRequest = {
       vector: searchVector,
@@ -373,7 +530,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${resolvedCollection}/points/search`,
+        `${qbase()}/collections/${resolvedCollection}/points/search`,
         {
           method: 'POST',
           headers,
@@ -401,69 +558,7 @@ export class QdrantClient {
    * @returns {Promise<Array>} Search results
    */
   async hybridSearch(query, filters = {}) {
-    const mustFilters = [];
-
-    // Add user/org filters for isolation
-    if (filters.user_id) {
-      mustFilters.push({
-        key: 'user_id',
-        match: { value: filters.user_id }
-      });
-    }
-
-    if (filters.org_id) {
-      mustFilters.push({
-        key: 'org_id',
-        match: { value: filters.org_id }
-      });
-    }
-
-    // Add project filter
-    if (filters.project) {
-      mustFilters.push({
-        key: 'project',
-        match: { value: filters.project }
-      });
-    }
-
-    // Add project_ids filter (V2 — array membership check on payload.project_ids)
-    if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
-      mustFilters.push({
-        key: 'project_ids',
-        match: { any: filters.project_ids }
-      });
-    } else if (typeof filters.project_id === 'string' && filters.project_id.trim()) {
-      mustFilters.push({
-        key: 'project_ids',
-        match: { any: [filters.project_id.trim()] }
-      });
-    }
-
-    // Add team_id filter (V2 — payload.team_id)
-    if (typeof filters.team_id === 'string' && filters.team_id.trim()) {
-      mustFilters.push({
-        key: 'team_id',
-        match: { value: filters.team_id.trim() }
-      });
-    }
-
-    // Add tags filter
-    if (filters.tags && filters.tags.length > 0) {
-      mustFilters.push({
-        key: 'tags',
-        match: { any: filters.tags }
-      });
-    }
-
-    // Add is_latest filter
-    if (filters.is_latest !== undefined) {
-      mustFilters.push({
-        key: 'is_latest',
-        match: { value: filters.is_latest }
-      });
-    }
-
-    const filter = mustFilters.length > 0 ? { must: mustFilters } : undefined;
+    const filter = buildHybridSearchFilter(filters);
 
     return await this.searchMemories({
       query,
@@ -489,7 +584,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points/${memoryId}`,
+        `${qbase()}/collections/${this.collectionName}/points/${memoryId}`,
         {
           headers,
           body: JSON.stringify({ with_payload: true, with_vector: false })
@@ -523,7 +618,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points/delete`,
+        `${qbase()}/collections/${this.collectionName}/points/delete`,
         {
           method: 'POST',
           headers,
@@ -533,6 +628,9 @@ export class QdrantClient {
           })
         }
       );
+
+      // mirror the delete into any enabled-org .amr shard that holds this memory (best-effort).
+      mirrorDelete(memoryId).catch(() => {});
 
       return response.ok;
     } catch (error) {
@@ -571,6 +669,8 @@ export class QdrantClient {
           content: memory.content,
           is_latest: memory.is_latest ?? true,
           created_at: memory.created_at || new Date().toISOString(),
+          valid_from: memory.valid_from || null,
+          valid_to: memory.valid_to || null,
           source_platform: memory.source_metadata?.source_platform || memory.source || null,
           document_date: memory.document_date,
           importance_score: memory.importance_score,
@@ -586,7 +686,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}/points`,
+        `${qbase()}/collections/${this.collectionName}/points`,
         {
           method: 'PUT',
           headers,
@@ -600,6 +700,14 @@ export class QdrantClient {
       if (!response.ok) {
         const error = await response.json();
         throw new Error(`Batch upsert failed: ${JSON.stringify(error)}`);
+      }
+
+      // mneme dual-write (best-effort): mirror each enabled-org point into its .amr shard. Uses
+      // org_<id> (enterprise per-tenant collection) to match the recall read key. Qdrant above
+      // is the source of truth, so any skipped mirror is safe.
+      for (const p of points) {
+        const oid = p.payload?.org_id;
+        if (mnemeOn(oid)) mirrorStore(`org_${oid}`, p).catch(() => {});
       }
 
       return memories.map(m => m.id);
@@ -631,7 +739,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${this.collectionName}`,
+        `${qbase()}/collections/${this.collectionName}`,
         { headers }
       );
 
@@ -680,10 +788,10 @@ export class QdrantClient {
   async testConnection() {
     try {
       console.log('🔍 Testing Qdrant connection...');
-      const response = await fetch(`${QDRANT_URL}/`, { headers });
+      const response = await fetch(`${qbase()}/`, { headers });
       if (response.ok) {
         console.log('✅ Qdrant connection successful');
-        console.log(`   URL: ${QDRANT_URL}, Collection: ${this.collectionName}`);
+        console.log(`   URL: ${qbase()}, Collection: ${this.collectionName}`);
         return true;
       } else {
         console.error('❌ Qdrant responded with status:', response.status);

@@ -41,6 +41,20 @@ const GENERIC_NON_ENTITY = new Set([
   'organization', 'org', 'meeting', 'document', 'doc', 'file', 'user',
   'assistant', 'system', 'everyone', 'someone', 'anyone', 'thing', 'stuff',
   'data', 'info', 'information', 'details', 'overview', 'summary', 'note',
+  // Universal English function / emphasis / status words that leak as fake
+  // entities from ALL-CAPS emphasis and prose (e.g. "NOW LIVE", "do NOT",
+  // "FOLLOW-UP"). These are never standalone proper-noun entities in any
+  // domain; a real name containing one survives as its multi-word slug
+  // (e.g. "Washington Post" → "washington-post", not bare "post"). Keeping
+  // this to closed-class words + generic status tokens avoids false-drops.
+  'not', 'now', 'new', 'old', 'live', 'done', 'follow', 'next', 'prev',
+  'yes', 'no', 'ok', 'okay', 'true', 'false', 'none', 'todo', 'tbd', 'na',
+  'via', 'per', 'vs', 'aka', 'etc', 'and', 'or', 'but', 'if', 'then',
+  'else', 'when', 'where', 'why', 'how', 'what', 'who', 'all', 'any',
+  'some', 'more', 'less', 'first', 'last', 'only', 'here', 'there', 'now',
+  'status', 'update', 'draft', 'final', 'pending', 'blocked', 'open', 'closed',
+  // HTTP verbs — leak from technical text; never entities on their own.
+  'get', 'post', 'put', 'patch', 'delete', 'head', 'options',
 ]);
 // Test/smoke sentinels this codebase emits (and that leaked into entity tags).
 const TEST_NOISE_RE = /^(ws\d+|embedtest|recallsmoke|routefix\d*|s1probe|s1async|abtest|deploy-smoke|smoketest|smoke-test|kbtest|foo|bar|baz|test|placeholder)(-|$)/i;
@@ -114,5 +128,47 @@ export function normalizeTagsArray(tags) {
     seen.add(nt);
     out.push(nt);
   }
-  return out;
+  return canonicalizeEntityAliases(out);
+}
+
+/**
+ * Within-set alias canonicalization: when a shorter entity's hyphen-words are a
+ * strict LEADING prefix of a longer entity's words, drop the shorter (keep the
+ * more-specific full form). Handles the common intro-sentence case where one
+ * memory names both a partial and a full reference:
+ *   entity:amar + entity:amar-sai-gadde      → entity:amar-sai-gadde
+ *   entity:uwe  + entity:uwe-berger          → entity:uwe-berger
+ *   entity:b-b  + entity:b-b-sinn-für-marken → entity:b-b-sinn-für-marken
+ * Deterministic, conservative (strict word-prefix, ≥1 word shorter), no dict, no
+ * fuzzy merge. Cross-MEMORY alias resolution (where the two forms live on
+ * different rows) is a separate entity-resolution concern, not handled here.
+ * @param {string[]} tagList already-normalized tags
+ * @returns {string[]}
+ */
+export function canonicalizeEntityAliases(tagList) {
+  if (!Array.isArray(tagList) || tagList.length < 2) return tagList;
+  const ents = [];
+  const rest = [];
+  for (const t of tagList) {
+    if (typeof t === 'string' && t.startsWith('entity:')) ents.push(t.slice('entity:'.length));
+    else rest.push(t);
+  }
+  if (ents.length < 2) return tagList;
+  const words = (e) => e.split('-').filter(Boolean);
+  const isLeadingPrefix = (a, b) => {
+    const wa = words(a); const wb = words(b);
+    if (wa.length >= wb.length) return false;            // must be strictly shorter
+    for (let i = 0; i < wa.length; i++) if (wa[i] !== wb[i]) return false;
+    return true;
+  };
+  const dropped = new Set();
+  for (const a of ents) {
+    if (dropped.has(a)) continue;
+    for (const b of ents) {
+      if (a === b || dropped.has(b)) continue;
+      if (isLeadingPrefix(a, b)) { dropped.add(a); break; } // a is a partial of fuller b → drop a
+    }
+  }
+  const merged = ents.filter((e) => !dropped.has(e)).map((e) => `entity:${e}`);
+  return [...rest, ...merged];
 }

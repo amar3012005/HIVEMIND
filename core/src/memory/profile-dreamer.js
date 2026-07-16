@@ -23,6 +23,9 @@
  */
 
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
+import { remoteList } from '../vector/mneme/remote-backend.js';
 
 const PROFILE_DREAM_ENABLED = process.env.PROFILE_DREAM_ENABLED === 'true';
 const PROFILE_DREAM_APPLY   = process.env.PROFILE_DREAM_APPLY === 'true';
@@ -65,6 +68,7 @@ export class ProfileDreamer {
    * @param {{ apply?: boolean }} [opts]
    */
   async dreamProfilesForOrg(orgId, opts = {}) {
+    if (orgId && currentOrg() !== orgId) return runWithOrg(orgId, () => this.dreamProfilesForOrg(orgId, opts)); // residency: org's store
     if (!PROFILE_DREAM_ENABLED) return { skipped: true, reason: 'PROFILE_DREAM_ENABLED!=true' };
     if (!this.prisma) return { skipped: true, reason: 'no prisma' };
     const apply = opts.apply === true && PROFILE_DREAM_APPLY;
@@ -99,17 +103,30 @@ export class ProfileDreamer {
 
   async _dreamUser(orgId, userId, apply, force = false) {
     // RAW memories only — never syntheses (cognitiveLayerRole null).
-    const raw = await this.prisma.memory.findMany({
-      where: {
-        userId, orgId, deletedAt: null,
-        cognitiveLayerRole: null,
-        memoryType: { in: ['fact', 'decision', 'preference', 'goal'] },
-        NOT: { tags: { hasSome: ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge'] } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: RAW_TAKE,
-      select: { id: true, content: true, title: true, createdAt: true },
-    });
+    // Remote (self-host): memory rows live on the agent — bounded recent list mapped to the
+    // same {id, content, title, createdAt} fields the downstream code reads.
+    const _remoteDream = orgIsRemote(orgId);
+    const _dreamExcl = ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge'];
+    const raw = _remoteDream
+      ? ((await remoteList(orgId, { user_id: userId, memory_type: ['fact', 'decision', 'preference', 'goal'], is_latest: true }, null, RAW_TAKE))?.memories || [])
+          .filter((m) => !(m.tags || []).some((t) => _dreamExcl.includes(t)))
+          .map((m) => ({
+            id: m.memory_id || m.id,
+            content: m.content || '',
+            title: m.title || null,
+            createdAt: m.created_at ? new Date(m.created_at) : null,
+          }))
+      : await this.prisma.memory.findMany({
+          where: {
+            userId, orgId, deletedAt: null,
+            cognitiveLayerRole: null,
+            memoryType: { in: ['fact', 'decision', 'preference', 'goal'] },
+            NOT: { tags: { hasSome: _dreamExcl } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: RAW_TAKE,
+          select: { id: true, content: true, title: true, createdAt: true },
+        });
     if (raw.length < MIN_MEMORIES) return { userId, skipped: 'below_min_memories', count: raw.length };
 
     // DIRTY-GATE — skip the (expensive) LLM re-distillation when nothing new has
@@ -140,15 +157,24 @@ export class ProfileDreamer {
     let transcriptCount = 0;
     if (PROFILE_DREAM_TRANSCRIPTS) {
       try {
-        const tx = await this.prisma.memory.findMany({
-          where: {
-            userId, orgId, deletedAt: null, cognitiveLayerRole: null,
-            memoryType: 'conversation',
-          },
-          orderBy: { createdAt: 'desc' },
-          take: TRANSCRIPT_TAKE,
-          select: { id: true, content: true, title: true, createdAt: true },
-        });
+        // Remote (self-host): pull conversation rows from the agent, mapped to the same fields.
+        const tx = _remoteDream
+          ? ((await remoteList(orgId, { user_id: userId, memory_type: ['conversation'], is_latest: true }, null, TRANSCRIPT_TAKE))?.memories || [])
+              .map((m) => ({
+                id: m.memory_id || m.id,
+                content: m.content || '',
+                title: m.title || null,
+                createdAt: m.created_at ? new Date(m.created_at) : null,
+              }))
+          : await this.prisma.memory.findMany({
+              where: {
+                userId, orgId, deletedAt: null, cognitiveLayerRole: null,
+                memoryType: 'conversation',
+              },
+              orderBy: { createdAt: 'desc' },
+              take: TRANSCRIPT_TAKE,
+              select: { id: true, content: true, title: true, createdAt: true },
+            });
         // Truncate transcript content so a long chat can't dominate the prompt.
         const trimmed = tx.map((t) => ({
           ...t,
@@ -180,14 +206,18 @@ export class ProfileDreamer {
     // project's memories is scoped to that project; evidence spanning multiple
     // projects (or none) → null = org-level identity (visible in every project).
     const memProj = new Map();
+    // Remote (self-host): memoryProject join rows are central-only — skip; facts default to
+    // org-level scope (_projectId=null), which is the safe visibility fallback.
     try {
-      const mp = await this.prisma.memoryProject.findMany({
-        where: { memoryId: { in: Array.from(validIds) } },
-        select: { memoryId: true, projectId: true },
-      });
-      for (const r of mp) {
-        if (!memProj.has(r.memoryId)) memProj.set(r.memoryId, new Set());
-        memProj.get(r.memoryId).add(r.projectId);
+      if (!_remoteDream) {
+        const mp = await this.prisma.memoryProject.findMany({
+          where: { memoryId: { in: Array.from(validIds) } },
+          select: { memoryId: true, projectId: true },
+        });
+        for (const r of mp) {
+          if (!memProj.has(r.memoryId)) memProj.set(r.memoryId, new Set());
+          memProj.get(r.memoryId).add(r.projectId);
+        }
       }
     } catch (err) {
       this.logger.warn?.(`[profile-dreamer] project map failed: ${err.message}`);

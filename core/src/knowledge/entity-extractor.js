@@ -13,6 +13,8 @@
  */
 
 import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
+import { memoryLLMRoute } from '../llm/groq-fallback.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
@@ -41,6 +43,7 @@ export class EntityExtractor {
     // ~5x faster than gpt-oss-20b and emits JSON cleanly).
     this.model = model
       || process.env.ENTITY_EXTRACTION_MODEL
+      || memoryLLMRoute()?.model
       || (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : getDefaultModel());
   }
 
@@ -51,6 +54,14 @@ export class EntityExtractor {
   async extractFromSegment({ segment, userId, orgId, documentId }) {
     if (!segment?.content || segment.content.trim().length < 20) {
       return { entities: [], mentions: [], skipped: true, reason: 'too_short' };
+    }
+    // RESIDENCY: the central entity / entityMention tables are FK'd to central segment/memory rows the
+    // agent doesn't have — for a remote (self-host) org these upserts throw ("Invalid prisma.entityMention
+    // .create invocation"). The memory entity graph for self-host is built on the AGENT by the co-mention
+    // linker (entity:* tags via amrUpdateTags + edges via amrAddEdge). Skip the central segment-entity
+    // persistence for remote.
+    if (orgIsRemote(orgId)) {
+      return { entities: [], mentions: [], skipped: true, reason: 'remote-agent' };
     }
 
     // 1. Regex pre-pass — cheap candidates

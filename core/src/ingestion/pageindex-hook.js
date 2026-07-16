@@ -51,6 +51,11 @@ class PageIndexIntegration {
    * @returns {Promise<void>} (never throws)
    */
   async onMemoryIngested(memory, options = {}) {
+    const orgIdForRouting = memory?.orgId || memory?.org_id || null;
+    const ctx = globalThis.__hivemindOrgCtx;
+    if (orgIdForRouting && ctx?.runWithOrg && ctx.currentOrg?.() !== orgIdForRouting) {
+      return ctx.runWithOrg(orgIdForRouting, () => this.onMemoryIngested(memory, options));
+    }
     try {
       await this._init();
 
@@ -194,4 +199,3 @@ module.exports = {
   PageIndexIntegration,
   setupIngestionEventListener,
 };
-

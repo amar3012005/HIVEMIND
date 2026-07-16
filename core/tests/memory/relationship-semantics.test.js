@@ -77,3 +77,60 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
   assert.equal(deriveEdges.length, 2);
   assert.ok(deriveEdges.every(edge => edge.metadata.semantic_relationship.type === 'Derives'));
 });
+
+test('LLM co-mention linker preserves Derives edge type', async () => {
+  const store = new InMemoryGraphStore();
+  const memoryChatClient = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          entities: ['Project Zephyr'],
+          temporal: {},
+          memory_type: 'fact',
+          links: [{
+            index: 0,
+            entity: 'Project Zephyr',
+            type: 'Derives',
+            confidence: 0.9,
+            reason: 'new claim synthesizes the prior source',
+          }],
+        }),
+      },
+    }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false, memoryChatClient });
+  const userId = '00000000-0000-4000-8000-000000009201';
+  const orgId = '00000000-0000-4000-8000-000000009202';
+
+  const source = await store.createMemory({
+    id: '00000000-0000-4000-8000-000000009203',
+    user_id: userId,
+    org_id: orgId,
+    content: 'Source A says Project Zephyr should use the Berlin deployment route.',
+    title: 'Source A',
+    memory_type: 'fact',
+    is_latest: true,
+    tags: ['entity:project-zephyr'],
+    created_at: new Date().toISOString(),
+  });
+
+  const derived = await store.createMemory({
+    id: '00000000-0000-4000-8000-000000009204',
+    user_id: userId,
+    org_id: orgId,
+    content: 'Project Zephyr deployment plan derives from Source A and validates the Berlin route.',
+    title: 'Derived claim',
+    memory_type: 'fact',
+    is_latest: true,
+    tags: ['entity:project-zephyr'],
+    created_at: new Date().toISOString(),
+  });
+
+  await engine._attachEntityCoMentionEdges(derived, store, [source]);
+
+  const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
+  assert.equal(deriveEdges.length, 1);
+  assert.equal(deriveEdges[0].from_id, derived.id);
+  assert.equal(deriveEdges[0].to_id, source.id);
+  assert.equal(deriveEdges[0].metadata.classification_source, 'llm');
+});

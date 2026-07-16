@@ -57,13 +57,14 @@ async function loadCore() {
     path.resolve(__dirname, '../src')
   ]);
 
-  const [{ getPrismaClient, ensureTenantContext }, { PrismaGraphStore }, { MemoryGraphEngine }] = await Promise.all([
+  const [{ getPrismaClient, ensureTenantContext }, { PrismaGraphStore }, { MemoryGraphEngine }, { DocumentFirstIngestionService }] = await Promise.all([
     import(pathToFileURL(path.join(coreBase, 'db/prisma.js')).href),
     import(pathToFileURL(path.join(coreBase, 'memory/prisma-graph-store.js')).href),
     import(pathToFileURL(path.join(coreBase, 'memory/graph-engine.js')).href),
+    import(pathToFileURL(path.join(coreBase, 'knowledge/document-first-ingestion.js')).href),
   ]);
 
-  cachedCore = { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine };
+  cachedCore = { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService };
   return cachedCore;
 }
 
@@ -114,7 +115,7 @@ async function createPersistedMemoryWriter() {
     return cachedWriter;
   }
 
-  const { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine } = await loadCore();
+  const { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService } = await loadCore();
   const prisma = getPrismaClient();
   if (!prisma) {
     return null;
@@ -122,6 +123,7 @@ async function createPersistedMemoryWriter() {
 
   const store = new PrismaGraphStore(prisma);
   const engine = new MemoryGraphEngine({ store });
+  const canonicalIngestion = new DocumentFirstIngestionService({ db: prisma, memoryGraphEngine: engine });
 
   cachedWriter = {
     async persistChunk(chunk, context) {
@@ -145,6 +147,7 @@ async function createPersistedMemoryWriter() {
         metadata: {
           ...(context.metadata || {}),
           ...(chunk.metadata || {}),
+          memory_type: context.memory_type || 'fact',
           filepath: context.filepath || null,
           language: context.language || null,
           source_session_id: context.source_session_id || null,
@@ -161,9 +164,31 @@ async function createPersistedMemoryWriter() {
       const codeMetadata = buildCodeMetadata(chunk, context);
       if (codeMetadata) {
         input.code_metadata = codeMetadata;
+        input.metadata.code_metadata = codeMetadata;
       }
 
-      const result = await engine.ingestMemory(input);
+      const canonicalResult = await canonicalIngestion.ingestSource({
+        userId: context.user_id,
+        orgId: context.org_id,
+        content: chunk.content,
+        title: context.title || null,
+        occurredAt: context.document_date || null,
+        scope: context.scope || undefined,
+        projectId: context.project_id || undefined,
+        mode: 'atomic',
+        tags: input.tags,
+        relationship: context.relationship || undefined,
+        relatedTo: context.related_to || undefined,
+        metadata: input.metadata,
+        source: {
+          type: 'api', platform: context.source_platform || context.source_type || 'external_indexer',
+          sourceId: context.source_id || context.filepath || context.request_id,
+          url: context.source_url || null,
+          title: context.title || null,
+        },
+      });
+      if (!canonicalResult?.ok) throw new Error(canonicalResult?.error || 'canonical external ingest failed');
+      const result = { ...canonicalResult, memoryId: canonicalResult.memoryId || canonicalResult.memoryIds?.[0] };
       const memory = await store.getMemory(result.memoryId);
 
       return {

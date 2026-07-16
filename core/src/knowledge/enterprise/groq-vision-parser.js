@@ -136,30 +136,53 @@ async function visionOcrPage(imagePath, pageNum) {
     ],
   };
 
-  // Retry up to 3× on 429/5xx with exponential backoff
-  const MAX_RETRIES = 3;
-  let lastErr = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  const orKey = process.env.OPENROUTER_API_KEY;
+  // Provider order. When Groq is billing-blocked/delinquent org-wide (every call
+  // 400s "restricted because of overdue payment"), preferring OpenRouter skips the
+  // always-failing Groq attempt + its noisy error + 60s timeout risk. Flag-gated
+  // (VISION_OPENROUTER_PRIMARY or the global HYPER_OPENROUTER_PRIMARY); default
+  // Groq-first for healthy accounts, OR as fallback either way.
+  const orFirst = orKey && (
+    String(process.env.VISION_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true'
+    || String(process.env.HYPER_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true');
+
+  // Retry up to 3× on 429/5xx with exponential backoff.
+  const tryGroq = async () => {
+    let err = null;
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (res.ok) { const json = await res.json(); return json.choices?.[0]?.message?.content || ''; }
+      const txt = await res.text().catch(() => '');
+      err = new Error(`Groq vision ${res.status}: ${txt.slice(0, 200)}`);
+      const transient = res.status === 429 || res.status >= 500;
+      if (!transient || attempt === 3) break;
+      const retryAfter = Number(res.headers.get('retry-after')) || 0;
+      await new Promise(r => setTimeout(r, retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * Math.pow(2, attempt))));
+    }
+    throw err || new Error('Groq vision failed');
+  };
+  const tryOR = async () => {
+    if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
+    const orModel = process.env.GROQ_VISION_OR_MODEL || 'meta-llama/llama-4-scout';
+    const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GROQ_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://hivemind.davinciai.eu', 'X-Title': 'HIVEMIND' },
+      body: JSON.stringify({ ...body, model: orModel }),
       signal: AbortSignal.timeout(60_000),
     });
-    if (res.ok) {
-      const json = await res.json();
-      return json.choices?.[0]?.message?.content || '';
-    }
-    const txt = await res.text().catch(() => '');
-    const transient = res.status === 429 || res.status >= 500;
-    lastErr = new Error(`Groq vision ${res.status}: ${txt.slice(0, 200)}`);
-    if (!transient || attempt === MAX_RETRIES) break;
-    const retryAfter = Number(res.headers.get('retry-after')) || 0;
-    const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * Math.pow(2, attempt));
-    await new Promise(r => setTimeout(r, backoffMs));
+    if (orRes.ok) { const json = await orRes.json(); const msg = json.choices?.[0]?.message || {}; return msg.content || msg.reasoning || ''; }
+    throw new Error(`OpenRouter vision ${orRes.status}: ${(await orRes.text().catch(() => '')).slice(0, 200)}`);
+  };
+
+  const order = orFirst ? [tryOR, tryGroq] : [tryGroq, tryOR];
+  let lastErr = null;
+  for (const fn of order) {
+    try { return await fn(); } catch (e) { lastErr = e; }
   }
-  throw lastErr || new Error('Groq vision exhausted retries');
+  throw lastErr || new Error('vision OCR exhausted (Groq + OpenRouter)');
 }

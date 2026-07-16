@@ -11,6 +11,7 @@ import { includePersonalForOrg, cognitionEnabledForOrg } from './cognition-pilot
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
 import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -805,6 +806,9 @@ export class ResidentRunManager {
       const err = new Error('runFullCycle requires orgId');
       err.code = 'MISSING_ORG_ID';
       throw err;
+    }
+    if (currentOrg() !== orgId) {
+      return runWithOrg(orgId, () => this.runFullCycle({ orgId, userId, scope, project, region, trigger, enabledCognitiveTools, tierName, tierTokenEstimate }));
     }
     if (!this.prisma) {
       this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');

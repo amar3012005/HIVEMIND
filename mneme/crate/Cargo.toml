@@ -1,0 +1,27 @@
+# mneme — Rust workspace.
+# P1: mneme-probe (proof-of-physics probe binary + lib).
+# Later phases add mseg-format, mnsw-index, mpq-codebook, mneme-node crates here.
+[workspace]
+resolver = "2"
+members = ["mneme-probe", "mseg-format", "mseg", "mnsw-index", "mpq", "mneme-node"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/amar3012005/HIVEMIND"
+# 1.77 for stable `core::mem::offset_of!` (used by the spec-lock test).
+rust-version = "1.77"
+
+[workspace.dependencies]
+# Reuse spine (see reference/OPENSOURCE_RECON.md). Pinned exact per global standards.
+memmap2 = "=0.9.5"
+zerocopy = { version = "=0.8.26", features = ["derive"] }
+lz4_flex = "=0.13.1"
+rayon = "=1.10.0"
+# HNSW: reuse usearch (reference/OPENSOURCE_RECON.md), never rebuilt. C++ core via cxx/cc.
+usearch = "=2.25.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

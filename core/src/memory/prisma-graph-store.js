@@ -3,6 +3,9 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts } from '../vector/mneme/driver.js';
+import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
+import { currentOrg } from '../db/prisma.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -61,6 +64,49 @@ function findJsonbCulprit(obj) {
   try { return walk(obj, ''); } catch { return null; }
 }
 
+// Map an agent (hm.memories) row → the same snake_case shape mapMemoryRecord emits, so remote-org
+// reads (getMemory/getMemories/listMemories) are shape-identical to central reads. The agent owns the
+// row; we only reshape what crossed the link.
+function mapAgentRow(r) {
+  if (!r) return null;
+  return {
+    id: r.id,
+    user_id: r.user_id || null,
+    owner: r.user_id ? { id: r.user_id, name: null } : null,
+    owner_name: null,
+    org_id: r.org_id || null,
+    project: r.project || null,
+    project_id: (Array.isArray(r.project_ids) && r.project_ids[0]) || null,
+    project_ids: r.project_ids || [],
+    visibility: r.visibility || 'private',
+    scope: r.scope || 'personal',
+    primary_team_id: r.primary_team_id || null,
+    content: r.content || '',
+    title: r.title || null,
+    tags: r.tags || [],
+    memory_type: r.memory_type || 'fact',
+    is_latest: r.is_latest ?? true,
+    layer: r.layer || 'memory',
+    cognitive_layer_role: r.cognitive_layer_role || null,
+    importance_score: r.confidence ?? 0.5,
+    // Recall reinforcement → feeds recall scoring (log-boost + strength multiplier).
+    recall_count: r.recall_count ?? 0,
+    strength: typeof r.strength === 'number' ? r.strength : 1.0,
+    last_accessed_at: r.last_accessed_at || null,
+    created_at: r.created_at,
+    updated_at: r.created_at,
+    valid_from: r.valid_from || null,
+    valid_to: r.valid_to || null,
+    document_date: r.document_date || null,
+    metadata: r.metadata || {},
+    // Provenance is folded into the agent's `metadata` jsonb on write (createMemory
+    // remote branch). Surface it as the canonical source_metadata shape so remote
+    // reads match central reads. Falls back to a top-level field if the agent ever
+    // gains a dedicated column.
+    source_metadata: r.source_metadata || (r.metadata && r.metadata.source_metadata) || {},
+  };
+}
+
 function mapMemoryRecord(record) {
   if (!record) return null;
 
@@ -108,6 +154,7 @@ function mapMemoryRecord(record) {
     updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
     document_date: record.documentDate instanceof Date ? record.documentDate.toISOString() : record.documentDate,
     valid_from: record.validFrom instanceof Date ? record.validFrom.toISOString() : (record.validFrom || null),
+    valid_to: record.validTo instanceof Date ? record.validTo.toISOString() : (record.validTo || null),
     event_dates: (record.eventDates || []).map(value => value instanceof Date ? value.toISOString() : value),
     memory_type: record.memoryType,
     title: record.title,
@@ -250,7 +297,12 @@ export class PrismaGraphStore {
     this.inTransaction = inTransaction;
   }
 
-  async advisoryLock(userId, fn) {
+  async advisoryLock(userId, fn, orgId) {
+    // .amr org: no Postgres to pg_advisory_lock against. Serialize per-user IN-PROCESS and run the
+    // body directly against the routing client (the .amr writes apply immediately). No PG tx opened.
+    if (orgId && (orgIsRemote(orgId) || pgUrlFor(orgId) || (isMnemeOrg(orgId) && mnemeMode() === 'sole'))) {
+      return withAmrLock(orgId, `mem:${userId}`, () => fn(new PrismaGraphStore(this.client, { inTransaction: true })));
+    }
     if (this.inTransaction) {
       await this.client.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       return fn(this);
@@ -263,9 +315,21 @@ export class PrismaGraphStore {
     }, { timeout: 180000 });
   }
 
-  async transaction(fn) {
+  // A store flagged inTransaction so a nested transaction()/advisoryLock runs the body directly
+  // (no PG tx). Used by the .amr write path to stay Postgres-free for a pure insert.
+  inProcessTx() {
+    return new PrismaGraphStore(this.client, { inTransaction: true });
+  }
+
+  async transaction(fn, orgId) {
     if (this.inTransaction) {
       return fn(this);
+    }
+    // .amr org: no Postgres transaction — run against the routing client (the .amr store is not part
+    // of a PG ACID tx anyway; writes apply immediately). Removes the empty-PG-tx dependency so an
+    // .amr org functions with Postgres entirely absent.
+    if (orgId && (orgIsRemote(orgId) || pgUrlFor(orgId) || (isMnemeOrg(orgId) && mnemeMode() === 'sole'))) {
+      return fn(new PrismaGraphStore(this.client, { inTransaction: true }));
     }
 
     return this.client.$transaction(async tx => {
@@ -274,6 +338,73 @@ export class PrismaGraphStore {
   }
 
   async createMemory(memory) {
+    // Auto-resolve legacy `project` string → project_id + project_ids when callers
+    // (TARA, MCP, chat) pass only the string slug.  Without this the memory_projects
+    // join table stays empty and project-scoped views show 0 memories.
+    if (memory.project && !memory.project_id && (!Array.isArray(memory.project_ids) || memory.project_ids.length === 0) && memory.org_id) {
+      try {
+        const slug = memory.project.replace(/^.*\//, ''); // strip prefix like "tara/"
+        const proj = await this.client.project.findFirst({
+          where: { orgId: memory.org_id, OR: [{ slug }, { name: { equals: slug, mode: 'insensitive' } }, { slug: memory.project }, { name: { equals: memory.project, mode: 'insensitive' } }] },
+          select: { id: true },
+        });
+        if (proj) {
+          memory.project_id = proj.id;
+          memory.project_ids = [proj.id];
+          if (!memory.scope || memory.scope === 'personal') memory.scope = 'project';
+        }
+      } catch { /* best-effort — don't block ingest */ }
+    }
+    // RESIDENCY: agent-org rows are NOT written centrally. Push the row to the org's agent NOW (vector
+    // is added later by storeMemory → same-id upsert) so mid-ingest reads (getMemory in extends/versions)
+    // find it on the agent. Central keeps identity only. Managed/personal (orgIsRemote=false) → unchanged.
+    if (orgIsRemote(memory.org_id)) {
+      await amrWrite(memory.org_id, {
+        id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
+        content: stripNullBytes(memory.content), title: stripNullBytes(memory.title) || null,
+        tags: memory.tags || [], memoryType: memory.memory_type || 'fact', isLatest: memory.is_latest ?? true,
+        layer: memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
+        cognitiveLayerRole: memory.cognitive_layer_role || null, confidence: memory.importance_score ?? null,
+        createdAt: memory.created_at || new Date().toISOString(),
+        project: memory.project || null, projectIds: memory.project_ids || [],
+        // Scope + team parity: the agent now has scope / primary_team_id columns,
+        // so a project/team-scoped memory round-trips on self-host like central.
+        scope: memory.scope || null, primaryTeamId: memory.primary_team_id || null,
+        // Recall reinforcement seed (agent owns subsequent bumps via /v1/bump-recall).
+        recallCount: memory.recall_count ?? 0, strength: memory.strength ?? 1.0,
+        validFrom: memory.valid_from || null, documentDate: memory.document_date || null,
+        // Provenance round-trip: the agent persists a `metadata` jsonb (no
+        // dedicated source columns), so fold source_metadata into it. Without
+        // this, remote-org reads return source_metadata:{} (the structured
+        // provenance was captured only in tags). mapAgentRow reads it back.
+        metadata: {
+          ...(memory.metadata && typeof memory.metadata === 'object' ? memory.metadata : {}),
+          ...(memory.source_metadata ? { source_metadata: memory.source_metadata } : {}),
+        },
+      }, null, []);
+      // PQC-by-default holds on the .amr path too: the signing side-table is central raw SQL
+      // (memory_signatures, no FK on the memories table), so agent-routed writes — self-host
+      // AND embedded amr-central — get the same ML-DSA-65 signature as central rows. The
+      // canonical payload is built EXACTLY like the central hook below (same fields, same
+      // null-byte-stripped content) so /verify-memory validates both identically. Best-effort:
+      // a signing failure never blocks the write.
+      try {
+        const sigPayload = pqcCanonical({
+          id: memory.id, user_id: memory.user_id, org_id: memory.org_id || null,
+          content: stripNullBytes(memory.content),
+        });
+        const sig = await signMemory(sigPayload);
+        if (sig) {
+          await this.client.$executeRawUnsafe(
+            `INSERT INTO memory_signatures (memory_id, org_id, alg, payload_hash, signature)
+             VALUES ($1::uuid, $2::uuid, 'ML-DSA-65', $3, $4)
+             ON CONFLICT (memory_id) DO NOTHING`,
+            memory.id, memory.org_id || null, sha256Hex(sigPayload), sig,
+          );
+        }
+      } catch { /* integrity signing is best-effort — never block the write */ }
+      return;
+    }
     // Strip null bytes (\u0000) — common in web-scraped content, rejected by Postgres text columns
     const content = stripNullBytes(memory.content);
     const title = stripNullBytes(memory.title) || null;
@@ -376,6 +507,22 @@ export class PrismaGraphStore {
   async updateMemory(id, rawPatch) {
     // Strip null bytes from all string fields — web-scraped content contains \u0000
     const patch = stripNullBytes(rawPatch);
+    // Remote (self-host) orgs have NO central row — the memory lives on the agent. Route the
+    // supported partial-update fields (tags / is_latest / memory_type) over HTTP instead of hitting
+    // central Postgres (which throws "record not found"). This is the seam the entity-link tag/type
+    // upgrades + supersession is_latest flips go through for remote orgs.
+    const _remoteUpdOrg = currentOrg();
+    if (_remoteUpdOrg && orgIsRemote(_remoteUpdOrg)) {
+      const remotePatch = {};
+      if (patch.tags !== undefined) remotePatch.tags = normalizeTagsArray(patch.tags);
+      const rIsLatest = patch.isLatest ?? patch.is_latest;
+      if (rIsLatest !== undefined) remotePatch.is_latest = rIsLatest;
+      if (patch.memoryType !== undefined) remotePatch.memory_type = patch.memoryType;
+      const rValidTo = patch.validTo ?? patch.valid_to;
+      if (rValidTo !== undefined) remotePatch.valid_to = rValidTo;
+      if (Object.keys(remotePatch).length) await amrUpdate(_remoteUpdOrg, id, remotePatch);
+      return this.getMemory(id);
+    }
     const data = {};
     const isLatestVal = patch.isLatest ?? patch.is_latest;
     if (isLatestVal !== undefined) data.isLatest = isLatestVal;
@@ -388,6 +535,8 @@ export class PrismaGraphStore {
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
+    const validToVal = patch.validTo ?? patch.valid_to;
+    if (validToVal !== undefined) data.validTo = validToVal ? new Date(validToVal) : null;
 
     await this.client.memory.update({
       where: { id },
@@ -413,6 +562,11 @@ export class PrismaGraphStore {
   }
 
   async getMemory(id) {
+    const _org = currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const rows = await remoteHydrate(_org, [id]);
+      return rows.length ? mapAgentRow(rows[0]) : null;
+    }
     const record = await this.client.memory.findUnique({
       where: { id },
       include: {
@@ -435,11 +589,31 @@ export class PrismaGraphStore {
   // candidate). Returns Map<id, mappedMemory>; ids absent from PG are simply
   // omitted (same as getMemory→null). Includes memoryProjects so project_ids
   // populate (getMemory omitted it).
-  async getMemories(ids) {
+  async getMemories(ids, temporal = null) {
     if (!Array.isArray(ids) || ids.length === 0) return new Map();
     const uniq = [...new Set(ids.filter(Boolean))];
+    const _org = currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const rows = await remoteHydrate(_org, uniq);
+      const out = new Map();
+      for (const r of rows) out.set(r.id, mapAgentRow(r));
+      return out;
+    }
+    const validAtValue = temporal?.valid_at || null;
+    const validAt = validAtValue ? new Date(validAtValue) : null;
+    const knownAt = temporal?.known_at ? new Date(temporal.known_at) : null;
     const records = await this.client.memory.findMany({
-      where: { id: { in: uniq } },
+      where: {
+        id: { in: uniq },
+        deletedAt: null,
+        ...(knownAt ? { createdAt: { lte: knownAt } } : {}),
+        ...(validAt ? {
+          AND: [
+            { OR: [{ validFrom: null }, { validFrom: { lte: validAt } }] },
+            { OR: [{ validTo: null }, { validTo: { gt: validAt } }] },
+          ],
+        } : {}),
+      },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -456,6 +630,14 @@ export class PrismaGraphStore {
   }
 
   async deleteMemory(id) {
+    // Remote (self-host) orgs have NO central row — the memory lives on the agent's shard.
+    // Without this seam every engine cleanup delete (supersession, consolidation, user delete)
+    // threw "record not found" centrally and the agent kept serving the stale memory forever.
+    const _remoteDelOrg = currentOrg();
+    if (_remoteDelOrg && orgIsRemote(_remoteDelOrg)) {
+      await amrDelete(_remoteDelOrg, id);
+      return { id, deleted: true };
+    }
     const deleted = await this.client.memory.update({
       where: { id },
       data: {
@@ -491,6 +673,20 @@ export class PrismaGraphStore {
   }
 
   async listLatestMemories({ user_id, org_id, project, scope = 'personal', access_context = null }) {
+    // RESIDENCY: remote (self-host) orgs keep their latest-memory set on the agent, not central.
+    // Without this branch latestMemories=[] for remote → contradiction reconciliation (graph-engine
+    // 1427) and conflictDetector candidate paths never fire → self-host loses Contradicts edges and
+    // the algorithmic Updates supersession, leaving only the co-mention LLM. Route to the agent so the
+    // full relationship machinery runs identically for all org types. Bounded to the most-recent latest
+    // rows (recency-biased, matching how conflictDetector ranks candidates) to keep the save hot path cheap.
+    const _org = org_id || currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const filter = { is_latest: true };
+      if (user_id) filter.user_id = user_id;
+      const REMOTE_LATEST_CAP = Number(process.env.REMOTE_LATEST_CAP || 500);
+      const { memories } = await remoteList(_org, filter, null, REMOTE_LATEST_CAP, 0);
+      return (memories || []).map(mapAgentRow);
+    }
     const records = await this.client.memory.findMany({
       where: { ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }), isLatest: true },
       include: {
@@ -508,6 +704,36 @@ export class PrismaGraphStore {
   }
 
   async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, hide_noise = false, limit = 50, offset = 0, scope = 'personal', access_context = null, owner_only = false }) {
+    // RESIDENCY: agent-org memory rows live on the org's agent, not central → enumerate from the agent.
+    const _org = org_id || currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const filter = {};
+      if (memory_type) filter.memory_type = Array.isArray(memory_type) ? memory_type : [memory_type];
+      if (is_latest !== undefined) filter.is_latest = is_latest;
+      if (user_id) filter.user_id = user_id;
+      // Tags MUST reach the agent: tara-config / skills / any tag-scoped lookup
+      // otherwise returns the newest arbitrary memories (config-as-session-junk bug).
+      if (Array.isArray(tags) && tags.length) filter.tags = tags;
+      // Pass offset so the FE's offset-based "load more" actually pages through the agent (was stuck on
+      // page 1 — agent ignored offset and the FE doesn't use cursors).
+      const { memories } = await remoteList(_org, filter, null, limit, offset);
+      const mapped = memories.map(mapAgentRow);
+      // Enrich with edge counts (in/out) in a single batched call so the FE "linked N" chip is correct.
+      // Central orgs compute edges_in_count / edges_out_count via Prisma _count; remote orgs query the
+      // agent's relationships table. On failure we degrade gracefully (counts stay 0).
+      if (mapped.length) {
+        try {
+          const edgeMap = await amrMemEdgeCounts(_org, mapped.map((m) => m.id));
+          if (edgeMap && typeof edgeMap === 'object') {
+            for (const m of mapped) {
+              const e = edgeMap[m.id];
+              if (e) { m.edges_in_count = e.in || 0; m.edges_out_count = e.out || 0; }
+            }
+          }
+        } catch { /* degrade gracefully — FE uses || 0 fallback */ }
+      }
+      return { memories: mapped, total: mapped.length };
+    }
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
@@ -632,7 +858,79 @@ export class PrismaGraphStore {
     };
   }
 
-  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
+  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, valid_at, known_at, source_platform, scope = 'personal', access_context = null }) {
+    // .amr org: there is no Postgres to run to_tsvector against. The lexical (keyword) leg of hybrid
+    // recall runs over the org's .amr records instead — same scope, term-overlap scoring. Without
+    // this the lexical leg would $queryRaw-passthrough to central Postgres (PG=0 for this org) and
+    // silently return nothing, leaving recall vector-only.
+    if (query && isMnemeOrg(org_id) && mnemeMode() === 'sole') {
+      return amrLexical(org_id, query, {
+        org_id, user_id, scope, is_latest, project, created_after, created_before, valid_at, known_at,
+      }, n_results * 3) || [];
+    }
+    // REMOTE agent org (push model): recall lives on the org's agent, not central. Embed the query here
+    // and vector-search the agent (amrRecall → POST /v1/recall); content rides in the hit payload.
+    if (query && orgIsRemote(org_id)) {
+      try {
+        const { getEmbedService } = await import('../embeddings/factory.js');
+        const vec = await getEmbedService().embedOne(query).catch(() => null);
+        if (!vec) return [];
+        const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
+        if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
+        const scopedProjectIds = Array.isArray(access_context?.projectIds) ? access_context.projectIds : [];
+        // HYBRID: vector (semantic) + lexical (exact-term FTS over the agent's Postgres). The lexical
+        // leg surfaces buried exact terms that cosine rank misses — without it self-host recall was
+        // vector-only. Union by id; keep the higher score (lexical hits ride at their ts_rank).
+        const lexFilter = {
+          ...(is_latest !== undefined ? { is_latest } : {}),
+          valid_at,
+          known_at,
+        };
+        const [hits, lex] = await Promise.all([
+          amrRecall(org_id, vec, filter, n_results * 3, 0).then((r) => r || []),
+          (amrLexicalRemote(org_id, query, lexFilter, n_results * 3) || Promise.resolve([])).then((r) => r || []),
+        ]);
+        const byId = new Map();
+        for (const h of [...hits, ...lex]) {
+          const p = h.payload || {};
+          const id = p.memory_id || h.id;
+          if (!id) continue;
+          const score = typeof h.score === 'number' ? h.score : 0.5;
+          const existing = byId.get(id);
+          if (existing && existing.score >= score) continue;
+          byId.set(id, {
+            id, content: p.content || '', title: p.title || null, tags: p.tags || [],
+            memory_type: p.memory_type || 'fact', project: p.project || null,
+            project_id: Array.isArray(p.project_ids) && p.project_ids.length === 1 ? p.project_ids[0] : null,
+            project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
+            scope: p.scope || null,
+            importance_score: score, is_latest: p.is_latest ?? true,
+            created_at: p.created_at || null, updated_at: p.created_at || null,
+            document_date: p.document_date || null,
+            valid_from: p.valid_from || null,
+            valid_to: p.valid_to || null,
+            score, cognitive_layer_role: p.cognitive_layer_role || null,
+          });
+        }
+        return Array.from(byId.values())
+          .filter((m) => {
+            const snapshot = valid_at || null;
+            if (known_at && (!m.created_at || new Date(m.created_at) > new Date(known_at))) return false;
+            if (snapshot) {
+              const validFrom = m.valid_from || m.document_date || m.created_at;
+              if (validFrom && new Date(validFrom) > new Date(snapshot)) return false;
+              if (m.valid_to && new Date(m.valid_to) <= new Date(snapshot)) return false;
+            }
+            if (m.scope !== 'project' || scopedProjectIds.length === 0) return true;
+            const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
+            return pids.some(id => scopedProjectIds.includes(id));
+          })
+          .sort((a, b) => (b.score || 0) - (a.score || 0));
+      } catch (e) {
+        console.warn('[recall] remote agent search failed:', e.message);
+        return [];
+      }
+    }
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
@@ -729,18 +1027,25 @@ export class PrismaGraphStore {
           const dateBeforeWhere = created_before
             ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
             : '';
+          const snapshotValidAt = valid_at || null;
+          const validAtWhere = snapshotValidAt
+            ? (ftsParams.push(new Date(snapshotValidAt).toISOString()), `AND (m.valid_from IS NULL OR m.valid_from <= ${nextParam()}::timestamptz) AND (m.valid_to IS NULL OR m.valid_to > ${nextParam()}::timestamptz)`)
+            : '';
+          const knownAtWhere = known_at
+            ? (ftsParams.push(new Date(known_at).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
+            : '';
 
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
-                   m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
+                   m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
                    ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
                            to_tsquery('english', $1)) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
-              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
+              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
               AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
                   @@ to_tsquery('english', $1)
             ORDER BY fts_score DESC
@@ -760,6 +1065,8 @@ export class PrismaGraphStore {
               created_at: r.created_at?.toISOString?.() || r.created_at,
               updated_at: r.updated_at?.toISOString?.() || r.updated_at,
               document_date: r.document_date?.toISOString?.() || r.document_date,
+              valid_from: r.valid_from?.toISOString?.() || r.valid_from,
+              valid_to: r.valid_to?.toISOString?.() || r.valid_to,
               source: r.source,
               visibility: r.visibility,
               // Phase 1 synthesis columns — needed by recall-router boost + synthesized[] shape
@@ -791,8 +1098,14 @@ export class PrismaGraphStore {
         tags: tags?.length ? { hasEvery: tags } : undefined,
         createdAt: {
           gte: created_after ? new Date(created_after) : undefined,
-          lte: created_before ? new Date(created_before) : undefined
-        }
+          lte: upperCreatedAt,
+        },
+        ...(valid_at ? {
+          AND: [
+            { OR: [{ validFrom: null }, { validFrom: { lte: new Date(valid_at) } }] },
+            { OR: [{ validTo: null }, { validTo: { gt: new Date(valid_at) } }] },
+          ],
+        } : {}),
       },
       include: {
         sourceMetadata: true,
@@ -905,6 +1218,13 @@ export class PrismaGraphStore {
 
   async createRelationship(edge) {
     const type = normalizeRelationshipType(edge.type) || edge.type;
+    // RESIDENCY: remote-org edges live on the agent (no central memory rows to FK to). Push the typed
+    // edge to the agent and skip the central upsert. Managed/personal → central upsert below.
+    const _remoteOrg = edge.org_id || currentOrg();
+    if (orgIsRemote(_remoteOrg)) {
+      amrAddEdge({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
+      return mapRelationshipRecord({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
+    }
     const created = await this.client.relationship.upsert({
       where: {
         fromId_toId_type: {
@@ -928,10 +1248,17 @@ export class PrismaGraphStore {
       }
     });
 
+    // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
+    // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
+    if (mnemeMode() === 'dual') {
+      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: edge.org_id || currentOrg() });
+    }
+
     return mapRelationshipRecord(created);
   }
 
   async createMemoryVersion(version) {
+    if (orgIsRemote(currentOrg())) return null; // remote-org versions live on the agent, not central
     return this.client.memoryVersion.create({
       data: {
         id: version.id,
@@ -948,6 +1275,9 @@ export class PrismaGraphStore {
   }
 
   async createSourceMetadata(source) {
+    // RESIDENCY: remote-org subgraph children are not written centrally (no central parent row to FK to);
+    // they travel with the push envelope to the agent. Managed/personal unchanged.
+    if (orgIsRemote(currentOrg())) return;
     const buildArgs = (s) => ({
       where: { memoryId: s.memory_id },
       update: {
@@ -1031,6 +1361,12 @@ export class PrismaGraphStore {
   }
 
   async enqueueDerivationJob(job) {
+    // RESIDENCY: derivation jobs are a CENTRAL-only async-derivation feature whose FK points at memory
+    // rows. For a remote (self-host) org the memory lives on the agent, so a central create() throws
+    // (Invalid prisma.derivationJob.create invocation — FK to a row central doesn't have) and aborts KB
+    // promotion. Skip for remote; the agent-side graph (tags + edges via the co-mention linker) is the
+    // self-host equivalent.
+    if (orgIsRemote(currentOrg())) return null;
     return this.client.derivationJob.create({
       data: {
         id: job.id,

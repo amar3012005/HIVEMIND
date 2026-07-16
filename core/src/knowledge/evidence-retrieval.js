@@ -9,6 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -48,6 +49,50 @@ export class EvidenceRetrievalService {
       : (docIdSet ? 0.2 : 0.5);
 
     try {
+      // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
+      if (orgIsRemote(orgId)) {
+        const queryVector = await this.qdrantClient.generateEmbedding(query);
+        if (!queryVector) return [];
+        // amrKbRecall returns [{segment_id, document_id, content, score}]
+        const hits = await amrKbRecall(orgId, queryVector, {
+          limit: limit * 2,
+          documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
+          documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
+          scoreThreshold: effectiveThreshold,
+        });
+        if (!hits || !hits.length) return [];
+        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id));
+        // Build a score lookup from the recall hits.
+        const scoreMap = new Map(hits.map((h) => [h.segment_id, h.score]));
+        const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
+        const remoteResults = hits
+          .map((h) => {
+            const s = hydrateMap.get(h.segment_id);
+            if (!s) return null;
+            // Filter by docIdSet when multiple docs requested (agent-side only filtered single-doc).
+            if (docIdSet && docIdSet.length > 1 && !docIdSet.includes(s.document_id)) return null;
+            const score = scoreMap.get(h.segment_id) ?? h.score;
+            return {
+              type: 'evidence_segment',
+              segmentId: s.id,
+              documentId: s.document_id,
+              content: s.content,
+              snippet: this._extractSnippet(s.content, query),
+              score,
+              document: { id: s.document_id },
+              metadata: {
+                segmentType: s.segment_type,
+                segmentIndex: s.segment_index,
+                wordCount: null,
+                startPage: null,
+                endPage: null,
+              },
+            };
+          })
+          .filter(Boolean);
+        return remoteResults.sort((a, b) => b.score - a.score).slice(0, limit);
+      }
+
       // Step 1: Vector search in evidence collection.
       // Multi-doc filter uses Qdrant's `match.any` array, single uses
       // `match.value`. Falls back to no doc filter when docIdSet null.
@@ -82,7 +127,8 @@ export class EvidenceRetrievalService {
         where: {
           id: { in: segmentIds },
           userId,
-          orgId
+          orgId,
+          document: { archivedAt: null },
         },
         include: {
           document: {
@@ -140,12 +186,19 @@ export class EvidenceRetrievalService {
       // its slots with OTHER segments — the count is fine, the right segment is
       // just missing. Lexical hits merge in, get re-ranked, and slice keeps top-N.
       {
-        const lexTokens = [...new Set(
+        const allQueryTokens = [...new Set(
           String(query || '')
             .split(/[^\p{L}\p{N}§°]+/u)
             .map(t => t.trim())
-            .filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^[A-ZÄÖÜ]/.test(t)))
-        )].slice(0, 8);
+            .filter(t => t.length >= 3)
+        )];
+        // A hard document filter makes a bounded lexical pass safe and cheap.
+        // Use every query token there so lowercase details work in any language;
+        // retain the narrower legacy lane for an unscoped corpus search.
+        const lexTokens = (docIdSet
+          ? allQueryTokens
+          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))))
+          .slice(0, 12);
         if (lexTokens.length) {
           try {
             // Scope the lexical pass to the SAME docs as the vector pass when a
@@ -157,13 +210,14 @@ export class EvidenceRetrievalService {
               where: {
                 userId,
                 orgId,
+                document: { archivedAt: null },
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },
               include: {
                 document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
               },
-              take: limit * 2,
+              take: Math.min(docIdSet ? limit * 4 : limit * 2, 80),
             });
             for (const segment of lexSegments) {
               if (haveIds.has(segment.id)) continue;
@@ -172,8 +226,12 @@ export class EvidenceRetrievalService {
               // is a stronger literal match → must outrank doc-scoped vector hits
               // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
               const lc = String(segment.content || '').toLowerCase();
-              const matches = lexTokens.filter((t) => lc.includes(t.toLowerCase())).length;
-              results.push(fmt(segment, Math.min(0.9, 0.55 + 0.13 * matches), true));
+              const matched = lexTokens.filter((t) => lc.includes(t.toLowerCase()));
+              const coverage = matched.length / Math.max(1, lexTokens.length);
+              const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
+                lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
+              const score = Math.min(0.95, 0.55 + (0.3 * coverage) + (0.08 * orderedPairs));
+              results.push(fmt(segment, score, true));
               haveIds.add(segment.id);
             }
           } catch (lexErr) {
@@ -210,6 +268,159 @@ export class EvidenceRetrievalService {
       evidence,
       mode: 'hybrid'
     };
+  }
+
+  /** Resolve an explicitly requested source without trusting a model-supplied id. */
+  async resolveSourceDocuments({ userId, orgId, documentId = null, title = null, limit = 3 }) {
+    if (orgIsRemote(orgId)) return [];
+    if (!this.db?.knowledgeDocument || (!documentId && !title)) return [];
+
+    return this.db.knowledgeDocument.findMany({
+      where: {
+        userId,
+        orgId,
+        archivedAt: null,
+        ...(documentId ? { id: documentId } : {}),
+        ...(!documentId && title ? {
+          OR: [
+            { title: { contains: title, mode: 'insensitive' } },
+            { sourceId: { contains: title, mode: 'insensitive' } },
+          ],
+        } : {}),
+      },
+      select: {
+        id: true,
+        title: true,
+        documentType: true,
+        sourcePlatform: true,
+        sourceUrl: true,
+        documentDate: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(1, Math.min(limit, 10)),
+    });
+  }
+
+  /**
+   * Resolve a document mentioned in natural-language input before retrieval.
+   * This is metadata-only: source eligibility never depends on vector scores or
+   * an LLM extracting an English filename.
+   */
+  async resolveSourceFromQuery({ userId, orgId, query, limit = 1 }) {
+    const tokens = [...new Set(String(query || '')
+      .normalize('NFKC')
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((token) => token.toLocaleLowerCase())
+      .filter((token) => token.length >= 3))]
+      .slice(0, 12);
+    if (!tokens.length) return [];
+
+    const score = (document) => {
+      const haystack = [document.title, document.sourceId, document.filename]
+        .filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase();
+      const hits = tokens.filter((token) => haystack.includes(token)).length;
+      return hits / tokens.length;
+    };
+
+    if (orgIsRemote(orgId)) {
+      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+      return (listed?.documents || [])
+        .filter((document) => !document.userId || document.userId === userId)
+        .map((document) => ({ ...document, _sourceScore: score(document) }))
+        .filter((document) => document._sourceScore > 0)
+        .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+        .slice(0, Math.max(1, Math.min(limit, 3)));
+    }
+
+    if (!this.db?.knowledgeDocument) return [];
+    const documents = await this.db.knowledgeDocument.findMany({
+      where: {
+        userId,
+        orgId,
+        archivedAt: null,
+        OR: tokens.flatMap((token) => [
+          { title: { contains: token, mode: 'insensitive' } },
+          { sourceId: { contains: token, mode: 'insensitive' } },
+        ]),
+      },
+      select: {
+        id: true, title: true, sourceId: true, documentType: true,
+        sourcePlatform: true, sourceUrl: true, documentDate: true, updatedAt: true,
+      },
+      take: 30,
+    });
+    return documents
+      .map((document) => ({ ...document, _sourceScore: score(document) }))
+      .filter((document) => document._sourceScore > 0)
+      .sort((a, b) => b._sourceScore - a._sourceScore
+        || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, Math.max(1, Math.min(limit, 3)));
+  }
+
+  /**
+   * Hydrate ordered raw sections for a named source. This reads the canonical
+   * document store; evidence vectors are used only to select relevant anchors.
+   */
+  async hydrateSourceDocuments({ documents, query, userId, orgId, perDocument = 8, total = 16 }) {
+    if (orgIsRemote(orgId) || !this.db?.knowledgeSegment || !documents?.length) return [];
+    const documentIds = documents.map((document) => document.id).filter(Boolean);
+    const anchors = await Promise.race([
+      this.retrieveEvidence({
+        query,
+        userId,
+        orgId,
+        documentIds,
+        limit: Math.min(total, Math.max(documentIds.length * 3, 6)),
+        scoreThreshold: 0.1,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve([]), 450)),
+    ]);
+    const anchorIndexes = new Map();
+    for (const anchor of anchors) {
+      if (!Number.isInteger(anchor?.metadata?.segmentIndex)) continue;
+      const indexes = anchorIndexes.get(anchor.documentId) || [];
+      indexes.push(anchor.metadata.segmentIndex);
+      anchorIndexes.set(anchor.documentId, indexes);
+    }
+
+    const rows = [];
+    for (const document of documents) {
+      const indexes = anchorIndexes.get(document.id) || [];
+      const center = indexes.length ? Math.min(...indexes) : 0;
+      const start = Math.max(0, center - 1);
+      const segments = await this.db.knowledgeSegment.findMany({
+        where: {
+          userId,
+          orgId,
+          documentId: document.id,
+          document: { archivedAt: null },
+          segmentIndex: { gte: start },
+        },
+        orderBy: { segmentIndex: 'asc' },
+        take: Math.max(1, Math.min(perDocument, total - rows.length)),
+      });
+      const scoreById = new Map(anchors.map((anchor) => [anchor.segmentId, anchor.score]));
+      for (const segment of segments) {
+        rows.push({
+          type: 'evidence_segment',
+          segmentId: segment.id,
+          documentId: segment.documentId,
+          content: segment.content,
+          snippet: this._extractSnippet(segment.content, query, 520),
+          score: scoreById.get(segment.id) ?? null,
+          document,
+          metadata: {
+            segmentType: segment.segmentType,
+            segmentIndex: segment.segmentIndex,
+            wordCount: segment.wordCount,
+            startPage: segment.startPage,
+            endPage: segment.endPage,
+          },
+        });
+        if (rows.length >= total) return rows;
+      }
+    }
+    return rows;
   }
 
   /**
@@ -258,6 +469,71 @@ export class EvidenceRetrievalService {
       excerpt: link.excerpt,
       segment: link.segment || null,
       document: link.document || link.segment?.document || null
+    }));
+  }
+
+  /**
+   * Hydrate a bounded, ordered window around matched source segments.
+   * This is used only by explicit full recall; matched evidence remains the
+   * fallback when a remote store cannot enumerate document order.
+   */
+  async hydrateAdjacentEvidence({ anchors, userId, orgId, perDocument = 3, total = 12 }) {
+    const matched = (anchors || []).filter((item) =>
+      item?.documentId && Number.isInteger(item?.metadata?.segmentIndex));
+    if (!matched.length || orgIsRemote(orgId)) return matched.slice(0, total);
+
+    const windows = new Map();
+    for (const item of matched) {
+      if (windows.has(item.documentId)) continue;
+      const index = item.metadata.segmentIndex;
+      const before = Math.floor((perDocument - 1) / 2);
+      windows.set(item.documentId, {
+        gte: Math.max(0, index - before),
+        lte: index + (perDocument - before - 1),
+      });
+    }
+
+    const segments = await this.db.knowledgeSegment.findMany({
+      where: {
+        userId,
+        orgId,
+        OR: [...windows].map(([documentId, range]) => ({
+          documentId,
+          segmentIndex: range,
+        })),
+      },
+      include: {
+        document: {
+          select: {
+            id: true,
+            title: true,
+            documentType: true,
+            sourcePlatform: true,
+            sourceUrl: true,
+            documentDate: true,
+          },
+        },
+      },
+      orderBy: [{ documentId: 'asc' }, { segmentIndex: 'asc' }],
+      take: total,
+    });
+
+    const scoreByDocument = new Map(matched.map((item) => [item.documentId, item.score ?? null]));
+    return segments.map((segment) => ({
+      type: 'evidence_segment',
+      segmentId: segment.id,
+      documentId: segment.documentId,
+      content: segment.content,
+      snippet: segment.content,
+      score: scoreByDocument.get(segment.documentId),
+      document: segment.document,
+      metadata: {
+        segmentType: segment.segmentType,
+        segmentIndex: segment.segmentIndex,
+        wordCount: segment.wordCount,
+        startPage: segment.startPage,
+        endPage: segment.endPage,
+      },
     }));
   }
 
@@ -403,11 +679,22 @@ export class EvidenceRetrievalService {
     if (index === -1) {
       const tokens = [...new Set(
         String(query || '').split(/[^\p{L}\p{N}§°]+/u).map(t => t.trim()).filter(t => t.length >= 3)
-      )].sort((a, b) => b.length - a.length);
-      for (const t of tokens) {
-        const i = contentLower.indexOf(t.toLowerCase());
-        if (i !== -1) { index = i; break; }
+      )];
+      let best = null;
+      for (const token of tokens) {
+        const needle = token.toLowerCase();
+        let position = contentLower.indexOf(needle);
+        while (position !== -1) {
+          const start = Math.max(0, position - Math.floor(contextLength / 2));
+          const window = contentLower.slice(start, Math.min(content.length, start + contextLength));
+          const covered = tokens.reduce((count, item) => count + Number(window.includes(item.toLowerCase())), 0);
+          const candidate = { position, covered, tokenLength: token.length };
+          if (!best || candidate.covered > best.covered
+            || (candidate.covered === best.covered && candidate.tokenLength > best.tokenLength)) best = candidate;
+          position = contentLower.indexOf(needle, position + needle.length);
+        }
       }
+      index = best?.position ?? -1;
     }
 
     if (index === -1) {

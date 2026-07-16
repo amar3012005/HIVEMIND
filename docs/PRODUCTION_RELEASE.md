@@ -1,5 +1,28 @@
 # SINGULANCE Production Release Ledger
 
+## 2026-07-16 - prod-20260716-0520888e (KB memory quality: dedup + coverage + yield, PR #42)
+
+```yaml
+release_id: prod-20260716-0520888e
+parent: { branch: hivemind-main, sha: 0520888e8a82b82cad27f4a61ce6bf2052e50c9d }
+merge: PR #42 squash (owner-authorized one-time admin bypass; enforce_admins re-enabled+verified)
+runtime: { VERSION: prod-20260716-0520888e, service: hm-core core-only }
+image: sha256:562cbb4bd55b88b738c26c6cb0ac54dd0f6dfc52ec2b3680a5ec3206170c27f6
+migrations: none (code-only)
+changes:
+  - reinstate cross-window fact consolidation (was dead code)
+  - per-doc curator cap scales to candidate richness (flat 6/ceil 12 -> floor 8/ceil 30) + coverage-first prompt
+  - per-window extraction cap 4 -> 8 + coverage-first prompt
+acceptance:
+  - real GTM proposal on release core: 9 memories, 0 duplicate titles (old live: 5)
+  - built from clean detached tree at merge sha, 0 dirty; health 200; public 200; no new fatal errors (P3005 known baseline)
+  - candidate pre-verified in disposable dev container: 5 -> 7 -> 8 across the 3 commits, 0 dupes
+open_items:
+  - specific dropped claims (bootstrapped/IP/18%-revenue/replacement-cost) not yet proven captured; needs the FULL 3879-word source (729-word reconstruction = too few windows)
+rollback: { image: hivemind/core-api:rollback-kbquality, env_backup: /root/hivemind/.env.bak-kbquality }
+aliases: stable+latest advanced post-acceptance
+```
+
 ## prod-20260716-c34a5469 - Outreach campaign runner (batch email/TARA-call over prospects)
 
 - **Parent:** `hivemind-main` at `c34a5469364cd45a5167c8f41c7930171f7b7862` ("feat(outreach): campaign runner — batch email/TARA-call over prospects with progress + stop/deselect (#39)"). Reconciled ancestry verified linear: `c459a086 → b9d6dc77 → 20b8f3de → c34a5469` (each a direct ancestor).

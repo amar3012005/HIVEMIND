@@ -8264,20 +8264,23 @@ Write the persona now.`;
       return jsonResponse(res, {
         room: {
           ...room,
+          swarm_instructions: (room.agentConnectors && typeof room.agentConnectors === 'object'
+            ? String(room.agentConnectors._swarm_instructions || '') : ''),
           participants: enrichedParticipants.map(e => ({ ...e, lane: deriveCsiLane(e) })),
         },
         turns,
       });
     }
 
-    // PATCH /v1/hyper-rooms/:id — rename or update participants
+    // PATCH /v1/hyper-rooms/:id — rename or update participants. Org-shared
+    // (same model as read/participate/clear) so members can edit shared rooms.
     if (roomMetaMatch && req.method === 'PATCH') {
       const current = await requireSession(req, res);
       if (!current) return;
       const body = await parseBody(req);
       const roomId = roomMetaMatch[1];
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const data = {};
@@ -8324,6 +8327,16 @@ Write the persona now.`;
           if (!emp) return jsonResponse(res, { error: 'Skeptic employee not in org' }, 400);
         }
         data.permanentSkepticId = body.permanent_skeptic_id || null;
+      }
+      // Swarm Instructions — owner-set standing orders the room follows on EVERY
+      // run. Stored in the agentConnectors jsonb (no migration); the sidecar reads
+      // agent_connectors->>'_swarm_instructions' at every turn.
+      if (typeof body.swarm_instructions === 'string') {
+        const si = body.swarm_instructions.trim().slice(0, 4000);
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+          JSON.stringify({ _swarm_instructions: si }), roomId,
+        );
       }
       const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
       if (hasGoalPatch) {

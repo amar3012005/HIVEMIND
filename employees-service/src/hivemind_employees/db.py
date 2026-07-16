@@ -504,6 +504,27 @@ async def update_employee_playbook(org_id: str, slug: str, lessons: list) -> boo
     return False
 
 
+async def get_room_instructions(room_id: str, org_id: Optional[str] = None) -> str:
+    """Owner-set Swarm Instructions for a room (agent_connectors._swarm_instructions).
+    '' when unset. Fetched every turn so the room follows its standing orders on
+    EVERY run regardless of which dispatch path kicked the turn."""
+    if not room_id:
+        return ""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT agent_connectors->>'_swarm_instructions' AS si "
+                "FROM hivemind.hyper_rooms WHERE id = $1::uuid"
+                + (" AND org_id = $2::uuid" if org_id else ""),
+                *( [room_id, org_id] if org_id else [room_id] ),
+            )
+            return str(row["si"] or "").strip()[:4000] if row and row["si"] else ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_instructions failed: %s", exc)
+            return ""
+
+
 async def get_room_playbook(room_id: str, org_id: Optional[str] = None) -> list:
     """ROOM-level learned method lessons (which skill sequences worked for this room
     kind), written by the post-turn reflection. Empty list if missing/pre-migration

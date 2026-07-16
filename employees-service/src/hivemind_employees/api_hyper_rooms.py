@@ -69,6 +69,7 @@ from .db import (
     get_employee_playbooks_map,
     update_employee_playbook,
     get_room_playbook,
+    get_room_instructions,
     get_connected_gmail,
     update_room_playbook,
     get_company_name,
@@ -2230,7 +2231,12 @@ async def _produce_sheet(req: "RoomTurnRequest", plan: Dict[str, Any],
         return {"url": url, "title": title}
     if isinstance(res, dict) and res.get("error"):
         await _surface_produce_error(req, plan, "Google Sheet", res.get("error"))
-    return {"skipped": "the Google Sheet could not be created"}
+    # Sheet creation failed but the deliverable CONTENT already exists (the synthesis
+    # body with its markdown tables is in the room). Deliver inline instead of
+    # dead-ending the whole turn over a missing artifact wrapper.
+    log.info("[produce] sheet creation failed — delivering content inline (no dead-end)")
+    return {"inline": True, "title": title,
+            "note": "Google Sheet could not be created — the full table is in the report above"}
 
 
 def _extract_notion_url(res: Any) -> str:
@@ -2908,6 +2914,13 @@ async def _orchestrate_single_agent(
         _room_playbook = await get_room_playbook(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _room_playbook = []
+    # Owner-set Swarm Instructions — fetched EVERY turn (not from the request
+    # payload) so every dispatch path (chat, task, cycle, flyby) obeys them.
+    _room_instructions = ""
+    try:
+        _room_instructions = await get_room_instructions(req.room_id, org_id=req.org_id)
+    except Exception:  # noqa: BLE001
+        _room_instructions = ""
 
     _sender_email = ""
     try:
@@ -2926,7 +2939,8 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
-            room_playbook=_room_playbook, sender_email=_sender_email,
+            room_playbook=_room_playbook, room_instructions=_room_instructions,
+            sender_email=_sender_email,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

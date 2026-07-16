@@ -979,6 +979,7 @@ class Director:
         intended_output: str = "answer",
         room_kind: str = "",
         room_playbook: Optional[List[str]] = None,
+        room_instructions: str = "",
         sender_email: str = "",
     ) -> None:
         self.user_message = user_message
@@ -1004,6 +1005,14 @@ class Director:
         # Room-type learned lessons ("previously effective: X→Y"), written by the
         # post-turn reflection, primed into the planner catalog block. [] = none yet.
         self.room_playbook: List[str] = [str(x) for x in (room_playbook or []) if str(x).strip()][:6]
+        # Owner-set Swarm Instructions for this room — MANDATORY on every run.
+        # Injected into the director plan, every persona turn, and the synthesis
+        # so the room can never "forget" its standing orders.
+        self.room_instructions = str(room_instructions or "").strip()[:4000]
+        self._room_instr_block = (
+            "\nROOM INSTRUCTIONS — set by the owner, MANDATORY, follow on EVERY run "
+            "(they override defaults but never safety):\n" + self.room_instructions + "\n"
+        ) if self.room_instructions else ""
         # The real connected Gmail — used as the email's From/signature so the
         # synth never invents a placeholder address.
         self.sender_email = str(sender_email or "").strip()
@@ -1604,7 +1613,8 @@ class Director:
         _messages = [
             {"role": "system", "content": (
                 _now_block() +
-                f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}\nRespond IN CHARACTER, CONCISELY "
+                f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}{self._room_instr_block}"
+                f"\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
                 f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
@@ -1842,7 +1852,7 @@ class Director:
             "COMPANY CONTEXT — the organisation you are planning for. Ground every query in its identity, "
             "products, customers, and market; do NOT emit generic industry queries:\n" + _org[:1200] + "\n\n"
         ) if _org else ""
-        user = f"{_org_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        user = f"{_org_block}{self._room_instr_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                model=self.director_model, temp=0.3, schema=schema, bucket="director")
         self.director_iters.append(self._last_tok)
@@ -2054,7 +2064,13 @@ class Director:
         sysp = (self._system_prompt() + "\n\nYou are now WRITING THE FINAL DELIVERABLE from the gathered "
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
-                "flag anything unverifiable as UNVERIFIED." + _fmt)
+                "flag anything unverifiable as UNVERIFIED."
+                "\nNO-FABRICATION CONTRACT (customer-facing deliverables): NEVER invent prices, fees, "
+                "percentages, benchmarks, guarantees, certifications, names, email addresses, phone numbers "
+                "or links that are not in the gathered context. A fabricated specific tagged UNVERIFIED is "
+                "still fabricated — omit it or write [confirm with sales] / [confirm with legal] instead. "
+                "Contact details: use ONLY the company's real sender identity from context."
+                + self._room_instr_block + _fmt)
         # Evidence contract: the report must show its grounding. Skills applied +
         # per-lane evidence counts feed a citation requirement — each major section
         # names the lane (recall/web/connector/debate) that grounded it.
@@ -2344,6 +2360,7 @@ async def run_director(
     intended_output: str = "answer",
     room_kind: str = "",
     room_playbook: Optional[List[str]] = None,
+    room_instructions: str = "",
     sender_email: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
@@ -2358,6 +2375,7 @@ async def run_director(
         company_brief=company_brief,
         intended_output=intended_output,
         room_kind=room_kind, room_playbook=room_playbook,
+        room_instructions=room_instructions,
         sender_email=sender_email,
     )
     return await director.run()

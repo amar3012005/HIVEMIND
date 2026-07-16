@@ -1,6 +1,9 @@
 # Production Image Policy
 
-> Authoritative procedure: [`../docs/PRODUCTION_RELEASE_PROTOCOL.md`](../docs/PRODUCTION_RELEASE_PROTOCOL.md).
+> **Day-to-day deploys: follow [`DEPLOYMENT.md`](DEPLOYMENT.md)** (fast single-branch
+> `quick-deploy.sh` flow, one `:stable` rollback per service). The heavy
+> immutable-release protocol below/linked is the invariant reference.
+> Authoritative invariants: [`../docs/PRODUCTION_RELEASE_PROTOCOL.md`](../docs/PRODUCTION_RELEASE_PROTOCOL.md).
 > Compose runs immutable release tags. The aliases below identify the accepted
 > release but must never be supplied as `VERSION` or `NEXT_VERSION`.
 

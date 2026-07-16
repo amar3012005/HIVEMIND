@@ -69,7 +69,7 @@ git fetch origin "$BRANCH" -q
 # (uncommitted edits, wrong branch). "no overwrites" = live is always canonical.
 git checkout -qf -B "$BRANCH" "origin/$BRANCH"
 git reset --hard "origin/$BRANCH" -q
-git submodule update --init --force frontend/Da-vinci -q
+git submodule update --init --force -q frontend/Da-vinci
 NOW=$(git rev-parse HEAD)
 if [ -n "$PREV" ] && [ "$PREV" = "$NOW" ]; then echo "already at $(git rev-parse --short HEAD) — nothing to deploy"; exit 0; fi
 echo "== deploy ${PREV:0:8}${PREV:+ → }$(git rev-parse --short $NOW) on $BRANCH"

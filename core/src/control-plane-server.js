@@ -337,6 +337,79 @@ async function recordOutboundAction({ orgId, userId, roomId, approvalId, channel
   } catch (e) { console.warn('[outbound-ledger] metering failed:', e.message); }
 }
 
+// ── HQ control-room activity feed ─────────────────────────────────────────
+// On a sealed COMPLETE turn in a NON-HQ room, write one templated "report" into
+// the org's HQ room feed — as if the room's lead agent reported its activity to
+// the owner. Templated (no LLM) from the turn's own events + room metadata.
+// Idempotent on turn_id. Best-effort — the caller guards; this never throws.
+async function recordHqActivity(prisma, turnId, event) {
+  if ((event?.status || 'complete') !== 'complete') return;
+  const turn = await prisma.hyperTurn.findUnique({
+    where: { id: turnId }, select: { roomId: true, userMessage: true, lines: true },
+  });
+  if (!turn) return;
+  const room = await prisma.hyperRoom.findUnique({
+    where: { id: turn.roomId },
+    select: { orgId: true, name: true, goal: true, agentConnectors: true },
+  });
+  if (!room) return;
+  // Skip the HQ room itself — it doesn't report to itself.
+  const isHq = room.agentConnectors && typeof room.agentConnectors === 'object'
+    && Object.prototype.hasOwnProperty.call(room.agentConnectors, '_company');
+  if (isHq) return;
+  // Resolve the org's HQ room (the one carrying _company state).
+  const hqRows = await prisma.$queryRawUnsafe(
+    `SELECT id FROM "hivemind"."hyper_rooms"
+      WHERE "agent_connectors" ? '_company' AND archived_at IS NULL AND org_id = $1::uuid
+      ORDER BY created_at DESC LIMIT 1`,
+    room.orgId,
+  ).catch(() => []);
+  const hqRoomId = hqRows?.[0]?.id;
+  if (!hqRoomId || hqRoomId === turn.roomId) return; // no HQ, or this IS the HQ
+
+  const lines = Array.isArray(turn.lines) ? turn.lines : [];
+  const line = (t) => lines.filter((l) => l && l.t === t);
+  // Lead agent = the seal's author, else the first line/react agent, else team.
+  const leadEv = [...lines].reverse().find((l) => l && (l.t === 'line' || l.t === 'react') && (l.agent || l.name));
+  const agentName = event.agent || leadEv?.agent || leadEv?.name || null;
+  const agentRole = leadEv?.role || leadEv?.lane || null;
+
+  // Outcome digest from the turn's events — what actually happened.
+  const bits = [];
+  const prospects = line('prospects');
+  if (prospects.length) {
+    const rows = prospects.flatMap((p) => p.prospects || []);
+    const withEmail = rows.filter((r) => r && r.email).length;
+    if (rows.length) bits.push(`${rows.length} prospects found${withEmail ? `, ${withEmail} email-verified` : ''}`);
+  }
+  const finalReport = line('final_report').slice(-1)[0];
+  if (finalReport) bits.push('report sealed');
+  const approvals = line('approval_request');
+  if (approvals.length) bits.push(`${approvals.length} action${approvals.length > 1 ? 's' : ''} awaiting approval`);
+  const skillUsed = line('skill_used');
+  if (skillUsed.length) bits.push(`${skillUsed.length} skill${skillUsed.length > 1 ? 's' : ''} used`);
+  const tok = Number(event.cost_tokens || 0);
+
+  const roomName = room.name || 'a room';
+  const task = (room.goal || turn.userMessage || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+  const who = agentName ? `${agentName}${agentRole ? ` · ${agentRole}` : ''}` : `The ${roomName} team`;
+  const headline = task
+    ? `${who} reporting from “${roomName}”: finished “${task}”`
+    : `${who} reporting from “${roomName}”: run complete`;
+  const summary = bits.length ? bits.join(' · ') : 'Run complete.';
+
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "hivemind"."hq_activity"
+       (org_id, hq_room_id, source_room_id, source_room_name, turn_id, agent_name, agent_role, headline, summary, status)
+     VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6,$7,$8,$9,'complete')
+     ON CONFLICT (turn_id) DO NOTHING`,
+    room.orgId, hqRoomId, turn.roomId, roomName.slice(0, 200), turnId,
+    agentName ? String(agentName).slice(0, 120) : null,
+    agentRole ? String(agentRole).slice(0, 120) : null,
+    headline.slice(0, 400), summary.slice(0, 2000),
+  );
+}
+
 // ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
 // The room-turn kick to the employees sidecar is fire-and-forget and can be
 // dropped (the sidecar holds the connection open for the whole synchronous
@@ -7795,6 +7868,33 @@ Write the persona now.`;
       }
     }
 
+    // GET /v1/hyper-rooms/:id/hq-activity — the HQ control-room feed: every
+    // non-HQ room run that reported here (agent-voice cards, newest last).
+    const hqActMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/hq-activity$/);
+    if (hqActMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, source_room_id, source_room_name, agent_name, agent_role,
+                  headline, summary, status, created_at
+             FROM "hivemind"."hq_activity"
+            WHERE org_id = $1::uuid AND hq_room_id = $2::uuid
+            ORDER BY created_at ASC LIMIT 200`,
+          current.session.orgId, hqActMatch[1],
+        );
+        return jsonResponse(res, {
+          activity: rows.map((r) => ({
+            id: r.id, source_room_id: r.source_room_id, source_room_name: r.source_room_name,
+            agent_name: r.agent_name, agent_role: r.agent_role,
+            headline: r.headline, summary: r.summary, status: r.status, created_at: r.created_at,
+          })),
+        });
+      } catch {
+        return jsonResponse(res, { activity: [] }); // un-migrated → empty
+      }
+    }
+
     // POST /v1/hyper/tasks/open { task_id } — open (or create) the room for a
     // dashboard task. First click provisions a room named after the task with
     // the task detail as its goal and marks the task in the persisted state;
@@ -8935,6 +9035,13 @@ Write the persona now.`;
               }
             }
           } catch (e) { console.warn('[hyper-task-done] hook failed:', e.message); }
+
+          // ── HQ control-room feed: any NON-HQ room run that seals posts a
+          // templated agent-voice report into the org's HQ room, so HQ becomes a
+          // live overview of all company activity. Best-effort; never breaks seal.
+          try {
+            await recordHqActivity(prisma, body.turn_id, body.event);
+          } catch (e) { console.warn('[hq-activity] hook failed:', e.message); }
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──

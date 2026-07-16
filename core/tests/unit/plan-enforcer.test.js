@@ -63,6 +63,15 @@ describe('PlanEnforcer B2C limits', () => {
     assert.equal(result.current, 1_000);
   });
 
+  it('keeps upload counts as internal telemetry rather than a billable limit', async () => {
+    const enforcer = makeEnforcer({
+      usage: { knowledgeBaseUploads: 10_000 },
+      daily: { uploads: 10_000 },
+    });
+    assert.equal((await enforcer.checkLimit(ORG_ID, 'uploads', 1)).allowed, true);
+    assert.equal(Object.hasOwn(await enforcer.getUsageSummary(ORG_ID), 'uploads'), false);
+  });
+
   it('enforces entitlement-overridden limits', async () => {
     const plan = { ...getPlan('pro'), limits: { ...getPlan('pro').limits, llmTokensPerDay: 500 } };
     const enforcer = makeEnforcer({ plan, daily: { tokens: 500 } });

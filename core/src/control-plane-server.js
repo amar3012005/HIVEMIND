@@ -9070,8 +9070,8 @@ Write the persona now.`;
     // GET /v1/billing/plan
     if (pathname === '/v1/billing/plan' && req.method === 'GET') {
       const { plan, entitlement } = await getEffectivePlan(prisma, orgId);
-      const usage = await usageTracker.getUsage(orgId);
-      const cumulative = await usageTracker.getCumulativeUsage(orgId);
+      const { knowledgeBaseUploads: _uploadTelemetry, ...usage } = await usageTracker.getUsage(orgId);
+      const { knowledgeBaseUploads: _cumulativeUploadTelemetry, ...cumulative } = await usageTracker.getCumulativeUsage(orgId);
       const limitCheck = await usageTracker.checkLimits(orgId, plan);
       const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
       const usageSummary = await new PlanEnforcer(

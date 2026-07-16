@@ -747,11 +747,18 @@ Output the JSON object and nothing else.`;
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
     }
-    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 2 : 4));
+    // Per-window candidate ceiling. This is the EVIDENCE-candidate stage — the
+    // document curator downstream picks and merges the durable set, so the
+    // extractor should surface EVERY distinct durable claim in a dense section
+    // rather than self-limit to 4 (a 'The Asset' section carries bootstrapped
+    // status + sole-IP + three products + replacement cost = >4 distinct claims;
+    // capping at 4 dropped them before the curator ever saw them). minImportance
+    // (0.65) + the curator keep the extra candidates from becoming noise.
+    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 3 : 8));
     const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
-Rules: at most ${factCap} facts; fewer, richer memories are better than many fragments. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
+Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
     const parsed = await chatCompletion({

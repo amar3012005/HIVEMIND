@@ -57,7 +57,7 @@ if [ "${1:-}" = "--rollback" ]; then
 fi
 
 # ── deploy path ────────────────────────────────────────────────────────────
-BRANCH="${1:-hivemind-main}"
+BRANCH="${1:-singulance-main}"
 cd "$REPO"
 PREV=$(git rev-parse HEAD)
 git fetch origin "$BRANCH" -q

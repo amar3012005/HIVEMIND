@@ -113,6 +113,24 @@ export function createOutreachModule(deps) {
     const payload = target.payload || {};
     if (!target.email || !EMAIL_RE.test(target.email)) throw new Error('target has no valid email');
     if (!payload.subject || !payload.body) throw new Error('target payload not generated');
+    // Cross-campaign dedup — HARD guard: this org already emailed this address
+    // (any prior campaign, any prior turn). Never contact the same client twice.
+    const already = await prisma.$queryRawUnsafe(
+      `SELECT id, sent_at FROM "hivemind"."outbound_actions"
+        WHERE org_id = $1::uuid AND channel = 'email' AND status = 'sent'
+          AND lower(recipient) = lower($2) LIMIT 1`,
+      campaign.orgId, target.email,
+    ).catch(() => []);
+    if (already?.length) {
+      const when = already[0].sent_at ? new Date(already[0].sent_at).toISOString().slice(0, 10) : 'earlier';
+      return prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: {
+          state: 'skipped',
+          resultRef: { skipped: `already emailed ${target.email} (${when}) — not re-sent`, dedupOf: already[0].id },
+        },
+      });
+    }
     // Pace: min gap since this campaign's last successful email send.
     const last = await prisma.outreachTarget.findFirst({
       where: { campaignId: campaign.id, state: 'sent' }, orderBy: { updatedAt: 'desc' },
@@ -328,6 +346,29 @@ export function createOutreachModule(deps) {
         },
         include: { targets: { orderBy: { position: 'asc' } } },
       });
+      // Pre-mark any target we've ALREADY emailed (any prior campaign) as skipped
+      // so the panel shows "already emailed" up front and the run won't re-send.
+      if (channel === 'email') {
+        const emails = campaign.targets.map((t) => t.email).filter(Boolean);
+        if (emails.length) {
+          const prior = await prisma.$queryRawUnsafe(
+            `SELECT DISTINCT lower(recipient) AS r FROM "hivemind"."outbound_actions"
+              WHERE org_id = $1::uuid AND channel = 'email' AND status = 'sent'
+                AND lower(recipient) = ANY($2::text[])`,
+            room.orgId, emails.map((e) => e.toLowerCase()),
+          ).catch(() => []);
+          const seen = new Set((prior || []).map((x) => x.r));
+          const dupes = campaign.targets.filter((t) => t.email && seen.has(t.email.toLowerCase()));
+          if (dupes.length) {
+            await prisma.outreachTarget.updateMany({
+              where: { id: { in: dupes.map((t) => t.id) } },
+              data: { state: 'skipped', resultRef: { skipped: 'already emailed — not re-sent' } },
+            });
+            const reloaded = await loadCampaign(campaign.id, room.orgId);
+            return jsonResponse(res, { campaign: reloaded }, 200), true;
+          }
+        }
+      }
       return jsonResponse(res, { campaign }, 200), true;
     }
 

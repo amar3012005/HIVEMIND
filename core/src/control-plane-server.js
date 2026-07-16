@@ -51,6 +51,7 @@ import {
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
+import { createOutreachModule } from './outreach/campaigns.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -545,6 +546,21 @@ const HYPER_SHOT_MAX = parseInt(process.env.HYPER_SHOT_CONCURRENCY || '2', 10);
 let _hyperShotActive = 0;
 const _hyperShotQueue = [];
 const HYPER_SIDECAR_BASE_URL = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+
+// Outreach campaign runner (batch email/call over Places prospects) — lazy
+// singleton so `recordOutboundAction` and the session helpers below are bound;
+// the drain interval starts on first construction.
+let _outreachModule = null;
+function outreachModule() {
+  if (!_outreachModule) {
+    _outreachModule = createOutreachModule({
+      prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
+      requireSession, recordOutboundAction, sidecarBaseUrl: HYPER_SIDECAR_BASE_URL,
+    });
+    _outreachModule.startDrain();
+  }
+  return _outreachModule;
+}
 
 function dispatchHyperRoomTurn(body) {
   return internalFetch(`${HYPER_SIDECAR_BASE_URL}/internal/hyper/room-turn`, {
@@ -8395,6 +8411,12 @@ Write the persona now.`;
         console.warn('[hyper-rooms] approve failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
+    }
+
+    // Outreach campaign runner — /v1/hyper-rooms/:id/outreach-campaigns +
+    // /v1/outreach-campaigns/* (create/get/start/stop/patch/generate/execute).
+    if (pathname.includes('outreach-campaigns')) {
+      if (await outreachModule().handle(req, res, pathname)) return true;
     }
 
     // POST /v1/hyper-rooms/:id/send-email — one-click send from the FE preview

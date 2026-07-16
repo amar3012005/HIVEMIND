@@ -185,6 +185,7 @@ if config.TARA_OUTBOUND_ENABLED:
             org_id=qp.get("org_id") or None,
             language=qp.get("language") or "en",
             voice_id=qp.get("voice_id") or None,
+            goal=qp.get("goal") or None,
         )
 
 

@@ -41,6 +41,7 @@ async def handle_telnyx_stream(
     language: str = "en",
     voice_id: Optional[str] = None,
     mode: str = "external",
+    goal: Optional[str] = None,
 ) -> None:
     """Drive a live Telnyx media-streaming session through the full TARA voice loop."""
     await ws.accept()
@@ -90,6 +91,7 @@ async def handle_telnyx_stream(
                 async for evt in stream_tara(
                     query=transcript, session_id=session_id,
                     user_id=user_id, org_id=org_id, language=language, mode=mode,
+                    extra={"voice_directive": goal[:600]} if goal else None,
                 ):
                     if evt["type"] == "token":
                         if metrics["ttfb"] is None:
@@ -168,7 +170,7 @@ async def handle_telnyx_stream(
                     async for evt in stream_tara(
                         query="__open__", session_id=session_id,
                         user_id=user_id, org_id=org_id, language=language, mode=mode,
-                        extra={"greeting": True},
+                        extra={"greeting": True, **({"voice_directive": goal[:600]} if goal else {})},
                     ):
                         if evt["type"] == "token":
                             buf += evt["text"]

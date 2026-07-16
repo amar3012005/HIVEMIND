@@ -7727,6 +7727,74 @@ Write the persona now.`;
       }
     }
 
+    // GET /v1/hyper/leads — the "Your Leads" board: one row per prospect the org
+    // has run outreach on, with all firm info + latest send state, sent date/time,
+    // reply/booking outcome, and a coarse "potential" derived from the outcome.
+    // Sourced from outreach_targets (the campaign wrapper) LEFT-JOINed to the
+    // outbound_actions ledger (sent-truth + reply/booking outcomes).
+    if (pathname === '/v1/hyper/leads' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT
+             t.id, t.company, t.email, t.phone, t.website, t.address,
+             t.state, t.result_ref, t.updated_at,
+             c.channel, c.id AS campaign_id, c.created_at AS campaign_at,
+             oa.sent_at, oa.outcome, oa.outcome_at, oa.subject
+           FROM "hivemind"."outreach_targets" t
+           JOIN "hivemind"."outreach_campaigns" c ON c.id = t.campaign_id
+           LEFT JOIN LATERAL (
+             SELECT sent_at, outcome, outcome_at, subject
+               FROM "hivemind"."outbound_actions" oa
+              WHERE oa.org_id = c.org_id
+                AND ((c.channel = 'email' AND oa.channel = 'email' AND lower(oa.recipient) = lower(t.email))
+                  OR (c.channel = 'call'  AND oa.channel = 'call'  AND oa.recipient = regexp_replace(t.phone, '[^0-9+]', '', 'g')))
+              ORDER BY oa.sent_at DESC LIMIT 1
+           ) oa ON true
+           WHERE c.org_id = $1::uuid
+           ORDER BY COALESCE(oa.sent_at, t.updated_at) DESC
+           LIMIT 500`,
+          current.session.orgId,
+        );
+        // Collapse to one row per prospect (email or company+phone) — latest wins.
+        const byKey = new Map();
+        for (const r of rows) {
+          const key = (r.email || `${r.company}|${r.phone || ''}`).toLowerCase();
+          if (!byKey.has(key)) byKey.set(key, r);
+        }
+        const leads = [...byKey.values()].map((r) => {
+          const rr = r.result_ref || {};
+          const sent = !!r.sent_at || r.state === 'sent';
+          const replied = r.outcome === 'replied';
+          const booked = r.outcome === 'booked' || r.outcome === 'completed';
+          // Coarse potential: booked > replied > sent(awaiting) > queued/skipped.
+          const potential = booked ? 'high' : replied ? 'medium' : sent ? 'low' : 'none';
+          return {
+            id: r.id, company: r.company, email: r.email, phone: r.phone,
+            website: r.website, address: r.address, channel: r.channel,
+            state: r.state, sent, replied, booked, potential,
+            subject: r.subject || null,
+            sent_at: r.sent_at || null,
+            outcome: r.outcome || null, outcome_at: r.outcome_at || null,
+            skipped_reason: rr.skipped || null,
+            error: rr.error || null,
+          };
+        });
+        const summary = {
+          total: leads.length,
+          emails_sent: leads.filter((l) => l.channel === 'email' && l.sent).length,
+          calls: leads.filter((l) => l.channel === 'call' && l.sent).length,
+          replies: leads.filter((l) => l.replied).length,
+          meetings: leads.filter((l) => l.booked).length,
+        };
+        return jsonResponse(res, { leads, summary });
+      } catch (err) {
+        // Un-migrated / no campaigns yet → empty board, never a 500.
+        return jsonResponse(res, { leads: [], summary: { total: 0, emails_sent: 0, calls: 0, replies: 0, meetings: 0 } });
+      }
+    }
+
     // POST /v1/hyper/tasks/open { task_id } — open (or create) the room for a
     // dashboard task. First click provisions a room named after the task with
     // the task detail as its goal and marks the task in the persisted state;

@@ -42,6 +42,7 @@ export async function resolveSourceArtifact({ evidenceRetrieval, query, userId, 
 
 export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], relationships = [] } = {}) {
   const source = plan.source || resolveDocumentArtifact(memories);
+  const evidenceFound = memories.length > 0 || evidence.length > 0;
   const sourceIds = new Set(evidence.map((item) => documentIdentity(item).document_id).filter(Boolean));
   const sourceTitles = new Set(evidence.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
   const sourceCovered = !source || (
@@ -64,6 +65,7 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
 
   return {
     source,
+    evidence_found: evidenceFound,
     source_requested: !!source,
     source_covered: sourceCovered,
     entities_requested: entities.length,
@@ -72,7 +74,8 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
     temporal_covered: !temporalRequested || memories.length > 0,
     graph_requested: graphRequested,
     graph_covered: !graphRequested || relationships.length > 0,
-    complete: sourceCovered
+    complete: evidenceFound
+      && sourceCovered
       && coveredEntities.length === entities.length
       && (!temporalRequested || memories.length > 0)
       && (!graphRequested || relationships.length > 0),
@@ -80,6 +83,12 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
 }
 
 export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {}) {
+  if (!coverage.evidence_found) {
+    return {
+      reason: 'empty_anchor_coverage',
+      args: { query, mode: 'explain', limit: 12 },
+    };
+  }
   if (coverage.source_requested && !coverage.source_covered) {
     return {
       reason: 'source_coverage',

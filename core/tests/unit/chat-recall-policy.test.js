@@ -158,3 +158,30 @@ test('validated claim citations become server-owned public document sources', ()
     score: 0.91,
   }]);
 });
+
+test('empty fast recall is incomplete and escalates once to explain', () => {
+  const plan = { user_message: 'what is the most groundbreaking thing with CSI' };
+  const coverage = assessRecallCoverage({ plan, memories: [], evidence: [], relationships: [] });
+
+  assert.equal(coverage.evidence_found, false);
+  assert.equal(coverage.complete, false);
+  assert.deepEqual(chooseRecallEscalation({ plan, coverage, query: plan.user_message }), {
+    reason: 'empty_anchor_coverage',
+    args: {
+      query: plan.user_message,
+      mode: 'explain',
+      limit: 12,
+    },
+  });
+});
+
+test('a recalled memory is sufficient when no narrower coverage was requested', () => {
+  const coverage = assessRecallCoverage({
+    plan: {},
+    memories: [{ id: 'm1', title: 'CSI integration', content: 'Shared cognitive substrate.' }],
+  });
+
+  assert.equal(coverage.evidence_found, true);
+  assert.equal(coverage.complete, true);
+  assert.equal(chooseRecallEscalation({ coverage, query: 'CSI' }), null);
+});

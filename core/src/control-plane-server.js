@@ -396,7 +396,19 @@ async function recordHqActivity(prisma, turnId, event) {
   const headline = task
     ? `${who} reporting from “${roomName}”: finished “${task}”`
     : `${who} reporting from “${roomName}”: run complete`;
-  const summary = bits.length ? bits.join(' · ') : 'Run complete.';
+  // Summary = the outcome digest line + the FULL run report (the sealed
+  // final_report/synthesis body), so the HQ bubble can show everything that
+  // happened in the run — not just a one-liner.
+  const digest = bits.length ? bits.join(' · ') : 'Run complete.';
+  const reportBody = String(
+    finalReport?.body || finalReport?.text || finalReport?.report || finalReport?.content
+    || [...lines].reverse().find((l) => l && l.t === 'line'
+        && String(l.content || l.text || '').length > 200)?.content
+    || [...lines].reverse().find((l) => l && l.t === 'line'
+        && String(l.text || '').length > 200)?.text
+    || '',
+  ).trim();
+  const summary = reportBody ? `${digest}\n\n${reportBody}` : digest;
 
   await prisma.$executeRawUnsafe(
     `INSERT INTO "hivemind"."hq_activity"
@@ -406,7 +418,7 @@ async function recordHqActivity(prisma, turnId, event) {
     room.orgId, hqRoomId, turn.roomId, roomName.slice(0, 200), turnId,
     agentName ? String(agentName).slice(0, 120) : null,
     agentRole ? String(agentRole).slice(0, 120) : null,
-    headline.slice(0, 400), summary.slice(0, 2000),
+    headline.slice(0, 400), summary.slice(0, 12000),
   );
 }
 

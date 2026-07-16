@@ -10,10 +10,8 @@
  *   2. plan_step    → LLM emits {direct_answer, sub_queries[],
  *                     needs_traverse, needs_time_travel, needs_web,
  *                     intents[]}. No prose, structured JSON.
- *   3. evidence_step → orchestrator runs sub_queries in parallel via
- *                     dispatchTool(hivemind_recall) / hivemind_at /
- *                     hivemind_web_search. No LLM. Accumulates memories,
- *                     dedups, normalises.
+ *   3. evidence_step → one shared recall plan retrieves broad context,
+ *                     checks coverage, and permits one typed escalation.
  *   4. answer_step   → LLM composes final response in the user's
  *                     selected language, grounded ONLY in the evidence
  *                     block. Returns {response, evidence_used:[ids],
@@ -31,25 +29,12 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
-import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation, resolveSourceArtifact } from './chat-recall-policy.js';
+import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
 // through immediately — those are not transient.
 const RETRYABLE_FAILURES = new Set(['TIMEOUT', 'RATE_LIMIT']);
-
-export function resolveDocumentAnchorFromMemories(memories = []) {
-  for (const memory of memories) {
-    const metadataId = memory?.source_metadata?.document_id;
-    if (metadataId) return { source_document_id: metadataId };
-    const tags = Array.isArray(memory?.tags) ? memory.tags : [];
-    const documentId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));
-    if (documentId) return { source_document_id: documentId.slice('doc-id:'.length) };
-    const filename = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'));
-    if (filename) return { source_title: filename.slice('filename:'.length) };
-  }
-  return null;
-}
 
 async function dispatchTool(name, args, ctx, opts = {}) {
   const t0 = Date.now();
@@ -83,7 +68,6 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // Caps raised per user directive — internal steps and final answer
 // both run on gpt-oss family; cost is acceptable, quality wins.
 const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 4000);
-const REFLECT_MAX_TOKENS = Number(process.env.HIVEMIND_REFLECT_MAX_TOKENS || 3000);
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
@@ -680,15 +664,11 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
 async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
-  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
   const steps = [];
   const memoriesById = new Map();
   const liveItems = [];
   const evidenceItems = [];
-  // Typed graph edges harvested from hivemind_traverse_graph. Passed to
-  // answerStep so the LLM can ground "relation between X and Y" answers
-  // on actual edge records instead of inventing relations from content
-  // co-occurrence. Anti-hallucination invariant.
+  // Typed graph edges returned by the shared recall service.
   const edgesByKey = new Map();   // key = `${from_id}|${to_id}|${type}` → edge
   // Synthesis evidence chains from insight-mode recall. Each chain is a
   // canonical-fact or synthesis-bridge memory + its top-4 evidence
@@ -705,19 +685,6 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       : Promise.reject(new Error('recall deadline exceeded'));
   };
 
-  if (!plan.source) {
-    try {
-      plan.source = await resolveSourceArtifact({
-        evidenceRetrieval: ctx.evidenceRetrieval,
-        query: plan.user_message,
-        userId: ctx.userId,
-        orgId: ctx.orgId,
-        deadlineAt,
-      });
-    } catch { /* ordinary recall remains available when source resolution fails */ }
-  }
-  if (!plan.source) activeDeadlineAt = Date.now() + TURN_BUDGET_MS;
-
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
     onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
@@ -725,96 +692,19 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     return payload;
   };
 
-  // Deterministic temporal+connector extraction from user's FULL message.
-  // Sub_queries are short bag-of-keywords ("slack messages") and lose the
-  // 'as of May 13' / 'slack' anchor. Re-attach them to each sub_query call
-  // so hop1's tag-anchored + valid_at override always fires when the user
-  // clearly asked for time-travel or connector-scoped recall.
-  const ul = String(plan.user_message || '').toLowerCase();
-  const CONNECTORS = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
-  const userConnector = CONNECTORS.find(k => ul.includes(k));
-  // Deterministic date extraction takes PRIORITY over planner LLM —
-  // planner routinely hallucinates the year (defaults to 2024) when the
-  // user says "May 13" without a year. We use server's current year so
-  // bare month/day phrases resolve to the right calendar year.
-  let derivedValidAt = null;
-  if (/\b(as of|before|prior to|on|in|by|until)\b/.test(ul) || /\d{4}-\d{1,2}-\d{1,2}/.test(ul)) {
-    const MONTH = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11, january:0, february:1, march:2, april:3, june:5, july:6, august:7, september:8, october:9, november:10, december:11 };
-    const year = new Date().getUTCFullYear();
-    let m = ul.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-    let d = m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3], 23,59,59)) : null;
-    if (!d) {
-      m = ul.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{1,2})(?:[,\s]+(\d{4}))?/);
-      if (m && MONTH[m[1]] !== undefined) d = new Date(Date.UTC(+(m[3]||year), MONTH[m[1]], +m[2], 23,59,59));
-    }
-    if (d && !Number.isNaN(d.getTime())) derivedValidAt = d.toISOString();
-  }
-  // Fall back to planner's valid_time / transaction_time only when our
-  // deterministic extractor found nothing.
-  if (!derivedValidAt) {
-    derivedValidAt = plan.time_travel?.valid_time || plan.time_travel?.transaction_time || null;
-  }
-  // Also overwrite plan.time_travel so the hivemind_at branch below
-  // uses the corrected date (planner often hallucinated year=2024).
-  if (!deterministicRecall && derivedValidAt) {
-    plan.needs_time_travel = true;
-    plan.time_travel = { ...(plan.time_travel || {}), valid_time: derivedValidAt };
-  }
-  // Today / yesterday / this-week extraction — answer-step bails with
-  // confidence 0.2 when recall returns 15 memories spanning weeks and
-  // the LLM cannot tell which fall on the user's target day. Compute a
-  // hard date_range so recall returns only memories whose document_date
-  // or created_at falls in the requested window. Today = UTC day boundary.
-  let derivedDateRange = null;
-  const ulRaw = String(plan.user_message || '').toLowerCase();
-  const todayUtc = new Date();
-  todayUtc.setUTCHours(0, 0, 0, 0);
-  const dayMs = 24 * 60 * 60 * 1000;
-  if (/\btoday\b/.test(ulRaw)) {
-    derivedDateRange = {
-      start: todayUtc.toISOString(),
-      end: new Date(todayUtc.getTime() + dayMs - 1).toISOString(),
-    };
-  } else if (/\byesterday\b/.test(ulRaw)) {
-    const y = new Date(todayUtc.getTime() - dayMs);
-    derivedDateRange = {
-      start: y.toISOString(),
-      end: new Date(todayUtc.getTime() - 1).toISOString(),
-    };
-  } else if (/\bthis\s+week\b/.test(ulRaw)) {
-    // ISO week (Mon=1). Find Monday of current week.
-    const dow = todayUtc.getUTCDay() || 7; // Sun=0 → 7
-    const monday = new Date(todayUtc.getTime() - (dow - 1) * dayMs);
-    derivedDateRange = {
-      start: monday.toISOString(),
-      end: new Date(todayUtc.getTime() + dayMs - 1).toISOString(),
-    };
-  } else if (/\blast\s+week\b/.test(ulRaw)) {
-    const dow = todayUtc.getUTCDay() || 7;
-    const thisMon = new Date(todayUtc.getTime() - (dow - 1) * dayMs);
-    const lastMon = new Date(thisMon.getTime() - 7 * dayMs);
-    derivedDateRange = {
-      start: lastMon.toISOString(),
-      end: new Date(thisMon.getTime() - 1).toISOString(),
-    };
-  }
-
   const recallExtras = {
-    ...(!deterministicRecall && userConnector ? { tags: [userConnector] } : {}),
-    ...((deterministicRecall ? plan.time?.valid_at : derivedValidAt) ? { valid_at: deterministicRecall ? plan.time.valid_at : derivedValidAt } : {}),
-    ...(deterministicRecall && plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
-    ...((deterministicRecall ? plan.time?.range : derivedDateRange) ? { date_range: deterministicRecall ? plan.time.range : derivedDateRange } : {}),
-    ...(deterministicRecall && plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
-    ...(deterministicRecall && plan.source?.title ? { source_title: plan.source.title } : {}),
+    ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
+    ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
+    ...(plan.time?.range ? { date_range: plan.time.range } : {}),
+    ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
+    ...(plan.source?.title ? { source_title: plan.source.title } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
   // default, insight for relation queries, panorama for time/history).
   // Insight mode pulls synthesis_evidence_chains so the agent sees the
   // multi-source claim AND its source memories without a second call.
-  const recallMode = deterministicRecall
-    ? (plan.explicit_recall_mode || 'fact')
-    : (plan.recall_mode || 'quick');
+  const recallMode = plan.explicit_recall_mode || 'fact';
   // T1-4: mode-aware candidate limit. Quick mode (common path) fetches 8, not
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
@@ -825,9 +715,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       ? 12
       : 8;
   const evidenceSeen = new Set();
-  const recallQueries = deterministicRecall
-    ? [plan.user_message || plan.sub_queries[0]].filter(Boolean)
-    : plan.sub_queries;
+  const recallQueries = [plan.user_message || plan.sub_queries[0]].filter(Boolean);
   if (recallQueries.length > 0) {
     const recallResults = await Promise.all(
       recallQueries.map(async (q) => {
@@ -862,6 +750,11 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // rows instead of repeats — recovers prompt tokens AND improves coverage.
     const liveSeen = new Set();
     for (const r of recallResults) {
+      if (r?.recall_plan) {
+        plan.source = r.recall_plan.source?.requested ? r.recall_plan.source : plan.source;
+        plan.time = r.recall_plan.time || plan.time;
+        plan.named_entities = r.recall_plan.named_entities || r.recall_plan.entities || plan.named_entities;
+      }
       for (const m of (r?.memories || [])) {
         if (!m?.id) continue;
         if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
@@ -894,68 +787,6 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
-  // ─── Event-driven post-recall expansion ──────────────────────────────
-  // Anthropic's "think between tool calls" guidance + the user's complaint
-  // about hallucination boil down to: don't pre-decide tool sequence in
-  // the planner. INSPECT what recall returned, then react.
-  //
-  // Triggers (all driven by hop1 output, no extra LLM):
-  //   1. If any memory carries `slack`+`channel:*` tags and the question
-  //      sounds temporal → fire hivemind_at on the latest slack memory's
-  //      doc-date to anchor "as of now" / "latest".
-  //   2. If any memory carries `entity:*` tags matching named_entities →
-  //      auto-traverse_graph from the top such memory (depth 2).
-  //   3. If filename anchor surfaced (filename:X tag on a memory but the
-  //      caller didn't pass valid_at) → no time-travel, but traverse to
-  //      find updates/derives chain.
-  //   4. If hop1 returned ≤1 memory AND the query has a connector keyword
-  //      → re-recall with looser filters (drop is_latest, widen tags).
-  const allRecallMems = Array.from(memoriesById.values());
-
-  // A document-backed memory is an event, not a guess about user wording. If
-  // quick recall found one but returned no source evidence, make one bounded
-  // explain pass for the original question. This prevents a summary anchor
-  // from being treated as the whole document while keeping ordinary fact-only
-  // chat on its fast path.
-  const documentAnchor = resolveDocumentAnchorFromMemories(allRecallMems);
-  if (
-    !deterministicRecall
-    &&
-    process.env.HIVEMIND_CHAT_ANCHORED_EVIDENCE !== 'false'
-    && (recallMode === 'quick' || recallMode === 'fact')
-    && evidenceItems.length === 0
-    && documentAnchor
-  ) {
-    const args = {
-      query: plan.user_message,
-      mode: 'explain',
-      limit: 12,
-      ...recallExtras,
-      ...documentAnchor,
-    };
-    try {
-      const grounded = await dispatchTool('hivemind_recall', args, ctx);
-      recordTool(
-        'hivemind_recall',
-        args,
-        `${grounded?.memories?.length || 0} memories + ${grounded?.evidence_count || 0} evidence (source-grounding)`,
-        grounded,
-      );
-      for (const memory of (grounded?.memories || [])) {
-        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
-      }
-      for (const evidence of (grounded?.evidence || [])) {
-        const key = evidence?.id || `${evidence?.document_title || '?'}|${evidence?.page || ''}|${(evidence?.content || evidence?.snippet || '').slice(0, 40)}`;
-        if (evidenceSeen.has(key)) continue;
-        evidenceSeen.add(key);
-        evidenceItems.push(evidence);
-      }
-      if (grounded?.evidence_packet) recallPackets.push(grounded.evidence_packet);
-    } catch (error) {
-      recordTool('hivemind_recall', args, `source-grounding error: ${error.message}`, null);
-    }
-  }
-
   let coverage = assessRecallCoverage({
     plan,
     memories: [...memoriesById.values()],
@@ -963,7 +794,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     relationships: [...edgesByKey.values()],
   });
   let escalationCount = 0;
-  if (deterministicRecall && remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
+  if (remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
     const escalation = chooseRecallEscalation({
       plan,
       coverage,
@@ -1010,121 +841,8 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
-  const hasConnectorTagged = allRecallMems.some(m => (m.tags || []).some(t => CONNECTORS.includes(t)));
-  const hasEntityTagged = allRecallMems.some(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:')));
-  const TEMPORAL_HINT = /\b(latest|last|recent|today|yesterday|this week|now|currently|as of)\b/i;
-  const isTemporalQuery = TEMPORAL_HINT.test(plan.user_message || '');
-
-  // (b) Time-travel — planner-flagged OR auto-fire when temporal hint +
-  // connector recall returned data OR deterministic date extractor produced
-  // a valid_at (catches "as of May 13" even when planner missed it).
-  const ASOF_RE = /\b(as of|before|prior to|on or before|until|by)\b/i;
-  const wantTimeTravel =
-    (plan.needs_time_travel && plan.time_travel && (plan.time_travel.transaction_time || plan.time_travel.valid_time))
-    || (isTemporalQuery && hasConnectorTagged && !plan.time_travel?.valid_time)
-    || (derivedValidAt && ASOF_RE.test(plan.user_message || ''));
-  // T1-2: skip the dedicated hivemind_at snapshot when recall was ALREADY
-  // as-of-scoped (recallExtras.valid_at set from the same derived date) AND
-  // returned enough rows — it would re-fetch the same window. Keep it as a
-  // safety net when recall came back thin (<3) or wasn't date-scoped.
-  if (!deterministicRecall && wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
-    try {
-      // Derive valid_time: planner first, else "now" (latest snapshot).
-      const validTime = plan.time_travel?.valid_time
-        || plan.time_travel?.transaction_time
-        || new Date().toISOString();
-      const connectorTag = userConnector || (allRecallMems
-        .flatMap(m => m.tags || [])
-        .find(t => CONNECTORS.includes(t)));
-      const args = {
-        valid_at: validTime,
-        query: plan.sub_queries[0] || plan.user_message || 'recent',
-        ...(connectorTag ? { tags: [connectorTag] } : {}),
-      };
-      const r = await dispatchTool('hivemind_at', args, ctx);
-      recordTool('hivemind_at', args, `${(r?.memories?.length || 0)} historical memories`, r);
-      for (const m of (r?.memories || [])) {
-        if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
-      }
-    } catch (err) {
-      recordTool('hivemind_at', plan.time_travel || {}, `error: ${err.message}`, null);
-    }
-  }
-
-  // (c) Graph traversal — fire whenever we got memories. Anthropic /
-  // DeepMind 2026 pattern: always go one hop deeper because the related
-  // memories often hold the answer the user actually wants (e.g. "X
-  // decided to ship Y" only references X; the Y decision is the edge).
-  // T1-6: traverse is for relation/entity questions. On pure temporal/history
-  // queries (no named entities, healthy recall) it adds round-trips that often
-  // return 0 edges. Gate on relational intent when the flag is on; otherwise
-  // preserve the original always-on behaviour for safe A/B rollout.
-  const traverseRelationalOnly = process.env.HIVEMIND_TRAVERSE_RELATIONAL_ONLY === 'true';
-  const isRelational = (plan.named_entities?.length || 0) > 0 || plan.recall_mode === 'insight';
-  const shouldTraverse = memoriesById.size > 0
-    && (!traverseRelationalOnly || (isRelational && memoriesById.size < 8));
-  if (!deterministicRecall && shouldTraverse) {
-    // Smarter seed selection. Build a ranked candidate list:
-    //   1. Memories matching ANY named_entity in title/content/tags
-    //   2. Memories with entity:* tags
-    //   3. Top-fusion-score memory
-    // Run traverse on UP TO 2 distinct seeds (covers ambiguous "X and Y"
-    // queries where one seed alone misses the answer).
-    const named = plan.named_entities.map(e => e.toLowerCase());
-    const scoreSeed = (m) => {
-      const hay = ((m.title || '') + ' ' + (m.content || '')).toLowerCase();
-      let s = 0;
-      for (const ent of named) {
-        if (hay.includes(ent)) s += 3;
-        if ((m.tags || []).some(t => typeof t === 'string' && t.toLowerCase().includes(ent))) s += 2;
-      }
-      if ((m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:'))) s += 1;
-      return s;
-    };
-    const seeds = [...memoriesById.values()]
-      .map(m => ({ m, s: scoreSeed(m) }))
-      .sort((a, b) => b.s - a.s)
-      .filter(x => x.s > 0 || memoriesById.size <= 4)
-      // T1-6: only widen to 2 seeds for genuinely multi-entity ("X and Y")
-      // questions; a single entity / history query needs just the top seed.
-      .slice(0, plan.named_entities.length >= 2 ? 2 : 1)
-      .map(x => x.m);
-    if (seeds.length === 0 && memoriesById.size > 0) seeds.push([...memoriesById.values()][0]);
-    const traversedIds = new Set();
-    for (const seed of seeds) {
-      if (!seed?.id || traversedIds.has(seed.id)) continue;
-      traversedIds.add(seed.id);
-      try {
-        const args = { memory_id: seed.id, depth: 2, relationship: 'all' };
-        const r = await dispatchTool('hivemind_traverse_graph', args, ctx);
-        const found = r?.related || r?.memories || r?.nodes || [];
-        const edges = Array.isArray(r?.edges) ? r.edges : [];
-        recordTool('hivemind_traverse_graph', args, `seed=${seed.id.slice(0, 8)} → ${edges.length} edges, ${found.length} related`, r);
-        for (const m of found.slice(0, 8)) {
-          if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
-        }
-        // Collect typed edges (dedup by from|to|type). Anchor seed id too —
-        // answerStep needs edges touching ANY memory in the evidence set.
-        for (const e of edges) {
-          if (!e?.from_id || !e?.to_id || !e?.type) continue;
-          const k = `${e.from_id}|${e.to_id}|${e.type}`;
-          if (!edgesByKey.has(k)) edgesByKey.set(k, e);
-        }
-      } catch (err) {
-        recordTool('hivemind_traverse_graph', { seed: seed.id }, `error: ${err.message}`, null);
-      }
-    }
-  }
-
-  // (c2) Connector auto-fetch for read intents.
-  // When user names a connector explicitly (notion/gmail) AND memory
-  // recall returned <3 hits → activate the toolkit, run that connector's
-  // primary search/list tool to back-fill live data. Slack handled via
-  // memory-tap + recall already.
-  // Per-connector read-intent dispatch. Triggers on:
-  //   - User explicitly asks to READ/FETCH/GET from that connector
-  //   - AND we have <3 cached memories OR query has 'latest/recent' cue
-  const LIVE_READ_VERB_RE = /\b(read|fetch|get|pull|show|list)\b/i;
+  // Connector reads are explicit planner/tool-router decisions. Recall itself
+  // remains deterministic and language-independent.
   const READ_CONNECTOR_TRIGGERS = {
     notion: { tool: 'notion-search', argMap: q => ({ query: q }) },
     slack: {
@@ -1164,25 +882,8 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     },
     gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
   };
-  const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
-  const lowRecall = memoriesById.size < 3;
-  // NB: removed !plan.action_intent gate — planner sometimes flags read
-  // queries as action_intent. Live-read should always fire when query has
-  // explicit read verb + connector keyword + extractable target.
-  //
-  // Connectors to live-fetch come from TWO sources:
-  //   (1) plan.live_providers — the tool-router's EXPLICIT, language-robust
-  //       choice (CHAT_ROUTER=tool → live_lookup). Always fires (the model
-  //       already judged live data is needed), no lowRecall gate.
-  //   (2) userConnector — the keyword-detected connector (legacy path), which
-  //       fires only on low recall / slack read-verb.
-  // Filtered to providers that have a READ_CONNECTOR_TRIGGER (notion/slack).
-  // gmail live flows via recall's live tier already; drive/calendar/docs have
-  // no read-trigger yet (recall live tier / future read sub-loop).
   const explicitLive = Array.isArray(plan.live_providers) ? plan.live_providers : [];
-  const keywordLive = (userConnector && READ_CONNECTOR_TRIGGERS[userConnector]
-    && (lowRecall || (liveReadIntent && userConnector === 'slack'))) ? [userConnector] : [];
-  const connectorsToFetch = [...new Set([...explicitLive, ...keywordLive])]
+  const connectorsToFetch = [...new Set(explicitLive)]
     .filter(p => READ_CONNECTOR_TRIGGERS[p]);
   if (connectorsToFetch.length > 0 && ctx.prisma) {
     try {
@@ -1249,52 +950,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   };
 }
 
-// ── STEP 4 — Reflect (decides if extra recall needed) ─────────────────
-
-function reflectPrompt({ language }) {
-  const lang = languageName(language);
-  return `You are a recall reflector. The user's question was in ${lang}.
-
-Given the user message + the memories already pulled, decide whether
-ANOTHER recall pass would materially improve the answer.
-
-Output STRICT JSON:
-{
-  "needs_more": false,           // true only if a 2nd pass would help
-  "extra_queries": ["..."],      // up to 2 English recall queries
-  "reason": "..."                 // one sentence justification
-}
-
-Heuristics for needs_more=true:
-  - Evidence < 2 memories AND user asked about an entity / project /
-    person you can name.
-  - Memories returned don't cover all sub_queries the planner intended.
-  - Pronoun anaphora unresolved (the message mentions "she/he/it/that"
-    but no memory names the referent).
-
-Default to false. Cheap to skip; expensive to call.`;
-}
-
-async function reflectStep({ message, plan, evidence, language, model, apiKey, signal }) {
-  const sys = reflectPrompt({ language });
-  const evidenceLines = evidence.memories.slice(0, 8).map((m, i) =>
-    `  ${i + 1}. [${m.id?.slice(0, 8)}] ${(m.title || '').slice(0, 60)} — ${(m.content || '').slice(0, 120).replace(/\n/g, ' ')}`,
-  ).join('\n') || '  (none)';
-
-  const user = `User message: ${message}\n\nPlanner output: ${JSON.stringify(plan)}\n\nMemories pulled (${evidence.memories.length}):\n${evidenceLines}`;
-  const { parsed, usage } = await callJsonLLM({
-    messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
-    model, apiKey, maxTokens: REFLECT_MAX_TOKENS, signal,
-  });
-  return {
-    needs_more:     !!parsed.needs_more,
-    extra_queries:  Array.isArray(parsed.extra_queries) ? parsed.extra_queries.filter(q => typeof q === 'string').slice(0, 2) : [],
-    reason:         typeof parsed.reason === 'string' ? parsed.reason : '',
-    usage,
-  };
-}
-
-// ── STEP 5 — Answer ────────────────────────────────────────────────────
+// ── STEP 4 — Answer ────────────────────────────────────────────────────
 
 function answerPrompt({ language, assistantName, orgName }) {
   const lang = languageName(language);
@@ -1483,8 +1139,7 @@ export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKn
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
-  const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
-  if (deterministicRecall && evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
+  if (evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
     return {
       response: 'No grounded workspace evidence found',
       claims: [],
@@ -1668,7 +1323,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
 
   // GRAPH EDGES block — typed relationships between evidence memories.
   // These come from real Relationship table rows (Updates/Extends/Mentions
-  // /Derives/Contradicts) returned by hivemind_traverse_graph. Agent MUST
+  // /Derives/Contradicts) returned by shared recall. Agent MUST
   // ground any "relation between X and Y" claim on these edges. No edge
   // present = no recorded relation; LLM is NOT allowed to infer relations
   // from content overlap or co-mentioned entities (rule 11).
@@ -1745,76 +1400,6 @@ ${message}`;
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
-
-  // Last-resort guard: if synthesis bailed ("I don't have...") but the
-  // EVIDENCE block has memories tagged with a connector the user named,
-  // re-ask the LLM once with an explicit nudge. Catches LLM stubbornness
-  // when grounding rules are clear but the model gave up anyway.
-  const bailedOut = /\b(i (don'?t|do not) have|no (record|records|memory|memories|notes) (of|about|on|for)|i can'?t find|nothing (in|about) (my )?memor)/i.test(response);
-  if (!deterministicRecall && bailedOut && evidence.memories.length > 0) {
-    const ml = String(message).toLowerCase();
-    const connectorMentioned = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence']
-      .find(k => ml.includes(k));
-    if (connectorMentioned) {
-      const hasConnectorTagged = evidence.memories.some(m =>
-        (m.tags || []).some(t => t.toLowerCase() === connectorMentioned)
-      );
-      if (hasConnectorTagged) {
-        try {
-          const retry = await callJsonLLM({
-            messages: [
-              { role: 'system', content: sys },
-              ...tail,
-              { role: 'user', content: userBlock },
-              { role: 'assistant', content: JSON.stringify(parsed) },
-              {
-                role: 'user',
-                content: `Your previous reply bailed but the EVIDENCE block has ${connectorMentioned}-tagged memories. Re-read it and answer using those memories. Cite specific titles and dates. Same JSON shape.`,
-              },
-            ],
-            model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
-          });
-          if (typeof retry.parsed?.response === 'string' && retry.parsed.response.trim()) {
-            response = retry.parsed.response.trim();
-            console.log(`[agent] retry recovered "${connectorMentioned}" answer (${evidence.memories.length} memories)`);
-          }
-        } catch (err) {
-          console.warn('[agent] retry failed:', err.message);
-        }
-      }
-    }
-
-    // Temporal-summary retry: user asked "what did I do today / yesterday
-    // / this week" AND evidence has memories matching the window, but LLM
-    // bailed. Force enumeration with explicit list-the-memories nudge.
-    const TEMPORAL_SUMMARY_RE = /\b(today|yesterday|this\s+week|last\s+week|on\s+\d{4}-\d{2}-\d{2}|on\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))/i;
-    if (TEMPORAL_SUMMARY_RE.test(String(message))) {
-      try {
-        const retry = await callJsonLLM({
-          messages: [
-            { role: 'system', content: sys },
-            ...tail,
-            { role: 'user', content: userBlock },
-            { role: 'assistant', content: JSON.stringify(parsed) },
-            {
-              role: 'user',
-              content: `Your previous reply bailed on a temporal-summary question. The EVIDENCE block above lists memories with ts:* tags or recent created_at. ENUMERATE them — title + short context per memory. Even one matching memory means the answer is NOT "I don't have notes". Same JSON shape.`,
-            },
-          ],
-          model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
-        });
-        if (typeof retry.parsed?.response === 'string' && retry.parsed.response.trim()) {
-          response = retry.parsed.response.trim();
-          parsed.response = response;
-          parsed.evidence_used = Array.isArray(retry.parsed.evidence_used) ? retry.parsed.evidence_used : parsed.evidence_used;
-          parsed.confidence = Number.isFinite(retry.parsed.confidence) ? retry.parsed.confidence : parsed.confidence;
-          console.log(`[agent] temporal-summary retry recovered answer (${evidence.memories.length} memories)`);
-        }
-      } catch (err) {
-        console.warn('[agent] temporal-summary retry failed:', err.message);
-      }
-    }
-  }
 
   const validated = validateChatAnswer({
     answer: response,
@@ -2700,95 +2285,14 @@ export async function runReactAgentV2({
       escalation_count: evidence.escalation_count,
     };
 
-    // STEP 4 — Reflect (only when evidence sparse + plan asked for stuff)
-    const deterministicRecall = process.env.HIVEMIND_DETERMINISTIC_RECALL !== 'false';
-    if (!deterministicRecall && evidence.memories.length < 2 && plan.sub_queries.length > 0) {
-      try {
-        // Reflection on sparse evidence → INTERNAL_MODEL (gap analysis)
-        const reflect = await reflectStep({
-          message, plan, evidence, language, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
-        });
-        if (reflect.usage) usages.push(reflect.usage);
-        if (reflect.needs_more && reflect.extra_queries.length > 0) {
-          onEvent?.({ type: 'reflect', extra_queries: reflect.extra_queries, reason: reflect.reason });
-          const extras = await Promise.all(reflect.extra_queries.map(async (q) => {
-            try {
-              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
-              steps.push({ tool: 'hivemind_recall', args: { query: q }, result_summary: `${r?.memories?.length || 0} memories` });
-              onEvent?.({ type: 'tool_call', name: 'hivemind_recall', arguments: JSON.stringify({ query: q }) });
-              onEvent?.({ type: 'tool_result', name: 'hivemind_recall', summary: `${r?.memories?.length || 0} memories` });
-              return r;
-            } catch (err) {
-              return null;
-            }
-          }));
-          const seen = new Set(evidence.memories.map(m => m.id));
-          for (const r of extras) {
-            if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
-            for (const m of (r?.memories || [])) {
-              if (m?.id && !seen.has(m.id)) {
-                seen.add(m.id);
-                evidence.memories.push(m);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        // Reflect failure is non-fatal; proceed with what we have.
-      }
-    }
-
-    // STEP 5 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
+    // STEP 4 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
       model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
     if (answer.usage) usages.push(answer.usage);
 
-    // STEP 5b — Confidence-gated re-recall (Gemini / Composio pattern).
-    // If the answer confidence is low AND we have explicit gaps[], re-recall
-    // on those gaps + re-synthesize. Caps at 1 retry to avoid runaway loops.
-    const CONF_THRESHOLD = Number(process.env.HIVEMIND_CONF_RETRY_THRESHOLD || 0.45);
-    if (!deterministicRecall && answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
-      onEvent?.({ type: 'reflect_low_confidence', confidence: answer.confidence, gaps: answer.gaps });
-      try {
-        // Take up to 2 gap phrases as targeted recall queries.
-        const gapQueries = answer.gaps.filter(g => typeof g === 'string' && g.trim().length > 0).slice(0, 2);
-        const extra = await Promise.all(gapQueries.map(async (q) => {
-          try {
-            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'fact', limit: 8 }, ctx);
-            recordTool('hivemind_recall', { query: q, mode: 'retry' }, `${r?.memories?.length || 0} memories`, r);
-            return r;
-          } catch { return null; }
-        }));
-        let mergedNew = 0;
-        for (const r of extra) {
-          if (r?.evidence_packet) evidence.recall_packets.push(r.evidence_packet);
-          for (const m of (r?.memories || [])) {
-            if (m?.id && !evidence.memories.some(e => e.id === m.id)) {
-              evidence.memories.push(m);
-              mergedNew++;
-            }
-          }
-        }
-        if (mergedNew > 0) {
-          // Re-run answer with augmented evidence (still FINAL_MODEL).
-          const retry = await answerStep({
-            message, history, evidence, plan, language, assistantName, orgName,
-            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
-          });
-          if (retry.usage) usages.push(retry.usage);
-          if (retry.confidence >= answer.confidence) {
-            answer = retry;
-            onEvent?.({ type: 'reflect_recovered', confidence: retry.confidence });
-          }
-        }
-      } catch (retryErr) {
-        console.warn(`[agent] confidence retry failed: ${retryErr.message}`);
-      }
-    }
-
-    // STEP 6 — Save intent fire-and-forget (don't block response).
+    // STEP 5 — Save intent fire-and-forget (don't block response).
     // Save dispatch — fires on either:
     //   (a) explicit save: intent_kind === 'save' + save_intent populated
     //   (b) proactive auto-save: planner detected durable fact with

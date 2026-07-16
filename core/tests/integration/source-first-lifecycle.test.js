@@ -7,6 +7,7 @@ import { PrismaGraphStore } from '../../src/memory/prisma-graph-store.js';
 import { MemoryGraphEngine } from '../../src/memory/graph-engine.js';
 import { recallPersistedMemories } from '../../src/memory/persisted-retrieval.js';
 import { buildRecallPacket, validateGroundedClaims } from '../../src/memory/recall-packet.js';
+import { assertCanonicalBackendContract } from '../fixtures/canonical-backend-contract.mjs';
 
 const prisma = getPrismaClient();
 const id = () => crypto.randomUUID();
@@ -135,6 +136,15 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       access_context: { orgId: otherOrgId, userId: otherUserId },
     });
     assert.equal(isolated.memories.length, 0);
+    assertCanonicalBackendContract({
+      backend: 'managed',
+      memories: ingested.promotedCount,
+      evidence: segments.length,
+      relationship: 'PartOf',
+      recall_hit: recalled.memories.some((memory) => memory.id === promoted.id),
+      source_hydrated: segments[0].content.includes('kept for seven years'),
+      isolated: isolated.memories.length === 0,
+    });
 
     const repeated = await service.ingestKnowledgeDocument({
       userId, orgId, filename: 'records-policy.md', fileBuffer: content,

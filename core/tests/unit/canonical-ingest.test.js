@@ -56,3 +56,37 @@ test('canonical compatibility mapping never creates relationship memories', () =
   assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'talk-to-hive' } }), 'chat');
   assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'google-drive' } }), 'connector');
 });
+
+test('every source type shares the same provenance and mode contract', () => {
+  const cases = [
+    ['kb', 'knowledge_base', 'document'],
+    ['connector', 'connector:gmail', 'document'],
+    ['mcp', 'mcp', 'atomic'],
+    ['meeting', 'meeting', 'document'],
+    ['chat', 'chat', 'atomic'],
+    ['api', 'api', 'document'],
+  ];
+
+  for (const [type, expectedPlatform, expectedMode] of cases) {
+    const envelope = {
+      userId: 'user-1',
+      orgId: 'org-1',
+      content: 'A'.repeat(1300),
+      occurredAt: '2026-07-16T10:00:00Z',
+      source: {
+        type,
+        ...(type === 'connector' ? { provider: 'gmail' } : {}),
+        sourceId: `${type}-source-1`,
+        title: `${type} source`,
+      },
+    };
+    const provenance = normalizeProvenance(envelope);
+
+    assert.deepEqual(validateEnvelope(envelope), { ok: true }, type);
+    assert.equal(provenance.sourcePlatform, expectedPlatform, type);
+    assert.equal(provenance.sourceMetadata.ingest_source, type, type);
+    assert.equal(provenance.sourceMetadata.source_id, `${type}-source-1`, type);
+    assert.ok(provenance.provenanceTags.includes(`source:${type}`), type);
+    assert.equal(detectMode(envelope), expectedMode, type);
+  }
+});

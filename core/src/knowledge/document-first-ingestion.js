@@ -2620,11 +2620,13 @@ Every item must include a non-empty content field and one or more valid support_
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
       }));
-      // UNIFIED single-call extraction (KB_UNIFIED_EXTRACT=true): one structured LLM call per window
+      // Canonical path: one structured LLM call per window emits facts,
+      // entities, evidence spans, and intra-window relationships together.
+      // Set KB_UNIFIED_EXTRACT=false only for an emergency rollback.
       // emits facts + canonical entities + intra-window relationships TOGETHER (coherent, low-noise,
       // alias-collapsed, ~1 call/window). The recall co-mention pass below then adds CROSS-DOC/TIME edges
       // only (no batch peers → no duplicate intra-doc edges).
-      if (String(process.env.KB_UNIFIED_EXTRACT ?? 'false').toLowerCase() === 'true' || String(process.env.KB_UNIFIED_EXTRACT ?? '') === '1') {
+      if (String(process.env.KB_UNIFIED_EXTRACT ?? 'true').toLowerCase() !== 'false' && String(process.env.KB_UNIFIED_EXTRACT ?? '') !== '0') {
         const docTitle = metadata.documentTitle || metadata.filename || '';
         const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
         const DOC_CAP = Number(process.env.KB_UNIFIED_DOC_CAP || 30); // rich-but-bounded total facts/doc

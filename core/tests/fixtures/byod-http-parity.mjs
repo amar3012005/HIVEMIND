@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { assertCanonicalBackendContract } from './canonical-backend-contract.mjs';
 
 const base = process.env.AGENT_URL || 'http://byod-agent:8787';
 const token = process.env.AGENT_TOKEN || 'parity-token';
@@ -75,6 +76,15 @@ assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});
 assert.equal(stats.payload.memories, 2);
 assert.equal(stats.payload.relationships, 1);
+assertCanonicalBackendContract({
+  backend: 'byod',
+  memories: stats.payload.memories,
+  evidence: evidence.payload.results.length,
+  relationship: relationships.payload.out[0].type,
+  recall_hit: recalled.payload.results[0].id === ids.claim,
+  source_hydrated: evidenceHydrated.payload.segments[0].content === 'Records are retained for seven years.',
+  isolated: wrongToken.status === 401 && wrongOrg.status === 403,
+});
 
 process.stdout.write(JSON.stringify({
   ok: true, memories: stats.payload.memories, relationships: stats.payload.relationships,

@@ -4,7 +4,6 @@ import { normalizeAgentRecallMode, TOOL_SCHEMAS } from '../../src/agent/tool-reg
 import { buildEvidencePacket } from '../../src/memory/recall-router.js';
 import {
   buildChatCitationPacket,
-  resolveDocumentAnchorFromMemories,
   validateChatAnswer,
 } from '../../src/agent/react-agent-v2.js';
 
@@ -42,16 +41,6 @@ test('chat namespaces server-owned citations across recall subqueries', () => {
     { citations: [{ id: 'C1', segment_id: 's2' }] },
   ]);
   assert.deepEqual(packet.citations.map((citation) => citation.id), ['P1-C1', 'P2-C1']);
-});
-
-test('chat resolves a deterministic source filter from the first document anchor', () => {
-  assert.deepEqual(resolveDocumentAnchorFromMemories([
-    { id: 'summary', tags: ['document-summary', 'doc-id:doc-1', 'filename:Brochure.pdf'] },
-    { id: 'other', tags: ['doc-id:doc-2'] },
-  ]), { source_document_id: 'doc-1' });
-  assert.deepEqual(resolveDocumentAnchorFromMemories([
-    { id: 'legacy', tags: ['filename:Legacy Notes.docx'] },
-  ]), { source_title: 'Legacy Notes.docx' });
 });
 
 test('chat rejects model-invented citations and keeps opt-in general knowledge visibly ungrounded', () => {

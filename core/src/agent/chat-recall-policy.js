@@ -25,21 +25,6 @@ export function resolveDocumentArtifact(memories = []) {
   return null;
 }
 
-export async function resolveSourceArtifact({ evidenceRetrieval, query, userId, orgId, deadlineAt }) {
-  if (!evidenceRetrieval?.resolveSourceFromQuery || !query) return null;
-  const remaining = deadlineAt - Date.now();
-  if (remaining <= 0) return null;
-  const resolved = await Promise.race([
-    evidenceRetrieval.resolveSourceFromQuery({ query, userId, orgId, deadlineAt }),
-    new Promise((resolve) => setTimeout(resolve, remaining, null)),
-  ]);
-  const source = Array.isArray(resolved) ? resolved[0] : resolved;
-  if (!source) return null;
-  const document_id = source.document_id || source.documentId || source.id || null;
-  const title = source.title || source.document_title || source.documentTitle || null;
-  return document_id || title ? { document_id, title } : null;
-}
-
 export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], relationships = [] } = {}) {
   const source = plan.source || resolveDocumentArtifact(memories);
   const evidenceFound = memories.length > 0 || evidence.length > 0;

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { assertCanonicalBackendContract } from '../fixtures/canonical-backend-contract.mjs';
 
 const helper = fileURLToPath(new URL('../fixtures/amr-native-phase.mjs', import.meta.url));
 
@@ -28,6 +29,15 @@ test('native AMR preserves canonical memory, evidence, graph, durability, and te
     assert.equal(reloaded.recalledId, '00000000-0000-4000-8000-00000000a102');
     assert.equal(reloaded.otherTenantId, 'pg-memory');
     assert.equal(reloaded.postgresCalls, 1);
+    assertCanonicalBackendContract({
+      backend: 'amr',
+      memories: reloaded.memories,
+      evidence: reloaded.evidenceSegmentId ? 1 : 0,
+      relationship: reloaded.relationshipType,
+      recall_hit: reloaded.recalledId === '00000000-0000-4000-8000-00000000a102',
+      source_hydrated: reloaded.segmentContent === 'Records are retained for seven years.',
+      isolated: reloaded.otherTenantId === 'pg-memory' && reloaded.postgresCalls === 1,
+    });
 
     assert.deepEqual(runPhase('mutate', root), { updated: true });
     const updated = runPhase('verify-updated', root);

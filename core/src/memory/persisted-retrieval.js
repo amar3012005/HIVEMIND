@@ -1305,6 +1305,7 @@ async function _recallPersistedMemoriesImpl(store, {
                              // rescue: when the primary recall is THIN, translate/rephrase the query
                              // and merge extra candidates. null = env default.
   exact_source = false,
+  canonical_entities = [],
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1407,9 +1408,14 @@ async function _recallPersistedMemoriesImpl(store, {
   const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'should').toLowerCase();
   const _entityTagsPromise = ENTITY_FILTER_MODE !== 'off'
     ? (async () => {
+        const _canonical = (Array.isArray(canonical_entities) ? canonical_entities : [])
+          .flatMap((entity) => {
+            const normalized = normalizeEntity(entity);
+            return normalized ? [`entity:${normalized}`, `entity:${normalized.toLowerCase()}`] : [];
+          });
         const _regex = normalizeQueryEntityTokens(query_context);
         const _llm = await extractQueryEntitiesLLM(query_context, org_id);
-        return _llm.length ? [...new Set([..._regex, ..._llm])] : _regex;
+        return [...new Set([..._canonical, ..._regex, ..._llm])];
       })()
     : Promise.resolve([]);
   // 'must' (hard filter) needs the tags before the main fetch; 'should' (global

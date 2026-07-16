@@ -73,12 +73,34 @@ test('source metadata resolution is tenant-scoped and does not require an LLM fi
     qdrantClient: null,
   });
   const documents = await service.resolveSourceFromQuery({
-    userId: 'user-1', orgId: 'org-1', query: 'What exactly does the brochure say?',
+    userId: 'user-1', orgId: 'org-1', query: 'What exactly does HIVEMIND Brochure.html.pdf say?',
   });
   assert.equal(where.userId, 'user-1');
   assert.equal(where.orgId, 'org-1');
   assert.equal(where.archivedAt, null);
   assert.deepEqual(documents.map((document) => document.id), ['brochure']);
+});
+
+test('source metadata resolution rejects a weak one-token coincidence', async () => {
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: {
+        findMany: async () => [{
+          id: 'policy',
+          title: 'General approval policy.pdf',
+          sourceId: 'general-approval-policy-pdf',
+          updatedAt: new Date('2026-07-16'),
+        }],
+      },
+    },
+    qdrantClient: null,
+  });
+  const documents = await service.resolveSourceFromQuery({
+    userId: 'user-1',
+    orgId: 'org-1',
+    query: 'What is the approval workflow for this project today?',
+  });
+  assert.deepEqual(documents, []);
 });
 
 test('packet preserves partial results and exposes latency cutoff', () => {

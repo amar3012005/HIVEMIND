@@ -377,10 +377,11 @@ const TOOL_HANDLERS = {
       projectId:     ctx.projectId,
       accessContext: ctx.accessContext,
     });
+    const effectivePlan = result.trace?.recall_plan || recallPlan;
 
     let graph = [];
-    const graphBudget = recallPlan.latency_budget_ms - (Date.now() - recallStartedAt);
-    if (recallPlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
+    const graphBudget = effectivePlan.latency_budget_ms - (Date.now() - recallStartedAt);
+    if (effectivePlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
       const loaded = await Promise.race([
         loadTypedGraphEvidence({
           prisma: ctx.prisma,
@@ -388,7 +389,7 @@ const TOOL_HANDLERS = {
           userId: ctx.userId,
           orgId: ctx.orgId,
           accessContext: ctx.accessContext,
-          time: recallPlan.time,
+          time: effectivePlan.time,
         }),
         new Promise((resolve) => setTimeout(() => resolve({ items: [], reason: 'timeout' }), Math.min(500, graphBudget))),
       ]);
@@ -400,7 +401,7 @@ const TOOL_HANDLERS = {
       evidence: result.evidence,
       graph,
       live: result.live,
-      plan: recallPlan,
+      plan: effectivePlan,
       trace: result.trace,
       cutoffReason,
     });
@@ -430,7 +431,7 @@ const TOOL_HANDLERS = {
     // mode already returns the top synthesis + 2 evidence ids; insight mode
     // expands ALL synthesis rows up to 4 evidence ids each. Bound by ctx.prisma.
     let synthEvidenceChains = null;
-    const remainingRecallBudget = () => Math.max(0, recallPlan.latency_budget_ms - (Date.now() - recallStartedAt));
+    const remainingRecallBudget = () => Math.max(0, effectivePlan.latency_budget_ms - (Date.now() - recallStartedAt));
     if ((mode === 'explain' || mode === 'full') && ctx.prisma && remainingRecallBudget() > 1) {
       const synthRows = (result.memories || []).filter(m => {
         const srcType = m.source_metadata?.source_type;
@@ -483,15 +484,15 @@ const TOOL_HANDLERS = {
 
     return {
       mode: requestedMode,
-      mode_used: planMode,
-      recall_plan: recallPlan,
+      mode_used: effectivePlan.mode,
+      recall_plan: effectivePlan,
       count:          result.memories.length,
       memories:       result.memories,
       live_count:     result.live.length,
       live:           result.live,
       evidence_count: result.evidence.length,
       evidence:       result.evidence,
-      timeline:       recallPlan.operation === 'timeline' ? result.memories : [],
+      timeline:       effectivePlan.operation === 'timeline' ? result.memories : [],
       relationships:  graph,
       evidence_packet: evidencePacket,
       ...(synthEvidenceChains ? { synthesis_evidence_chains: synthEvidenceChains } : {}),

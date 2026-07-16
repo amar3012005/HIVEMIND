@@ -160,9 +160,10 @@ export async function handleRecallRoute(ctx = {}) {
         remainingMs(),
         timeoutResult,
       );
+      const effectivePlan = bounded.trace?.recall_plan || recallPlan;
 
       let graphEvidence = [];
-      if (recallPlan.max_graph_hops > 0 && bounded.memories?.length && remainingMs() > 1) {
+      if (effectivePlan.max_graph_hops > 0 && bounded.memories?.length && remainingMs() > 1) {
         const graph = await resolveWithinDeadline(
           recallRuntime.loadGraph({
             prisma,
@@ -170,7 +171,7 @@ export async function handleRecallRoute(ctx = {}) {
             userId,
             orgId,
             accessContext: recallAccessCtx,
-            time: recallPlan.time,
+            time: effectivePlan.time,
           }),
           Math.min(500, remainingMs()),
           { items: [], reason: 'timeout' },
@@ -179,7 +180,7 @@ export async function handleRecallRoute(ctx = {}) {
       }
 
       const elapsed = Date.now() - _recallT0;
-      const cutoffReason = bounded.trace?.timeout || elapsed >= recallPlan.latency_budget_ms
+      const cutoffReason = bounded.trace?.timeout || elapsed >= effectivePlan.latency_budget_ms
         ? 'latency_budget'
         : bounded.trace?.cutoff_reason || null;
       const packet = recallRuntime.buildPacket({
@@ -189,7 +190,7 @@ export async function handleRecallRoute(ctx = {}) {
         conflicts: graphEvidence.filter((edge) => String(edge.type).toLowerCase() === 'contradicts'),
         graphEvidence,
         liveEvidence: bounded.live || [],
-        plan: recallPlan,
+        plan: effectivePlan,
         cutoffReason,
         trace: bounded.trace,
       });
@@ -198,8 +199,8 @@ export async function handleRecallRoute(ctx = {}) {
         memories: bounded.memories || [],
         evidence: bounded.evidence || [],
         live: bounded.live || [],
-        mode_used: recallPlan.mode,
-        recall_plan: recallPlan,
+        mode_used: effectivePlan.mode,
+        recall_plan: effectivePlan,
         evidence_packet: packet,
         cutoff_reason: cutoffReason,
         latency_ms: Date.now() - _recallT0,

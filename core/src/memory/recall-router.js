@@ -65,6 +65,66 @@ function boundedString(value, maxLength) {
   return normalized ? normalized.slice(0, maxLength) : null;
 }
 
+function entityQueryForms(query) {
+  if (!query) return [];
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+  const words = [];
+  for (const part of segmenter.segment(String(query))) {
+    const word = part.isWordLike ? part.segment.trim() : '';
+    if (word.length >= 2) words.push(word);
+  }
+  const forms = new Set();
+  for (const word of words) {
+    forms.add(word);
+    forms.add(word.toLocaleLowerCase());
+  }
+  for (let size = Math.min(4, words.length); size >= 2; size -= 1) {
+    for (let start = 0; start + size <= words.length; start += 1) {
+      const phrase = words.slice(start, start + size).join(' ');
+      forms.add(phrase);
+    }
+  }
+  return [...forms].slice(0, 32);
+}
+
+export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {
+  const candidates = entityQueryForms(query);
+  if (!prisma?.entity || !orgId || !candidates.length) return [];
+  const entities = await prisma.entity.findMany({
+    where: {
+      orgId,
+      isActive: true,
+      OR: [
+        ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+        { aliases: { hasSome: candidates } },
+      ],
+    },
+    orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
+    select: { canonicalName: true },
+    take: 8,
+  });
+  return [...new Set(entities.map((entity) => entity.canonicalName).filter(Boolean))];
+}
+
+async function resolveImplicitSource({ evidence, query, ctx, timeoutMs }) {
+  if (!evidence?.resolveSourceFromQuery || !query) return null;
+  const resolved = await withTimeout(
+    evidence.resolveSourceFromQuery({
+      query,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      deadlineAt: Date.now() + timeoutMs,
+    }),
+    timeoutMs,
+    null,
+  );
+  const source = Array.isArray(resolved) ? resolved[0] : resolved;
+  if (!source) return null;
+  const documentId = source.document_id || source.documentId || source.id || null;
+  const title = source.title || source.document_title || source.documentTitle || null;
+  return documentId || title ? { document_id: documentId, title } : null;
+}
+
 function normalizeTemporalRange(value) {
   if (!value || typeof value !== 'object') return null;
   const start = normalizedIso(value.start);
@@ -362,6 +422,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(options.known_at ? { known_at: options.known_at } : {}),
     include_superseded: options.include_superseded === true,
     exact_source: !!(options.source_document_id || options.source_title),
+    canonical_entities: options.canonical_entities || [],
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -1100,7 +1161,31 @@ export class RecallRouter {
 
     const traceLatency = {};
     const startedAt = Date.now();
-    const recallPlan = resolveRecallPlan(options);
+    let recallPlan = resolveRecallPlan(options);
+    const [implicitSource, canonicalEntities] = await Promise.all([
+      recallPlan.source.requested ? null : resolveImplicitSource({
+        evidence: this.evidence,
+        query,
+        ctx,
+        timeoutMs: 250,
+      }),
+      withTimeout(
+        resolveCanonicalEntities({ prisma: this.prisma, orgId: ctx.orgId, query }),
+        250,
+        [],
+      ),
+    ]);
+    if (implicitSource) {
+      recallPlan = resolveRecallPlan({
+        ...options,
+        source: implicitSource,
+      });
+    }
+    recallPlan = {
+      ...recallPlan,
+      entities: canonicalEntities,
+      named_entities: canonicalEntities,
+    };
     options = {
       ...options,
       source_document_id: recallPlan.source.document_id,
@@ -1109,6 +1194,7 @@ export class RecallRouter {
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
       include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
+      canonical_entities: canonicalEntities,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;

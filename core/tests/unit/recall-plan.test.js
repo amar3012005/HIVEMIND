@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RecallRouter, isLiveExpansionEligible, resolveRecallPlan } from '../../src/memory/recall-router.js';
+import {
+  RecallRouter,
+  isLiveExpansionEligible,
+  resolveCanonicalEntities,
+  resolveRecallPlan,
+} from '../../src/memory/recall-router.js';
 
 test('legacy recall modes preserve their existing event-driven behavior', () => {
   const plan = resolveRecallPlan({ mode: 'auto' });
@@ -104,6 +109,54 @@ test('source identifiers are normalized and bounded by the server', () => {
   assert.equal(plan.source.document_id.length, 128);
   assert.equal(plan.source.title.length, 512);
   assert.equal(plan.source.requested, true);
+});
+
+test('Hop-0 resolves exact tenant entities and aliases without language keyword rules', async () => {
+  let receivedWhere = null;
+  const prisma = {
+    entity: {
+      findMany: async ({ where }) => {
+        receivedWhere = where;
+        return [{ canonicalName: 'Cognitive Swarm Intelligence' }, { canonicalName: 'CSI' }];
+      },
+    },
+  };
+
+  const entities = await resolveCanonicalEntities({
+    prisma,
+    orgId: 'org-1',
+    query: 'what is the most groundbreaking thing with csi?',
+  });
+
+  assert.deepEqual(entities, ['Cognitive Swarm Intelligence', 'CSI']);
+  assert.equal(receivedWhere.orgId, 'org-1');
+  assert.equal(receivedWhere.isActive, true);
+  assert.ok(receivedWhere.OR.some((clause) => clause.aliases?.hasSome?.includes('CSI')));
+  assert.ok(receivedWhere.OR.some((clause) => clause.canonicalName?.equals === 'groundbreaking thing with csi'));
+});
+
+test('Hop-0 resolves implicit source artifacts before broad recall', async () => {
+  const router = new RecallRouter({
+    persistentMemoryStore: {},
+    evidenceRetrieval: {
+      resolveSourceFromQuery: async ({ query }) => query.includes('Wald.pdf')
+        ? [{ id: 'doc-1', document_title: 'Wald.pdf' }]
+        : [],
+      resolveSourceDocuments: async ({ documentId }) => documentId === 'doc-1'
+        ? [{ id: 'doc-1', title: 'Wald.pdf' }]
+        : [],
+      hydrateSourceDocuments: async () => ({ items: [] }),
+    },
+    prisma: null,
+  });
+
+  const result = await router.recall('Was steht in Wald.pdf?', { mode: 'explain' }, {
+    userId: 'user-1',
+    orgId: 'org-1',
+  });
+
+  assert.equal(result.trace.recall_plan.source.document_id, 'doc-1');
+  assert.equal(result.trace.recall_plan.source.title, 'Wald.pdf');
 });
 
 test('an unresolved explicit source fails closed before memory recall', async () => {

@@ -4,7 +4,6 @@ import {
   applyExplicitRecallControls,
   assessRecallCoverage,
   chooseRecallEscalation,
-  resolveSourceArtifact,
 } from '../../src/agent/chat-recall-policy.js';
 import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
 
@@ -77,33 +76,6 @@ test('entity coverage includes exact source evidence', () => {
     evidence: [{ document_id: 'doc-1', snippet: 'Approval belongs to Mira Chen.' }],
   });
   assert.equal(coverage.entities_covered, 1);
-});
-
-test('artifact source resolution preserves the query language and deadline', async () => {
-  let received;
-  const source = await resolveSourceArtifact({
-    evidenceRetrieval: {
-      resolveSourceFromQuery: async (args) => {
-        received = args;
-        return [{ id: 'doc-1', document_title: 'Wald.pdf' }];
-      },
-    },
-    query: 'Was steht in Wald.pdf?',
-    userId: 'user-1', orgId: 'org-1', deadlineAt: Date.now() + 100,
-  });
-  assert.deepEqual(source, { document_id: 'doc-1', title: 'Wald.pdf' });
-  assert.equal(received.query, 'Was steht in Wald.pdf?');
-  assert.equal(typeof received.deadlineAt, 'number');
-});
-
-test('artifact source resolution does not start after the deadline', async () => {
-  let called = false;
-  const source = await resolveSourceArtifact({
-    evidenceRetrieval: { resolveSourceFromQuery: async () => { called = true; } },
-    query: 'document', userId: 'u', orgId: 'o', deadlineAt: Date.now() - 1,
-  });
-  assert.equal(source, null);
-  assert.equal(called, false);
 });
 
 test('entity coverage includes exact source evidence without requiring a graph edge', () => {

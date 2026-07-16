@@ -465,6 +465,29 @@ model OutreachTarget {
   @@map("outreach_targets")
 }
 
+/// HQActivity — the HQ "control room" feed. One row per non-HQ room run that
+/// seals, written control-plane-side from the seal event. Agents "report" their
+/// room activity to the owner here so the HQ room becomes a live overview of all
+/// company activity. Templated (no LLM) from the turn's own events.
+model HQActivity {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  hqRoomId       String   @map("hq_room_id") @db.Uuid
+  sourceRoomId   String   @map("source_room_id") @db.Uuid
+  sourceRoomName String?  @map("source_room_name") @db.VarChar(200)
+  turnId         String   @map("turn_id") @db.Uuid
+  agentName      String?  @map("agent_name") @db.VarChar(120)
+  agentRole      String?  @map("agent_role") @db.VarChar(120)
+  headline       String   @db.VarChar(400)
+  summary        String?  @db.Text
+  status         String   @default("complete") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([turnId])
+  @@index([orgId, hqRoomId, createdAt])
+  @@map("hq_activity")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

@@ -31,7 +31,7 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
-import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation, resolveSourceArtifact } from './chat-recall-policy.js';
+import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation, resolveCanonicalEntityQuery, resolveSourceArtifact } from './chat-recall-policy.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -964,10 +964,17 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   });
   let escalationCount = 0;
   if (deterministicRecall && remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
+    const canonicalEntityQuery = !coverage.evidence_found
+      ? await beforeDeadline(resolveCanonicalEntityQuery({
+          prisma: ctx.prisma,
+          orgId: ctx.orgId,
+          query: plan.user_message,
+        })).catch(() => null)
+      : null;
     const escalation = chooseRecallEscalation({
       plan,
       coverage,
-      query: plan.user_message || recallQueries[0],
+      query: canonicalEntityQuery || plan.user_message || recallQueries[0],
     });
     if (escalation) {
       escalationCount = 1;

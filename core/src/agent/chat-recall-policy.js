@@ -2,6 +2,35 @@ function normalized(value) {
   return String(value || '').trim().toLocaleLowerCase();
 }
 
+export async function resolveCanonicalEntityQuery({ prisma, orgId, query } = {}) {
+  if (!prisma?.entity || !orgId || !query) return null;
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+  const forms = new Set();
+  for (const part of segmenter.segment(String(query))) {
+    const token = part.isWordLike ? part.segment.trim() : '';
+    if (token.length < 3) continue;
+    forms.add(token);
+    forms.add(token.toLocaleLowerCase());
+    forms.add(token.toLocaleUpperCase());
+  }
+  const candidates = [...forms].slice(0, 24);
+  if (!candidates.length) return null;
+  const entities = await prisma.entity.findMany({
+    where: {
+      orgId,
+      isActive: true,
+      OR: [
+        ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+        { aliases: { hasSome: candidates } },
+      ],
+    },
+    orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
+    select: { canonicalName: true },
+    take: 1,
+  });
+  return entities[0]?.canonicalName || null;
+}
+
 function documentIdentity(item) {
   const tags = Array.isArray(item?.tags) ? item.tags : [];
   const taggedId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));

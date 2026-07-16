@@ -4,6 +4,7 @@ import {
   applyExplicitRecallControls,
   assessRecallCoverage,
   chooseRecallEscalation,
+  resolveCanonicalEntityQuery,
   resolveSourceArtifact,
 } from '../../src/agent/chat-recall-policy.js';
 import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
@@ -184,4 +185,27 @@ test('a recalled memory is sufficient when no narrower coverage was requested', 
   assert.equal(coverage.evidence_found, true);
   assert.equal(coverage.complete, true);
   assert.equal(chooseRecallEscalation({ coverage, query: 'CSI' }), null);
+});
+
+test('zero recall resolves an exact tenant entity without language keyword rules', async () => {
+  let receivedWhere = null;
+  const prisma = {
+    entity: {
+      findMany: async ({ where }) => {
+        receivedWhere = where;
+        return [{ canonicalName: 'CSI' }];
+      },
+    },
+  };
+
+  const query = await resolveCanonicalEntityQuery({
+    prisma,
+    orgId: 'org-1',
+    query: 'what is the most groundbreaking thing with csi?',
+  });
+
+  assert.equal(query, 'CSI');
+  assert.equal(receivedWhere.orgId, 'org-1');
+  assert.equal(receivedWhere.isActive, true);
+  assert.ok(receivedWhere.OR.some((clause) => clause.aliases?.hasSome?.includes('CSI')));
 });

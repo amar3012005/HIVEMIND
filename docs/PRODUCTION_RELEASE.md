@@ -1,5 +1,18 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-b9d6dc77 - KB page-only billing and usage
+
+- **Parent:** `hivemind-main` at `b9d6dc77d0cde9ba4ba2532703e6e92f67654173` ("fix(billing): meter knowledge base by pages only (#35)").
+- **Frontend:** `frontend/Da-vinci` at `6bdc4235ad2027405b5d7c252a3f00d302043912` ("fix(usage): remove document upload quota UI").
+- **Scope:** `hm-core`, `hm-control`, and `hm-fe`. Knowledge-base document count remains internal telemetry, while KB pages are the only customer-visible and enforced capacity metric.
+- **Build:** clean detached worktree `/root/builds/prod-20260716-b9d6dc77`; parent and pinned frontend SHAs verified with a clean status before build.
+- **Images:** core `sha256:cdbf6769750ff1d0ded05379706534451bbda31a345a72282238cb7bc4ba7d27`; control `sha256:001c22536ca770be9274dc0b1c84d48216e17c4b118fba35eebf16b6b4c2b096`; frontend `sha256:7a5d7f791297472ab1ce8274f0d6f15ebb0446735da9a1561aece75b0269b49e`.
+- **Migrations:** none. PostgreSQL backup before promotion: `/root/hivemind/backups/prod-20260716-b9d6dc77-pre.sql.gz`, SHA-256 `cfac20a9ab3b523296683ea4b3c0c730d750f92c6ba3443b06196359b7ad0697`.
+- **Acceptance:** public `next.singulancelabs.com/hivemind`, `/hivemind/login`, `/hivemind/app/usage`, API health, and Core health each returned `200`; protected billing endpoint returned expected `401` without a session; core and control reached `healthy`; no fresh fatal, panic, uncaught, unhandled, OOM, or migration errors in core, control, or frontend logs.
+- **Not exercised:** authenticated billing payload inspection was not run because no disposable authenticated session was available; no customer-side upload was created.
+- **Aliases:** core, control, and frontend `stable` and `latest` were advanced only after acceptance.
+- **Rollback:** `hivemind/core-api:rollback-20260716T052951Z-pre-prod-20260716-b9d6dc77` and `hivemind/fe:rollback-20260716T052951Z-pre-prod-20260716-b9d6dc77`; restore the matching prior runtime env backup and recreate only affected services.
+
 ## prod-20260716-c459a086 - HyperAgents outreach: connected-Gmail sender identity + prospect-stack cards
 
 - **Parent:** `hivemind-main` at `c459a0869c5f0724bda1e2057098a18c61b1d02a` ("chore(fe): bump Da-vinci gitlink → prospect-stack cards (00aad39) (#34)").

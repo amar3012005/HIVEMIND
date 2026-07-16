@@ -38,8 +38,8 @@ img_of() { case "$1" in
   core) echo core-api;; control-plane) echo control-plane;; employees) echo employees;;
   tara-deepgram) echo tara-deepgram;; fe) echo fe;; esac; }
 recreate_one() { case "$1" in
-  fe)  cd "$REPO"; docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null ;;
-  *)   cd /root/hivemind; docker compose -f "$REPO/$HETZNER" --env-file "$ENV" up -d --no-deps --force-recreate "$1" >/dev/null ;;
+  fe)  cd /root/hivemind-next; docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null ;;
+  *)   cd /root/hivemind;      docker compose -f "$HETZNER" --env-file "$ENV" up -d --no-deps --force-recreate "$1" >/dev/null ;;
 esac; }
 health_gate() { local c="$1"; for i in $(seq 1 45); do
   s=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo missing)
@@ -113,6 +113,7 @@ for s in "${SVCS[@]}"; do
   i=$(img_of "$s"); tag=$([ "$s" = fe ] && echo "latest-single" || echo latest); stag=$([ "$s" = fe ] && echo "stable-single" || echo stable)
   echo "== $s: save current :$tag → :$stag (rollback), build new :$tag"
   docker image inspect "hivemind/$i:$tag" >/dev/null 2>&1 && docker tag "hivemind/$i:$tag" "hivemind/$i:$stag" || echo "  (no prior :$tag — first deploy, no rollback saved)"
+  cd "$REPO"            # build context must be the worktree
   build_one "$s"
   recreate_one "$s"; health_gate "${CONTAINER[$s]}" || { echo "FATAL — roll back with: quick-deploy.sh --rollback $s"; exit 1; }
 done

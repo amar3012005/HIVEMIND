@@ -58,24 +58,36 @@ fi
 
 # ── deploy path ────────────────────────────────────────────────────────────
 BRANCH="${1:-singulance-main}"
+LASTSHA=/root/.quickdeploy-last-sha
 cd "$REPO"
-PREV=$(git rev-parse HEAD)
+# Last SUCCESSFULLY-DEPLOYED sha (not the box's current branch HEAD — the deploy
+# checkout may sit on an unrelated/dirty branch from another session). Empty on
+# the very first run → rebuild everything.
+PREV=$(cat "$LASTSHA" 2>/dev/null || true)
 git fetch origin "$BRANCH" -q
-git checkout -q "$BRANCH" 2>/dev/null || git checkout -qb "$BRANCH" "origin/$BRANCH"
-git reset --hard "origin/$BRANCH" -q            # live = latest, always clean
-git submodule update --init frontend/Da-vinci -q
+# Force live to EXACTLY origin/$BRANCH, discarding any local drift on the box
+# (uncommitted edits, wrong branch). "no overwrites" = live is always canonical.
+git checkout -qf -B "$BRANCH" "origin/$BRANCH"
+git reset --hard "origin/$BRANCH" -q
+git submodule update --init --force frontend/Da-vinci -q
 NOW=$(git rev-parse HEAD)
-if [ "$PREV" = "$NOW" ]; then echo "already at $(git rev-parse --short HEAD) — nothing to deploy"; exit 0; fi
-echo "== deploy $(git rev-parse --short $PREV) → $(git rev-parse --short $NOW) on $BRANCH"
+if [ -n "$PREV" ] && [ "$PREV" = "$NOW" ]; then echo "already at $(git rev-parse --short HEAD) — nothing to deploy"; exit 0; fi
+echo "== deploy ${PREV:0:8}${PREV:+ → }$(git rev-parse --short $NOW) on $BRANCH"
 
-# which services changed
-chg() { ! git diff --quiet "$PREV" "$NOW" -- "$@"; }
-SVCS=()
-chg core/src/control-plane-server.js core/src/outreach core/src/security core/src/billing && SVCS+=(control-plane)
-chg core/src core/prisma && SVCS+=(core)
-chg employees-service && SVCS+=(employees)
-chg services/tara-aaas services/tara-deepgram && SVCS+=(tara-deepgram)
-chg frontend/Da-vinci && SVCS+=(fe)
+# which services changed since last deploy. If PREV is empty/unknown (first run
+# or the marker was lost), rebuild ALL — safe, just slower.
+if [ -z "$PREV" ] || ! git cat-file -e "$PREV^{commit}" 2>/dev/null; then
+  echo "no valid last-deploy marker → rebuilding all services"
+  SVCS=(control-plane core employees tara-deepgram fe)
+else
+  chg() { ! git diff --quiet "$PREV" "$NOW" -- "$@"; }
+  SVCS=()
+  chg core/src/control-plane-server.js core/src/outreach core/src/security core/src/billing && SVCS+=(control-plane)
+  chg core/src core/prisma && SVCS+=(core)
+  chg employees-service && SVCS+=(employees)
+  chg services/tara-aaas services/tara-deepgram && SVCS+=(tara-deepgram)
+  chg frontend/Da-vinci && SVCS+=(fe)
+fi
 # de-dup
 SVCS=($(printf '%s\n' "${SVCS[@]}" | awk '!seen[$0]++'))
 [ ${#SVCS[@]} -gt 0 ] || { echo "no service dirs changed — nothing to rebuild"; exit 0; }
@@ -112,4 +124,5 @@ for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind htt
 # container or a kept tag (:latest/:stable/running stay — they're referenced).
 docker builder prune -af >/dev/null 2>&1 || true
 docker image prune -f >/dev/null 2>&1 || true
+echo "$NOW" > "$LASTSHA"   # record what's now live for the next deploy's diff
 echo "== deployed $(git rev-parse --short $NOW). free: $(df -h / | awk 'NR==2{print $4}'). rollback: quick-deploy.sh --rollback <svc>"

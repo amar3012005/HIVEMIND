@@ -128,7 +128,7 @@ export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null)
 
 export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8) {
   const pool = Array.isArray(candidates) ? candidates : [];
-  const cap = Math.max(1, Math.min(12, Number(maxMemories) || 8));
+  const cap = Math.max(1, Math.min(30, Number(maxMemories) || 8));
   const output = [];
   for (const memory of (Array.isArray(rawMemories) ? rawMemories : []).slice(0, cap)) {
     const indices = [...new Set((memory?.support_indices || []).map(Number))]
@@ -747,11 +747,18 @@ Output the JSON object and nothing else.`;
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
         .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
     }
-    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 2 : 4));
+    // Per-window candidate ceiling. This is the EVIDENCE-candidate stage — the
+    // document curator downstream picks and merges the durable set, so the
+    // extractor should surface EVERY distinct durable claim in a dense section
+    // rather than self-limit to 4 (a 'The Asset' section carries bootstrapped
+    // status + sole-IP + three products + replacement cost = >4 distinct claims;
+    // capping at 4 dropped them before the curator ever saw them). minImportance
+    // (0.65) + the curator keep the extra candidates from becoming noise.
+    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 3 : 8));
     const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
-Rules: at most ${factCap} facts; fewer, richer memories are better than many fragments. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
+Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
     const parsed = await chatCompletion({
@@ -1131,7 +1138,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       .slice(0, 48);
     if (!pool.length) return [];
 
-    const cap = Math.max(1, Math.min(12, Number(maxMemories) || 6));
+    const cap = Math.max(1, Math.min(30, Number(maxMemories) || 6));
     const fallback = () => [...pool]
       .sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0))
       .slice(0, cap)
@@ -1154,9 +1161,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       source: String(candidate.source_quote).slice(0, 500),
     }));
     const system = `You curate durable organizational memory from source-grounded candidates extracted from ONE document.
-Return at most ${cap} high-value memories that together cover the document's important decisions, commitments, requirements, metrics, events, validated lessons, stable preferences, and defining facts.
+Return up to ${cap} memories that TOGETHER COVER EVERY distinct important claim in the document — each decision, commitment, requirement, metric, figure, date, event, validated lesson, stable preference, and defining fact. Coverage is the goal: do NOT drop a distinct high-value claim (a funding status, ownership term, price, deadline, named role) just to keep the count low. One memory per distinct claim.
 Merge compatible candidates into one complete, information-dense memory. Never merge unrelated subjects. A strong memory keeps the subject together with the relevant decision or requirement, scope, owner, rationale, constraints, numbers, dates, and outcome. Do not split one coherent plan or decision into mini-facts. Prefer 1-3 concise sentences when the supporting candidates contain that context; do not pad or repeat content.
-Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.
+Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Merge ONLY genuine duplicates (the same claim restated); never merge or drop two DISTINCT claims to reduce the count.
 
 Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
 {"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","support_indices":[0,1]}]}
@@ -2670,9 +2677,18 @@ Every item must include a non-empty content field and one or more valid support_
           }
         });
         await Promise.all(uWorkers);
+        // Coverage: the per-doc memory cap must scale with how much distinct
+        // signal the document actually holds. A flat cap of 6 truncated dense
+        // multi-topic documents (a 10-section proposal dropped its bootstrapped
+        // status, IP ownership, revenue share, and replacement cost). Scale to
+        // ~70% of distinct candidates, floored at 8 and ceilinged at 30, so a
+        // rich document keeps its distinct claims while a thin one stays small.
+        // Dedup (upstream curation + cross-window consolidation) prevents the
+        // extra headroom from re-admitting duplicates. Env override wins.
+        const _dynamicCap = Math.min(30, Math.max(8, Math.ceil(extractedCandidates.length * 0.7)));
         const curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
-          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 6),
+          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
         });
         const uFacts = [];
         const extraEvidenceLinks = [];
@@ -2701,6 +2717,20 @@ Every item must include a non-empty content field and one or more valid support_
         }
         if (extraEvidenceLinks.length) {
           await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
+        }
+        // Cross-window consolidation — a long document (e.g. a 12-page proposal)
+        // repeats the same claim across many sections; each window extracts it
+        // independently, so the doc ships near-duplicate memories ("bootstrapped
+        // status" x3, "B&B partnership" x2). Within-window NON-REDUNDANT can't
+        // see across windows. Merge near-duplicates here → fewer, richer memories
+        // (keep the most complete, union the dupes' tags into it, delete the rest).
+        // Runs BEFORE entity-linking so edges attach only to survivors. Default
+        // ON; KB_CONSOLIDATE=0 disables. Best-effort: on failure facts ship as-is.
+        if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
+          try {
+            const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
+            if (removed) this.logger.info?.(`[kb-unified] consolidated ${removed} cross-window duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+          } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         }
         if (uFacts.length) {
           // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified

@@ -6,58 +6,6 @@ entry after each meaningful task. Newest at top within a date. Pair with
 
 ---
 
-## 2026-07-09
-
-### Singulance production topology and deployment baseline
-- Production host: `root@singulancelabs.com` (`46.224.4.164`). Live source checkout is
-  `/root/hivemind` and is intentionally dirty; never pull, reset, or build from it.
-  Clean build/canary checkout is `/root/hivemind-next` on branch
-  `codex/production-hardening-runtime`.
-- Production Compose: `/root/hivemind/infra/docker-compose.hetzner.yml`, always invoked
-  with `--env-file /root/hivemind/.env`. Core/control are Compose-managed only: never
-  `docker run` them. Caddy config is `/root/hivemind/infra/Caddyfile`; after a Caddy edit,
-  restart `hm-caddy` (reload alone is not sufficient in this installation).
-- Public routing: `core.singulancelabs.com` -> core `:2026`,
-  `api.singulancelabs.com` -> control plane `:2027`, and the production-compatible vNext
-  frontend is `https://next.singulancelabs.com/hivemind/app` via loopback `:2388`.
-  The vNext FE calls the existing production core/control hosts, preserving OAuth callback,
-  connector, Cartesia, and BYOD behavior. `next.singulancelabs.com` is in production CORS.
-- Temporary B2B/B2C backend canaries remain isolated and must never receive customer traffic.
-  Do not create two frontend applications: one frontend with existing callback URLs is the
-  deliberate production design.
-- The 16 GB server runs many containers and React production builds are CPU/memory slow.
-  Do not add k3s/kubernetes on this single host: it does not provide host failover and adds
-  overhead. First reduce idle canaries, enforce resource limits, add off-host backups and
-  monitoring; consider k3s only for a multi-node deployment with external/shared data.
-
-### Safe Singulance rollout rules
-- Build images from `/root/hivemind-next`, tag the new image separately first, retain the
-  current image under a timestamped `rollback-<timestamp>` tag, then retag the approved
-  image and recreate only the changed Compose service with `--no-deps --force-recreate`.
-- Never run `docker compose` against production without `--env-file /root/hivemind/.env`.
-  Missing it injects blank secrets and causes control-plane health failures/502s.
-- Mandatory cold checks after a core/control/frontend rollout:
-  `https://core.singulancelabs.com/health`,
-  `https://api.singulancelabs.com/v1/bootstrap`, and the changed frontend route. Confirm
-  `hm-control` is `running/healthy` and inspect recent logs. Roll back to the retained image
-  tag and recreate through Compose on failure; never use `git reset --hard` on production.
-- The frontend submodule is deployed by committing/pushing its branch, then committing the
-  parent gitlink update. Verify the exact submodule SHA in `/root/hivemind-next` before build.
-
-### Platform admin console
-- Public route: `/hivemind/platform-admin` on `next.singulancelabs.com`. It lists B2B/B2C,
-  active/sleeping users and last activity. The route fallback is absolute
-  `/hivemind/app/overview`; do not change it to a relative path or it recurses.
-- Admin unlock is `POST /admin/api/platform/unlock`. `HIVEMIND_ADMIN_SECRET` is server-only;
-  never store, print, commit, or place its value in browser code or Claude memory. Unlock
-  creates a 15-minute `Secure`, `HttpOnly`, `SameSite=Strict` signed cookie. It is rate-limited
-  to five failed attempts per IP per 15 minutes.
-- `GET /admin/api/platform/users` and `GET /admin/api/platform/logs` require that cookie.
-  The admin page polls the latter every two seconds. The old public `/api/logs` endpoint was
-  intentionally removed; do not restore unauthenticated raw log access.
-- Service-worker cache is `hive-shell-v2`; Umami gateway loader was removed. If an old shell
-  appears, hard reload/unregister the stale service worker before debugging application code.
-
 ## 2026-05-30
 
 ### CSI / MiroFish + Employees architecture docs
@@ -115,36 +63,38 @@ entry after each meaningful task. Newest at top within a date. Pair with
   react-helmet per-route meta. react-snap prerender FAILED (Chromium not downloaded) ->
   build green but no prerendered HTML. Decision pending: fix react-snap vs Vercel edge.
 
-## 2026-07-09 — TARA voice model stack (mercury-2 + Cerebras split)
-- **Direct (mechanics)** = `inception/mercury-2` called **NON-STREAMED** (mercury's diffusion
-  streams empty/glitch chunks through our SSE; one-shot is fast + clean). Config
-  `TARA_DG_DIRECT_MODEL`.
-- **Grounded recall (accuracy-critical)** = `openai/gpt-oss-120b` @ **Cerebras** (0.85s,
-  reliable streaming, never empty). Config `TARA_DG_RECALL_MODEL` / `TARA_DG_RECALL_PROVIDER=Cerebras`.
-  DO NOT put mercury here — it returns "Empty response" on the larger grounded prompt.
-- **Router (strategist JSON)** = `google/gemini-2.5-flash-lite` (~0.5s). Mercury is slower for
-  tight JSON. Router is **recall-biased**: any product/company/comparison claim → recall (grounded
-  via stream_tara), only pure mechanics → direct. Kills domain hallucination.
-- Hypothesis/clinical engine (phase discover→qualify→propose→close + confidence 0-100) verified
-  on a real-life 6-turn skeptical-banker call: conf 50→100, grounded EU-sovereignty answers,
-  drove to demo booking, zero empty replies.
-- tara-deepgram is the voice SIDECAR (port 8091, `docker run` on singulance /opt/tara-deepgram) —
-  NOT in the hetzner Compose file; the Compose-only rule governs hm-core/hm-control. Deploy =
-  rsync /opt/tara-deepgram + docker build + recreate. Core change (voice_max_tokens) baked via Compose.
+## 2026-05-31
 
-## 2026-07-09 — Google Calendar global toolkit + TARA mid-call booking (54c00805)
-- `core/src/connectors/google-native.js` GOOGLE_TOOLS gains `calendar_*`: list_calendars,
-  list_events, get_event, freebusy, create_event (sendUpdates=all), update_event, delete_event,
-  respond, current_time. Same registry HyperAgents uses via `POST /api/connectors/google/exec`
-  — one global toolkit for rooms AND TARA. Fallback chain google-calendar→gmail→google-docs.
-- TARA router action `schedule` (+schedule_when verbatim): shim branch does
-  calendar_current_time → parse_when (ONE ~40-token flash-lite call) → freebusy →
-  create_event → speaks TRUE outcome; success sets goal_state "BOOKED ✓" + phase wrapup.
-  Graceful fallbacks: calendar unavailable → "team will send invite"; conflict → propose alternative.
-  Verified e2e: "Tuesday 2pm works — book it" → action=schedule conf=100 → clean fallback speech
-  (org's Google token currently lacks calendar scope — user must connect Google Calendar in
-  Connectors; then the same path books for real; bridge+token resolution verified to Google 403).
-- DEPLOY (per runbook): merged feat/mneme-foundation into /root/hivemind-next
-  (codex/production-hardening-runtime; only conflict .claude/MEMORY.md, ours-kept), rollback tag
-  `hivemind/core-api:rollback-20260709-212142`, built from hivemind-next, recreated core via
-  production Compose `--no-deps --force-recreate`. Cold checks green; both work-streams preserved.
+### Restore point created (pre-hyperagents-upgrade)
+- All prior session work confirmed COMMITTED (i18n 34 pages `7b01d72`, chat redesign
+  `ed3948c`, welcome email `731091a`, overview tour, lint fix `c8eaa15`). Nothing lost.
+- Submodule Da-vinci: was detached HEAD -> branched `pre-hyperagents-upgrade`, committed
+  i18next-parser tooling, tagged. Commit `271a2d1`, clean.
+- Root: tagged `pre-hyperagents-upgrade`, commit `d8f6787` (docs + .claude + server.js +
+  submodule ptr 271a2d1). Left untracked on purpose: OpenWA/ (nested repo), lock, worktree ptr.
+- DB: `pg_dump` local -> `~/hivemind-pre-hyperagents-upgrade.sql` (226K).
+- ROLLBACK: `cd frontend/Da-vinci && git switch pre-hyperagents-upgrade` ;
+  `git switch pre-hyperagents-upgrade && git submodule update --init` ;
+  `psql "$DATABASE_URL" < ~/hivemind-pre-hyperagents-upgrade.sql`.
+- Note: dump is LOCAL dev DB only; prod (Coolify/Hetzner) needs its own dump at migrate time.
+
+### HyperAgents CSI artifact layer — Phase 1 (branch hyperagents-csi, commit 873308d)
+- DECISION: dropped U2 (concurrency) — swarm R1/R2/R3/R5 + debate reactors ALREADY parallel
+  via asyncio.gather; sequential bits (lead/skeptic/synthesis) are intentional. No rewrite.
+- DECISION: persist artifacts at ONE sink — control-plane `POST /internal/hyper/turn-event`
+  callback — not 8 engine seam points. No Python engine edits.
+- Added Prisma models HyperClaim/HyperTrial/HyperRelation (scalar cols, no @relation, org-
+  scoped; matches AgentTrust precedent) + migration 20260531000000_hyper_csi_artifacts
+  (up + down.sql). prisma generate done; client exposes the 3 models.
+- control-plane: tee events (hypothesis/chain_of_thought/line:lead|synthesis ->claims;
+  peer_review/react/vote/validate/skeptic ->trials; derived_from/agreement/votes_for
+  ->relations) best-effort try/catch, never blocks append/seal. New GET
+  /v1/hyper-rooms/:id/artifacts (requireSession + room owner/org scope). api-client
+  getHyperRoomArtifacts().
+- VERIFIED: node --check control-plane OK; prisma client has models; api-client parses.
+- NOT live-tested: local dev DB is partial (20 tables, `hivemind` schema, NO hyper_rooms/
+  digital_employees) — can't exercise the write path here. My 3 tables were also created
+  ad-hoc in the local `hivemind` schema (harmless). Real validation must run where the
+  control-plane DB has hyper_rooms (staging/prod) after `prisma migrate deploy`.
+- ROLLBACK: tags pre-hyperagents-upgrade (both repos) + ~/hivemind-pre-hyperagents-upgrade.sql.
+  Prod revert: run migrations/20260531000000_hyper_csi_artifacts/down.sql.

@@ -108,4 +108,8 @@ done
 # public smoke
 for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind https://api.singulancelabs.com/health https://core.singulancelabs.com/health; do
   c=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$u"); echo "$u → $c"; done
-echo "== deployed $(git rev-parse --short $NOW). rollback any service: quick-deploy.sh --rollback <svc>"
+# Keep the box lean: drop build cache + images no longer referenced by a
+# container or a kept tag (:latest/:stable/running stay — they're referenced).
+docker builder prune -af >/dev/null 2>&1 || true
+docker image prune -f >/dev/null 2>&1 || true
+echo "== deployed $(git rev-parse --short $NOW). free: $(df -h / | awk 'NR==2{print $4}'). rollback: quick-deploy.sh --rollback <svc>"

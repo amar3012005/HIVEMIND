@@ -8131,16 +8131,51 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       const roomId = roomTurnMatch[1];
+      // Org-shared: any org member can clear a room's runs (matches the read +
+      // participate model). Scoping by userId broke Clear for rooms owned by a
+      // different member (incl. the HQ room) — it 404'd and silently no-op'd.
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId, archivedAt: null },
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
         select: { id: true },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       try {
         const result = await prisma.hyperTurn.deleteMany({ where: { roomId } });
+        // Also wipe this room's control-room reports so cleared runs vanish from
+        // HQ too (best-effort; table may not exist on an un-migrated box).
+        await prisma.$executeRawUnsafe(
+          'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND source_room_id = $2::uuid',
+          current.session.orgId, roomId,
+        ).catch(() => {});
         return jsonResponse(res, { ok: true, cleared: result.count });
       } catch (err) {
         console.warn('[hyper-rooms] clear discussion failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // DELETE /v1/hyper-rooms/:id/turns/:turnId — remove ONE run (the per-turn
+    // clear X). Org-shared, same as the whole-discussion clear. Previously there
+    // was NO handler for this path, so the per-turn clear silently no-op'd.
+    if (roomTurnMatch && roomTurnMatch[2] != null && !roomTurnMatch[3] && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomTurnMatch[1];
+      const turnId = roomTurnMatch[2];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      try {
+        const result = await prisma.hyperTurn.deleteMany({ where: { id: turnId, roomId } });
+        await prisma.$executeRawUnsafe(
+          'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND turn_id = $2::uuid',
+          current.session.orgId, turnId,
+        ).catch(() => {});
+        return jsonResponse(res, { ok: true, cleared: result.count });
+      } catch (err) {
+        console.warn('[hyper-rooms] delete turn failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
     }

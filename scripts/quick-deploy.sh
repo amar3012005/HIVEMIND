@@ -100,7 +100,13 @@ grep -q '^VERSION=latest$' "$ENV" || { cp "$ENV" "$ENV.bak-quickdeploy"; sed -i 
 grep -q '^NEXT_VERSION=latest$' "$NEXTENV" || { cp "$NEXTENV" "$NEXTENV.bak-quickdeploy"; sed -i 's/^NEXT_VERSION=.*/NEXT_VERSION=latest/' "$NEXTENV"; echo "pinned NEXT_VERSION=latest"; }
 
 # pending migrations (new folders since PREV) → backup + apply idempotent SQL
-NEWMIG=$(git diff --name-only --diff-filter=A "$PREV" "$NOW" -- core/prisma/migrations | sed -nE 's#core/prisma/migrations/([^/]+)/migration.sql#\1#p')
+# Only diff migrations when we have a valid PREV; a rebuild-all (empty PREV)
+# means the box is already at/ahead of these migrations — don't re-diff from ''.
+if [ -n "$PREV" ] && git cat-file -e "$PREV^{commit}" 2>/dev/null; then
+  NEWMIG=$(git diff --name-only --diff-filter=A "$PREV" "$NOW" -- core/prisma/migrations | sed -nE 's#core/prisma/migrations/([^/]+)/migration.sql#\1#p')
+else
+  NEWMIG=""
+fi
 if [ -n "$NEWMIG" ]; then
   TS=$(date -u +%Y%m%dT%H%M%SZ)
   echo "== new migrations: $NEWMIG — backing up first"

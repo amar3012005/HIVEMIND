@@ -1,5 +1,19 @@
 # SINGULANCE Production Release Ledger
 
+## prod-20260716-20b8f3de - Fast, JSON-safe full-source document curation
+
+- **Parent:** `hivemind-main` at `20b8f3de11371a13429c8fd07a9eccdf51dea165` ("fix(ingestion): enforce curator JSON contract (#38)"). A later non-overlapping campaign commit reached canonical after this candidate was built; it was not included or deployed by this release.
+- **Frontend:** unchanged at `6bdc4235ad2027405b5d7c252a3f00d302043912`; `hm-fe` was not recreated.
+- **Scope:** `hm-core` only. The document curator now requires one schema-shaped JSON object and caps curator output at 1,400 tokens. Runtime extraction and curation use `google/gemini-2.5-flash-lite` through OpenRouter. `PHASE1_MIN_PROMOTE=20` ensures documents with up to 20 quality segments are distilled from the complete bounded source instead of a five-segment sample.
+- **Build:** clean detached worktree `/root/builds/prod-20260716-20b8f3de`, exact parent SHA and frontend gitlink verified before building. Worktree removed after acceptance.
+- **Image:** `hivemind/core-api:prod-20260716-20b8f3de` = `sha256:9665591fde6dd9a84278b50e94c5310dcf72168dfd27940f7e5e55b6431038cc`.
+- **Migrations:** none; no data-service restart and no schema change.
+- **Authenticated FOREST acceptance:** reprocessed `DAVINCI_AI_GTM_LOI_.pdf` (`document_id=04617408-c907-4649-a2e3-90e5968f6002`) from its 17 persisted evidence segments. The full-source run completed in 14.347s, produced 17 grounded candidates, 8 durable memories plus the document parent, and 29 graph edges. The previous failed run took 53.970s and yielded only 2 weak memories. Five obsolete memories from the failed and partial repair attempts were hard-deleted through the authenticated tenant-scoped API, including Qdrant cleanup.
+- **Recall acceptance:** exact-document explain recall returned 6 source evidence sections in 1.921s with no cutoff; no unrelated source was admitted.
+- **Public acceptance:** `next.singulancelabs.com/hivemind`, `/hivemind/login`, API health, and Core health returned `200`; `hm-core` reached `healthy`; deployed curator marker and effective model environment were verified inside the running container; fresh fatal/panic/uncaught/unhandled/OOM count was zero.
+- **Aliases:** core `stable` and `latest` advanced to the accepted image only after the authenticated ingestion and recall checks.
+- **Rollback:** `hivemind/core-api:rollback-20260716T061100Z-pre-20b8f3de`; restore `/root/hivemind/.env.bak-prod-20260716-20b8f3de`, then recreate only `hm-core`.
+
 ## prod-20260716-b9d6dc77 - KB page-only billing and usage
 
 - **Parent:** `hivemind-main` at `b9d6dc77d0cde9ba4ba2532703e6e92f67654173` ("fix(billing): meter knowledge base by pages only (#35)").

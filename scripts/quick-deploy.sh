@@ -65,10 +65,11 @@ cd "$REPO"
 # the very first run → rebuild everything.
 PREV=$(cat "$LASTSHA" 2>/dev/null || true)
 git fetch origin "$BRANCH" -q
-# Force live to EXACTLY origin/$BRANCH, discarding any local drift on the box
-# (uncommitted edits, wrong branch). "no overwrites" = live is always canonical.
-git checkout -qf -B "$BRANCH" "origin/$BRANCH"
-git reset --hard "origin/$BRANCH" -q
+# Reset to FETCH_HEAD, NOT origin/$BRANCH: this box's remote-tracking ref lags
+# (fetch updates FETCH_HEAD but not refs/remotes/origin/$BRANCH), which silently
+# rebuilt ancient code. FETCH_HEAD is always the tip we just fetched. -f discards
+# any local drift so live == canonical ("no overwrites").
+git checkout -qf -B "$BRANCH" FETCH_HEAD
 git submodule update --init --force -q frontend/Da-vinci
 NOW=$(git rev-parse HEAD)
 if [ -n "$PREV" ] && [ "$PREV" = "$NOW" ]; then echo "already at $(git rev-parse --short HEAD) — nothing to deploy"; exit 0; fi
@@ -121,9 +122,10 @@ done
 # public smoke
 for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind https://api.singulancelabs.com/health https://core.singulancelabs.com/health; do
   c=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$u"); echo "$u → $c"; done
-# Keep the box lean: drop build cache + images no longer referenced by a
-# container or a kept tag (:latest/:stable/running stay — they're referenced).
-docker builder prune -af >/dev/null 2>&1 || true
+# Keep the box lean WITHOUT killing warm cache — pruning all cache made every
+# build cold (re-npm-install etc.). Keep recent layers so a code-only change
+# rebuilds in seconds; only evict cache older than 7 days + dangling images.
+docker builder prune -f --filter 'until=168h' >/dev/null 2>&1 || true
 docker image prune -f >/dev/null 2>&1 || true
 echo "$NOW" > "$LASTSHA"   # record what's now live for the next deploy's diff
 echo "== deployed $(git rev-parse --short $NOW). free: $(df -h / | awk 'NR==2{print $4}'). rollback: quick-deploy.sh --rollback <svc>"

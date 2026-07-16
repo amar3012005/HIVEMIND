@@ -2702,6 +2702,20 @@ Every item must include a non-empty content field and one or more valid support_
         if (extraEvidenceLinks.length) {
           await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
         }
+        // Cross-window consolidation — a long document (e.g. a 12-page proposal)
+        // repeats the same claim across many sections; each window extracts it
+        // independently, so the doc ships near-duplicate memories ("bootstrapped
+        // status" x3, "B&B partnership" x2). Within-window NON-REDUNDANT can't
+        // see across windows. Merge near-duplicates here → fewer, richer memories
+        // (keep the most complete, union the dupes' tags into it, delete the rest).
+        // Runs BEFORE entity-linking so edges attach only to survivors. Default
+        // ON; KB_CONSOLIDATE=0 disables. Best-effort: on failure facts ship as-is.
+        if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
+          try {
+            const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
+            if (removed) this.logger.info?.(`[kb-unified] consolidated ${removed} cross-window duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+          } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
+        }
         if (uFacts.length) {
           // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
           // extractor already produced (one pool fetch + tag intersection).

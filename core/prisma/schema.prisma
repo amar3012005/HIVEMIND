@@ -416,6 +416,55 @@ model OutboundAction {
   @@map("outbound_actions")
 }
 
+/// OutreachCampaign — one durable batch-outreach run created when the user clicks
+/// "Send outreach emails" / "Start outreach calls" on a sealed turn's prospect stack.
+/// Hybrid control: FE drives pace while open; drain worker finishes if the tab dies.
+model OutreachCampaign {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId      String           @map("room_id") @db.Uuid
+  turnId      String           @map("turn_id") @db.Uuid
+  userId      String           @map("user_id") @db.Uuid
+  orgId       String           @map("org_id") @db.Uuid
+  channel     String           @db.VarChar(8) // email | call
+  status      String           @default("queued") @db.VarChar(12) // queued | running | paused | done | cancelled
+  senderEmail String?          @map("sender_email") @db.VarChar(160) // connected Gmail (email channel)
+  taraNumber  String?          @map("tara_number") @db.VarChar(32) // outbound caller id (call channel)
+  lastTickAt  DateTime?        @map("last_tick_at") @db.Timestamptz(6) // FE liveness — drain takes over when stale
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt   DateTime?        @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime?        @map("finished_at") @db.Timestamptz(6)
+  targets     OutreachTarget[]
+
+  @@index([userId, status, createdAt])
+  @@index([orgId, status])
+  @@index([turnId])
+  @@map("outreach_campaigns")
+}
+
+/// OutreachTarget — one prospect inside a campaign. Snapshot of the Places prospect
+/// row at click time + the per-prospect generated payload (email {subject,body} or
+/// call {goal,opener}) + run state. OutboundAction stays the sent-truth ledger;
+/// resultRef links there.
+model OutreachTarget {
+  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId String           @map("campaign_id") @db.Uuid
+  position   Int
+  company    String           @db.VarChar(300)
+  email      String?          @db.VarChar(320)
+  phone      String?          @db.VarChar(40)
+  website    String?          @db.VarChar(500)
+  address    String?          @db.VarChar(500)
+  payload    Json?            @db.JsonB // email: {subject, body} · call: {goal, opener} — editable until executed
+  state      String           @default("selected") @db.VarChar(12) // selected | deselected | generating | ready | sending | sent | failed | skipped
+  resultRef  Json?            @map("result_ref") @db.JsonB // {outboundActionId} | {taraCallLegId, sessionId} + {error}
+  updatedAt  DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign   OutreachCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, position])
+  @@index([campaignId, state])
+  @@map("outreach_targets")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

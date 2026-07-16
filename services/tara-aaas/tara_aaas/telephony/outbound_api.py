@@ -57,6 +57,9 @@ class OutboundCallRequest(BaseModel):
     org_id: Optional[str] = None
     language: str = "en"
     voice_id: Optional[str] = None
+    # Outreach campaigns: one-line call objective (+opener), injected into every
+    # turn of the voice session as the voice_directive so TARA pursues THIS goal.
+    goal: Optional[str] = None
 
 
 class OutboundCallResponse(BaseModel):
@@ -95,6 +98,7 @@ async def initiate_call(req: OutboundCallRequest) -> OutboundCallResponse:
         "org_id": req.org_id,
         "language": req.language,
         "voice_id": req.voice_id,
+        "goal": (req.goal or "")[:600] or None,
         "status": "dialing",
     }
     log.info("outbound initiated leg=%s session=%s to=%s", call_leg_id, req.session_id, req.to)
@@ -135,6 +139,7 @@ async def handle_webhook_event(event: dict) -> None:
             "org_id":     meta.get("org_id") or "",
             "language":   meta.get("language") or "en",
             "voice_id":   meta.get("voice_id") or "",
+            "goal":       meta.get("goal") or "",
         })
         stream_url = f"{config.TELNYX_STREAM_BASE_URL}/telnyx/stream?{qs}"
         cid = call_control_id or meta.get("call_control_id")

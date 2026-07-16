@@ -1156,10 +1156,14 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     const system = `You curate durable organizational memory from source-grounded candidates extracted from ONE document.
 Return at most ${cap} high-value memories that together cover the document's important decisions, commitments, requirements, metrics, events, validated lessons, stable preferences, and defining facts.
 Merge compatible candidates into one complete, information-dense memory. Never merge unrelated subjects. A strong memory keeps the subject together with the relevant decision or requirement, scope, owner, rationale, constraints, numbers, dates, and outcome. Do not split one coherent plan or decision into mini-facts. Prefer 1-3 concise sentences when the supporting candidates contain that context; do not pad or repeat content.
-Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.`;
+Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Fewer strong memories are better than many fragments.
+
+Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
+{"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","support_indices":[0,1]}]}
+Every item must include a non-empty content field and one or more valid support_indices from the supplied candidate list.`;
     try {
       const parsed = await chatCompletion({
-        model, temperature: 0, max_tokens: 2600, json_mode: true, feature: 'kb-document-curator',
+        model, temperature: 0, max_tokens: 1400, json_mode: true, feature: 'kb-document-curator',
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },

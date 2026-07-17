@@ -1566,14 +1566,15 @@ async function invalidateCorePlanCache(orgId) {
 }
 
 async function syncPersonalStripeSubscription({ org, subscription, plansMod }) {
-  if (!org || plansMod.isEnterpriseWorkspace(org)) return null;
+  if (!org) return null;
   if (!subscription?.id || !subscription.customer) return null;
   if (subscription.metadata?.hivemind_org_id
     && subscription.metadata.hivemind_org_id !== org.id) return null;
 
   const billingMod = await import('./billing/stripe.js');
   const planId = plansMod.planIdForStripePrice(billingMod.getSubscriptionPriceId(subscription));
-  if (!planId || !plansMod.isPersonalPlan(planId) || planId === 'free') return null;
+  const plan = planId ? plansMod.PLANS[planId] : null;
+  if (!plan || planId === 'free' || plan.commercial?.audience === 'enterprise') return null;
   if (!billingMod.isEntitledSubscriptionStatus(subscription.status)) return null;
 
   const now = new Date();
@@ -9690,7 +9691,7 @@ Write the persona now.`;
       if (!billingMod.isEnabled()) {
         return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
       }
-      if (plansMod.isEnterpriseWorkspace(org)) {
+      if (plansMod.PLANS[org.plan]?.commercial?.audience === 'enterprise') {
         return jsonResponse(res, { error: 'Enterprise billing is managed outside self-serve checkout' }, 409);
       }
       if (!org.stripeCustomerId) {

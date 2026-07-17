@@ -151,9 +151,23 @@ export function resolveRecallPlan(input = {}) {
   const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
   const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
   const fullAllowed = requested !== 'full' || input.explicit_mode === true;
+  // Compound-query auto-routing: a multi-part question ("X and Y", multiple
+  // '?', "compare/across/both", several clauses) needs graph/source evidence,
+  // not a single fact pass. Escalate AUTO (non-explicit) compound queries
+  // straight to explain — starting in fact mode then escalating burned most of
+  // the deadline before reaching explain (observed: chat compound answers
+  // dropped a delivered fact + falsely marked a source uncovered).
+  const _q = String(input.query_context || input.query || input.context || '');
+  const _compound = _q.length > 40 && (
+    (_q.match(/\?/g) || []).length > 1
+    || /\b(and|plus|as well as|both|compare|across|versus|vs\.?|along with|together with)\b/i.test(_q)
+    || (_q.match(/[.;]/g) || []).length >= 2
+  );
   const mode = requested === 'full' && !fullAllowed
     ? 'explain'
-    : explicit ? requested : 'fact';
+    : explicit ? requested
+      : (_compound && process.env.RECALL_COMPOUND_EXPLAIN !== 'false') ? 'explain'
+        : 'fact';
   const operation = input.operation === 'timeline' ? 'timeline' : 'recall';
   const structuredSource = input.source && typeof input.source === 'object' ? input.source : {};
   const structuredTime = input.time && typeof input.time === 'object' ? input.time : {};
@@ -1382,6 +1396,22 @@ export class RecallRouter {
     rankedMemories = applyEventTimeBoost(rankedMemories, query);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
     rankedMemories = collapseClusterDuplicates(rankedMemories);
+    // Exact-id dedup BEFORE the top-N slice. RRF/lane-fusion + graph expansion
+    // can re-surface the SAME memory under different lane wrappers (id vs
+    // memory.id), and collapseClusterDuplicates only merges near-dupes by
+    // cluster hash — not identical ids. Without this the delivered top-N is
+    // wasted on duplicates (observed: 5 delivered / 3 unique in explain mode).
+    // Keep the first (highest-ranked) occurrence.
+    {
+      const _seenIds = new Set();
+      rankedMemories = rankedMemories.filter((m) => {
+        const id = m?.id || m?.memory?.id;
+        if (!id) return true;
+        if (_seenIds.has(id)) return false;
+        _seenIds.add(id);
+        return true;
+      });
+    }
 
     // Fire recall-count update asynchronously — don't block response
     if (this.clusterIndex) {

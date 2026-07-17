@@ -2213,6 +2213,28 @@ Every item must include a non-empty content field and one or more valid support_
     const memoryIds = Array.isArray(res?.results)
       ? res.results.map(x => x?.memoryId || x?.id).filter(Boolean)
       : [res?.memoryId || res?.id].filter(Boolean);
+    // Canonical-entity persistence for ATOMIC ingestion (chat / save_memory /
+    // API). Document mode persists canonical entities inline; atomic went
+    // through ingestMemory which tags entity:<slug> but never populated the
+    // CanonicalEntity/MemoryEntityLink registry — so cross-source stitching
+    // silently excluded chat/atomic memories. Derive names from the committed
+    // memory's entity tags (same contract as the KB path + backfill).
+    try {
+      const store = this.memoryGraphEngine?.store;
+      if (memoryIds.length && this.db?.canonicalEntity && store?.getMemories) {
+        const mems = await store.getMemories(memoryIds);
+        const items = [];
+        for (const id of memoryIds) {
+          const m = mems.get(id);
+          const names = (m?.tags || [])
+            .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
+            .map((t) => t.replace(/^(entity|person):/, '').replace(/-/g, ' ').trim())
+            .filter(Boolean);
+          if (names.length) items.push({ memoryId: id, entities: names });
+        }
+        if (items.length) await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
+      }
+    } catch (e) { this.logger.warn?.(`[canonical-entities][atomic] ${e.message}`); }
     return { ok: true, mode, source: sourceType, memoryIds, promotedCount: memoryIds.length, memoryId: memoryIds[0] || null, operation: res?.operation || null };
   }
 

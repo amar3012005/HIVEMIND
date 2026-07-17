@@ -2811,6 +2811,27 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       const edgeType = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
       const isSupersede = edgeType === 'Updates';
 
+      // Negation guard: a memory that explicitly says it is UNRELATED to the
+      // shared entity ("unrelated to X", "not related to X", "nothing to do
+      // with X", "other than X") must not become a semantic co-mention edge to
+      // that entity — the mention is a disclaimer, not a relationship (observed:
+      // a negative-control note falsely linked to SolvisMax). Checks a short
+      // window before the entity mention in BOTH memories' content.
+      {
+        const _ent = String(l.entity || '').replace(/_/g, ' ').toLowerCase().trim();
+        const _negated = (text) => {
+          const c = String(text || '').toLowerCase();
+          if (!_ent || !c.includes(_ent)) return false;
+          const idx = c.indexOf(_ent);
+          const before = c.slice(Math.max(0, idx - 48), idx);
+          return /\b(un-?related to|not related to|no relation to|nothing to do with|not associated with|not connected to|other than|unrelated to)\s*$/.test(before);
+        };
+        if (_negated(baseMemory.content) || _negated(cand?.content)) {
+          console.log(`[entity-co-mention] negation-guard: skip "${edgeType}" edge on "${l.entity}" (negated mention)`);
+          continue;
+        }
+      }
+
       try {
         await writeStore.createRelationship({
           id: uuidv4(),

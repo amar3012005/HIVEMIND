@@ -13,7 +13,7 @@
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
-import { chatCompletion } from './enterprise/litellm-client.js';
+import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
 
@@ -774,12 +774,18 @@ Output the JSON object and nothing else.`;
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
-    const parsed = await chatCompletion({
+    // Model fallback: if the primary extraction model fails (provider error,
+    // finish=error, unparseable), fall through to a DIFFERENT family so a
+    // section's facts are never lost to one model/provider hiccup. Configurable
+    // via KB_UNIFIED_FALLBACK_MODELS (comma-separated).
+    const _fallbacks = (process.env.KB_UNIFIED_FALLBACK_MODELS
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean);
+    const parsed = await chatCompletionWithFallback({
       // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
       // source_quote + entities). 1800 tokens overflowed → finish=length →
       // truncated JSON → whole-section fact loss (~28% of calls). Give ample
       // headroom; the truncation-salvage in litellm-client is the backstop.
-      model, temperature: 0, max_tokens: compact ? 2200 : 4500, json_mode: true, feature: 'kb-unified-extract',
+      models: [model, ..._fallbacks], temperature: 0, max_tokens: compact ? 2200 : 4500, json_mode: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),

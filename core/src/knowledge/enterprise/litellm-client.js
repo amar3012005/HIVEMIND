@@ -239,3 +239,24 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 export function getDefaultModel() {
   return DEFAULT_MODEL;
 }
+
+// Model-fallback wrapper: try each model in order; on ANY failure (provider
+// error, timeout, finish=error, unparseable-after-salvage) fall through to the
+// NEXT model. Cross-family list (e.g. gpt-oss-120b → gemini-flash-lite →
+// gpt-oss-20b) so a single-model/provider issue can't drop a memory. Returns
+// the first success; throws the last error only if every model fails.
+export async function chatCompletionWithFallback({ models = [], model, ...opts } = {}) {
+  const list = [...new Set((models.length ? models : [model]).filter(Boolean))];
+  if (!list.length) throw new Error('[llm-fallback] no model(s) provided');
+  let lastErr = null;
+  for (let i = 0; i < list.length; i += 1) {
+    try {
+      return await chatCompletion({ ...opts, model: list[i] });
+    } catch (err) {
+      lastErr = err;
+      const next = i + 1 < list.length ? `falling back to ${list[i + 1]}` : 'no more models';
+      console.warn(`[llm-fallback] model ${list[i]} failed (${String(err.message).slice(0, 120)}) — ${next}`);
+    }
+  }
+  throw lastErr;
+}

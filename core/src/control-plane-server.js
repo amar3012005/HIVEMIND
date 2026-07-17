@@ -17,6 +17,7 @@ import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
+import { registerEmbeddedAmrOrg, unregisterEmbeddedAmrOrg } from './storage/amr-registry.js';
 import { PLANS } from './billing/plans.js';
 import {
   activateOffer,
@@ -3103,17 +3104,30 @@ const server = http.createServer(async (req, res) => {
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
     const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
+    const memoryStorageMode = memoryStorageModeFor(provisionPlan, hostingMode);
+    const orgId = crypto.randomUUID();
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    const needsEmbeddedAmr = hostingMode === 'managed' && memoryStorageMode === 'amr_embedded';
+    if (needsEmbeddedAmr) {
+      try {
+        registerEmbeddedAmrOrg(orgId, regFile);
+      } catch (error) {
+        console.error('[org-create] .amr-central reservation failed', { orgId, error: error.message });
+        return jsonResponse(res, { error: 'Personal memory storage is temporarily unavailable.' }, 503);
+      }
+    }
     let org;
     try {
       const created = await prisma.$transaction(async (tx) => {
         const newOrg = await tx.organization.create({
           data: {
+            id: orgId,
             zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
             name: body.name,
             slug,
             plan: requestedPlan,
             hostingMode,
-            memoryStorageMode: memoryStorageModeFor(provisionPlan, hostingMode),
+            memoryStorageMode,
           },
         });
         await tx.userOrganization.create({
@@ -3129,27 +3143,16 @@ const server = http.createServer(async (req, res) => {
       });
       org = created.org;
     } catch (error) {
+      if (needsEmbeddedAmr) {
+        try { unregisterEmbeddedAmrOrg(orgId, regFile); }
+        catch (cleanupError) {
+          console.error('[org-create] .amr-central reservation cleanup failed', { orgId, error: cleanupError.message });
+        }
+      }
       return jsonResponse(res, { error: error.message }, 409);
     }
 
-    // .amr-by-default for NEW personal orgs (flag: MNEME_PERSONAL_DEFAULT=1, default off):
-    // register the org in the agent registry with url 'local:' — every memory-domain seam then
-    // routes to the EMBEDDED agent (the same hardened v2 .amr engine self-host runs, in-process
-    // on central; hm.* schema + org_<id> collection for its KB). New orgs only — existing orgs
-    // keep their current backend until an explicit migration. Never blocks signup.
-    if (hostingMode === 'managed' && memoryStorageModeFor(provisionPlan, hostingMode) === 'amr_embedded') {
-      try {
-        const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
-        const fsm = await import('node:fs');
-        let reg = {};
-        try { reg = JSON.parse(fsm.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
-        reg[org.id] = { url: 'local:', token: '', kind: 'amr-central' };
-        fsm.writeFileSync(regFile, JSON.stringify(reg), 'utf8');
-        console.log(`[org-create] .amr-central registered for new personal org ${org.id}`);
-      } catch (e) {
-        console.warn('[org-create] .amr-central registration failed (org stays central):', e.message);
-      }
-    }
+    if (needsEmbeddedAmr) console.log(`[org-create] .amr-central registered for new personal org ${org.id}`);
 
     // Route the org to its Qdrant home by PLAN:
     //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)

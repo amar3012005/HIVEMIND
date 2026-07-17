@@ -33,6 +33,7 @@ function assertKbAllowedForOrg(orgId) {
 }
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
+import { persistCanonicalLinks } from '../memory/canonical-entity-persister.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
@@ -535,6 +536,7 @@ Output the JSON object and nothing else.`;
       // (cross-doc dedup + relationship edges). Populated in flushEmbeds.
       const enrichRecs = [];
       const factObjs = []; // created fact memories (id+content+tags) — facts-only mode links them post-distill
+      const canonicalItems = []; // {memoryId, entities:[raw names]} — post-commit canonical registry pass
 
       // Only sections with enough prose to distill.
       const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
@@ -671,8 +673,8 @@ Output the JSON object and nothing else.`;
           // co-mention linker never re-tags them, and they do NOT reach the
           // createMemory chokepoint's tag-normalize — so writing raw here left
           // entity:SOLVIS / entity:WP_storage un-canonicalized in the DB.
-          const entityTags = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim())
-            .slice(0, 8)
+          const rawEntityNames = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8);
+          const entityTags = rawEntityNames
             .map((e) => { const slug = normalizeEntity(e); return slug ? `entity:${slug}` : null; })
             .filter(Boolean);
           for (const fact of facts) {
@@ -685,6 +687,7 @@ Output the JSON object and nothing else.`;
               // overshoot. This keeps MAX_FACTS_PER_DOC effectively binding.
               if (p && created < MAX_FACTS_PER_DOC) {
                 pending.push(p); created++;
+                if (rawEntityNames.length) canonicalItems.push({ memoryId: p.factId, entities: rawEntityNames });
                 factObjs.push({
                   id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
                   title: (p.fact || '').slice(0, 80), memory_type: 'fact',
@@ -712,6 +715,15 @@ Output the JSON object and nothing else.`;
       });
       await Promise.all(workers);
       this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
+      // Canonical-entity registry pass — AFTER all facts committed, off the hot
+      // path (fire-and-forget). Creates org-scoped CanonicalEntity rows +
+      // MemoryEntityLink rows from the extractor's canonical names; exact names
+      // reuse existing entities, ambiguous fuzzy matches go to the review
+      // queue. entity: tags above stay as the compatibility fallback.
+      if (canonicalItems.length) {
+        persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items: canonicalItems, logger: this.logger })
+          .catch((e) => this.logger.warn?.(`[canonical-entities] ${e.message}`));
+      }
       // Phase 2 enrichment — OFF the hot path, flag-gated (default off). Cross-doc
       // dedup + relationship edges, using vectors already computed during embed.
       if (process.env.KB_ENRICH_ENABLED === '1' && enrichRecs.length) {

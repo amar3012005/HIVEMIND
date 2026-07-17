@@ -219,6 +219,59 @@ async function createHyperRoomWithinPlan(data) {
   });
 }
 
+// ── HQ dispatcher (P4) ─────────────────────────────────────────────────────
+// A work request typed in the HQ room is classified, routed to (or auto-creates)
+// the right kind room, and RUNS THERE — HQ stays a control room, not a work log.
+// Mirrors the sidecar keyword classifier (hyper/skills.resolve_room_kind) so no
+// round-trip is needed. Off-switch: HQ_DISPATCH=off.
+const _HQ_KIND_KEYWORDS = [
+  ['outreach', ['outreach', 'cold email', 'prospect', 'lead gen', 'leads', 'sales call', 'book meeting', 'reach out', 'sales sheet', 'campaign']],
+  ['research', ['competitor', 'market research', 'landscape', 'icp', 'market size', 'segment', 'industry trend', 'analyze market', 'research']],
+  ['content', ['content', 'blog', 'social', 'post', 'newsletter', 'seo', 'copy', 'article', 'brand']],
+  ['strategy', ['strategy', 'roadmap', 'prioriti', 'decision', 'invest', 'pivot', 'pricing', 'business model', 'go-to-market', 'gtm']],
+];
+const _HQ_KIND_LABEL = { outreach: 'Outreach', research: 'Research', content: 'Content', strategy: 'Strategy' };
+
+function classifyHqKind(message) {
+  const hay = String(message || '').toLowerCase();
+  for (const [kind, words] of _HQ_KIND_KEYWORDS) {
+    if (words.some((w) => hay.includes(w))) return kind;
+  }
+  return null;
+}
+// A short question/status stays in HQ (direct answer); a work verb routes out.
+function isHqWorkRequest(message) {
+  const m = String(message || '').trim();
+  if (m.length < 12) return false;
+  return /\b(find|design|create|build|write|draft|prepare|research|analyze|generate|plan|make|produce|reach out|send|compose|map|identify)\b/i.test(m);
+}
+
+async function findOrCreateKindRoom(session, hqRoom, kind, message) {
+  const orgId = session.orgId;
+  // Reuse the newest non-archived room already tagged for this kind.
+  const existing = await prisma.$queryRawUnsafe(
+    `SELECT id, participant_ids FROM "hivemind"."hyper_rooms"
+      WHERE org_id = $1::uuid AND archived_at IS NULL
+        AND agent_connectors->>'_kind' = $2 ORDER BY updated_at DESC LIMIT 1`,
+    orgId, kind,
+  ).catch(() => []);
+  if (existing?.[0]?.id) return { id: existing[0].id, participantIds: existing[0].participant_ids || [], created: false };
+  // Else create one, seeded with the HQ room's team (or the org's employees).
+  let participantIds = Array.isArray(hqRoom.participantIds) ? hqRoom.participantIds.slice(0, 5) : [];
+  if (!participantIds.length) {
+    const emps = await prisma.digitalEmployee.findMany({ where: { orgId }, select: { id: true }, take: 5 });
+    participantIds = emps.map((e) => e.id);
+  }
+  const name = `${_HQ_KIND_LABEL[kind] || 'Work'} desk`;
+  const room = await createHyperRoomWithinPlan({
+    orgId, userId: session.userId, name, template: 'auto',
+    participantIds, goal: `${_HQ_KIND_LABEL[kind]} work routed from HQ`,
+    agentConnectors: { _kind: kind },
+    permanentLeadId: participantIds.slice().sort()[0] || null,
+  });
+  return { id: room.id, participantIds, created: true };
+}
+
 async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles, invitedAt }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
@@ -8814,6 +8867,47 @@ Write the persona now.`;
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const agentAccess = await requirePrivilegedAgentAccess(req, res, current, room.projectId || null);
       if (!agentAccess) return;
+
+      // ── HQ dispatch: a work request typed in HQ runs in the right kind room ──
+      if (process.env.HQ_DISPATCH !== 'off' && !body.action && userMessage.trim()) {
+        const isHq = room.agentConnectors && typeof room.agentConnectors === 'object'
+          && Object.prototype.hasOwnProperty.call(room.agentConnectors, '_company');
+        const kind = isHq ? classifyHqKind(userMessage) : null;
+        if (kind && isHqWorkRequest(userMessage)) {
+          try {
+            const target = await findOrCreateKindRoom(current.session, room, kind, userMessage);
+            // Create + kick the turn in the TARGET room (idempotent seq).
+            const tgtTurn = await prisma.$transaction(async (tx) => {
+              const last = await tx.hyperTurn.findFirst({ where: { roomId: target.id }, orderBy: { seq: 'desc' }, select: { seq: true } });
+              const seq = (last?.seq ?? 0) + 1;
+              return tx.hyperTurn.create({
+                data: { roomId: target.id, seq, userMessage, status: 'live',
+                        idempotencyKey: buildIdempotencyKey({ roomId: target.id, seq, userMessage }), lines: [] },
+              });
+            });
+            dispatchHyperRoomTurn({
+              room_id: target.id, turn_id: tgtTurn.id,
+              user_id: current.session.userId, org_id: current.session.orgId,
+              user_message: userMessage, participant_ids: target.participantIds || [],
+              project_id: null, room_goal: `${kind} work routed from HQ`,
+              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+            }).catch((e) => console.warn('[hq-dispatch] kick failed:', e.message));
+            // Routing card in the HQ feed so the owner sees where it went.
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO "hivemind"."hq_activity"
+                 (org_id, hq_room_id, source_room_id, source_room_name, turn_id, headline, summary, status)
+               VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6,$7,'routed') ON CONFLICT (turn_id) DO NOTHING`,
+              current.session.orgId, room.id, target.id, `${_HQ_KIND_LABEL[kind]} desk`, tgtTurn.id,
+              `Routed to the ${_HQ_KIND_LABEL[kind]} desk`, String(userMessage).slice(0, 400),
+            ).catch(() => {});
+            return jsonResponse(res, { ok: true, routed: true, room_id: target.id, turn_id: tgtTurn.id, kind }, 200);
+          } catch (e) {
+            console.warn('[hq-dispatch] failed, running in HQ:', e.message);
+            // fall through — run in HQ rather than lose the turn
+          }
+        }
+      }
+
       if (body.action === 'flyby-decision') {
         const turnId = typeof body.turn_id === 'string' ? body.turn_id : '';
         const decision = String(body.decision || '').trim().toLowerCase();

@@ -2087,7 +2087,12 @@ class Director:
             "\n- Timeline: a fenced ```timeline block, one `YYYY-MM-DD or label — event` per line (deadlines, cadence)."
             "\n- Mermaid: a fenced ```mermaid block for a flow/sequence (funnel, decision path)."
             "\n- Chart: a fenced ```chart block of JSON {\"type\":\"bar|line|donut\",\"title\":\"\",\"data\":[{\"label\":\"\",\"value\":n}]} for counts/scores."
+            "\n- Stats: a fenced ```stats block of JSON [{\"label\":\"\",\"value\":\"\",\"delta\":\"+x%\"}] for the report's 3-5 headline numbers."
+            "\n- Steps: a fenced ```steps block, one `Title — detail` per line, for a real SEQUENCE (touch cadence, rollout, pilot phases)."
             "\nDon't force them; a crisp report with one table + one callout beats five half-empty widgets."
+            "\nPROSPECT GROUNDING: when the board carries PROSPECT rows (real firms from Maps/Impressum), any"
+            " prospect/target/partner list in the report MUST be built from THOSE rows (real names, phones,"
+            " emails, websites) — never invent institutions or write placeholder contacts when real ones exist."
         )
         if _io in ("doc", "notion", "answer", "report", ""):
             _fmt += _RICH

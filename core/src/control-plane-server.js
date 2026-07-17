@@ -239,11 +239,16 @@ function classifyHqKind(message) {
   }
   return null;
 }
-// A short question/status stays in HQ (direct answer); a work verb routes out.
+// A short greeting/status stays in HQ (direct answer). A work verb OR a
+// substantive question (already classified to a kind) routes to that kind's room.
 function isHqWorkRequest(message) {
   const m = String(message || '').trim();
   if (m.length < 12) return false;
-  return /\b(find|design|create|build|write|draft|prepare|research|analyze|generate|plan|make|produce|reach out|send|compose|map|identify)\b/i.test(m);
+  if (/\b(find|design|create|build|write|draft|prepare|research|analyze|generate|plan|make|produce|reach out|send|compose|map|identify)\b/i.test(m)) return true;
+  // A classified question ("should we…", "is it worth…", "how do we…") is work
+  // for that desk — route it. (classifyHqKind already gated to a real topic.)
+  if (m.length >= 20 && (/\?/.test(m) || /\b(should|could|would|is it worth|do we|how do we|what if|which)\b/i.test(m))) return true;
+  return false;
 }
 
 async function findOrCreateKindRoom(session, hqRoom, kind, message) {

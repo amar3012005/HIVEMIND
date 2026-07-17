@@ -11,6 +11,42 @@ import fetch from 'node-fetch';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 
+// Recover every COMPLETE top-level JSON object from a (possibly truncated)
+// array-bearing string. Brace-counted and string/escape aware so braces or
+// brackets inside string values never miscount. Used to salvage facts from a
+// finish=length truncated LLM response — the objects that fully serialized
+// before the cut are still valid and must not be discarded.
+export function _salvageArrayObjects(text = '') {
+  const s = String(text);
+  // Start scanning at the first '[' (the array whose elements we want). The
+  // fact objects sit INSIDE the outer {"facts":[…]} wrapper, so we count braces
+  // relative to the array: an element object opens when depth 0→1 and completes
+  // when it returns to 0 (nested objects inside it go 1→2→1 and don't miscount).
+  const arrStart = s.indexOf('[');
+  if (arrStart < 0) return [];
+  const out = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = arrStart + 1; i < s.length; i += 1) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') { if (depth === 0) start = i; depth += 1; }
+    else if (c === '}') {
+      if (depth > 0) depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try { out.push(JSON.parse(s.slice(start, i + 1))); } catch { /* skip malformed */ }
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
 // Routing logic:
@@ -163,6 +199,20 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       // Salvage first balanced object/array
       const m = content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
       if (m) parsed = tryParse(m[0]);
+    }
+    if (parsed === null) {
+      // TRUNCATION SALVAGE (finish=length): a cut-off response has no closing
+      // bracket, so the balanced-match above fails and every fact in that
+      // section would be lost. Recover every COMPLETE top-level object from the
+      // (possibly truncated) array — brace-counted, string/escape aware — so a
+      // response cut mid-object still yields the N-1 facts that completed.
+      const salvaged = _salvageArrayObjects(content);
+      if (salvaged.length) {
+        // Rebuild the shape the caller expects: {"facts":[…]} if the payload
+        // was a facts array, else the bare array.
+        parsed = /"facts"\s*:/.test(content) ? { facts: salvaged } : salvaged;
+        console.warn(`[enterprise-extract] truncation-salvaged ${salvaged.length} objects (finish=${json.choices?.[0]?.finish_reason || 'unknown'})`);
+      }
     }
     if (parsed !== null) return parsed;
     throw new Error(`[enterprise-extract] Failed to parse JSON response (finish=${json.choices?.[0]?.finish_reason || 'unknown'}): ${content.slice(0, 200)}`);

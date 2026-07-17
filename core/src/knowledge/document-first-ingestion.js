@@ -775,7 +775,11 @@ Rules: up to ${factCap} facts — capture EVERY distinct durable claim the secti
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
     const parsed = await chatCompletion({
-      model, temperature: 0, max_tokens: compact ? 900 : 1800, json_mode: true, feature: 'kb-unified-extract',
+      // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
+      // source_quote + entities). 1800 tokens overflowed → finish=length →
+      // truncated JSON → whole-section fact loss (~28% of calls). Give ample
+      // headroom; the truncation-salvage in litellm-client is the backstop.
+      model, temperature: 0, max_tokens: compact ? 2200 : 4500, json_mode: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),

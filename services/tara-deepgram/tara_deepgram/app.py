@@ -268,6 +268,16 @@ if config.TARA_DG_ENABLED:
         return {"call_leg_id": call_leg_id,
                 "session_id": meta["session_id"], "status": meta["status"]}
 
+    @app.websocket("/calls/listen")
+    async def calls_listen(ws: WebSocket):
+        """Listen-only browser tap into a live call (no barge-in). Query:
+        session_id (required), key (required when TARA_DG_API_KEY set — browser
+        WS can't send headers). Binary PCM16 mono 8kHz + JSON control events."""
+        from . import listen as _listen
+        qp = ws.query_params
+        await _listen.handle_listen(ws, session_id=qp.get("session_id") or "",
+                                    key=qp.get("key") or "")
+
     @app.post("/telnyx/webhook")
     async def telnyx_webhook(request: Request):
         event = await request.json()

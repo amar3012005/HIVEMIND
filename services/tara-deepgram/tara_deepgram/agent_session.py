@@ -26,7 +26,7 @@ from urllib.parse import urlencode
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import config
+from . import config, listen
 from .core_client import core_post
 from .functions import FUNCTION_DEFS, FunctionExecutor
 from .tara_stream import stream_tara
@@ -225,7 +225,9 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                     if ev == "media":
                         payload = msg.get("media", {}).get("payload")
                         if payload:
-                            await dg.send(base64.b64decode(payload))
+                            _pcmu_in = base64.b64decode(payload)
+                            await dg.send(_pcmu_in)
+                            listen.tee(session_id, "in", _pcmu_in)  # live-listen tap (no-op without listeners)
                     elif ev == "start":
                         st = msg.get("start", {})
                         stream_id = (msg.get("streamSid") or st.get("streamSid")
@@ -250,12 +252,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                         if stream_id:  # Twilio requires streamSid; Telnyx omits it
                             out["streamSid"] = stream_id
                         await telnyx_ws.send_text(json.dumps(out))
+                        listen.tee(session_id, "out", frame)  # live-listen tap (TTS out)
                         continue
                     msg = json.loads(frame)
                     mtype = msg.get("type")
                     if mtype == "ConversationText":
                         role, content = msg.get("role"), msg.get("content")
                         events.write("transcript", {"role": role, "content": content})
+                        listen.tee_event(session_id, {"type": "transcript", "role": role, "content": content})
                         if role == "user":
                             turn["user_text"] = content
                         elif role == "assistant":
@@ -330,6 +334,7 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         events.write("session_end", {"hangup_by_agent": executor.hangup_requested})
         # Mark the call ended in the registry so the FE status poll flips the
         # dialing animation to "ended" the moment the media stream closes.
+        listen.end_session(session_id)  # release any live listeners
         try:
             from . import telephony as _tel
             m = _tel.find_by_session(session_id)

@@ -186,10 +186,14 @@ export class EntityResolver {
       }
 
       // Create new canonical entity.
+      const _canonName = cand.name || cand.email || 'Unknown';
       const created = await this.prisma.canonicalEntity.create({
         data: {
           organizationId,
-          canonicalName: cand.name || cand.email || 'Unknown',
+          canonicalName: _canonName,
+          // normalized_name is NOT NULL in the DB; without it every create threw
+          // P2011 and canonical_entities could never populate. Stable identity key.
+          normalizedName: normalizeName(_canonName) || String(_canonName).toLowerCase(),
           entityKind: kind,
           aliases: cand.name ? [cand.name] : [],
           primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,

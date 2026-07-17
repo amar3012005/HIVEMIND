@@ -2285,6 +2285,7 @@ model CanonicalEntity {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizationId String   @map("organization_id") @db.Uuid
   canonicalName  String   @map("canonical_name")
+  normalizedName String   @map("normalized_name")
   entityKind     String   @map("entity_kind") @db.VarChar(40)
   aliases        String[] @default([])
   primaryEmail   String?  @map("primary_email") @db.VarChar(255)

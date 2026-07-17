@@ -3,42 +3,38 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260717-191051de
+release_id: prod-20260718-1c16e228
 host: singulance
-deployed_at_utc: 2026-07-17T18:21:00Z
+deployed_at_utc: 2026-07-17T19:10:00Z
 parent:
   branch: singulance-main
-  sha: 191051de4707f1c13a64652fce0d70a8784ce533
+  sha: 1c16e2288b2c8f7f9d5b9e7668a54f193d1c9ff9
 frontend:
-  sha: 84ad6c49c90a2817bc8683d743d88be6a4195527
+  sha: 6cb212da8c996201f1294b34dfdedacb5ed7d8cd
 runtime:
-  VERSION: prod-20260717-191051de
-  NEXT_VERSION: prod-20260717-191051de
+  VERSION: prod-20260718-1c16e228
+  NEXT_VERSION: prod-20260718-1c16e228
 images:
-  core: sha256:ee8cd3ab22d743a917b56ba02912c8e5021111767bdec237368761a7e079b68a
-  control: sha256:2d0326ca1d5042cacf659a28333ae3ce39b3c7fb0f095ec2f52dd40c4ff08c4b
+  core: sha256:36e1bbf40f8022bc276c86a95fb796c9dab8f3fb5408904e8cbda71e4da9f698
+  control: sha256:df985f4c84c4554dc039bf5df7119776a58e7998a979c160180e40ef798fe932
 changes:
-  - Personal managed onboarding reserves its embedded AMR route before organization creation.
-  - Successful personal onboarding cannot silently fall back to hybrid storage.
-  - Existing personal AMR metadata was reconciled and orphan memory-plane data was removed.
+  - Paid personal subscriptions reconcile from Checkout, subscription, and invoice events.
+  - Billing checkout returns can recover authoritative Stripe state idempotently.
+  - Core plan caches invalidate immediately after subscription activation.
 acceptance:
-  public: [api_health, core_health, next_login]
-  amr_canary:
-    org_id: 40da0836-6e0a-4c02-82f3-3c392f155cef
-    memories: 26
-    relationships: 40
-    warm_fact_recall_ms: [600, 465, 474]
-  personal_orgs_reconciled: 4
-  orphan_memory_rows_remaining: 0
-  orphan_shards_remaining: 0
+  public: [homepage, login, billing, api_health, core_health]
+  authenticated: [muster_billing_reconcile, muster_billing_plan, muster_usage]
+  muster:
+    plan: pro
+    subscription_status: active
+    memory_storage_mode: amr_embedded
   fresh_fatal_errors: 0
 backup:
-  path: /root/backups/amr-reconcile-20260717T180646Z
-  postgres_sha256: dc50e1f948139f68609e70fc26bc84a57ed4666b49555f00bc16fa2f1c4cd1fe
-  amr_registry_sha256: a788bd6fc061cb98bbdc5eb1f6749aac14e692d5eb7860f54811bbf873ea815d
+  path: /root/backups/prod-20260718-df10c312.dump
+  postgres_sha256: 31c0a0d3c5d05763cf1cca90bc9d5b10d50e01af98fcd74fa0e5fa37524a920b
 rollback:
-  core: hivemind/core-api:rollback-20260717T180902Z
-  control: hivemind/control-plane:rollback-20260717T180902Z
+  core: hivemind/core-api:rollback-20260717T185728Z
+  control: hivemind/control-plane:rollback-20260717T190437Z
 ```
 
 No customer email, connector action, or telephone call was triggered during release acceptance.

@@ -164,3 +164,19 @@ export async function findOrgByCustomerId(prisma, customerId) {
   if (!prisma || !customerId) return null;
   return prisma.organization.findUnique({ where: { stripeCustomerId: customerId } });
 }
+
+export function getSubscriptionIdFromStripeObject(object) {
+  const subscription = object?.subscription
+    || object?.parent?.subscription_details?.subscription
+    || object?.subscription_details?.subscription;
+  if (typeof subscription === 'string') return subscription;
+  return subscription?.id || null;
+}
+
+export function getSubscriptionPriceId(subscription) {
+  return subscription?.items?.data?.[0]?.price?.id || null;
+}
+
+export function isEntitledSubscriptionStatus(status) {
+  return status === 'active' || status === 'trialing';
+}

@@ -1140,16 +1140,28 @@ export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKn
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
   if (evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
-    return {
-      response: 'No grounded workspace evidence found',
-      claims: [],
-      rejected_claims: [],
-      grounded: false,
-      evidence_used: [],
-      confidence: 0,
-      gaps: ['The requested source was not covered by retrieved source evidence.'],
-      usage: null,
-    };
+    // ONLY refuse when there is genuinely nothing to answer from. When recall
+    // DID surface grounded memories/evidence, answer from them and record the
+    // uncovered requested source as a GAP — do not discard valid evidence.
+    // (Observed: 5 correct facts thrown away because an explain-escalation
+    // deadline falsely marked the requested source uncovered.) Restore the old
+    // hard-refuse with RECALL_SOURCE_STRICT=true.
+    const _haveEvidence = (evidence.memories?.length || 0) > 0
+      || (evidence.evidence?.length || 0) > 0
+      || (evidence.recall_packets?.some((p) => (p?.facts?.length || 0) > 0)) === true;
+    if (!_haveEvidence || String(process.env.RECALL_SOURCE_STRICT || '').toLowerCase() === 'true') {
+      return {
+        response: 'No grounded workspace evidence found',
+        claims: [],
+        rejected_claims: [],
+        grounded: false,
+        evidence_used: [],
+        confidence: 0,
+        gaps: ['The requested source was not covered by retrieved source evidence.'],
+        usage: null,
+      };
+    }
+    // else: fall through — answer from available evidence, gap noted below.
   }
 
   // Connector capability hint — built from active Nango connections so

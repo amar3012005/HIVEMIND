@@ -34,6 +34,7 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { persistCanonicalLinks } from '../memory/canonical-entity-persister.js';
+import { validateSupersedingEdge, computeHubEntitySlugs } from '../memory/relationship-semantics.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
@@ -1123,6 +1124,24 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     }
     const source = factById.get(pair.fromId);
     if (!source?.user_id || !source?.org_id) throw new Error('curated relationship source scope missing');
+    // STRICT VALIDATOR for the destructive types: the gray-zone LLM's opinion
+    // alone must not create Updates (demotes is_latest) or Contradicts. Same
+    // canonical subject required beyond the corpus-dominant hub entity (e.g.
+    // the manufacturer org tagging every fact), no exclusive-subject conflict
+    // (SolvisPia vs SolvisLea), and a same-attribute content overlap. On
+    // failure the edge is DOWNGRADED to Mentions with the refusal reason kept
+    // in metadata — shared-entity context is preserved, nothing is demoted.
+    if (type === 'Updates' || type === 'Contradicts') {
+      const target = factById.get(pair.toId);
+      const hubSlugs = computeHubEntitySlugs([...factById.values()]);
+      const verdict = validateSupersedingEdge(source, target || {}, { hubSlugs });
+      if (!verdict.ok) {
+        return store.createRelationship({
+          id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type: 'Mentions', confidence: 0.6,
+          metadata: { created_by: 'kb_hybrid_v1', document_id: documentId, downgraded_from: type, downgrade_reason: verdict.reason },
+        });
+      }
+    }
     if (type === 'Updates') {
       return this.memoryGraphEngine.applyUpdate(pair.fromId, pair.toId, {
         user_id: source.user_id, org_id: source.org_id, confidence: 0.8,

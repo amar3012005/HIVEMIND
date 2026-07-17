@@ -15,6 +15,7 @@ import {
   inferMemorySemanticRole,
   normalizeRelationshipDescriptor,
   normalizeRelationshipType,
+  validateSupersedingEdge,
 } from './relationship-semantics.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
@@ -2135,8 +2136,17 @@ OUTPUT JSON only.`;
       } catch { /* edge already exists — skip duplicate */ }
 
       // Reconciled-to-Updates supersedes the older memory (skip syntheses — cognition owns those).
+      // STRICT VALIDATOR gate: an algorithmic Updates edge may NOT demote
+      // is_latest unless the two memories provably share a specific subject
+      // and attribute (validateSupersedingEdge). The edge itself stands for
+      // graph context; only the destructive flip is withheld.
       if (edgeType === 'Updates' && !(c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis')) {
-        try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch { /* best-effort */ }
+        const verdict = validateSupersedingEdge(baseMemory, c.memory, {});
+        if (verdict.ok) {
+          try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch { /* best-effort */ }
+        } else {
+          console.log(`[kb-enrich] supersede WITHHELD for ${String(c.memory.id).slice(0, 8)}: ${verdict.reason}`);
+        }
       }
     }
     return out;
@@ -2865,11 +2875,20 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         if (cand.memory_type === 'synthesis' || cand.memoryType === 'synthesis') {
           console.log(`[entity-co-mention] H2: synthesis supersede SKIPPED for ${cand.id.slice(0, 8)} — cognition-loop owns synthesis demotion`);
         } else {
-          try {
-            await writeStore.updateMemory(cand.id, { is_latest: false });
-            console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
-          } catch (supErr) {
-            console.warn('[entity-co-mention] supersede update failed:', supErr.message);
+          // STRICT VALIDATOR gate: is_latest demotion requires a provably
+          // shared specific subject + attribute overlap — the LLM's Updates
+          // vote alone is not enough (prevents cross-product false
+          // supersessions that share only a generic org entity).
+          const verdict = validateSupersedingEdge(baseMemory, cand, {});
+          if (!verdict.ok) {
+            console.log(`[entity-co-mention] supersede WITHHELD for ${cand.id.slice(0, 8)}: ${verdict.reason}`);
+          } else {
+            try {
+              await writeStore.updateMemory(cand.id, { is_latest: false });
+              console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
+            } catch (supErr) {
+              console.warn('[entity-co-mention] supersede update failed:', supErr.message);
+            }
           }
         }
       }

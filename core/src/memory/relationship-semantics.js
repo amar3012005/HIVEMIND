@@ -318,3 +318,126 @@ export function buildSemanticMetadata({
     semantic_provenance: semanticProvenance,
   };
 }
+
+// ── Strict superseding-edge validator ────────────────────────────────────────
+// Deterministic structural gate for the DESTRUCTIVE relationship types
+// (Updates flips is_latest=false on the target; Contradicts asserts
+// incompatibility). Algorithmic edge factories (kb_hybrid_v1 gray-zone LLM,
+// entity-co-mention, kb-enrich contradiction pass) must pass this validator
+// before creating Updates/Contradicts or demoting is_latest — an LLM opinion
+// alone is not enough. Conversational hot-path classification (full-context,
+// user-driven) is intentionally NOT gated here.
+//
+// Rules (all must hold):
+//   1. SAME SUBJECT — the two memories share ≥1 entity slug.
+//   2. SPECIFIC SUBJECT — the shared set contains at least one NON-hub slug.
+//      Sharing only a generic hub entity (the org name — e.g. SOLVIS — that
+//      appears on most facts in a corpus) proves nothing about subject.
+//   3. NO EXCLUSIVE-SUBJECT CONFLICT — if each side carries its own distinct
+//      specific (non-hub, non-shared) entity, they are about DIFFERENT things
+//      (SolvisPia vs SolvisLea) and cannot update/contradict each other.
+//   4. SAME ATTRIBUTE (proxy) — content token overlap ≥ minAttributeOverlap
+//      (default 0.18 Jaccard on non-trivial tokens): a replacement/changed
+//      value keeps most of the sentence frame; disjoint statements (pellet
+//      requirements vs heating-oil requirements) do not.
+
+const _EDGE_STOP = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'with', 'on', 'at', 'is', 'are', 'be', 'has', 'have',
+  'der', 'die', 'das', 'und', 'oder', 'von', 'zu', 'im', 'mit', 'auf', 'ist', 'sind', 'ein', 'eine', 'für', 'bei', 'den', 'dem', 'des',
+]);
+
+function _entitySlugs(tags = []) {
+  const out = new Set();
+  for (const t of Array.isArray(tags) ? tags : []) {
+    if (typeof t !== 'string') continue;
+    if (t.startsWith('entity:') || t.startsWith('person:')) {
+      const slug = t.replace(/^(entity|person):/, '').trim().toLowerCase();
+      if (slug) out.add(slug);
+    }
+  }
+  return out;
+}
+
+function _contentTokens(content = '') {
+  return new Set(
+    String(content || '')
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((t) => t.length >= 3 && !_EDGE_STOP.has(t)),
+  );
+}
+
+/**
+ * @param {object} from  the NEW memory (source of the edge) — needs {tags, content}
+ * @param {object} to    the OLD memory (target, would be demoted) — needs {tags, content}
+ * @param {object} [opts]
+ * @param {string[]} [opts.hubSlugs]  generic entity slugs (corpus-dominant, e.g. the org name)
+ * @param {number} [opts.minAttributeOverlap]
+ * @returns {{ok: boolean, reason: string, sharedSpecific: string[]}}
+ */
+export function validateSupersedingEdge(from = {}, to = {}, { hubSlugs = [], minAttributeOverlap = 0.18 } = {}) {
+  const hubs = new Set((hubSlugs || []).map((s) => String(s).toLowerCase()));
+  const fromEnts = _entitySlugs(from.tags);
+  const toEnts = _entitySlugs(to.tags);
+
+  const shared = [...fromEnts].filter((e) => toEnts.has(e));
+  if (fromEnts.size && toEnts.size) {
+    if (shared.length === 0) return { ok: false, reason: 'no-shared-entity', sharedSpecific: [] };
+    const sharedSpecific = shared.filter((e) => !hubs.has(e));
+    if (hubs.size && sharedSpecific.length === 0) {
+      return { ok: false, reason: 'only-generic-entity-shared', sharedSpecific: [] };
+    }
+    const exclusiveFrom = [...fromEnts].filter((e) => !toEnts.has(e) && !hubs.has(e));
+    const exclusiveTo = [...toEnts].filter((e) => !fromEnts.has(e) && !hubs.has(e));
+    if (sharedSpecific.length === 0 && exclusiveFrom.length && exclusiveTo.length) {
+      return { ok: false, reason: 'different-subjects', sharedSpecific: [] };
+    }
+    // Same-attribute proxy on content.
+    const a = _contentTokens(from.content);
+    const b = _contentTokens(to.content);
+    if (a.size && b.size) {
+      let inter = 0;
+      for (const t of a) if (b.has(t)) inter += 1;
+      const jac = inter / (a.size + b.size - inter);
+      if (jac < minAttributeOverlap) {
+        return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific };
+      }
+    }
+    return { ok: true, reason: 'ok', sharedSpecific };
+  }
+
+  // One or both sides carry no entity tags — fall back to the attribute proxy
+  // alone (conversational memories often have no entity tags; do not
+  // hard-block them here, the caller decides how strict to be).
+  const a = _contentTokens(from.content);
+  const b = _contentTokens(to.content);
+  if (a.size && b.size) {
+    let inter = 0;
+    for (const t of a) if (b.has(t)) inter += 1;
+    const jac = inter / (a.size + b.size - inter);
+    if (jac < minAttributeOverlap) return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific: [] };
+  }
+  return { ok: true, reason: 'ok-no-entity-tags', sharedSpecific: [] };
+}
+
+/**
+ * Corpus-dominant ("hub") entity slugs: entities present on ≥ threshold share
+ * of the given memories. In a product manual the manufacturer's org name tags
+ * nearly every fact — sharing it proves nothing (rule 2 above).
+ * @param {Array<{tags?: string[]}>} memories
+ * @param {number} [threshold]  fraction of memories (default 0.5)
+ * @returns {string[]}
+ */
+export function computeHubEntitySlugs(memories = [], threshold = 0.5) {
+  const counts = new Map();
+  let n = 0;
+  for (const m of memories) {
+    const ents = _entitySlugs(m?.tags);
+    if (!ents.size) continue;
+    n += 1;
+    for (const e of ents) counts.set(e, (counts.get(e) || 0) + 1);
+  }
+  if (n < 3) return []; // too few tagged memories to call anything "dominant"
+  const min = Math.ceil(n * threshold);
+  return [...counts.entries()].filter(([, c]) => c >= min).map(([e]) => e);
+}

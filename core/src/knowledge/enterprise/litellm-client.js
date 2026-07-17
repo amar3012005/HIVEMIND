@@ -129,7 +129,18 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   const route = pickRoute(model);
   // On OpenRouter, remap Groq model ids to their OpenRouter equivalents.
-  if (route.provider === 'openrouter') body.model = mapModelForOpenRouter(model);
+  if (route.provider === 'openrouter') {
+    body.model = mapModelForOpenRouter(model);
+    // "use groq models from openrouter": for Groq-served models (gpt-oss,
+    // llama, mixtral, gemma, qwen) PREFER the Groq backend — benchmarked ~4s
+    // vs ~16s on other OpenRouter providers, valid JSON, 8/8 facts-with-entities.
+    // allow_fallbacks stays TRUE so a Groq 429/outage falls back (slower) rather
+    // than failing — robustness over raw speed. Non-Groq models (gemini) unpinned.
+    if (FORCE_GROQ_FOR_MODELS.test(model || '')) {
+      const order = (process.env.OPENROUTER_PROVIDER_ORDER || 'Groq').split(',').map((x) => x.trim()).filter(Boolean);
+      body.provider = { order, allow_fallbacks: process.env.OPENROUTER_ALLOW_FALLBACKS !== 'false' };
+    }
+  }
   // Groq's strict json_object mode rejects empty/invalid generations with
   // a 400. Skip strict mode there and rely on the salvage parser below.
   if (json_mode && route.provider !== 'groq') {

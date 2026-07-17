@@ -1552,6 +1552,77 @@ function resolveCoreTarget(req, org = null) {
   });
 }
 
+async function invalidateCorePlanCache(orgId) {
+  if (!orgId) return;
+  const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/billing/plan/refresh`, {
+    method: 'POST',
+    headers: {
+      'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || '',
+      'X-HM-Org-Id': orgId,
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`core plan refresh failed (${response.status})`);
+}
+
+async function syncPersonalStripeSubscription({ org, subscription, plansMod }) {
+  if (!org || plansMod.isEnterpriseWorkspace(org)) return null;
+  if (!subscription?.id || !subscription.customer) return null;
+  if (subscription.metadata?.hivemind_org_id
+    && subscription.metadata.hivemind_org_id !== org.id) return null;
+
+  const billingMod = await import('./billing/stripe.js');
+  const planId = plansMod.planIdForStripePrice(billingMod.getSubscriptionPriceId(subscription));
+  if (!planId || !plansMod.isPersonalPlan(planId) || planId === 'free') return null;
+  if (!billingMod.isEntitledSubscriptionStatus(subscription.status)) return null;
+
+  const now = new Date();
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.organization.update({
+      where: { id: org.id },
+      data: {
+        plan: planId,
+        stripeCustomerId: String(subscription.customer),
+        stripeSubscriptionId: subscription.id,
+        subscriptionStatus: subscription.status,
+        currentPeriodEnd: subscription.current_period_end
+          ? new Date(subscription.current_period_end * 1000)
+          : null,
+        trialEndsAt: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+      },
+    });
+    const activeStripeEntitlement = await tx.organizationEntitlement.findFirst({
+      where: {
+        orgId: org.id,
+        source: 'stripe',
+        phase: 'subscription',
+        planId,
+        effectiveUntil: null,
+      },
+      select: { id: true },
+    });
+    if (!activeStripeEntitlement) {
+      await tx.organizationEntitlement.updateMany({
+        where: { orgId: org.id, effectiveUntil: null },
+        data: { effectiveUntil: now },
+      });
+      await tx.organizationEntitlement.create({
+        data: {
+          orgId: org.id,
+          source: 'stripe',
+          phase: 'subscription',
+          planId,
+          limits: {},
+          effectiveFrom: now,
+        },
+      });
+    }
+    return result;
+  });
+  await invalidateCorePlanCache(updated.id);
+  return updated;
+}
+
 async function getCoreHealth(coreApiBaseUrl = CONFIG.coreApiBaseUrl) {
   try {
     const healthResponse = await fetch(`${coreApiBaseUrl}/health`);
@@ -9614,6 +9685,43 @@ Write the persona now.`;
       }
     }
 
+    // POST /v1/billing/reconcile — recover authoritative Stripe state after Checkout.
+    if (pathname === '/v1/billing/reconcile' && req.method === 'POST') {
+      if (!billingMod.isEnabled()) {
+        return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+      }
+      if (plansMod.isEnterpriseWorkspace(org)) {
+        return jsonResponse(res, { error: 'Enterprise billing is managed outside self-serve checkout' }, 409);
+      }
+      if (!org.stripeCustomerId) {
+        return jsonResponse(res, { reconciled: false, reason: 'no_customer' }, 412);
+      }
+      try {
+        const stripe = await billingMod.getStripe();
+        const subscriptions = await stripe.subscriptions.list({
+          customer: org.stripeCustomerId,
+          status: 'all',
+          limit: 10,
+        });
+        const subscription = subscriptions.data.find((item) => (
+          billingMod.isEntitledSubscriptionStatus(item.status)
+          && (!item.metadata?.hivemind_org_id || item.metadata.hivemind_org_id === orgId)
+        ));
+        const updated = await syncPersonalStripeSubscription({ org, subscription, plansMod });
+        if (!updated) {
+          return jsonResponse(res, { reconciled: false, reason: 'no_active_personal_subscription' }, 409);
+        }
+        return jsonResponse(res, {
+          reconciled: true,
+          plan: updated.plan,
+          subscription_status: updated.subscriptionStatus,
+        });
+      } catch (err) {
+        console.error('[billing] Stripe reconciliation failed:', err.message);
+        return jsonResponse(res, { error: 'Stripe reconciliation failed' }, 502);
+      }
+    }
+
     // POST /v1/billing/portal — opens Stripe Customer Portal
     if (pathname === '/v1/billing/portal' && req.method === 'POST') {
       if (!billingMod.isEnabled()) {
@@ -9733,40 +9841,24 @@ Write the persona now.`;
               data: { stripeCustomerId: customerId },
             });
           }
+          if (org && obj.payment_status === 'paid') {
+            const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(obj);
+            if (subscriptionId) {
+              const stripe = await billingMod.getStripe();
+              const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+              org = await syncPersonalStripeSubscription({ org, subscription, plansMod }) || org;
+            }
+          }
           break;
         }
         case 'customer.subscription.created':
         case 'customer.subscription.updated':
         case 'customer.subscription.resumed': {
           if (!org) break;
-          const sub = obj;
-          const priceId = sub.items?.data?.[0]?.price?.id || null;
-          const planId = plansMod.planIdForStripePrice(priceId) || org.plan || 'free';
-          await prisma.$transaction(async (tx) => {
-            await tx.organization.update({
-              where: { id: org.id },
-              data: {
-                plan: planId,
-                stripeCustomerId: org.stripeCustomerId || sub.customer || null,
-                stripeSubscriptionId: sub.id || null,
-                subscriptionStatus: sub.status || null,
-                currentPeriodEnd: sub.current_period_end
-                  ? new Date(sub.current_period_end * 1000)
-                  : null,
-                trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
-              },
-            });
-            // A paid subscription supersedes a referral runway immediately.
-            await tx.organizationEntitlement.updateMany({
-              where: { orgId: org.id, effectiveFrom: { lte: new Date() }, effectiveUntil: null },
-              data: { effectiveUntil: new Date() },
-            });
-            await tx.organizationEntitlement.create({
-              data: { orgId: org.id, source: 'stripe', phase: 'subscription', planId, limits: {}, effectiveFrom: new Date() },
-            });
-          });
-          if (['active', 'trialing'].includes(sub.status)) {
-            provisionPaidManagedOrg(org.id, planId)
+          const updated = await syncPersonalStripeSubscription({ org, subscription: obj, plansMod });
+          if (updated) {
+            org = updated;
+            provisionPaidManagedOrg(org.id, org.plan)
               .catch((error) => console.error('[managed-provision] post-stripe failed', { orgId: org.id, error: error.message }));
           }
           break;
@@ -9799,10 +9891,15 @@ Write the persona now.`;
           });
           break;
         }
+        case 'invoice.paid':
         case 'invoice.payment_succeeded': {
           if (!org) break;
-          // No state change needed — subscription.updated covers it. Still
-          // record so the audit trail shows the payment.
+          const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(obj);
+          if (subscriptionId) {
+            const stripe = await billingMod.getStripe();
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+            org = await syncPersonalStripeSubscription({ org, subscription, plansMod }) || org;
+          }
           break;
         }
         default:

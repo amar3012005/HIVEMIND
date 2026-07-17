@@ -1657,7 +1657,15 @@ class Director:
 
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
-        members = self.participants[:5]
+        # Maker kinds (outreach/content/research) + any produce output run a
+        # WRITER-LED shape: 1 maker + ≤1 reviewer, not a skeptic tribunal. Panel
+        # kinds (strategy/decision) keep the full debate. Fixes the sales-sheet
+        # failure where 3 skeptics argued instead of producing the deliverable.
+        from .rooms import lead_shape_for, shape_debate_members
+        _shape = lead_shape_for(self.room_kind, getattr(self, "intended_output", ""))
+        members = shape_debate_members(self.participants, _shape)
+        if _shape == "maker":
+            rounds = 1  # one pass: lead writes, reviewer flags — no multi-round tribunal
         if not members:
             return json.dumps({"error": "no participants to debate"})
 

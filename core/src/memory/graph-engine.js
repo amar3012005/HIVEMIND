@@ -16,6 +16,7 @@ import {
   normalizeRelationshipDescriptor,
   normalizeRelationshipType,
   validateSupersedingEdge,
+  relationshipValidatorMode,
 } from './relationship-semantics.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
@@ -2141,11 +2142,16 @@ OUTPUT JSON only.`;
       // and attribute (validateSupersedingEdge). The edge itself stands for
       // graph context; only the destructive flip is withheld.
       if (edgeType === 'Updates' && !(c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis')) {
-        const verdict = validateSupersedingEdge(baseMemory, c.memory, {});
-        if (verdict.ok) {
+        const _mode = relationshipValidatorMode();
+        const verdict = _mode === 'off' ? { ok: true, reason: 'validator-off' } : validateSupersedingEdge(baseMemory, c.memory, { requireChangeEvidence: true });
+        if (_mode === 'shadow' && !verdict.ok) {
+          console.log(`[rel-validator][shadow] kb-enrich WOULD-WITHHOLD supersede ${String(c.memory.id).slice(0, 8)}: ${verdict.reason} (acting anyway — shadow)`);
+        }
+        const withhold = _mode === 'enforce' && !verdict.ok;
+        if (!withhold) {
           try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch { /* best-effort */ }
         } else {
-          console.log(`[kb-enrich] supersede WITHHELD for ${String(c.memory.id).slice(0, 8)}: ${verdict.reason}`);
+          console.log(`[rel-validator][enforce] kb-enrich supersede WITHHELD ${String(c.memory.id).slice(0, 8)}: ${verdict.reason}`);
         }
       }
     }
@@ -2879,9 +2885,14 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           // shared specific subject + attribute overlap — the LLM's Updates
           // vote alone is not enough (prevents cross-product false
           // supersessions that share only a generic org entity).
-          const verdict = validateSupersedingEdge(baseMemory, cand, {});
-          if (!verdict.ok) {
-            console.log(`[entity-co-mention] supersede WITHHELD for ${cand.id.slice(0, 8)}: ${verdict.reason}`);
+          const _mode = relationshipValidatorMode();
+          const verdict = _mode === 'off' ? { ok: true, reason: 'validator-off' } : validateSupersedingEdge(baseMemory, cand, { requireChangeEvidence: true });
+          if (_mode === 'shadow' && !verdict.ok) {
+            console.log(`[rel-validator][shadow] co-mention WOULD-WITHHOLD supersede ${cand.id.slice(0, 8)}: ${verdict.reason} (acting anyway — shadow)`);
+          }
+          const withhold = _mode === 'enforce' && !verdict.ok;
+          if (withhold) {
+            console.log(`[rel-validator][enforce] co-mention supersede WITHHELD ${cand.id.slice(0, 8)}: ${verdict.reason}`);
           } else {
             try {
               await writeStore.updateMemory(cand.id, { is_latest: false });

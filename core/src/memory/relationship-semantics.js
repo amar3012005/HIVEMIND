@@ -1,3 +1,4 @@
+import { assessClaimRelation } from './claim-signature.js';
 const RELATIONSHIP_ALIASES = new Map([
   ['update', 'Updates'],
   ['updates', 'Updates'],
@@ -375,49 +376,60 @@ function _contentTokens(content = '') {
  * @param {number} [opts.minAttributeOverlap]
  * @returns {{ok: boolean, reason: string, sharedSpecific: string[]}}
  */
-export function validateSupersedingEdge(from = {}, to = {}, { hubSlugs = [], minAttributeOverlap = 0.18 } = {}) {
-  const hubs = new Set((hubSlugs || []).map((s) => String(s).toLowerCase()));
-  const fromEnts = _entitySlugs(from.tags);
-  const toEnts = _entitySlugs(to.tags);
-
-  const shared = [...fromEnts].filter((e) => toEnts.has(e));
-  if (fromEnts.size && toEnts.size) {
-    if (shared.length === 0) return { ok: false, reason: 'no-shared-entity', sharedSpecific: [] };
-    const sharedSpecific = shared.filter((e) => !hubs.has(e));
-    if (hubs.size && sharedSpecific.length === 0) {
-      return { ok: false, reason: 'only-generic-entity-shared', sharedSpecific: [] };
-    }
-    const exclusiveFrom = [...fromEnts].filter((e) => !toEnts.has(e) && !hubs.has(e));
-    const exclusiveTo = [...toEnts].filter((e) => !fromEnts.has(e) && !hubs.has(e));
-    if (sharedSpecific.length === 0 && exclusiveFrom.length && exclusiveTo.length) {
+export function validateSupersedingEdge(from = {}, to = {}, {
+  hubSlugs = [],
+  minAttributeOverlap = 0.18,
+  requireChangeEvidence = false,
+} = {}) {
+  // PRIMARY: structural claim comparison (claim-signature.js) — canonical
+  // subjects + typed value slots (numbers/units/years/dates/model ids).
+  // Language-neutral and deterministic: an LLM edge proposal survives only when
+  // the STRUCTURE supports it. Token-overlap Jaccard is retained ONLY as a
+  // fallback for value-less prose claims (see below), because it conflates
+  // "shares vocabulary" with "same attribute" and misses multilingual equals.
+  const assessment = assessClaimRelation(from, to, { hubSlugs });
+  switch (assessment.relation) {
+    case 'no-shared-subject':
+      return { ok: false, reason: 'no-shared-entity', sharedSpecific: [] };
+    case 'different-subject':
       return { ok: false, reason: 'different-subjects', sharedSpecific: [] };
-    }
-    // Same-attribute proxy on content.
-    const a = _contentTokens(from.content);
-    const b = _contentTokens(to.content);
-    if (a.size && b.size) {
-      let inter = 0;
-      for (const t of a) if (b.has(t)) inter += 1;
-      const jac = inter / (a.size + b.size - inter);
-      if (jac < minAttributeOverlap) {
-        return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific };
+    case 'topical':
+      if (assessment.reason === 'only corpus-hub subject shared') {
+        return { ok: false, reason: 'only-generic-entity-shared', sharedSpecific: [] };
       }
-    }
-    return { ok: true, reason: 'ok', sharedSpecific };
+      if (assessment.reason === 'subject evidence on one side only') {
+        return { ok: false, reason: 'subject-evidence-one-sided', sharedSpecific: [] };
+      }
+      break; // same subject, no typed slots → fall through to frame fallback
+    case 'corroboration':
+      if (requireChangeEvidence) {
+        return { ok: false, reason: 'no-change-evidence(values-agree)', sharedSpecific: assessment.sharedSpecific };
+      }
+      return { ok: true, reason: 'corroboration', sharedSpecific: assessment.sharedSpecific };
+    case 'update':
+      return { ok: true, reason: 'value-change-evidence', sharedSpecific: assessment.sharedSpecific };
+    default:
+      break;
   }
 
-  // One or both sides carry no entity tags — fall back to the attribute proxy
-  // alone (conversational memories often have no entity tags; do not
-  // hard-block them here, the caller decides how strict to be).
+  // FALLBACK for value-less prose (no typed slots either side): a genuine
+  // replacement keeps the sentence frame and swaps the value words; a
+  // near-verbatim duplicate keeps everything; unrelated statements share
+  // little. Weak signal — only when structure could not decide.
   const a = _contentTokens(from.content);
   const b = _contentTokens(to.content);
   if (a.size && b.size) {
     let inter = 0;
     for (const t of a) if (b.has(t)) inter += 1;
     const jac = inter / (a.size + b.size - inter);
-    if (jac < minAttributeOverlap) return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific: [] };
+    if (jac < minAttributeOverlap) {
+      return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific: assessment.sharedSpecific };
+    }
+    if (requireChangeEvidence && jac >= 0.7) {
+      return { ok: false, reason: `no-change-evidence(${jac.toFixed(2)})`, sharedSpecific: assessment.sharedSpecific };
+    }
   }
-  return { ok: true, reason: 'ok-no-entity-tags', sharedSpecific: [] };
+  return { ok: true, reason: 'frame-fallback', sharedSpecific: assessment.sharedSpecific };
 }
 
 /**
@@ -440,4 +452,19 @@ export function computeHubEntitySlugs(memories = [], threshold = 0.5) {
   if (n < 3) return []; // too few tagged memories to call anything "dominant"
   const min = Math.ceil(n * threshold);
   return [...counts.entries()].filter(([, c]) => c >= min).map(([e]) => e);
+}
+
+// ── Enforcement mode ─────────────────────────────────────────────────────────
+// The destructive-edge validator ships in SHADOW mode first: every gate still
+// COMPUTES the verdict and logs it, but does NOT act on it (no downgrade, no
+// is_latest withhold) until we have measured precision on a real corpus.
+//   RELATIONSHIP_VALIDATOR_MODE = shadow (default) | enforce | off
+//     shadow  → compute + log, take NO destructive action differently than before
+//     enforce → act on the verdict (downgrade edges / withhold demotion)
+//     off     → skip the validator entirely (legacy behaviour)
+// Read per-call (not cached) so the mode can be flipped via env without redeploy
+// where the process re-reads env, and always overridable in tests.
+export function relationshipValidatorMode() {
+  const m = String(process.env.RELATIONSHIP_VALIDATOR_MODE || 'shadow').toLowerCase();
+  return (m === 'enforce' || m === 'off') ? m : 'shadow';
 }

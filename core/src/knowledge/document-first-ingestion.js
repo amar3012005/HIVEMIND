@@ -34,7 +34,7 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { persistCanonicalLinks } from '../memory/canonical-entity-persister.js';
-import { validateSupersedingEdge, computeHubEntitySlugs } from '../memory/relationship-semantics.js';
+import { validateSupersedingEdge, computeHubEntitySlugs, relationshipValidatorMode } from '../memory/relationship-semantics.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
@@ -1132,14 +1132,24 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // failure the edge is DOWNGRADED to Mentions with the refusal reason kept
     // in metadata — shared-entity context is preserved, nothing is demoted.
     if (type === 'Updates' || type === 'Contradicts') {
-      const target = factById.get(pair.toId);
-      const hubSlugs = computeHubEntitySlugs([...factById.values()]);
-      const verdict = validateSupersedingEdge(source, target || {}, { hubSlugs });
-      if (!verdict.ok) {
-        return store.createRelationship({
-          id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type: 'Mentions', confidence: 0.6,
-          metadata: { created_by: 'kb_hybrid_v1', document_id: documentId, downgraded_from: type, downgrade_reason: verdict.reason },
-        });
+      const _mode = relationshipValidatorMode();
+      if (_mode !== 'off') {
+        const target = factById.get(pair.toId);
+        const hubSlugs = computeHubEntitySlugs([...factById.values()]);
+        const verdict = validateSupersedingEdge(source, target || {}, { hubSlugs, requireChangeEvidence: type === 'Updates' });
+        if (!verdict.ok) {
+          const downgradeType = verdict.reason.startsWith('no-change-evidence') ? 'Extends' : 'Mentions';
+          if (_mode === 'shadow') {
+            // Observe-only: create the ORIGINAL edge type but tag the shadow verdict
+            // so we can measure precision without changing graph behaviour yet.
+            console.log(`[rel-validator][shadow] kb-hybrid WOULD-DOWNGRADE ${type}→${downgradeType} (${pair.fromId.slice(0,8)}→${pair.toId.slice(0,8)}): ${verdict.reason}`);
+          } else { // enforce
+            return store.createRelationship({
+              id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type: downgradeType, confidence: 0.6,
+              metadata: { created_by: 'kb_hybrid_v1', document_id: documentId, downgraded_from: type, downgrade_reason: verdict.reason },
+            });
+          }
+        }
       }
     }
     if (type === 'Updates') {

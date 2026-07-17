@@ -1,5 +1,6 @@
 import { computeTokenSimilarity, tokenCountMap, cosineFromCounts } from './conflict-detector.js';
 import { normalizeEntity } from './entity-normalize.js';
+import { resolveEntityRecallCandidates } from './entity-hop0.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { runWithOrg, currentOrg, currentApiKey } from '../db/prisma.js';
 import { getRetrievalConfig } from './retrieval-config.js';
@@ -1520,6 +1521,31 @@ async function _recallPersistedMemoriesImpl(store, {
     : Promise.resolve([]);
   _entityCandidatesPromise.catch(() => {});
 
+  // ── Hop-0 canonical-entity lane (gated: RECALL_ENTITY_HOP0, default on) ──
+  // Bounded DETERMINISTIC registry lookup (indexed entity tables, no LLM)
+  // that surfaces entity-linked memories as ADDITIVE candidates. Overlaps the
+  // other lanes; ~125ms deadline; fails open to [] so it can never delay or
+  // narrow ordinary recall. See entity-hop0.js for caps + matching rules.
+  const _ENTITY_HOP0_EMPTY = { candidates: [], matchedEntities: [], matchedQueryEntityCount: 0, latencyMs: 0, cutoff: false };
+  const _entityHop0Promise = (process.env.RECALL_ENTITY_HOP0 !== 'false')
+    ? resolveEntityRecallCandidates({
+        store,
+        query: query_context,
+        org_id,
+        user_id,
+        access_context,
+        scope_filter,
+        dateRange: effectiveDateRange,
+        validAt: snapshotValidAt,
+        knownAt: known_at,
+        is_latest: effectiveIsLatest,
+        excludeMemory: (m) => isTaraActivity(m) || isRecallNoise(m),
+        isMemoryInDateRange,
+        isMemoryInTemporalSnapshot,
+      }).catch(() => _ENTITY_HOP0_EMPTY)
+    : Promise.resolve(_ENTITY_HOP0_EMPTY);
+  _entityHop0Promise.catch(() => {});
+
   // Observation-prefix (Mastra-style stable context) depends ONLY on
   // (user, org, project) — NOT on the recall results — yet was assembled at the
   // very END, serialized after all scoring/dedup. It does a listLatestMemories
@@ -1643,11 +1669,13 @@ async function _recallPersistedMemoriesImpl(store, {
   //   • temporal pass: COMPLEMENTARY to effectiveDateRange — it any-matches the
   //     ingest ts:/time: EVENT-time tags (dateRange:null), surfacing memories a
   //     record-time window misses. _temporal_filtered tag set inside the promise.
-  const [entityFilteredCandidates, temporalFilteredCandidates, relationships] = await Promise.all([
+  const [entityFilteredCandidates, temporalFilteredCandidates, relationships, _entityHop0] = await Promise.all([
     _entityCandidatesPromise,
     _temporalCandidatesPromise,
     _relationshipsPromise,
+    _entityHop0Promise,
   ]);
+  const entityHop0Candidates = Array.isArray(_entityHop0?.candidates) ? _entityHop0.candidates : [];
   // Keep _entityFilterTags populated for any downstream reference. The extraction
   // promise is already settled (the entity pass above awaited it); this is a
   // no-op await that just surfaces the resolved tags. 'must' mode set it earlier.
@@ -1667,6 +1695,7 @@ async function _recallPersistedMemoriesImpl(store, {
     crosslingualCandidates,
     entityFilteredCandidates,
     temporalFilteredCandidates,
+    entityHop0Candidates,
   ]);
   const expandedCandidates = await expandCandidatesViaGraph(store, {
     initialCandidates,
@@ -1854,7 +1883,43 @@ async function _recallPersistedMemoriesImpl(store, {
     return { ...candidate, keywordScore: candidate.similarityScore || 0, graphScore, policyScore, recencyScore, score };
   }).filter(c => c.memory?.id);
 
-  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal).sort((a, b) => b.score - a.score);
+  // Score the Hop-0 entity-lane candidates and merge them DIRECTLY (same
+  // pattern as scoredTemporal). They carry no vector similarity — their claim
+  // to relevance is the deterministic entity match, applied as a BOUNDED boost
+  // (≤0.45) plus a small multi-entity coverage bonus (≤0.15). Semantic and
+  // lexical relevance still decide the final order: an entity match lifts a
+  // candidate into contention, it cannot override an on-topic result. All
+  // penalties (superseded/contradiction/attribution) apply identically.
+  const _hop0CoverageBoost = Math.min(0.15, (_entityHop0?.matchedQueryEntityCount || 0) * 0.05);
+  const scoredEntityHop0 = entityHop0Candidates.map(candidate => {
+    const now = Date.now();
+    const created = new Date(candidate.memory?.created_at).getTime();
+    const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
+    const recencyScore = Math.exp(-daysAgo / 30);
+    const graphScore = Math.min((relationshipCounts.get(candidate.memory?.id) || 0) * 0.03, 0.12);
+    const policyScore = policyBoost(candidate.memory, { preferred_project, preferred_source_platforms, preferred_tags });
+    const entityBoost = Math.min(0.45, (candidate._entity_match_score || 0) * 0.45);
+    let score = (_effectiveWeights.recency ?? 0.15) * recencyScore +
+        (_effectiveWeights.importance ?? 0.1) * 1 +
+        (_effectiveWeights.graph ?? 0.05) * graphScore +
+        (_effectiveWeights.policy ?? 0.05) * policyScore +
+        entityBoost + _hop0CoverageBoost + _eventTimeBoost(candidate.memory);
+    if (!temporalSnapshot && candidate.memory?.is_latest === false) score *= 0.55;
+    if (candidate.memory?.id) {
+      score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
+      score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
+    }
+    // The deterministic entity match IS this candidate's lexical-relevance
+    // evidence. Carry it (scaled) as keyword/similarity signal so
+    // applyRecallRelevanceFloor's HARD_MIN_SIMILARITY (0.10) doesn't silently
+    // drop Hop-0-only candidates: exact match (0.5) clears every floor; a weak
+    // partial (0.15) clears only the hard floor and yields to strong semantic
+    // hits — entity matching boosts relevance, it does not override it.
+    const _lexEvidence = Math.max(0, Math.min(0.5, (candidate._entity_match_score || 0) * 0.5));
+    return { ...candidate, keywordScore: _lexEvidence, similarityScore: _lexEvidence, graphScore, policyScore, recencyScore, score };
+  }).filter(c => c.memory?.id);
+
+  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0).sort((a, b) => b.score - a.score);
 
   // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting)
   const typeBoosts = detectMemoryTypeBoost(query_context);
@@ -2598,6 +2663,9 @@ async function _recallPersistedMemoriesImpl(store, {
         vector: Array.isArray(vectorCandidates) ? vectorCandidates.length : 0,
         crosslingual: Array.isArray(crosslingualCandidates) ? crosslingualCandidates.length : 0,
         entity: Array.isArray(entityFilteredCandidates) ? entityFilteredCandidates.length : 0,
+        entity_hop0: entityHop0Candidates.length,
+        entity_hop0_matched: Array.isArray(_entityHop0?.matchedEntities) ? _entityHop0.matchedEntities.length : 0,
+        entity_hop0_ms: _entityHop0?.latencyMs || 0,
         temporal: Array.isArray(temporalFilteredCandidates) ? temporalFilteredCandidates.length : 0,
         graph_expanded: Array.isArray(expandedCandidates) ? expandedCandidates.length : 0,
       },

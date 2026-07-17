@@ -1098,7 +1098,10 @@ export class PrismaGraphStore {
         tags: tags?.length ? { hasEvery: tags } : undefined,
         createdAt: {
           gte: created_after ? new Date(created_after) : undefined,
-          lte: upperCreatedAt,
+          // was `upperCreatedAt` — an undefined variable (ReferenceError) that
+          // crashed the whole recall call whenever the FTS path fell through
+          // to this fallback. Restored to the created_before bound.
+          lte: created_before ? new Date(created_before) : undefined,
         },
         ...(valid_at ? {
           AND: [

@@ -932,6 +932,23 @@ Promote only decisions, commitments, requirements, metrics, named parties, dates
         } catch { /* best-effort; dup/FK tolerated */ }
       }
     }
+    // Canonical-entity registry: turn the extractor's canonical NAMES into
+    // durable CanonicalEntity + MemoryEntityLink rows. This is the LIVE KB path
+    // (KB_UNIFIED_EXTRACT default on); the mirror hook in _distillFactsAsync
+    // covers the legacy fallback. Awaited (not fire-and-forget) so serial
+    // window calls can't race-create duplicate entities; it's already off the
+    // ingest lock (post-commit) so latency lands in background Tier-2.
+    const _canonItems = [];
+    for (let i = 0; i < facts.length; i++) {
+      if (idByIdx[i] && Array.isArray(facts[i].entities) && facts[i].entities.length) {
+        _canonItems.push({ memoryId: idByIdx[i], entities: facts[i].entities });
+      }
+    }
+    if (_canonItems.length) {
+      try {
+        await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items: _canonItems, logger: this.logger });
+      } catch (e) { this.logger.warn?.(`[canonical-entities] ${e.message}`); }
+    }
     return factObjs;
   }
 

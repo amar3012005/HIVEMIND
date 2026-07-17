@@ -1688,9 +1688,20 @@ class Director:
                              "content": c["text"], "line": c["text"], "confidence": 0.7})
             return c
 
+        # Prospect-anchored round 1 for outreach/maker rooms: if the board carries
+        # PROSPECT rows, agents debate the ACTUAL firms (who to prioritize, the
+        # per-firm hook + likely objection, the sequence) — not generic theory.
+        _prospect_lines = [l for l in self.blackboard if "PROSPECT:" in str(l)][:8]
+        if _prospect_lines:
+            _plist = "\n".join(_prospect_lines)
+            r1_prompt = (f"The team found these PROSPECTS on the board:\n{_plist}\n\n"
+                         f"Objective: {topic}\nDiscuss THESE specific firms — which to prioritize and why, "
+                         f"the sharpest why-now hook for each, the objection each is likely to raise, and how "
+                         f"the outreach should open. Be concrete about the named firms; no generic theory.")
+        else:
+            r1_prompt = f"What is your stance on: {topic}? Give your view + your single biggest concern."
         r1 = await asyncio.gather(*[
-            _consult_and_emit(m, f"What is your stance on: {topic}? Give your view + your single biggest concern.",
-                              self._round_seq, ("challenge", "contribute"))
+            _consult_and_emit(m, r1_prompt, self._round_seq, ("challenge", "contribute"))
             for m in members
         ])
         for c in r1:
@@ -2060,6 +2071,25 @@ class Director:
             _fmt = "\n\nThe deliverable is a SPREADSHEET — output the rows/columns the producer will create as a sheet."
         else:
             _fmt = ""
+        # Rich room-report elements — the FE renders these as first-class visuals
+        # (styled tables, mermaid, timeline, charts, callouts). Offer them to the
+        # room report (doc/answer) + the SUPPORTING MATERIAL of an outreach email —
+        # never inside the email body. Use ONLY when they add clarity; keep to
+        # grounded facts.
+        _RICH = (
+            "\n\nRICH REPORT ELEMENTS (use when they genuinely aid clarity — the UI renders each specially):"
+            "\n- Tables: normal markdown tables (prospect lists, comparisons)."
+            "\n- Callouts: a line starting `> [!important]`, `> [!insight]`, or `> [!risk]` for the one thing that matters."
+            "\n- Timeline: a fenced ```timeline block, one `YYYY-MM-DD or label — event` per line (deadlines, cadence)."
+            "\n- Mermaid: a fenced ```mermaid block for a flow/sequence (funnel, decision path)."
+            "\n- Chart: a fenced ```chart block of JSON {\"type\":\"bar|line|donut\",\"title\":\"\",\"data\":[{\"label\":\"\",\"value\":n}]} for counts/scores."
+            "\nDon't force them; a crisp report with one table + one callout beats five half-empty widgets."
+        )
+        if _io in ("doc", "notion", "answer", "report", ""):
+            _fmt += _RICH
+        elif _io == "email" and _is_prospecting:
+            _fmt += ("\n\nUnder '--- SUPPORTING MATERIAL ---' you MAY use the rich elements below "
+                     "(prospect table, a timeline of the outreach cadence, an [!important] callout).") + _RICH
         # Real sender identity: the email signs off as the connected Gmail; never
         # invent a placeholder like email@company.com. Robust-email contract too.
         if _io == "email" and self.sender_email:

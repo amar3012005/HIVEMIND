@@ -747,8 +747,12 @@ def _pick_lead_fixed(
     participants: List[Dict[str, Any]],
     permanent_lead_id: Optional[str],
     skeptic_id: Optional[str],
+    prefer_maker: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Resolve a fixed per-room lead, or fall back to the first eligible agent."""
+    """Resolve a fixed per-room lead, or fall back to the first eligible agent.
+    prefer_maker (maker kinds — outreach/content/research, or any produce output):
+    a MAKER leads, not a Skeptic — a deliverable room needs a writer at the helm,
+    not a challenger. Skeptic-lane agents drop to reactor/reviewer only."""
     if permanent_lead_id:
         locked = next((p for p in participants if p["id"] == permanent_lead_id), None)
         if locked is not None and locked["id"] != skeptic_id:
@@ -760,6 +764,10 @@ def _pick_lead_fixed(
     eligible = [p for p in participants if p["id"] != skeptic_id] or participants
     if not eligible:
         return None
+    if prefer_maker:
+        makers = [p for p in eligible if "skeptic" not in str(p.get("_lane") or p.get("role_archetype") or "").lower()]
+        if makers:
+            eligible = makers
     return sorted(eligible, key=lambda p: p.get("slug", ""))[0]
 
 
@@ -3209,7 +3217,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         seq = raw_seq
     # Lead: @mention override wins; otherwise use the room's pinned lead.
     # This avoids recomputing router selection on every turn.
-    lead = forced or _pick_lead_fixed(participants, permanent_lead_id, permanent_skeptic_id)
+    # Maker kinds (outreach/content/research) + produce outputs → a MAKER leads,
+    # not a Skeptic, so a deliverable room writes instead of convening a tribunal.
+    try:
+        from .hyper.rooms import lead_shape_for
+        from .hyper.skills import resolve_room_kind
+        _rk = resolve_room_kind(getattr(req, "task_tag", "") or "", req.room_goal or "", req.user_message or "")
+        _io = _derive_intended_output(req.user_message or "")
+        _prefer_maker = lead_shape_for(_rk, _io) == "maker"
+    except Exception:  # noqa: BLE001
+        _prefer_maker = False
+    lead = forced or _pick_lead_fixed(participants, permanent_lead_id, permanent_skeptic_id, prefer_maker=_prefer_maker)
     if lead is None:
         raise RuntimeError("no eligible lead")
     reactors = _pick_reactors(participants, lead)

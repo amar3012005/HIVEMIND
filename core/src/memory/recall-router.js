@@ -32,6 +32,7 @@ import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
+import { dedupeMemoriesById } from './recall-dedup.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -1402,16 +1403,7 @@ export class RecallRouter {
     // cluster hash — not identical ids. Without this the delivered top-N is
     // wasted on duplicates (observed: 5 delivered / 3 unique in explain mode).
     // Keep the first (highest-ranked) occurrence.
-    {
-      const _seenIds = new Set();
-      rankedMemories = rankedMemories.filter((m) => {
-        const id = m?.id || m?.memory?.id;
-        if (!id) return true;
-        if (_seenIds.has(id)) return false;
-        _seenIds.add(id);
-        return true;
-      });
-    }
+    rankedMemories = dedupeMemoriesById(rankedMemories);
 
     // Fire recall-count update asynchronously — don't block response
     if (this.clusterIndex) {
@@ -1487,6 +1479,7 @@ export class RecallRouter {
         rankedMemories.slice(0, deliverN),
       )
       : rankedMemories.slice(0, deliverN);
+    deliverMemories = dedupeMemoriesById(deliverMemories).slice(0, deliverN);
     if (recallPlan.operation === 'timeline') {
       deliverMemories = [...deliverMemories].sort((left, right) => {
         const leftTime = new Date(left.valid_from || left.valid_at || left.created_at || 0).getTime();

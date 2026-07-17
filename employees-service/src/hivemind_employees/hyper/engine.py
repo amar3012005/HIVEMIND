@@ -1664,8 +1664,9 @@ class Director:
         from .rooms import lead_shape_for, shape_debate_members
         _shape = lead_shape_for(self.room_kind, getattr(self, "intended_output", ""))
         members = shape_debate_members(self.participants, _shape)
-        if _shape == "maker":
-            rounds = 1  # one pass: lead writes, reviewer flags — no multi-round tribunal
+        # Maker rooms keep the full round count — the debate must be SUBSTANTIVE
+        # (prioritize firms, hooks, objections), just writer-led rather than a
+        # skeptic tribunal. Roster shaping alone prevents the pile-on.
         if not members:
             return json.dumps({"error": "no participants to debate"})
 
@@ -1841,9 +1842,12 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
-            "- places_query: a local-business discovery query when the task is to FIND PROSPECTS/CLIENTS/companies "
-            "in a place (e.g. 'law firms in Hannover', 'dental clinics Hamburg') — returns real firms with phone + "
-            "website to reach out to. null when the task isn't prospect-finding.\n"
+            "- places_query: a local-business discovery query whenever the task involves finding PROSPECTS, "
+            "CLIENTS, PARTNERS, target INSTITUTIONS/organisations, or outreach candidates in any region "
+            "(e.g. 'law firms in Hannover', 'regulated financial institutions Amsterdam', 'compliance "
+            "consultancies Frankfurt') — returns REAL firms with phone + website to reach out to. Prefer "
+            "a real query over null for any outreach/partnership/market-entry task; null only when the "
+            "task has no external-organisation angle at all.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "

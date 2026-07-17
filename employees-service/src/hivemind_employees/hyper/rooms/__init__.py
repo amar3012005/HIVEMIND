@@ -44,8 +44,9 @@ def lead_shape_for(room_kind: str, intended_output: str = "") -> str:
 def shape_debate_members(members: List[Dict[str, Any]], shape: str) -> List[Dict[str, Any]]:
     """Trim/reorder the debate roster for the given lead shape.
 
-    maker: 1 non-skeptic maker (lead) + at most 1 skeptic (reviewer) → 2 max, so
-           the room writes the deliverable instead of convening a tribunal.
+    maker: makers first (a writer leads), at most ONE skeptic kept as reviewer,
+           roster capped at 3 — substantive multi-voice debate without the
+           skeptic tribunal pile-on.
     panel/auto: unchanged (up to 5).
     """
     if shape != "maker" or len(members) <= 2:
@@ -56,6 +57,8 @@ def shape_debate_members(members: List[Dict[str, Any]], shape: str) -> List[Dict
 
     makers = [m for m in members if not _is_skeptic(m)]
     skeptics = [m for m in members if _is_skeptic(m)]
-    lead = makers[0] if makers else members[0]
-    reviewer = (skeptics[0] if skeptics else (makers[1] if len(makers) > 1 else None))
-    return [lead] + ([reviewer] if reviewer else [])
+    shaped = makers[:2] + skeptics[:1]
+    if len(shaped) < min(3, len(members)):
+        seen = {id(m) for m in shaped}
+        shaped += [m for m in members if id(m) not in seen][: 3 - len(shaped)]
+    return shaped[:3] if shaped else members[:3]

@@ -33,6 +33,7 @@ import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
 import { dedupeMemoriesById } from './recall-dedup.js';
+import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -1320,6 +1321,12 @@ export class RecallRouter {
       if (projectFallbackFired) {
         console.log(`[recall-router] project-scope empty (${ctx.projectId}) → broad recall found ${memories.length} memories`);
       }
+    }
+    if (explicitSourceRequested) {
+      memories = filterMemoriesByDocumentIds(
+        memories,
+        explicitSourceDocuments.map((document) => document.id),
+      );
     }
     traceLatency.memory = Date.now() - t1;
 

@@ -465,6 +465,11 @@ export function computeHubEntitySlugs(memories = [], threshold = 0.5) {
 // Read per-call (not cached) so the mode can be flipped via env without redeploy
 // where the process re-reads env, and always overridable in tests.
 export function relationshipValidatorMode() {
-  const m = String(process.env.RELATIONSHIP_VALIDATOR_MODE || 'shadow').toLowerCase();
-  return (m === 'enforce' || m === 'off') ? m : 'shadow';
+  // DEFAULT enforce: the shadow measurement is complete (≈73% of algorithmic
+  // destructive edges were false, with sound rejections), so the deterministic
+  // validator now GATES every ingestion by default — no env needed, works the
+  // same on any box. Set RELATIONSHIP_VALIDATOR_MODE=shadow to observe-only or
+  // =off for the legacy (unsafe) behaviour.
+  const m = String(process.env.RELATIONSHIP_VALIDATOR_MODE || 'enforce').toLowerCase();
+  return (m === 'shadow' || m === 'off') ? m : 'enforce';
 }

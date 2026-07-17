@@ -29,6 +29,11 @@ class Contact(BaseModel):
     phone: str
     name: Optional[str] = None
     language: str = "en"
+    # Per-prospect call objective + brief — override the campaign-level goal so
+    # every contact gets ITS plan (outreach: goal from the room's report, context
+    # = firm + why-fit + prior-call learnings).
+    goal: Optional[str] = None
+    context: Optional[str] = None
 
 
 class CampaignRequest(BaseModel):
@@ -65,8 +70,9 @@ async def _run_contact(camp: dict, contact: dict, sem: asyncio.Semaphore) -> Non
                 user_id=camp.get("user_id"), org_id=camp.get("org_id"),
                 language=contact.get("language") or camp["language"],
                 voice_id=camp.get("voice_id"), skill_id=camp.get("skill_id"),
-                goal=camp.get("goal"), campaign_id=camp["id"],
+                goal=contact.get("goal") or camp.get("goal"), campaign_id=camp["id"],
                 contact_name=contact.get("name"),
+                context=contact.get("context"),
             ))
             contact["call_leg_id"] = res["call_leg_id"]
             contact["state"] = "dialing"

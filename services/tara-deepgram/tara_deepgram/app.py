@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import httpx
 import re
@@ -223,8 +224,21 @@ async def voice_preview(voice_id: str, text: str | None = None, language: str = 
 
 if config.TARA_DG_ENABLED:
 
+    def _dial_auth_ok(request: Request) -> bool:
+        """Shared-secret gate on side-effectful dial/campaign routes. Enforced only
+        when TARA_DG_API_KEY is set (backward-compatible rollout: deploy this first,
+        set the env on both sides, then it enforces). Constant-time compare."""
+        import hmac
+        expected = (os.environ.get("TARA_DG_API_KEY") or "").strip()
+        if not expected:
+            return True
+        supplied = (request.headers.get("x-tara-key") or "").strip()
+        return bool(supplied) and hmac.compare_digest(supplied, expected)
+
     @app.post("/calls/outbound")
-    async def outbound(req: telephony.DialRequest):
+    async def outbound(req: telephony.DialRequest, request: Request):
+        if not _dial_auth_ok(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
         try:
             return await telephony.dial(req)
         except ValueError as e:
@@ -234,7 +248,9 @@ if config.TARA_DG_ENABLED:
             return JSONResponse({"error": str(e)}, status_code=502)
 
     @app.post("/calls/outbound/{call_leg_id}/hangup")
-    async def call_hangup(call_leg_id: str):
+    async def call_hangup(call_leg_id: str, request: Request):
+        if not _dial_auth_ok(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
         try:
             await telephony.hangup(call_leg_id)
             return {"ok": True}
@@ -305,19 +321,27 @@ if config.TARA_DG_ENABLED:
             prompt += f"\n\n[CALL GOAL] {call_goal} — steer every turn toward this; never lose sight of it."
         if meta.get("contact_name"):
             prompt += f"\n[CALLER] The person you are calling is named {meta['contact_name']}."
+        call_context = (meta.get("context") or "").strip()
+        if call_context:
+            prompt += (f"\n[PROSPECT CONTEXT] {call_context[:800]}\n"
+                       "Ground the conversation in these facts about who you're calling — "
+                       "reference them naturally, never invent others.")
 
         # Strategic opening: plan the first move from skill + goal, so TARA opens
         # by asking the right FIRST question (not a generic hello). Pre-seed the
         # turn-strategist's session state so it continues that plan.
         greeting_extra = ""
-        if call_goal:
-            plan = await plan_opening(persona_prompt=skill_prompt, goal=call_goal,
+        if call_goal or call_context:
+            plan = await plan_opening(persona_prompt=skill_prompt,
+                                      goal=(f"{call_goal}\nProspect: {call_context[:400]}" if call_context else call_goal),
                                       company=company, language=call_lang)
             greeting_extra = plan.get("opening") or ""
             think_shim._session_state[session_id] = {
                 "directive": plan.get("strategy") or "",
                 "goal_state": plan.get("goal_state") or f"Objective: {call_goal}",
-                "facts": [],
+                # Prospect brief seeds the strategist's working memory so every
+                # turn plans around WHO is on the line, not just the objective.
+                "facts": ([f"Prospect: {call_context[:400]}"] if call_context else []),
             }
         await run_bridge(
             ws, session_id=session_id,
@@ -331,7 +355,9 @@ if config.TARA_DG_ENABLED:
 
     # ── Campaigns ────────────────────────────────────────────────────────────
     @app.post("/campaigns")
-    async def campaign_launch(req: campaigns.CampaignRequest):
+    async def campaign_launch(req: campaigns.CampaignRequest, request: Request):
+        if not _dial_auth_ok(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
         try:
             return campaigns.launch(req)
         except ValueError as e:
@@ -349,7 +375,9 @@ if config.TARA_DG_ENABLED:
         return camp
 
     @app.post("/campaigns/{camp_id}/stop")
-    async def campaign_stop(camp_id: str):
+    async def campaign_stop(camp_id: str, request: Request):
+        if not _dial_auth_ok(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
         if not campaigns.stop(camp_id):
             return JSONResponse({"error": "not_found"}, status_code=404)
         return {"ok": True}

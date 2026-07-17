@@ -44,6 +44,9 @@ class DialRequest(BaseModel):
     contact_name: Optional[str] = None
     company: Optional[str] = None      # real org/company name (never the UUID)
     mode: Optional[str] = None
+    # Outreach campaigns: per-prospect brief (firm, website, why-fit, prior-call
+    # learnings) — grounds the strategist + prompt so TARA knows WHO it's calling.
+    context: Optional[str] = None
 
 
 def _b64_basic(user: str, pw: str) -> str:

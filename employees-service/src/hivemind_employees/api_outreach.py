@@ -17,6 +17,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .db import init_pool
+from .hivemind_client import list_tagged_emulated
 from .hyper.engine import run_mention_reply
 
 log = logging.getLogger("hivemind_employees.outreach")
@@ -40,6 +41,9 @@ class GenerateRequest(BaseModel):
     turn_id: str
     sender_email: str = ""
     prospect: _Prospect
+    # Tenant identity — lets generation recall the org's prior outreach learnings.
+    user_id: str = ""
+    org_id: str = ""
 
 
 async def _report_for_turn(turn_id: str) -> str:
@@ -85,6 +89,25 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
         f"Company: {p.company}\nWebsite: {p.website or '—'}\n"
         f"Address: {p.address or '—'}\nPhone: {p.phone or '—'}\nEmail: {p.email or '—'}"
     )
+    # Prior outreach learnings (distilled from past TARA calls at /calls/end) —
+    # guaranteed tag lane; prefer this prospect's own learnings, then org-wide.
+    learnings_block = ""
+    if req.org_id:
+        try:
+            rows = await list_tagged_emulated(tags="outreach-learning",
+                                              user_id=req.user_id or None,
+                                              org_id=req.org_id, limit=6)
+            _slug = "".join(ch for ch in p.company.lower() if ch.isalnum())[:24]
+            rows.sort(key=lambda r: (_slug not in str(r.get("tags") or "").lower()))
+            lines = []
+            for r in rows[:4]:
+                c = str(r.get("content") or "").replace("\n", " ").strip()
+                if c:
+                    lines.append(f"- {c[:220]}")
+            if lines:
+                learnings_block = "\nPRIOR OUTREACH LEARNINGS (from real calls — apply them, don't repeat mistakes):\n" + "\n".join(lines)
+        except Exception:  # noqa: BLE001 — learnings are additive, never block generation
+            learnings_block = ""
     if req.channel == "email":
         sys = (
             "You write ONE cold-outreach email to a specific prospect, grounded in the team "
@@ -103,12 +126,15 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
         sys = (
             "You prepare ONE outbound phone call by an AI voice agent (TARA) to a specific "
             "prospect, grounded in the team report below. Respond with ONLY a JSON object: "
-            '{"goal": "...", "opener": "..."} — goal: one outcome-framed sentence for the call '
+            '{"goal": "...", "opener": "...", "context": "..."} — goal: one outcome-framed sentence for the call '
             "(e.g. 'Book a 15-minute intro about X with the office manager'); opener: the first "
-            "spoken line, naming the firm and why we're calling, natural and brief. "
-            "Never invent facts about the firm."
+            "spoken line, naming the firm and why we're calling, natural and brief; "
+            "context: a compact prospect brief (max 500 chars) the voice agent keeps in working "
+            "memory during the call — firm name, what they do / why they fit, and any prior-call "
+            "learnings worth applying. Never invent facts about the firm."
         )
-    user = f"TEAM REPORT (grounding):\n{report or '(no report body — use the firm data only)'}\n\nPROSPECT:\n{firm}"
+    user = (f"TEAM REPORT (grounding):\n{report or '(no report body — use the firm data only)'}\n\n"
+            f"PROSPECT:\n{firm}{learnings_block}")
     content, usage = await run_mention_reply(
         [{"role": "system", "content": sys}, {"role": "user", "content": user}], temp=0.5,
     )
@@ -126,4 +152,9 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
     opener = str(obj.get("opener") or "").strip()
     if not goal:
         return {"error": "generation missing goal"}
-    return {"goal": goal[:300], "opener": opener[:400], "tokens": usage.get("total", 0)}
+    # Prospect brief for the dial ([PROSPECT CONTEXT]); fall back to the firm
+    # facts so TARA is never blind even if the model skipped the field.
+    context = str(obj.get("context") or "").strip() or (
+        f"{p.company} — {p.website or ''}".strip(" —"))
+    return {"goal": goal[:300], "opener": opener[:400],
+            "context": context[:600], "tokens": usage.get("total", 0)}

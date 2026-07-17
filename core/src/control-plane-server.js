@@ -8815,7 +8815,10 @@ Write the persona now.`;
         const sessionId = `hyper-${roomId.slice(0, 8)}-${Date.now()}`;
         const r = await fetch(`${taraBase}/calls/outbound`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+          },
           body: JSON.stringify({
             to,
             session_id: sessionId,

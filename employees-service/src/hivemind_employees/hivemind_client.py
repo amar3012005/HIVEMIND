@@ -107,6 +107,29 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         return r.json()
 
 
+async def list_tagged_emulated(*, tags: str, user_id: Optional[str], org_id: Optional[str],
+                               api_key: str = "", limit: int = 6) -> list:
+    """Guaranteed tag-filtered memory lane (same pattern as the org-canon lane) —
+    e.g. tags="outreach-learning" surfaces the org's distilled call learnings even
+    when vector recall would rank them low. Best-effort: [] on any failure."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(12.0, connect=4.0),
+            headers=headers,
+        ) as c:
+            r = await c.get("/api/memories", params={
+                "tags": str(tags), "is_latest": "true", "limit": max(1, min(int(limit or 6), 12)),
+            })
+            r.raise_for_status()
+            j = r.json()
+            return j.get("memories") or j.get("results") or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 async def list_canon_emulated(*, user_id: Optional[str], org_id: Optional[str],
                               api_key: str = "", limit: int = 8) -> list:
     """Fetch the org's PINNED canon memories (tag `org-canon` — company identity,

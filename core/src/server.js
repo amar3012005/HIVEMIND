@@ -7248,6 +7248,57 @@ exit \$RC
                       });
                     } catch (e3) { console.warn('[tara/call-log] memory save failed:', e3.message); }
                   }
+
+                  // ── Outreach learnings loop ────────────────────────────────
+                  // If this call was an OUTREACH CAMPAIGN dial (ledger row keyed by
+                  // session_id, via=outreach-campaign), distill the insight into a
+                  // RECALL-VISIBLE org learning memory (unlike the call log above,
+                  // which is deliberately recall-excluded). Next campaign's email +
+                  // call-goal generation pulls these via the outreach-learning tag
+                  // lane — the loop that makes outreach compound instead of repeat.
+                  try {
+                    const oa = await prisma.$queryRawUnsafe(
+                      `SELECT id, recipient, meta FROM "hivemind"."outbound_actions"
+                        WHERE org_id = $1::uuid AND channel = 'call'
+                          AND meta->>'session_id' = $2 AND meta->>'via' = 'outreach-campaign' LIMIT 1`,
+                      tOrg, String(body.session_id),
+                    );
+                    const hasLearnings = Array.isArray(parsed.tara_learnings) && parsed.tara_learnings.length;
+                    if (persistentMemoryStore && oa?.length && (hasLearnings || parsed.goal_outcome || parsed.lead_found)) {
+                      // Idempotent per session: skip if the learning already exists.
+                      const dup = await prisma.$queryRawUnsafe(
+                        `SELECT id FROM "hivemind"."memories"
+                          WHERE org_id = $1::uuid AND deleted_at IS NULL
+                            AND tags @> ARRAY['outreach-learning', $2]::text[] LIMIT 1`,
+                        tOrg, `sid:${body.session_id}`,
+                      ).catch(() => []);
+                      if (!dup?.length) {
+                        const companyName = String(oa[0].meta?.company || oa[0].meta?.contact_name || oa[0].recipient || 'prospect');
+                        const companySlug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'prospect';
+                        const bits = [];
+                        if (parsed.goal_outcome) bits.push(`Outcome: ${parsed.goal_outcome}`);
+                        if (hasLearnings) bits.push(`Learnings:\n- ${parsed.tara_learnings.slice(0, 6).join('\n- ')}`);
+                        const lead = Array.isArray(parsed.leads) ? parsed.leads[0] : null;
+                        if (lead) {
+                          bits.push(`Lead: ${[lead.name, lead.company, lead.contact].filter(Boolean).join(' · ')}`
+                            + (lead.next_step ? ` — next: ${lead.next_step}` : ''));
+                        }
+                        if (parsed.sentiment) bits.push(`Sentiment: ${parsed.sentiment}`);
+                        await persistentMemoryStore.createMemory({
+                          id: crypto.randomUUID(),
+                          user_id: tUser,
+                          org_id: tOrg,
+                          content: `Outreach call to ${companyName}: ${bits.join('\n') || parsed.summary || 'call completed'}`,
+                          title: `Outreach learning — ${companyName} — ${new Date().toISOString().slice(0, 10)}`,
+                          tags: ['outreach-learning', `company:${companySlug}`, `sid:${body.session_id}`],
+                          memory_type: 'knowledge',
+                          document_date: new Date().toISOString(),
+                          metadata: { session_id: body.session_id, call_id: call.id, lead_found: parsed.lead_found === true },
+                        });
+                        console.log(`[outreach-learning] saved for ${companyName} (sid ${String(body.session_id).slice(0, 12)})`);
+                      }
+                    }
+                  } catch (e4) { console.warn('[outreach-learning] save failed:', e4.message); }
                 }
               } catch (e2) { console.warn('[tara/insights]', e2.message); }
             }

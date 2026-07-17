@@ -80,6 +80,7 @@ export function createOutreachModule(deps) {
           channel: campaign.channel,
           turn_id: campaign.turnId,
           sender_email: campaign.senderEmail || '',
+          user_id: campaign.userId, org_id: campaign.orgId,
           prospect: {
             company: target.company, email: target.email, phone: target.phone,
             website: target.website, address: target.address,
@@ -91,7 +92,12 @@ export function createOutreachModule(deps) {
       if (!r.ok || !j || j.error) throw new Error(j?.error || `generate failed (${r.status})`);
       const payload = campaign.channel === 'email'
         ? { subject: String(j.subject || '').slice(0, 500), body: String(j.body || '') }
-        : { goal: String(j.goal || '').slice(0, 300), opener: String(j.opener || '').slice(0, 400) };
+        : {
+            goal: String(j.goal || '').slice(0, 300), opener: String(j.opener || '').slice(0, 400),
+            // Prospect brief (firm + why-fit + prior-call learnings) — rides the
+            // dial as TARA's [PROSPECT CONTEXT] so the strategist isn't blind.
+            ...(j.context ? { context: String(j.context).slice(0, 800) } : {}),
+          };
       if (campaign.channel === 'email' && (!payload.subject || !payload.body)) throw new Error('empty email payload');
       if (campaign.channel === 'call' && !payload.goal) throw new Error('empty call goal');
       return prisma.outreachTarget.update({
@@ -203,10 +209,17 @@ export function createOutreachModule(deps) {
     const directive = payload.opener ? `${payload.goal}. Open with: ${payload.opener}` : payload.goal;
     const r = await fetch(`${CONFIG.taraDeepgramBaseUrl}/calls/outbound`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+      },
       body: JSON.stringify({
         to, session_id: sessionId, user_id: campaign.userId, org_id: campaign.orgId,
         goal: String(directive).slice(0, 600),
+        // Full prospect metadata contract — TARA plans + speaks around WHO it's
+        // calling (firm brief + why-fit + prior-call learnings from generate).
+        context: payload.context ? String(payload.context).slice(0, 800) : undefined,
+        contact_name: target.company ? String(target.company).slice(0, 120) : undefined,
       }),
       signal: AbortSignal.timeout(20000),
     }).catch(() => null);
@@ -228,7 +241,7 @@ export function createOutreachModule(deps) {
     recordOutboundAction({
       orgId: campaign.orgId, userId: campaign.userId, roomId: campaign.roomId,
       channel: 'call', recipient: to, messageId: result?.call_leg_id || null,
-      meta: { via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id, session_id: sessionId, goal: payload.goal },
+      meta: { via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id, session_id: sessionId, goal: payload.goal, company: target.company || undefined },
     }).catch(() => {});
     // Dial success = executed (v1). Call OUTCOME (completed/booked/no-answer)
     // lands on the OutboundAction via the existing /api/tara/calls/end path.
@@ -418,7 +431,9 @@ export function createOutreachModule(deps) {
       if (body.payload && typeof body.payload === 'object') {
         data.payload = c.channel === 'email'
           ? { subject: String(body.payload.subject || t.payload?.subject || '').slice(0, 500), body: String(body.payload.body || t.payload?.body || '') }
-          : { goal: String(body.payload.goal || t.payload?.goal || '').slice(0, 300), opener: String(body.payload.opener || t.payload?.opener || '').slice(0, 400) };
+          : { goal: String(body.payload.goal || t.payload?.goal || '').slice(0, 300), opener: String(body.payload.opener || t.payload?.opener || '').slice(0, 400),
+              // Inline edits never drop the generated prospect brief.
+              ...(t.payload?.context ? { context: t.payload.context } : {}) };
         if (!data.state && t.state !== 'deselected') data.state = 'ready';
       }
       if (!Object.keys(data).length) return jsonResponse(res, { error: 'nothing to update' }, 400), true;

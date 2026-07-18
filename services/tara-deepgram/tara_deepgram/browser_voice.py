@@ -68,17 +68,26 @@ def _resolve_voice(voice_id: Optional[str], language: str) -> str:
 async def handle_browser_voice(ws: WebSocket, *, session_id: str,
                                user_id: Optional[str], org_id: Optional[str],
                                language: str, voice_id: Optional[str],
-                               mode: str = "external") -> None:
+                               mode: str = "external", goal: str = "") -> None:
     await ws.accept()
 
-    prompt = (
+    # Persona = the operator's SELECTED skill (same as the phone path) so the
+    # browser session is skill-driven, not a generic prompt. Goal (if given)
+    # rides the think endpoint URL → seeds the strategist's goal_state +
+    # confidence/phase engine, identical to outbound calls.
+    from .core_client import get_persona
+    persona = await get_persona(user_id, org_id)
+    skill_prompt = persona.get("internal_prompt" if mode == "internal" else "system_prompt") or ""
+    prompt = skill_prompt or (
         "You are TARA, the voice of this company's HIVEMIND. Answer briefly "
         "(1-3 spoken sentences), warmly and factually. Never invent facts."
     )
+    if goal:
+        prompt += f"\n\n[SESSION GOAL] {goal} — steer every turn toward this."
     settings = build_settings(
         session_id=session_id, user_id=user_id, org_id=org_id,
         language=language, voice_id=_resolve_voice(voice_id, language),
-        prompt=prompt, company="the company",
+        prompt=prompt, company="the company", goal=goal, mode=mode,
     )
     # Browser leg is linear16@16k (widget contract), not phone mulaw.
     settings["audio"] = {

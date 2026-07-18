@@ -74,6 +74,7 @@ async def browser_voice(ws: WebSocket):
         org_id=qp.get("org_id") or None,
         language=(qp.get("language") or "en").split("-")[0],
         voice_id=qp.get("voice_id") or None,
+        goal=(qp.get("goal") or "").strip()[:200],
         mode=qp.get("mode") or "external",
     )
 

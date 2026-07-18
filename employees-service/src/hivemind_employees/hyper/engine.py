@@ -509,6 +509,37 @@ def _resolve_language(lang: str) -> str:
     return "" if name.lower() == "english" else name
 
 
+# Maps/Places discovery is EXPENSIVE and pollutes the board when unwanted — run it
+# ONLY when THIS turn actually asks to find NEW real-world orgs/contacts. A turn that
+# drafts emails, writes a sequence, or reasons over already-known targets must NOT
+# re-run discovery. Verb-of-finding + a discoverable object; drafting verbs veto it.
+_DISCOVERY_RE = re.compile(
+    r"\b(find|get|source|sources?|list|give\s+me|need|pull|gather|identif\w+|show\s+me|"
+    r"look\s+up|search\s+for|discover|reach\s+out|prospect\w*|scrape)\b[^.\n]{0,60}?"
+    r"\b(prospects?|leads?|clients?|customers?|contacts?|companies|compan\w+|firms?|"
+    r"institutions?|organi[sz]ations?|partners?|niches?|decision[-\s]?makers?)\b",
+    re.I)
+_DRAFTING_RE = re.compile(
+    r"\b(draft|write|compose|rewrite|edit|revise|sequence|template|email\s+copy|"
+    r"subject\s+line|follow[-\s]?up|cadence|send\s+(?:the|this|these|it|them)|"
+    r"summari[sz]e|translate|explain|analy[sz]e|compare|plan\b|strategy|roadmap)\b", re.I)
+
+
+def _wants_discovery(user_message: str) -> bool:
+    """True only when THIS turn's message asks to source NEW real-world orgs/contacts."""
+    msg = str(user_message or "")
+    if not _DISCOVERY_RE.search(msg):
+        return False
+    # A drafting/analysis turn with NO explicit find-verb-on-contacts stays off, but
+    # an explicit "find/give me contacts" wins even if drafting words co-occur.
+    if _DRAFTING_RE.search(msg) and not re.search(
+            r"\b(find|get|source|list|give\s+me|pull|gather|identif\w+|discover)\b[^.\n]{0,40}?"
+            r"\b(prospects?|leads?|clients?|contacts?|companies|firms?|institutions?|niches?)\b",
+            msg, re.I):
+        return False
+    return True
+
+
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Extract the first JSON object from a model reply (handles plain JSON, fenced, or prose-wrapped).
     Returns the parsed dict, or None when nothing valid parses (caller treats None as fail-safe)."""
@@ -981,7 +1012,11 @@ class Director:
         room_playbook: Optional[List[str]] = None,
         room_instructions: str = "",
         sender_email: str = "",
+        out_language: str = "",
     ) -> None:
+        # Run-wide output language from the FE navbar toggle (locale code/name →
+        # language NAME, '' for English). Drives a strict "write in X only" directive.
+        self.out_lang = _resolve_language(out_language)
         self.user_message = user_message
         self.user_id = user_id
         self.org_id = org_id
@@ -1842,12 +1877,12 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
-            "- places_query: a local-business discovery query whenever the task involves finding PROSPECTS, "
-            "CLIENTS, PARTNERS, target INSTITUTIONS/organisations, or outreach candidates in any region "
-            "(e.g. 'law firms in Hannover', 'regulated financial institutions Amsterdam', 'compliance "
-            "consultancies Frankfurt') — returns REAL firms with phone + website to reach out to. Prefer "
-            "a real query over null for any outreach/partnership/market-entry task; null only when the "
-            "task has no external-organisation angle at all.\n"
+            "- places_query: a local-business discovery query ONLY when THIS turn asks to FIND or SOURCE "
+            "NEW real firms/prospects/contacts to reach (e.g. 'find law firms in Hannover', 'get contacts "
+            "for regulated banks Amsterdam') — returns REAL firms with phone + website. Return NULL when "
+            "the turn drafts/writes emails or a sequence, reasons over already-identified targets, or is a "
+            "strategy/analysis/decision task — do NOT re-discover prospects the room already has. When in "
+            "doubt, null.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "
@@ -1901,7 +1936,11 @@ class Director:
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
-        plan["places_query"] = pq if (isinstance(pq, str) and pq.strip() and _places_on) else None
+        # Deterministic backstop: even if the planner emits a query, only run Maps
+        # when THIS turn genuinely asks to source new prospects (not a drafting/
+        # strategy turn). Stops the "20 firms every run" noise the user flagged.
+        plan["places_query"] = (pq if (isinstance(pq, str) and pq.strip() and _places_on
+                                       and _wants_discovery(self.user_message)) else None)
         # Method skills: keep only real catalog names; auto-load the kind default
         # when the plan picked none (mirrors the polished-email auto-load).
         ms = [s for s in (plan.get("method_skills") or [])
@@ -2038,6 +2077,19 @@ class Director:
             "## Tripwire — what would flip this decision, and who watches it"),
     }
 
+    def _lang_directive(self) -> str:
+        """Strict output-language directive for the FE navbar locale (mirrors /chat).
+        Empty when English/unset. The report — every heading, table, and email —
+        must be written entirely in this language regardless of the input language."""
+        if not self.out_lang:
+            return ""
+        return (
+            f"\n\nOUTPUT LANGUAGE — MANDATORY: write the ENTIRE deliverable in {self.out_lang} ONLY. "
+            f"Every heading, sentence, table cell, list item, and email (subject + body) must be in "
+            f"{self.out_lang}, even though the task, context, and gathered facts are in another language. "
+            f"Do NOT mix languages. Keep proper nouns, brand names (SINGULANCE, TARA, HIVEMIND, "
+            f"HYPERAGENTS), URLs, and email addresses verbatim.")
+
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
@@ -2123,7 +2175,7 @@ class Director:
                 "or links that are not in the gathered context. A fabricated specific tagged UNVERIFIED is "
                 "still fabricated — omit it or write [confirm with sales] / [confirm with legal] instead. "
                 "Contact details: use ONLY the company's real sender identity from context."
-                + self._room_instr_block + _fmt)
+                + self._room_instr_block + _fmt + self._lang_directive())
         # Evidence contract: the report must show its grounding. Skills applied +
         # per-lane evidence counts feed a citation requirement — each major section
         # names the lane (recall/web/connector/debate) that grounded it.
@@ -2346,9 +2398,7 @@ class Director:
         #   a) org names surfaced by web/debate get looked up on Maps for REAL contacts;
         #   b) a sharpened company-oriented Places query runs when discovery was weak.
         try:
-            _wants_contacts = bool(re.search(
-                r"\b(contact|prospect|lead|reach|niche|client|partner|institution|firm|compan)",
-                (self.user_message or "").lower()))
+            _wants_contacts = _wants_discovery(self.user_message)
             _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
             if _wants_contacts and len(_prospect_rows) < 3:
                 await self.emit({"t": "typing", "agent": "director",

@@ -1700,6 +1700,9 @@ class RoomTurnRequest(BaseModel):
     # only; when unset the env default applies. Lets the model battery A/B without
     # restarting the sidecar.
     agentic_model: Optional[str] = None
+    # Run-wide output language from the FE navbar i18n toggle (e.g. "de", "fr").
+    # When set, the final report is written entirely in this language. Optional.
+    language: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -2948,7 +2951,7 @@ async def _orchestrate_single_agent(
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
             room_playbook=_room_playbook, room_instructions=_room_instructions,
-            sender_email=_sender_email,
+            sender_email=_sender_email, out_language=(req.language or ""),
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

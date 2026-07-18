@@ -9152,6 +9152,7 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
+            ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
           } catch (err) {

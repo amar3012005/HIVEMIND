@@ -2508,6 +2508,7 @@ async def run_director(
     room_playbook: Optional[List[str]] = None,
     room_instructions: str = "",
     sender_email: str = "",
+    out_language: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2523,5 +2524,6 @@ async def run_director(
         room_kind=room_kind, room_playbook=room_playbook,
         room_instructions=room_instructions,
         sender_email=sender_email,
+        out_language=out_language,
     )
     return await director.run()

@@ -2112,6 +2112,12 @@ class Director:
                 "context below — publish-ready content only, plain text, no tool calls, no process narration, "
                 "no placeholders. Real markdown tables where they help. Ground every specific in the context; "
                 "flag anything unverifiable as UNVERIFIED."
+                "\nFINISH-THE-TASK CONTRACT: the report must COMPLETE the user's ask with what the room "
+                "gathered — you ARE the research team. NEVER write '[to be sourced]', 'TBD', or assign "
+                "work to staff, analysts, or future dates for something the room's tools could do or "
+                "already did this turn. If a specific datum genuinely isn't on the board after the tools "
+                "ran, state plainly what IS known (e.g. 'no public direct contact — general inbox: "
+                "info@x.de, +49 …') and move on. Every deliverable list must be complete and usable as-is."
                 "\nNO-FABRICATION CONTRACT (customer-facing deliverables): NEVER invent prices, fees, "
                 "percentages, benchmarks, guarantees, certifications, names, email addresses, phone numbers "
                 "or links that are not in the gathered context. A fabricated specific tagged UNVERIFIED is "
@@ -2334,6 +2340,49 @@ class Director:
                 forced_debate = True
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] debate failed: %s", exc)
+        # PHASE 3.5 — TASK-COMPLETION PASS. If the task's deliverable is prospects/
+        # contacts and the board is thin, the room FINISHES the job itself instead of
+        # sealing a report full of "[to be sourced]" and fictional research assignees:
+        #   a) org names surfaced by web/debate get looked up on Maps for REAL contacts;
+        #   b) a sharpened company-oriented Places query runs when discovery was weak.
+        try:
+            _wants_contacts = bool(re.search(
+                r"\b(contact|prospect|lead|reach|niche|client|partner|institution|firm|compan)",
+                (self.user_message or "").lower()))
+            _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
+            if _wants_contacts and len(_prospect_rows) < 3:
+                await self.emit({"t": "typing", "agent": "director",
+                                 "note": "Completing the task — sourcing real contacts for the named organisations…"})
+                # a) Proper-noun org names from web/debate board lines (bounded).
+                _names, _seen_n = [], set()
+                for line in self.blackboard:
+                    s = str(line)
+                    if not re.search(r"\bweb\b|WEB|http|Debate|debate", s):
+                        continue
+                    for m in re.finditer(r"\b([A-ZÄÖÜ][\w&.-]+(?:\s+[A-ZÄÖÜ(][\w&().-]+){1,3}\s*(?:GmbH|AG|B\.V\.|Ltd\.?|SE)?)", s):
+                        nm = m.group(1).strip(" .,")
+                        low = nm.lower()
+                        if (len(nm) > 7 and low not in _seen_n
+                                and not re.match(r"^(the|our|this|key|gaps|next|touch|subject|recommend)", low)):
+                            _seen_n.add(low)
+                            _names.append(nm)
+                for nm in _names[:3]:
+                    try:
+                        await self._places_search(f"{nm} Germany")
+                    except Exception:  # noqa: BLE001
+                        pass
+                # b) One sharpened retry when discovery stayed thin — Places indexes
+                # BUSINESSES, so ask for firms/consultancies, not government bodies.
+                if len([l for l in self.blackboard if "PROSPECT:" in str(l)]) < 3:
+                    _q = re.sub(r"institutions?|authorit(?:y|ies)|agenc(?:y|ies)|bodies",
+                                "companies and consultancies", self.user_message or "", flags=re.I)[:160]
+                    try:
+                        await self._places_search(_q or "consultancies in Germany")
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001 — completion pass must never sink the turn
+            log.warning("[hyper-engine] completion pass failed: %s", exc)
+
         # PHASE 4 — STRONG-MODEL SYNTHESIS from the gathered board + debate. Clean context
         # (no tool-call transcript) on the synth model → no harmony glitch, full quality.
         _lead_p = self.participants[0] if self.participants else {}

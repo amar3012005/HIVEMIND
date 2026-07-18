@@ -109,11 +109,25 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001 — learnings are additive, never block generation
             learnings_block = ""
     if req.channel == "email":
+        # On-demand EMAIL SKILL — the campaign's Send button triggers this per
+        # prospect. Loads the room's method skills (cold-email-sequence craft +
+        # polished-email form) and grounds the write on the RUN's report, THIS
+        # firm's real data (website/city), and prior-call learnings — never a
+        # generic template.
+        from .hyper.skills import load_method_skill
+        from .hyper.engine import _SKILLS as _ENGINE_SKILLS
+        _skill = (load_method_skill("cold-email-sequence") or "")[:900]
+        _polish = str(_ENGINE_SKILLS.get("polished-email") or "")[:700]
         sys = (
-            "You write ONE cold-outreach email to a specific prospect, grounded in the team "
-            "report below. Personal, specific, non-generic: one why-now hook tied to THIS firm, "
-            "one concrete value point from the report, one clear ask (a short intro call). "
-            "Under 160 words. Never invent facts, links, phone numbers or placeholder addresses."
+            "You are the outreach agent SENDING one email to a specific prospect — apply these "
+            "method skills exactly:\n" + _skill + "\n" + _polish + "\n"
+            "GROUNDING RULES: this is Touch 1 to THIS firm. Derive the why-now hook and value point "
+            "from the TEAM REPORT and the firm's own profile below (their business, city, website). "
+            "Reference something specific about THEM (what they do / where they operate) so it could "
+            "not have been sent to anyone else. Include the firm's REAL website URL from the profile "
+            "when referencing them, and our site https://singulancelabs.com as the sender's link. "
+            "Brand names exactly: SINGULANCE, HIVEMIND, TARA, HYPERAGENTS. Under 160 words. Never "
+            "invent facts, numbers, links, or placeholder contacts."
             + (
                 f" SENDER IDENTITY: the email is sent from {req.sender_email} — sign off with the "
                 f"sender's real name/role if known (else just the address) and this exact address."

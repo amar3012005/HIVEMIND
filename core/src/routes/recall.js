@@ -309,13 +309,26 @@ export async function handleRecallRoute(ctx = {}) {
       } catch {}
     }
 
-    if (recallProjectId && Array.isArray(result?.memories)) {
+    if (Array.isArray(result?.memories)) {
       const before = result.memories.length;
-      result.memories = result.memories.filter((m) => {
-        const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
-        return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
-      });
-      result.project_scope_applied = { project_id: recallProjectId, kept: result.memories.length, dropped: before - result.memories.length };
+      if (recallProjectId) {
+        // Project-scoped caller: org-plane memories + THIS project's memories only.
+        result.memories = result.memories.filter((m) => {
+          const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
+          return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
+        });
+      } else {
+        // No project on the caller (e.g. a projectless HyperAgents room): the
+        // default plane is ORG-WIDE memories ONLY. Project-scoped documents must
+        // never bleed into unrelated rooms — that's how one project's KB (e.g. a
+        // client's docs) contaminated another company's outreach synthesis.
+        result.memories = result.memories.filter((m) => m.scope !== 'project');
+      }
+      result.project_scope_applied = {
+        project_id: recallProjectId || null,
+        kept: result.memories.length,
+        dropped: before - result.memories.length,
+      };
     }
 
     if (recallAuthorId && Array.isArray(result?.memories)) {

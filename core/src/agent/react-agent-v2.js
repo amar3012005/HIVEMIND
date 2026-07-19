@@ -92,6 +92,10 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 //     language synthesis.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
+// Routing decides authorization-sensitive source/aggregate behavior. Use the
+// same capable model as final chat unless operators explicitly choose another;
+// the smaller internal model remains for bounded toolkit follow-ups.
+const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || 'openai/gpt-oss-120b';
 const FINAL_MODEL    = process.env.HIVEMIND_AGENT_FINAL_MODEL    || 'openai/gpt-oss-120b';
 
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
@@ -1904,7 +1908,7 @@ export async function runReactAgentV2({
     const intentParsed = await parseChatIntent({
       message, history, language,
       groupCatalog,
-      model: process.env.CHAT_INTENT_MODEL || INTERNAL_MODEL,
+      model: INTENT_MODEL,
       apiKey,
       signal: abortCtrl.signal,
     });

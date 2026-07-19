@@ -14,6 +14,7 @@ import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
 import { remoteHydrate } from '../vector/mneme/remote-backend.js';
+import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -37,8 +38,25 @@ export const TOOL_SCHEMAS = [
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
           known_at: { type: 'string', description: 'ISO timestamp for what the workspace had learned by that time.' },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Server-owned scope restriction for typed requests such as self-profile recall.' },
         },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'hivemind_aggregate_entities',
+      description: 'Deterministically count/list distinct canonical entities associated with a parent entity. Use for exhaustive how-many/list-all questions; never infer a count from top-K recall.',
+      parameters: {
+        type: 'object',
+        properties: {
+          parent_name: { type: 'string', description: 'Canonical parent/entity name, for example Solvis.' },
+          entity_kind: { type: 'string', description: 'Entity kind to aggregate, for example product.' },
+          limit: { type: 'integer', minimum: 1, maximum: 1000, default: 500 },
+        },
+        required: ['parent_name', 'entity_kind'],
       },
     },
   },
@@ -338,6 +356,126 @@ export const TOOL_SCHEMAS = [
 // ── Dispatch handlers ────────────────────────────────────────────────────────
 
 const TOOL_HANDLERS = {
+  async hivemind_aggregate_entities(args, ctx) {
+    if (!ctx.prisma?.entity || !ctx.prisma?.entityMention) {
+      return {
+        count: null,
+        entities: [],
+        coverage: { complete: false, cutoff: false, reason: 'entity_index_unavailable' },
+      };
+    }
+    const parentName = String(args.parent_name || '').trim();
+    const rawKind = String(args.entity_kind || '').trim().toLowerCase();
+    const entityKind = rawKind.endsWith('s') ? rawKind.slice(0, -1) : rawKind;
+    const limit = Math.max(1, Math.min(Number(args.limit) || 500, 1000));
+    const parentForms = [...new Set([parentName, parentName.toLowerCase(), parentName.toUpperCase()])];
+    const parentEntities = await ctx.prisma.entity.findMany({
+      where: {
+        orgId: ctx.orgId,
+        isActive: true,
+        OR: [
+          { canonicalName: { equals: parentName, mode: 'insensitive' } },
+          { aliases: { hasSome: parentForms } },
+        ],
+      },
+      select: { id: true, canonicalName: true },
+      take: 10,
+    });
+    if (parentEntities.length === 0) {
+      return {
+        count: null,
+        entities: [],
+        coverage: { complete: false, cutoff: false, reason: 'parent_entity_not_found' },
+      };
+    }
+
+    const orgRole = String(ctx.accessContext?.orgRole || '').toLowerCase();
+    const privilegedOrgReader = orgRole === 'owner' || orgRole === 'admin';
+    const authorizedProjectTags = (ctx.accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
+    const accessibleDocument = {
+      orgId: ctx.orgId,
+      archivedAt: null,
+      ...(ctx.projectId ? { tags: { has: `scope-key:project:${ctx.projectId}` } } : {}),
+      ...(!ctx.projectId && !privilegedOrgReader
+        ? {
+            OR: [
+              { userId: ctx.userId },
+              { tags: { has: 'scope-key:organization' } },
+              { tags: { has: `scope-key:personal:${ctx.userId}` } },
+              ...(authorizedProjectTags.length ? [{ tags: { hasSome: authorizedProjectTags } }] : []),
+            ],
+          }
+        : {}),
+    };
+    const accessibleMemory = scopedMemoryWhere({
+      user_id: ctx.userId,
+      org_id: ctx.orgId,
+      scope: 'all',
+      access_context: ctx.projectId
+        ? { ...(ctx.accessContext || {}), projectIds: [ctx.projectId] }
+        : ctx.accessContext,
+    });
+    const parentMentions = await ctx.prisma.entityMention.findMany({
+      where: {
+        entityId: { in: parentEntities.map((entity) => entity.id) },
+        OR: [
+          { document: accessibleDocument },
+          { memory: accessibleMemory },
+        ],
+      },
+      select: { documentId: true, memoryId: true },
+      take: 2001,
+    });
+    const parentCutoff = parentMentions.length > 2000;
+    const documentIds = [...new Set(parentMentions.slice(0, 2000).map((row) => row.documentId).filter(Boolean))];
+    const memoryIds = [...new Set(parentMentions.slice(0, 2000).map((row) => row.memoryId).filter(Boolean))];
+    if (documentIds.length === 0 && memoryIds.length === 0) {
+      return {
+        count: 0,
+        entities: [],
+        parent: parentEntities[0].canonicalName,
+        coverage: { complete: !parentCutoff, cutoff: parentCutoff, reason: parentCutoff ? 'parent_mention_cap' : null },
+      };
+    }
+
+    const entities = await ctx.prisma.entity.findMany({
+      where: {
+        orgId: ctx.orgId,
+        isActive: true,
+        entityType: { equals: entityKind, mode: 'insensitive' },
+        mentions: {
+          some: {
+            OR: [
+              ...(documentIds.length ? [{ documentId: { in: documentIds } }] : []),
+              ...(memoryIds.length ? [{ memoryId: { in: memoryIds } }] : []),
+            ],
+          },
+        },
+      },
+      select: { id: true, canonicalName: true, aliases: true },
+      orderBy: [{ canonicalName: 'asc' }],
+      take: limit + 1,
+    });
+    const cutoff = parentCutoff || entities.length > limit;
+    const members = entities.slice(0, limit);
+    return {
+      count: cutoff ? null : members.length,
+      entity_kind: entityKind,
+      parent: parentEntities[0].canonicalName,
+      entities: members.map((entity) => ({
+        id: entity.id,
+        name: entity.canonicalName,
+        aliases: entity.aliases || [],
+      })),
+      source_document_ids: documentIds.slice(0, 50),
+      coverage: {
+        complete: !cutoff,
+        cutoff,
+        reason: parentCutoff ? 'parent_mention_cap' : (entities.length > limit ? 'entity_cap' : null),
+      },
+    };
+  },
+
   async hivemind_recall(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
 
@@ -353,7 +491,12 @@ const TOOL_HANDLERS = {
 
     const requestedMode = args.mode || 'fact';
     const mode = normalizeAgentRecallMode(requestedMode);
-    const recallPlan = resolveRecallPlan({ ...args, mode, explicit_mode: args._explicit_mode === true });
+    const recallPlan = resolveRecallPlan({
+      ...args,
+      mode,
+      explicit_mode: args._explicit_mode === true,
+      structured_intent: args._structured_intent === true,
+    });
     const planMode = recallPlan.mode;
     const recallStartedAt = Date.now();
     const result = await router.recall(args.query, {
@@ -371,6 +514,8 @@ const TOOL_HANDLERS = {
       // today/yesterday/this-week shortcuts.
       include_live:   args.include_live === true,
       live_intent:    args.live_intent === true,
+      scope_filter:   args.scope_filter,
+      structured_intent: args._structured_intent === true,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
@@ -539,6 +684,14 @@ const TOOL_HANDLERS = {
     if (!resolvedProjectId && ctx.projectId) {
       resolvedProjectId = ctx.projectId;
     }
+    if (resolvedProjectId) {
+      const accessProjectIds = Array.isArray(ctx.accessContext?.projectIds)
+        ? ctx.accessContext.projectIds
+        : [];
+      if (!accessProjectIds.includes(resolvedProjectId)) {
+        return { saved: false, error: 'project_access_denied', project_id: resolvedProjectId };
+      }
+    }
     let resolvedProjectName = null;
     if (!resolvedProjectId && args.project && ctx.persistentMemoryStore?.client?.project) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
@@ -651,22 +804,44 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_update_memory(args, ctx) {
-    if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
-    const updated = await ctx.persistentMemoryStore.updateMemory({
-      id: args.id,
-      content: args.content,
-      title: args.title,
-      tags: args.tags,
+    if (!ctx.persistentMemoryStore || !ctx.persistentMemoryEngine?.ingestMemory) {
+      throw new Error('versioned memory update unavailable');
+    }
+    const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(args.id, {
+      user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
+    });
+    if (!existing) return { updated: false, error: 'memory_not_found_or_forbidden' };
+    const result = await ctx.persistentMemoryEngine.ingestMemory({
+      title: args.title || existing.title,
+      content: args.content || existing.content,
+      tags: Array.isArray(args.tags) ? args.tags : (existing.tags || []),
+      memory_type: existing.memory_type || 'fact',
       user_id: ctx.userId,
       org_id: ctx.orgId,
-      update_reason: args.reason,
+      scope: existing.scope || 'personal',
+      project_ids: existing.project_ids || [],
+      relationship: { type: 'Updates', target_id: args.id, confidence: 1.0 },
+      _authorized_relationship: true,
+      source_metadata: {
+        source_type: 'chat-update',
+        source_id: args.id,
+        metadata: { update_reason: args.reason || null },
+      },
     });
-    return { updated: true, id: args.id, reason: args.reason };
+    return {
+      updated: true,
+      id: result?.memoryId || result?.id || null,
+      deprecated_id: args.id,
+      operation: result?.operation || 'updated',
+      reason: args.reason,
+    };
   },
 
   async hivemind_get_memory(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
-    const m = await ctx.persistentMemoryStore.getMemory(args.id);
+    const m = await ctx.persistentMemoryStore.getMemoryScoped?.(args.id, {
+      user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
+    });
     if (!m) return { found: false };
     return {
       found: true,
@@ -694,7 +869,11 @@ const TOOL_HANDLERS = {
 
   async hivemind_delete_memory(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
-    await ctx.persistentMemoryStore.deleteMemory({ id: args.id, user_id: ctx.userId, org_id: ctx.orgId });
+    const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(args.id, {
+      user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
+    });
+    if (!existing) return { deleted: false, error: 'memory_not_found_or_forbidden' };
+    await ctx.persistentMemoryStore.deleteMemory(args.id);
     return { deleted: true, id: args.id };
   },
 
@@ -725,7 +904,15 @@ const TOOL_HANDLERS = {
     if (otherIds.size > 0 && ctx.prisma?.memory) {
       try {
         const rows = await ctx.prisma.memory.findMany({
-          where: { id: { in: [...otherIds] }, deletedAt: null },
+          where: {
+            id: { in: [...otherIds] },
+            ...scopedMemoryWhere({
+              user_id: ctx.userId,
+              org_id: ctx.orgId,
+              scope: 'all',
+              access_context: ctx.accessContext,
+            }),
+          },
           select: {
             id: true, title: true, content: true, tags: true, memoryType: true,
             isLatest: true, createdAt: true, documentDate: true,
@@ -1010,6 +1197,7 @@ export function normalizeAgentRecallMode(mode) {
 // Source: ai-boost/awesome-harness-engineering 2026 recommendations +
 // observed P95 latencies in HIVEMIND production.
 const TOOL_TIMEOUTS_MS = {
+  hivemind_aggregate_entities: 5_000,
   hivemind_recall:           8_000,
   hivemind_at:               9_000,   // wraps recall + extra date filter
   hivemind_diff:            16_000,  // 2x recall

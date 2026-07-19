@@ -582,6 +582,43 @@ export class PrismaGraphStore {
     return mapMemoryRecord(record);
   }
 
+  async getMemoryScoped(id, { user_id, org_id, access_context = null } = {}) {
+    if (!id || !user_id || !org_id) return null;
+    const _org = currentOrg();
+    if (_org && orgIsRemote(_org)) {
+      const rows = await remoteHydrate(_org, [id]);
+      const memory = rows.length ? mapAgentRow(rows[0]) : null;
+      if (!memory || (memory.org_id && memory.org_id !== org_id)) return null;
+      if (memory.scope === 'personal') return memory.user_id === user_id ? memory : null;
+      if (memory.scope === 'project') {
+        const allowed = new Set(access_context?.projectIds || []);
+        return (memory.project_ids || []).some((projectId) => allowed.has(projectId)) ? memory : null;
+      }
+      if (memory.scope === 'team') {
+        return (access_context?.teamIds || []).includes(memory.primary_team_id) ? memory : null;
+      }
+      return access_context?.orgRole === 'guest' ? null : memory;
+    }
+    const record = await this.client.memory.findFirst({
+      where: {
+        id,
+        ...scopedMemoryWhere({
+          user_id,
+          org_id,
+          scope: 'all',
+          access_context,
+        }),
+      },
+      include: {
+        sourceMetadata: true,
+        codeMetadata: true,
+        memoryProjects: true,
+        versions: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    });
+    return mapMemoryRecord(record);
+  }
+
   // Batch hydrate by ids — ONE findMany instead of N concurrent getMemory()
   // findUnique calls. The vector lane fans out ~150 ids; doing them as a
   // Promise.all of findUnique slams the Prisma pool (under full-pipeline

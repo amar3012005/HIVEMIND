@@ -5,9 +5,9 @@
  * pipeline. Each step is a single LLM call with a JSON-schema'd output,
  * so behaviour is auditable and deterministic.
  *
- *   1. quick_gate   → cheap rule check: greeting / smalltalk / math /
- *                     self-Q → answer directly, skip planning.
- *   2. plan_step    → LLM emits {direct_answer, sub_queries[],
+ *   1. intent_step  → fast language-agnostic LLM emits a required,
+ *                     schema-validated route_chat_turn tool call.
+ *   2. plan_step    → normalized intent emits {direct_answer, sub_queries[],
  *                     needs_traverse, needs_time_travel, needs_web,
  *                     intents[]}. No prose, structured JSON.
  *   3. evidence_step → one shared recall plan retrieves broad context,
@@ -30,6 +30,7 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
+import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -38,7 +39,17 @@ const RETRYABLE_FAILURES = new Set(['TIMEOUT', 'RATE_LIMIT']);
 
 async function dispatchTool(name, args, ctx, opts = {}) {
   const t0 = Date.now();
-  const first = await _dispatchTool(name, args, ctx, opts);
+  const invoke = async () => {
+    if (ctx?._toolkit?.hasTool(name)) {
+      const response = await ctx._toolkit.execute(name, args, ctx);
+      if (response.status === 'error') {
+        return { error: response.meta?.error || response.content?.[0]?.text || 'tool_error', _failure_mode: 'INVALID_ARGS' };
+      }
+      return response.meta?.raw ?? { content: response.content, status: response.status, ...response.meta };
+    }
+    return _dispatchTool(name, args, ctx, opts);
+  };
+  const first = await invoke();
   const logCall = (resp, retried) => {
     if (!ctx?._trace) return;
     ctx._trace.tool_calls.push({
@@ -54,7 +65,7 @@ async function dispatchTool(name, args, ctx, opts = {}) {
   }
   const backoff = first._failure_mode === 'RATE_LIMIT' ? 1500 : 400;
   await new Promise(r => setTimeout(r, backoff));
-  const second = await _dispatchTool(name, args, ctx, opts);
+  const second = await invoke();
   if (second && !second.error) second._retried_after = first._failure_mode;
   logCall(second, first._failure_mode);
   return second;
@@ -71,6 +82,7 @@ const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 400
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
+const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 6_500);
 
 // Model split (per user directive 2026-05-24):
 //   • internal steps (planner, reflection, classification, sub-tools) use
@@ -96,21 +108,6 @@ const LANGUAGE_NAMES = {
 function languageName(code) {
   if (!code) return 'English';
   return LANGUAGE_NAMES[String(code).slice(0, 2).toLowerCase()] || 'English';
-}
-
-// ── Quick gates — cheap pattern match, no LLM ──────────────────────────
-
-const GREETING_RE = /^\s*(hi|hello|hey|yo|hallo|guten\s*tag|bonjour|ciao|hola|namaste|namaskar|ola|olá|salam|salaam|shalom|merhaba|good\s*(morning|afternoon|evening|night))\b/i;
-const SMALLTALK_RE = /^\s*(thanks|thank\s*you|thx|ok|okay|cool|nice|lol|got\s*it|sounds\s*good|np|no\s*problem|cheers|see\s*you|bye|good\s*night)\s*[!.?]*\s*$/i;
-const SELF_Q_RE = /\b(who\s*are\s*you|what\s*can\s*you\s*do|what\s*('?s|\s+is)\s*(your|hivemind)|what\s*do\s*you\s*do|wer\s*bist\s*du|wie\s*hei[ßs]t\s*du|que\s+puedes\s+hacer|qui\s+es-tu)\b/i;
-
-function quickGateClassify(message) {
-  const t = (message || '').trim();
-  if (!t) return null;
-  if (GREETING_RE.test(t))  return 'greeting';
-  if (SMALLTALK_RE.test(t)) return 'smalltalk';
-  if (SELF_Q_RE.test(t))    return 'self_q';
-  return null;
 }
 
 // ── Groq JSON helper ───────────────────────────────────────────────────
@@ -676,6 +673,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // their source rows in the same answer.
   const synthesisChains = new Map(); // key = synthesis_id → chain
   const recallPackets = [];
+  let aggregateResult = null;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
   const beforeDeadline = (promise) => {
@@ -687,24 +685,35 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
-    onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
+    onEvent?.({ type: 'tool_completed', name: tool, summary, ok: !!payload });
+    // Backward-compatible projections for existing clients.
     onEvent?.({ type: 'tool_result', name: tool, summary });
     return payload;
   };
 
+  const startTool = (tool, args) => {
+    onEvent?.({ type: 'tool_selected', name: tool, arguments: args });
+    onEvent?.({ type: 'tool_started', name: tool, arguments: args });
+    onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
+  };
+
   const recallExtras = {
+    _structured_intent: true,
     ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
     ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
+    ...(plan.scope_filter ? { scope_filter: plan.scope_filter } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
   // default, insight for relation queries, panorama for time/history).
   // Insight mode pulls synthesis_evidence_chains so the agent sees the
   // multi-source claim AND its source memories without a second call.
-  const recallMode = plan.explicit_recall_mode || 'fact';
+  const recallMode = plan.explicit_recall_mode
+    || ({ quick: 'fact', panorama: 'explain', insight: 'explain' }[plan.recall_mode])
+    || (['fact', 'explain', 'full'].includes(plan.recall_mode) ? plan.recall_mode : 'fact');
   // T1-4: mode-aware candidate limit. Quick mode (common path) fetches 8, not
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
@@ -715,19 +724,32 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       ? 12
       : 8;
   const evidenceSeen = new Set();
-  const recallQueries = [plan.user_message || plan.sub_queries[0]].filter(Boolean);
+  const plannedQueries = [...new Set([
+    plan.user_message,
+    ...(Array.isArray(plan.sub_queries) ? plan.sub_queries : []),
+  ].filter((query) => typeof query === 'string' && query.trim()).map((query) => query.trim()))].slice(0, 3);
+  // Compile the planner's decomposition into one deterministic recall packet.
+  // The shared router owns wide lexical/vector/entity lanes; firing several
+  // independent recalls duplicates those lanes and makes latency/merging
+  // nondeterministic under load.
+  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read';
+  const recallQueries = !dedicatedLane && plannedQueries.length > 0
+    ? [plannedQueries.join('\nRelated focus: ')]
+    : [];
   if (recallQueries.length > 0) {
     const recallResults = await Promise.all(
       recallQueries.map(async (q) => {
+        const args = {
+          query: q,
+          mode: recallMode,
+          limit: recallLimit,
+          _explicit_mode: !!plan.explicit_recall_mode,
+          deadline_at: activeDeadlineAt,
+          ...recallExtras,
+        };
         try {
-          const r = await beforeDeadline(dispatchTool('hivemind_recall', {
-            query: q,
-            mode: recallMode,
-            limit: recallLimit,
-            _explicit_mode: !!plan.explicit_recall_mode,
-            deadline_at: activeDeadlineAt,
-            ...recallExtras,
-          }, ctx));
+          startTool('hivemind_recall', args);
+          const r = await beforeDeadline(dispatchTool('hivemind_recall', args, ctx));
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -787,6 +809,30 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
+  if (plan.aggregate?.parent && plan.aggregate?.kind && remaining() > 0) {
+    const aggregateArgs = {
+      parent_name: plan.aggregate.parent,
+      entity_kind: plan.aggregate.kind,
+      limit: 1000,
+    };
+    try {
+      startTool('hivemind_aggregate_entities', aggregateArgs);
+      aggregateResult = await beforeDeadline(
+        dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx),
+      );
+      recordTool(
+        'hivemind_aggregate_entities',
+        aggregateArgs,
+        aggregateResult?.coverage?.complete
+          ? `${aggregateResult.count} distinct ${aggregateResult.entity_kind || plan.aggregate.kind}`
+          : `incomplete aggregate (${aggregateResult?.coverage?.reason || 'unknown'})`,
+        aggregateResult,
+      );
+    } catch (error) {
+      recordTool('hivemind_aggregate_entities', aggregateArgs, `error: ${error.message}`, null);
+    }
+  }
+
   let coverage = assessRecallCoverage({
     plan,
     memories: [...memoriesById.values()],
@@ -803,6 +849,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     if (escalation) {
       escalationCount = 1;
       try {
+        startTool('hivemind_recall', { ...recallExtras, ...escalation.args });
         const expanded = await beforeDeadline(dispatchTool('hivemind_recall', {
           ...recallExtras,
           ...escalation.args,
@@ -841,79 +888,34 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
-  // Connector reads are explicit planner/tool-router decisions. Recall itself
-  // remains deterministic and language-independent.
-  const READ_CONNECTOR_TRIGGERS = {
-    notion: { tool: 'notion-search', argMap: q => ({ query: q }) },
-    slack: {
-      tool: 'slack_read_channel',
-      argMap: (q, mems) => {
-        // Pull channel_id from a cached slack memory if present.
-        const ch = mems
-          .flatMap(m => (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('slack-channel-id:')))
-          .map(t => t.slice('slack-channel-id:'.length))[0];
-        // Fallback: extract channel name from query — Nango Slack proxy
-        // accepts either id or name in `channel` field. Priority order:
-        //   1. #channel hashtag
-        //   2. "channel <name>" / "in #<name>"
-        //   3. "in <name>" — only if <name> looks like a real channel slug
-        //      (kebab/snake with at least one separator) to avoid matching
-        //      "in slack" → name="slack".
-        const STOP_WORDS = /^(the|that|this|a|an|slack|notion|gmail|github|linear|jira|drive|calendar|outlook|channel|thread|message|messages|msg|msgs)$/i;
-        let channelName = null;
-        const hash = (q || '').match(/#([a-z0-9][a-z0-9._-]+)/i);
-        if (hash) channelName = hash[1];
-        if (!channelName) {
-          const m2 = (q || '').match(/\bchannel\s+#?([a-z0-9][a-z0-9._-]{2,40})\b/i);
-          if (m2 && !STOP_WORDS.test(m2[1])) channelName = m2[1];
-        }
-        if (!channelName) {
-          const m3 = (q || '').match(/\bin\s+([a-z0-9][a-z0-9._-]*[-_][a-z0-9][a-z0-9._-]*)\b/i);
-          if (m3 && !STOP_WORDS.test(m3[1])) channelName = m3[1];
-        }
-        return {
-          channel_id: ch || undefined,
-          channel: !ch && channelName ? channelName : undefined,
-          limit: 5,
-        };
-      },
-      // Allow live call if EITHER id or channel name resolved.
-      requires: (args) => !!(args.channel_id || args.channel),
-    },
-    gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
-  };
-  const explicitLive = Array.isArray(plan.live_providers) ? plan.live_providers : [];
-  const connectorsToFetch = [...new Set(explicitLive)]
-    .filter(p => READ_CONNECTOR_TRIGGERS[p]);
-  if (connectorsToFetch.length > 0 && ctx.prisma) {
+  // Connector reads use the same AgentScope-style toolkit as writes. The
+  // selected group's read-only schemas drive a bounded tool loop, allowing
+  // search -> read follow-ups without provider/tool-name switch statements.
+  const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
+  if (plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit) {
     try {
-      const { buildToolkitForUser } = await import('./toolkit-factory.js');
-      const tk = await buildToolkitForUser({
-        prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId, hivemindTools: [],
-      });
-      for (const provider of connectorsToFetch) {
-        try {
-          tk.resetEquippedTools([provider]);
-          const cfg = READ_CONNECTOR_TRIGGERS[provider];
-          const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
-          if (!cfg.requires || cfg.requires(arg)) {
-            const resp = await tk.execute(cfg.tool, arg, {
-              userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
-              persistentMemoryEngine: ctx.persistentMemoryEngine,
-              ingestCanonicalPayload: ctx.ingestCanonicalPayload,
-            });
-            const text = resp.content?.[0]?.text || '';
-            recordTool(cfg.tool, arg, `${text.length}b live`, resp);
-            if (text) {
-              liveItems.push({ source: provider, title: `live ${provider} result`, snippet: text.slice(0, 600) });
-            }
-          }
-        } catch (e) {
-          recordTool('connector_live_fallback', { provider }, `error: ${e.message}`, null);
-        }
+      const readResult = await beforeDeadline(runToolkitReadLoop({
+        toolkit: ctx._readToolkit,
+        message: plan.user_message,
+        history: [],
+        model: ctx._internalModel,
+        apiKey: ctx._apiKey,
+        ctx,
+        signal: ctx._signal,
+        onEvent,
+      }));
+      for (const step of (readResult?.steps || [])) {
+        recordTool(step.tool, step.args, step.result_summary, step.raw || null);
+      }
+      if (readResult?.text) {
+        liveItems.push({
+          source: selectedLiveGroups.join(','),
+          title: 'live connector result',
+          snippet: readResult.text.slice(0, 4000),
+        });
       }
     } catch (err) {
-      recordTool('connector_live_fallback', { providers: connectorsToFetch }, `error: ${err.message}`, null);
+      recordTool('connector_read_loop', { groups: selectedLiveGroups }, `error: ${err.message}`, null);
     }
   }
 
@@ -943,7 +945,18 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
     recall_packets: recallPackets,
-    coverage,
+    aggregate: aggregateResult,
+    coverage: {
+      ...coverage,
+      ...(plan.requires_complete_coverage ? {
+        aggregate_requested: true,
+        aggregate_complete: aggregateResult?.coverage?.complete === true,
+        complete: aggregateResult?.coverage?.complete === true,
+        ...(aggregateResult?.coverage?.complete === true
+          ? {}
+          : { cutoff_reason: aggregateResult?.coverage?.reason || 'aggregate_coverage_incomplete' }),
+      } : {}),
+    },
     escalation_count: escalationCount,
     steps,
     webJob,
@@ -1139,6 +1152,54 @@ export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKn
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
+  if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
+      && Number.isInteger(evidence.aggregate?.count)) {
+    const count = evidence.aggregate.count;
+    const kind = evidence.aggregate.entity_kind || plan.aggregate?.kind || 'entities';
+    const parent = evidence.aggregate.parent || plan.aggregate?.parent || '';
+    const lang = String(language || 'en').slice(0, 2).toLowerCase();
+    const responses = {
+      de: `${parent} hat ${count} verschiedene ${kind}.`,
+      fr: `${parent} compte ${count} ${kind} distincts.`,
+      es: `${parent} tiene ${count} ${kind} distintos.`,
+      en: `${parent} has ${count} distinct ${kind}${count === 1 ? '' : 's'}.`,
+    };
+    const response = responses[lang] || responses.en;
+    return {
+      response,
+      claims: [{
+        text: response,
+        grounded: true,
+        citation_ids: [],
+        provenance: 'entity_aggregate',
+      }],
+      rejected_claims: [],
+      grounded: true,
+      evidence_used: [],
+      confidence: 0.99,
+      gaps: [],
+      usage: null,
+    };
+  }
+  if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete !== true) {
+    const lang = String(language || 'en').slice(0, 2).toLowerCase();
+    const responses = {
+      de: 'Ich kann die genaue Anzahl aus einer Top-K-Suche nicht zuverlässig bestimmen. Dafür ist eine vollständige, deduplizierte Entitäts- oder Dokumentaggregation erforderlich.',
+      fr: 'Je ne peux pas déterminer le nombre exact à partir d’une recherche top-K. Il faut une agrégation complète et dédupliquée des entités ou documents.',
+      es: 'No puedo determinar el número exacto a partir de una búsqueda top-K. Se necesita una agregación completa y sin duplicados de entidades o documentos.',
+      en: 'I cannot determine the exact count from top-K recall. A complete, deduplicated entity or document aggregation is required.',
+    };
+    return {
+      response: responses[lang] || responses.en,
+      claims: [],
+      rejected_claims: [],
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['coverage_incomplete: exact aggregate executor did not prove complete coverage'],
+      usage: null,
+    };
+  }
   if (evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
     // ONLY refuse when there is genuinely nothing to answer from. When recall
     // DID surface grounded memories/evidence, answer from them and record the
@@ -1149,7 +1210,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const _haveEvidence = (evidence.memories?.length || 0) > 0
       || (evidence.evidence?.length || 0) > 0
       || (evidence.recall_packets?.some((p) => (p?.facts?.length || 0) > 0)) === true;
-    if (!_haveEvidence || String(process.env.RECALL_SOURCE_STRICT || '').toLowerCase() === 'true') {
+    if (!_haveEvidence || evidence.coverage.source_requested) {
       return {
         response: 'No grounded workspace evidence found',
         claims: [],
@@ -1171,7 +1232,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   if (ctx?.prisma?.nangoConnection) {
     try {
       const conns = await ctx.prisma.nangoConnection.findMany({
-        where: { userId: ctx.userId, status: 'active' },
+        where: { userId: ctx.userId, orgId: ctx.orgId, status: 'active' },
         select: { providerKey: true },
       });
       const providers = conns.map(c => c.providerKey);
@@ -1432,62 +1493,10 @@ ${message}`;
 
 // ── Save / update side-effects (best-effort, async-fire-and-forget) ───
 
-// Set of pronouns / placeholders that mean "the prior turn". Plain set
-// lookup — no regex — so the rule is auditable and stable across locales.
-const PRONOUN_PLACEHOLDERS = new Set([
-  'this', 'that', 'it', 'these', 'those',
-  'the above', 'the previous', 'the prior', 'the last one',
-  'above', 'previous', 'prior', 'last one',
-]);
-
-// Imperative save-trigger phrases. When the user message IS one of these
-// (or a confirmation), the save target is NOT the message itself — it's
-// the prior conversation turn. Examples: "save it", "remember this",
-// "ok save it", "yes please", "go ahead", "do it".
-const SAVE_IMPERATIVE_PHRASES = new Set([
-  'save it', 'save this', 'save that', 'save them', 'save these',
-  'remember it', 'remember this', 'remember that', 'remember it please',
-  'keep it', 'keep this', 'keep that', 'store it', 'store this',
-  'note it', 'note this', 'note that', 'note it down', 'log it',
-  'add to memory', 'add to hivemind', 'commit it', 'commit this',
-  // Pure confirmations after the agent already proposed something
-  'yes', 'yes please', 'yes go ahead', 'go ahead', 'do it',
-  'sure', 'sure go ahead', 'ok', 'okay', 'confirmed', 'proceed',
-]);
-
-function _isPronounPlaceholder(s) {
-  if (!s) return false;
-  const norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
-  return PRONOUN_PLACEHOLDERS.has(norm);
-}
-
-// T2-1: distill the answer-prompt history tail — the single biggest line item
-// (~59% of prompt tokens). Two levers, both accuracy-safe:
-//   (1) ASSISTANT turns are stored as the full {response, evidence_used,
-//       confidence, gaps} JSON blob. The model only needs the prose reply, so
-//       extract `.response` instead of JSON.stringify-ing the whole object.
-//   (2) Depth: 4 recent turns is plenty for a fresh factual/temporal question.
-//       Keep the FULL 6 only when the current message refers back ("save it",
-//       "what about that one", bare pronoun, or a tiny follow-up) — anaphora
-//       needs the older turn to resolve. When in doubt we keep more, never less.
-// Each turn is start-capped (not mid-truncated) so the model never parses a
-// severed JSON fragment.
-function _needsDeepHistory(message) {
-  const m = String(message || '').trim().toLowerCase();
-  if (!m) return true;                              // empty → don't risk it
-  if (m.length <= 24) return true;                  // terse follow-up
-  if (SAVE_IMPERATIVE_PHRASES.has(m.replace(/[.!?,;:]+$/, ''))) return true;
-  const tokens = m.replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(Boolean);
-  if (tokens.some((t) => PRONOUN_PLACEHOLDERS.has(t))) return true;  // "...that one..."
-  if (/\b(above|previous|prior|earlier|last (one|time)|the same)\b/.test(m)) return true;
-  return false;
-}
-
 function distillHistoryTail(history, message, { perTurnCap = 600 } = {}) {
-  const depth = _needsDeepHistory(message) ? 6 : 4;
   return (history || [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
-    .slice(-depth)
+    .slice(-6)
     .map((h) => {
       let content = h.content;
       if (typeof content !== 'string') {
@@ -1505,60 +1514,49 @@ function distillHistoryTail(history, message, { perTurnCap = 600 } = {}) {
     });
 }
 
-// Returns true when the message is a bare imperative/confirmation that
-// the save tool should NOT use as content. Strips "please", trailing
-// punctuation. Multilingual variants would need translation — we keep
-// English here and rely on _isPronounPlaceholder for cross-locale "it/this".
-function _isSaveImperative(s) {
-  if (!s) return false;
-  let norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
-  norm = norm.replace(/\bplease\b/g, '').replace(/\s+/g, ' ').trim();
-  if (SAVE_IMPERATIVE_PHRASES.has(norm)) return true;
-  // Match "save X" / "remember X" / "note X" where X is a pronoun.
-  const m = norm.match(/^(save|remember|store|note|keep|log)\s+(.+)$/);
-  if (m && _isPronounPlaceholder(m[2])) return true;
-  return false;
-}
-
-// ── Write-intent detection + toolkit action loop ──────────────────────
-//
-// Determines whether the user wants to ACT on a connector (post/send/
-// draft a Slack msg, create a Notion page, etc.) vs query their memory.
-// Pure regex — runs before LLM. Avoids spending a planner call on
-// imperative phrasing.
-
-// Wider verb set — catches "let X know", "tell Y", "remind Z", "ping",
-// "ask", "announce", "broadcast" + the original action verbs.
-const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share|tell|ping|ask|let|inform|remind|announce|broadcast|update|alert|forward|compose|create|make|generate|publish)\b/i;
-const SLACK_HINT_RE = /(?:\b(?:slack|channel|@channel|@here|@everyone)\b|(?:^|\s)#[a-z0-9_-]+|(?:^|\s)@[a-z0-9_-]+)/i;
-const NOTION_HINT_RE = /\b(notion|wiki|page|database)\b/i;
-const GMAIL_HINT_RE = /\b(gmail|email|inbox|mail)\b/i;
-const GDOCS_HINT_RE = /\b(google\s*docs?|gdocs?|doc\b|document\b|word\s*doc)\b/i;
-const GEMINI_HINT_RE = /\b(gemini|google\s*ai|bard)\b/i;
-
-function detectWriteIntent(message) {
-  const m = String(message || '');
-  if (!WRITE_VERB_RE.test(m)) return null;
-  if (SLACK_HINT_RE.test(m)) return { provider: 'slack' };
-  if (NOTION_HINT_RE.test(m)) return { provider: 'notion' };
-  if (GMAIL_HINT_RE.test(m)) return { provider: 'gmail' };
-  if (GDOCS_HINT_RE.test(m)) return { provider: 'google-docs' };
-  if (GEMINI_HINT_RE.test(m)) return { provider: 'google-gemini' };
-  return null;
-}
-
-// Read-intent detection — even when there's no write verb, references to a
-// specific provider should equip its READ tools so the agent can pull live
-// data. Returns a list of groups to activate (read-only intent).
-function detectReadIntents(message) {
-  const m = String(message || '');
-  const groups = [];
-  if (GMAIL_HINT_RE.test(m)) groups.push('gmail');
-  if (GDOCS_HINT_RE.test(m)) groups.push('google-docs');
-  if (GEMINI_HINT_RE.test(m)) groups.push('google-gemini');
-  if (NOTION_HINT_RE.test(m)) groups.push('notion');
-  if (SLACK_HINT_RE.test(m)) groups.push('slack');
-  return groups;
+async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ctx, signal, onEvent }) {
+  const schemas = toolkit.getJsonSchemas({ readOnlyOnly: true });
+  if (schemas.length === 0) return { text: '', steps: [] };
+  const messages = [
+    {
+      role: 'system',
+      content: 'Use only the provided read-only tools to answer the request. Select tools from their schemas and descriptions. Preserve the user language and exact identifiers. Stop after sufficient current evidence; never propose or perform a mutation.',
+    },
+    ...distillHistoryTail(history, message, { perTurnCap: 400 }).slice(-4),
+    { role: 'user', content: message },
+  ];
+  const steps = [];
+  const resultTexts = [];
+  for (let round = 0; round < 3; round++) {
+    const response = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages, tools: schemas, tool_choice: 'auto', temperature: 0, max_tokens: 900 }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`connector_read_model_${response.status}`);
+    const data = await response.json();
+    const msg = data?.choices?.[0]?.message || {};
+    const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    if (calls.length === 0) {
+      const final = String(msg.content || '').trim();
+      return { text: final || resultTexts.join('\n\n'), steps };
+    }
+    messages.push(msg);
+    for (const call of calls) {
+      let args = {};
+      try { args = JSON.parse(call.function?.arguments || '{}'); } catch {}
+      const name = call.function?.name;
+      onEvent?.({ type: 'tool_started', name, tool_call_id: call.id, arguments: args });
+      const toolResult = await toolkit.execute(name, args, ctx);
+      const text = String(toolResult.content?.[0]?.text || '').slice(0, 8000);
+      steps.push({ tool: name, args, result_summary: text.slice(0, 240), raw: toolResult.meta?.raw || null });
+      if (text) resultTexts.push(text);
+      onEvent?.({ type: 'tool_completed', name, tool_call_id: call.id, status: toolResult.status, summary: text.slice(0, 240) });
+      messages.push({ role: 'tool', tool_call_id: call.id, content: text });
+    }
+  }
+  return { text: resultTexts.join('\n\n'), steps };
 }
 
 /**
@@ -1611,7 +1609,7 @@ ${toolNames.map(n => `- ${n}`).join('\n')}
 
 RULES:
 - Call only the tools listed above. Tool names are case-sensitive.
-- For Slack: the available tools are slack_read_channel, slack_read_thread, slack_send_message, slack_schedule_message, slack_send_message_draft. There is NO slack_search_channels tool — if you need to find a channel ID, ASK the user for the channel name or ID instead of inventing a tool.
+- For Slack: trust the registered tool names and descriptions above. Use slack_list_channels when it is registered and a channel id must be resolved; otherwise ask the user instead of inventing a tool.
 - If the user names a channel like "#all-davinci-ai" without giving you an ID, either (a) reuse a channel_id from prior context in this conversation, or (b) ask the user for it.
 - Write tools (send/schedule/draft) go through a draft-approval gate. When a tool returns status="draft_created", do NOT claim the message was sent. Tell the user the draft was created and is awaiting their approval.
 - Be concise. Output a single sentence after the tool call completes.${contextHint}`;
@@ -1634,6 +1632,7 @@ RULES:
         max_completion_tokens: 1500,
         temperature: 0.2,
       }),
+      signal: ctx._signal,
     });
     if (!resp.ok) {
       const errText = (await resp.text()).slice(0, 500);
@@ -1698,48 +1697,12 @@ RULES:
 
 async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   if (plan.save_intent && typeof plan.save_intent === 'object') {
-    // Resolve empty / pronoun-only / imperative content by harvesting
-    // conversation history. User says "save this" / "save it" / "yes" →
-    // grab the most recent assistant turn (their proposed text) OR the
-    // last substantive user message.
     let content = (plan.save_intent.content || '').trim();
     let title   = (plan.save_intent.title   || '').trim();
 
-    const msgIsImperative = _isSaveImperative(message);
-    const contentIsBare = !content
-      || _isPronounPlaceholder(content)
-      || _isSaveImperative(content)
-      // Planner echoed the trigger phrase as content — clearly wrong.
-      || (message && content.toLowerCase() === message.trim().toLowerCase());
-
-    if (contentIsBare || msgIsImperative) {
-      const turns = Array.isArray(history) ? history.slice(-8) : [];
-      // Prefer last assistant draft (often the thing being saved)
-      const lastAssistant = [...turns].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string' && h.content.trim().length > 20);
-      const lastUserPrior = [...turns].reverse().find(h => h?.role === 'user'
-        && typeof h.content === 'string'
-        && h.content.trim() !== (message || '').trim()
-        && h.content.trim().length > 10
-        // Don't pick another imperative as the source — the user's *prior*
-        // substantive content is the target.
-        && !_isSaveImperative(h.content)
-      );
-      // Prefer user turn when it carries the fact ("meet Ethan Tuesday 7pm")
-      // and only fall back to assistant draft when no user content exists.
-      content = (lastUserPrior?.content || lastAssistant?.content || '').trim();
-    }
-
-    // Final guard: never persist a save whose content equals the trigger.
-    if (content && message && content.toLowerCase() === message.trim().toLowerCase()) {
-      content = '';
-    }
-    // Also reject pure imperatives that slipped through.
-    if (content && _isSaveImperative(content)) {
-      content = '';
-    }
-
     if (!content) {
-      // Nothing to save — log and skip.
+      // The structured parser must resolve references from history. Never
+      // guess the save target through locale-specific phrase matching.
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: 'skipped (empty content)' });
       return { tool: 'hivemind_save_memory', args: plan.save_intent, result_summary: 'skipped (empty content)' };
     }
@@ -1808,55 +1771,6 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   return null;
 }
 
-// ── Save-classifier rescue ──────────────────────────────────────────────
-// The planner (INTERNAL_MODEL, gpt-oss-20b) reliably catches first-person
-// narration but misses THIRD-PERSON declarative facts the user teaches
-// ("X is now the parent of Y", "we rebranded Z") — a buried field in a
-// 20-field JSON is too subtle for a small model, so the agent just recalls
-// "no record" instead of SAVING. This is a focused, single-purpose binary
-// classifier on the STRONG model, gated by a cheap declarative heuristic so it
-// only fires when the planner emitted no save on a statement (not a question).
-const QUESTION_LEAD_RE = /^(what|who|whom|whose|when|where|why|how|which|is|are|am|was|were|do|does|did|can|could|would|should|will|shall|tell|show|list|find|search|get|fetch|explain|describe|summari[sz]e|recall|give|look|lookup|any|please)\b/i;
-export function looksDeclarativeFact(message) {
-  const m = String(message || '').trim();
-  if (!m || m.endsWith('?')) return false;          // question
-  if (QUESTION_LEAD_RE.test(m)) return false;        // interrogative / recall-command lead
-  if (m.split(/\s+/).length < 4) return false;       // too short (bare entity/filename)
-  return true;
-}
-
-// Mutates plan.auto_save_intent in place when a declarative fact is detected
-// that the planner did not already flag for save. Non-fatal + best-effort.
-async function rescueAutoSaveIntent({ message, plan, model, apiKey, signal, onEvent }) {
-  if (!plan || plan.save_intent || plan.auto_save_intent) return plan; // planner caught it
-  if (!looksDeclarativeFact(message)) return plan;
-  const prompt = `The user said: "${message}"
-
-Decide ONE thing: is the user TEACHING a new durable fact about THEIR OWN world (their company, org structure, people, products, projects, plans, preferences, events, decisions) that should be remembered — as opposed to (a) asking a question, (b) a recall request, or (c) stating general/external/encyclopedic knowledge unrelated to them?
-
-If YES, extract a self-contained THIRD-PERSON note. If NO, return {"save": false}.
-Output JSON only:
-{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}
-OR {"save": false}`;
-  try {
-    const { parsed, usage } = await callJsonLLM({ messages: [{ role: 'user', content: prompt }], model, apiKey, maxTokens: 400, signal });
-    if (parsed && parsed.save === true && parsed.title && parsed.content && Number(parsed.confidence || 0) >= 0.7) {
-      plan.auto_save_intent = {
-        title: String(parsed.title).slice(0, 200),
-        content: String(parsed.content).slice(0, 2000),
-        tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 12) : [],
-        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
-        confidence: Number(parsed.confidence),
-        _rescued: true,
-      };
-      onEvent?.({ type: 'tool_call', name: 'save_classifier', arguments: JSON.stringify({ rescued: true, title: plan.auto_save_intent.title }) });
-    }
-    return { plan, usage };
-  } catch {
-    return { plan };
-  }
-}
-
 // ── Public entry — same signature as v1 ────────────────────────────────
 
 export async function runReactAgentV2({
@@ -1869,7 +1783,7 @@ export async function runReactAgentV2({
   language,
   ctx,
   onEvent,
-  router,
+  router: _deprecatedRouter,
   recallMode,
   recallSource,
   recallTime,
@@ -1877,11 +1791,6 @@ export async function runReactAgentV2({
 }) {
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
-  const recallDeadlineAt = Date.now() + 3_000;
-  // Tool-decision router (per-request `router:'tool'` OR env CHAT_ROUTER=tool).
-  // Per-request lets us A/B test safely without flipping the deployment default.
-  const useRouter = (router || process.env.CHAT_ROUTER) === 'tool';
-
   const abortCtrl = new AbortController();
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
   const usages = [];
@@ -1904,6 +1813,14 @@ export async function runReactAgentV2({
     failure_mode: null,
     confidence_path: [],
   };
+  let eventSequence = 0;
+  const userOnEvent = onEvent;
+  onEvent = (event) => userOnEvent?.({
+    ...event,
+    schema_version: 1,
+    trace_id: trace.traceId,
+    sequence: ++eventSequence,
+  });
   // Wrap dispatchTool so every call lands in the trace.
   const tracedDispatch = async (name, args, c, opts) => {
     const t0 = Date.now();
@@ -1919,61 +1836,89 @@ export async function runReactAgentV2({
   };
   // Shim ctx so downstream uses traced dispatch automatically without
   // having to refactor every call site.
-  ctx = { ...ctx, _tracedDispatch: tracedDispatch, _trace: trace };
+  ctx = {
+    ...ctx,
+    _tracedDispatch: tracedDispatch,
+    _trace: trace,
+    _signal: abortCtrl.signal,
+    _apiKey: apiKey,
+    _internalModel: INTERNAL_MODEL,
+  };
 
   try {
+    if (ctx.projectId) {
+      const authorizedProjects = Array.isArray(ctx.accessContext?.projectIds)
+        ? ctx.accessContext.projectIds
+        : [];
+      if (!authorizedProjects.includes(ctx.projectId)) {
+        trace.failure_mode = 'PROJECT_ACCESS_DENIED';
+        onEvent?.({ type: 'scope_rejected', project_id: ctx.projectId, reason: 'project_access_denied' });
+        return {
+          response: 'You do not have access to the requested project scope.',
+          error: 'project_access_denied',
+          sources: [], steps: [], evidence_used: [], claims: [], rejected_claims: [],
+          grounded: false, confidence: 0, gaps: ['Requested project is not authorized.'],
+          usage: null, trace: finalizeTrace(trace, usages), assistant_name: assistantName || null,
+        };
+      }
+    }
+    onEvent?.({
+      type: 'scope_bound',
+      project_id: ctx.projectId || null,
+      authorized_project_count: ctx.accessContext?.projectIds?.length || 0,
+    });
+    onEvent?.({ type: 'turn_accepted', schema_version: 1, trace_id: trace.traceId });
+
+    // Build one per-turn toolkit before intent parsing. The parser sees only
+    // capability names/descriptions available to this user and organization;
+    // the same instance executes any selected connector/native tools later.
+    const { buildToolkitForUser, getCapabilityCatalogForUser } = await import('./toolkit-factory.js');
+    const groupCatalog = await getCapabilityCatalogForUser({ prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId });
+    const intentParsed = await parseChatIntent({
+      message, history, language,
+      groupCatalog,
+      model: process.env.CHAT_INTENT_MODEL || INTERNAL_MODEL,
+      apiKey,
+      signal: abortCtrl.signal,
+    });
+    const intentDecision = intentParsed.decision;
+    if (intentParsed.usage) usages.push(intentParsed.usage);
+    const turnToolkit = await buildToolkitForUser({
+      prisma: ctx.prisma,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      persistentMemoryEngine: ctx.persistentMemoryEngine,
+      selectedGroups: intentDecision.tool_groups,
+    });
+    turnToolkit.resetEquippedTools(intentDecision.tool_groups);
+    ctx._toolkit = turnToolkit;
+    onEvent?.({ type: 'intent_decided', schema_version: 1, trace_id: trace.traceId, decision: intentDecision });
+    trace.intent = {
+      version: intentDecision.version,
+      operation: intentDecision.operation,
+      language: intentDecision.response_language,
+      side_effect_policy: intentDecision.side_effect_policy,
+    };
     const hasBrowserContext = /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');
 
-    // STEP 1 — Quick gate (no LLM). Browser context bypasses the gate.
-    // CHAT_ROUTER=tool also bypasses it — the LLM router (STEP 2 ALT) decides
-    // greetings/smalltalk in ANY language, so no regex routing is relied upon.
-    const gateKind = (useRouter || hasBrowserContext) ? null : quickGateClassify(message);
-    if (gateKind) {
-      onEvent?.({ type: 'gate', kind: gateKind });
-      // Quick gate (greeting/math/definition) is user-facing → FINAL_MODEL
-      const { response, usage } = await answerDirectly({
-        message, gateKind, language, assistantName, orgName, model: FINAL_MODEL, apiKey, signal: abortCtrl.signal,
-      });
-      if (usage) usages.push(usage);
-      onEvent?.({ type: 'finish', text: response });
-      return {
-        response,
-        sources: [],
-        steps,
-        evidence_used: [],
-        confidence: 1.0,
-        gaps: [],
-        usage: sumUsage(usages),
-        trace: finalizeTrace(trace, usages),
-        assistant_name: assistantName || null,
-      };
+    // The required structured intent call is the plan. This removes the old
+    // quick-gate, JSON planner, tool-router switch, and phrase rescue stack.
+    let plan = intentDecisionToPlan(intentDecision, message);
+    if (hasBrowserContext && !plan.sub_queries.length && plan.operation !== 'direct') {
+      plan.sub_queries = [message];
     }
-
-    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning).
-    // CHAT_ROUTER=tool swaps the big JSON planStep for the tiny-tool routerPlan
-    // (language-robust, ~token-cheap). Same { plan, usage } contract → every
-    // downstream step is reused unchanged.
-    const planResult = (useRouter)
-      ? await routerPlan({
-          message, history, language, assistantName, orgName,
-          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
-        })
-      : await planStep({
-          message, history, language, assistantName, orgName, hasBrowserContext,
-          model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
-        });
-    if (planResult.usage) usages.push(planResult.usage);
-    const plan = applyExplicitRecallControls(planResult.plan, {
+    plan = applyExplicitRecallControls(plan, {
       mode: recallMode,
       source: recallSource,
-      time: recallTime,
+      time: recallTime || intentDecision.time,
     });
 
     // Router direct-answer short-circuit: the router already wrote a
     // language-correct reply (no tool needed) → skip the extra answerDirectly
     // call + save-rescue. 1 LLM call total for greetings/smalltalk.
-    if (useRouter && plan._direct_answer) {
+    if (intentDecision.operation === 'direct' && plan._direct_answer) {
       onEvent?.({ type: 'finish', text: plan._direct_answer });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
       return {
         response: plan._direct_answer,
         sources: [], steps, evidence_used: [], confidence: 0.9, gaps: [],
@@ -1982,37 +1927,35 @@ export async function runReactAgentV2({
       };
     }
 
-    // Save-classifier rescue: catch declarative facts the small planner missed
-    // (3rd-person "X is now Y" teachings). Runs on the strong answer model, only
-    // when no save was already flagged AND the message is a statement (not a
-    // question). Populates plan.auto_save_intent for the downstream save path.
-    try {
-      const rescue = await rescueAutoSaveIntent({ message, plan, model, apiKey, signal: abortCtrl.signal, onEvent });
-      if (rescue?.usage) usages.push(rescue.usage);
-    } catch { /* non-fatal */ }
+    const mutationTool = {
+      update: plan.update_intent ? ['hivemind_update_memory', plan.update_intent] : null,
+      delete: plan.delete_intent ? ['hivemind_delete_memory', plan.delete_intent] : null,
+      rename_assistant: plan.assistant_name_intent ? ['hivemind_set_assistant_name', { name: plan.assistant_name_intent }] : null,
+    }[intentDecision.operation];
+    if (mutationTool) {
+      const [toolName, toolArgs] = mutationTool;
+      onEvent?.({ type: 'tool_started', name: toolName, arguments: toolArgs });
+      const result = await dispatchTool(toolName, toolArgs, ctx);
+      const succeeded = !result?.error && result?.updated !== false && result?.deleted !== false;
+      onEvent?.({ type: 'tool_completed', name: toolName, status: succeeded ? 'ok' : 'error', result });
+      const response = succeeded ? intentDecision.acknowledgement : `${intentDecision.acknowledgement} (${result?.error || 'operation_failed'})`;
+      onEvent?.({ type: 'finish', text: response });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: succeeded });
+      return {
+        response, sources: [], steps: [{ tool: toolName, args: toolArgs, result_summary: succeeded ? 'completed' : String(result?.error || 'failed') }],
+        evidence_used: [], confidence: succeeded ? 1 : 0, gaps: succeeded ? [] : [String(result?.error || 'operation_failed')],
+        usage: sumUsage(usages), trace: finalizeTrace(trace, usages), assistant_name: plan.assistant_name_intent || assistantName || null,
+      };
+    }
 
-    // Write-intent branch (post/send/draft slack message, etc).
-    // Runs BEFORE the evidence/recall flow because the user wants to act,
-    // not query memory. Planner-emitted action_intent takes priority over
-    // the regex detector — the LLM catches indirect phrasing the regex
-    // misses ("@team heads up", "ping the eng channel").
-    // Read-intent connector activation. When the user explicitly names a
-    // provider (Gmail, Google Docs, Gemini, Notion, Slack) without a clear
-    // write verb, equip the READ tools so the agent can pull live data
-    // alongside memory recall. The provider's group becomes active for
-    // THIS turn only; primary system prompt stays small.
-    const readIntents = detectReadIntents(message);
+    // Activate exactly the groups selected from their schemas/descriptions by
+    // the structured parser. No provider-name or write-verb text matching.
+    const selectedGroups = intentDecision.tool_groups || [];
+    const readIntents = intentDecision.operation === 'connector_read' ? selectedGroups : [];
     let readToolkit = null;
-    if (readIntents.length > 0 && ctx.prisma) {
+    if (readIntents.length > 0) {
       try {
-        const { buildToolkitForUser } = await import('./toolkit-factory.js');
-        readToolkit = await buildToolkitForUser({
-          prisma: ctx.prisma,
-          userId: ctx.userId,
-          orgId: ctx.orgId,
-          hivemindTools: [],
-          persistentMemoryEngine: ctx.persistentMemoryEngine,
-        });
+        readToolkit = turnToolkit;
         const activation = readToolkit.resetEquippedTools(readIntents);
         if (activation.tools.length > 1) {
           onEvent?.({
@@ -2040,27 +1983,20 @@ export async function runReactAgentV2({
       }
     }
 
-    const writeIntent = plan.action_intent
-      ? { provider: plan.action_intent }
-      : detectWriteIntent(message);
-    if (writeIntent && ctx.prisma) {
+    const writeIntent = plan.action_intent ? { provider: plan.action_intent } : null;
+    if (writeIntent) {
+      let writeFailure = null;
       try {
-        const { buildToolkitForUser } = await import('./toolkit-factory.js');
-        const toolkit = await buildToolkitForUser({
-          prisma: ctx.prisma,
-          userId: ctx.userId,
-          orgId: ctx.orgId,
-          hivemindTools: [],
-          persistentMemoryEngine: ctx.persistentMemoryEngine,
-        });
+        const toolkit = turnToolkit;
         // Activate the matched connector group.
-        const activation = toolkit.resetEquippedTools([writeIntent.provider]);
+        const actionGroups = selectedGroups.length ? selectedGroups : [writeIntent.provider];
+        const activation = toolkit.resetEquippedTools(actionGroups);
         if (activation.tools.length > 1) {
-          onEvent?.({ type: 'tool_call', name: 'reset_equipped_tools', arguments: JSON.stringify({ group_names: [writeIntent.provider] }) });
+          onEvent?.({ type: 'tool_call', name: 'reset_equipped_tools', arguments: JSON.stringify({ group_names: actionGroups }) });
           onEvent?.({ type: 'tool_result', name: 'reset_equipped_tools', summary: `activated ${writeIntent.provider} (${activation.tools.length} tools)` });
           steps.push({
             tool: 'reset_equipped_tools',
-            args: { group_names: [writeIntent.provider] },
+            args: { group_names: actionGroups },
             result_summary: `${activation.tools.length} tools active`,
           });
           // Tool-call sub-loop is internal reasoning → INTERNAL_MODEL
@@ -2069,8 +2005,9 @@ export async function runReactAgentV2({
             provider: writeIntent.provider,
           });
           steps.push(...sub.steps);
-          const finalText = sub.response || 'Done.';
+          const finalText = sub.response || plan.acknowledgement;
           onEvent?.({ type: 'finish', text: finalText });
+          onEvent?.({ type: 'turn_completed', grounded: false, operation: 'connector_write', success: true });
           return {
             response: finalText,
             sources: [],
@@ -2085,64 +2022,20 @@ export async function runReactAgentV2({
             project_choice: sub.project_choice || null,
           };
         }
+        writeFailure = 'connector_toolkit_unavailable';
       } catch (err) {
         console.warn(`[agent] write-intent branch failed: ${err.message}`);
-        // Fall through to normal recall flow if toolkit unavailable.
+        writeFailure = 'connector_toolkit_failed';
       }
-    }
-
-    // ── Continuation: prior assistant asked "which project?" ────────────
-    //
-    // When the immediately-previous assistant message asked the user to
-    // choose a project AND the current user message is short (a project
-    // name OR "org" OR a number), reconstruct the original save from the
-    // user turn BEFORE the question, and attach the chosen project hint.
-    // Without this, the planner sees "Ashley" and saves "Ashley" as a new
-    // standalone memory — the bug the user reported.
-    const PROJECT_QUESTION_MARKERS = [
-      'Which project should I save this to',
-      'In welches Projekt soll ich das speichern',
-      '¿En qué proyecto guardo esto',
-      "Dans quel projet dois-je l'enregistrer",
-    ];
-    const priorAssistant = Array.isArray(history) ? [...history].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string') : null;
-    const isProjectAnswer = priorAssistant
-      && PROJECT_QUESTION_MARKERS.some(m => priorAssistant.content.includes(m))
-      && typeof message === 'string'
-      && message.trim().length > 0
-      && message.trim().length < 80;
-    if (isProjectAnswer) {
-      // Walk further back to find the original user save-request — the
-      // first user turn before the project question that contained
-      // substantive content (not another imperative).
-      const turns = Array.isArray(history) ? history : [];
-      // Find the index of priorAssistant in history (last assistant).
-      let questionIdx = -1;
-      for (let i = turns.length - 1; i >= 0; i--) {
-        if (turns[i] === priorAssistant) { questionIdx = i; break; }
-      }
-      let originalUserTurn = null;
-      for (let i = questionIdx - 1; i >= 0 && i >= questionIdx - 5; i--) {
-        const h = turns[i];
-        if (h?.role === 'user' && typeof h.content === 'string' && h.content.trim().length > 8 && !_isSaveImperative(h.content)) {
-          originalUserTurn = h.content.trim();
-          break;
-        }
-      }
-      const projectAnswer = message.trim();
-      const wantsOrgScope = /^(org|organization|organisation|alle|todos|todas|none)$/i.test(projectAnswer);
-      if (originalUserTurn) {
-        plan.intent_kind = 'save';
-        plan.save_intent = {
-          title: originalUserTurn.slice(0, 60),
-          content: originalUserTurn,
-          tags: [],
-          ...(wantsOrgScope ? {} : { project_hint: projectAnswer }),
+      if (writeFailure) {
+        const response = plan.failure_response;
+        onEvent?.({ type: 'finish', text: response });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'connector_write', success: false, error: writeFailure });
+        return {
+          response, sources: [], steps, evidence_used: [], confidence: 0,
+          gaps: [writeFailure], usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
+          assistant_name: assistantName || null,
         };
-        // Skip the ask-project gate below — we have the answer now.
-        plan.ask_for_project = false;
-        // No need to recall again — just run the save branch.
-        plan.sub_queries = [];
       }
     }
 
@@ -2192,21 +2085,15 @@ export async function runReactAgentV2({
           plan.ask_for_project = false;
           // fall through to the save branch (acks "(project: X)").
         } else if (decision.decision === 'ask') {
-          const lang = languageName(language);
           const ordered = decision.suggestedId
             ? [...projects].sort((a, b) => (a.id === decision.suggestedId ? -1 : b.id === decision.suggestedId ? 1 : 0))
             : projects;
           const list = ordered
-            .map(p => `• ${p.name}${p.id === decision.suggestedId ? ' (suggested)' : ''}`)
-            .join('\n') || '(no projects found)';
-          const ask = lang === 'German'
-            ? `In welches Projekt soll ich das speichern?\n${list}\n\nOder sag "org" für die ganze Organisation.`
-            : lang === 'Spanish'
-            ? `¿En qué proyecto guardo esto?\n${list}\n\nO di "org" para guardarlo a nivel de organización.`
-            : lang === 'French'
-            ? `Dans quel projet dois-je l'enregistrer ?\n${list}\n\nOu dis "org" pour l'enregistrer au niveau de l'organisation.`
-            : `Which project should I save this to?\n${list}\n\nOr say "org" to save it at the organisation level.`;
+            .map(p => `• ${p.name}`)
+            .join('\n');
+          const ask = `${plan.project_prompt}\n${list}`.trim();
           onEvent?.({ type: 'finish', text: ask });
+          onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: false, reason: 'project_scope_unresolved' });
           return {
             response: ask, sources: [], steps,
             evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
@@ -2228,15 +2115,12 @@ export async function runReactAgentV2({
     if (plan.intent_kind === 'save' && plan.save_intent && plan.sub_queries.length === 0) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
-      const lang = languageName(language);
       // Deferred for project choice — ask (the FE renders project buttons),
       // do NOT claim it was saved.
       if (saveStep?.project_choice) {
-        const askText = lang === 'German'  ? 'In welches Projekt soll ich das speichern?' :
-                        lang === 'Spanish' ? '¿En qué proyecto lo guardo?' :
-                        lang === 'French'  ? 'Dans quel projet dois-je l’enregistrer ?' :
-                        'Which project should I save this to?';
+        const askText = plan.project_prompt;
         onEvent?.({ type: 'finish', text: askText });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: false, reason: 'project_scope_unresolved' });
         return {
           response: askText, sources: [], steps,
           evidence_used: [], confidence: 1.0, gaps: [],
@@ -2246,15 +2130,9 @@ export async function runReactAgentV2({
           project_choice: saveStep.project_choice,
         };
       }
-      const scopeNote = saveStep?.args?.project_id || saveStep?.args?.project
-        ? ` (project: ${saveStep.args.project || saveStep.args.project_id.slice(0, 8)})`
-        : '';
-      const ackText = lang === 'English' ? `Got it — saved${scopeNote}.` :
-                      lang === 'German'  ? `Verstanden — gespeichert${scopeNote}.` :
-                      lang === 'Spanish' ? `Entendido — guardado${scopeNote}.` :
-                      lang === 'French'  ? `Compris — enregistré${scopeNote}.` :
-                      `Got it — saved${scopeNote} (${lang}).`;
+      const ackText = plan.acknowledgement;
       onEvent?.({ type: 'finish', text: ackText });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: true });
       return {
         response: ackText, sources: [], steps,
         evidence_used: [], confidence: 1.0, gaps: [],
@@ -2276,6 +2154,7 @@ export async function runReactAgentV2({
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct', success: true });
       return {
         response,
         sources: [],
@@ -2290,12 +2169,27 @@ export async function runReactAgentV2({
     }
 
     // STEP 3 — Evidence
-    const evidence = await gatherEvidence({ plan, ctx, onEvent, deadlineAt: recallDeadlineAt });
+    onEvent?.({
+      type: 'retrieval_planned',
+      operation: intentDecision.operation,
+      mode: plan.recall_mode,
+      source: plan.source || null,
+      aggregate: plan.aggregate || null,
+    });
+    const evidence = await gatherEvidence({
+      plan,
+      ctx,
+      onEvent,
+      // Retrieval owns its own absolute budget. Planning latency must never
+      // consume the evidence window.
+      deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
+    });
     steps.push(...evidence.steps);
     trace.recall = {
       coverage: evidence.coverage,
       escalation_count: evidence.escalation_count,
     };
+    onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
     // STEP 4 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
     let answer = await answerStep({
@@ -2303,6 +2197,12 @@ export async function runReactAgentV2({
       model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
     if (answer.usage) usages.push(answer.usage);
+    onEvent?.({
+      type: 'answer_validated',
+      grounded: answer.grounded,
+      confidence: answer.confidence,
+      rejected_claim_count: answer.rejected_claims?.length || 0,
+    });
 
     // STEP 5 — Save intent fire-and-forget (don't block response).
     // Save dispatch — fires on either:
@@ -2317,7 +2217,9 @@ export async function runReactAgentV2({
       if (saveStep?.project_choice) recallProjectChoice = saveStep.project_choice;
     }
 
-    onEvent?.({ type: 'finish', text: answer.response });
+    const finalResponse = recallProjectChoice ? plan.project_prompt : answer.response;
+    onEvent?.({ type: 'finish', text: finalResponse });
+    onEvent?.({ type: 'turn_completed', grounded: answer.grounded, confidence: answer.confidence });
 
     const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
     const memorySources = evidence.memories.slice(0, 10).map(m => {
@@ -2355,9 +2257,7 @@ export async function runReactAgentV2({
       project_choice: recallProjectChoice,
       // When a save was deferred for project choice, don't claim it was saved —
       // prompt the user to pick (the FE renders project buttons below).
-      response:      recallProjectChoice
-        ? 'Which project should I save this to? (pick below)'
-        : answer.response,
+      response: finalResponse,
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps
       // users trust the answer + spot mis-ranking.
@@ -2373,6 +2273,7 @@ export async function runReactAgentV2({
       // Synthesis chains (insight-mode only) — FE renders claim + sources tree.
       synthesis_chains: (evidence.synthesis_chains || []).slice(0, 5),
       evidence_packets: (evidence.recall_packets || []).slice(0, 3),
+      aggregate: evidence.aggregate || null,
       steps,
       evidence_used: answer.evidence_used,
       claims:        answer.claims,
@@ -2384,6 +2285,9 @@ export async function runReactAgentV2({
       trace:         finalizeTrace(trace, usages),
       assistant_name: assistantName || null,
     };
+  } catch (error) {
+    onEvent?.({ type: 'turn_failed', error: error?.code || error?.name || 'chat_orchestration_failed' });
+    throw error;
   } finally {
     clearTimeout(budgetTimer);
   }

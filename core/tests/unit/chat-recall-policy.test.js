@@ -157,3 +157,24 @@ test('a recalled memory is sufficient when no narrower coverage was requested', 
   assert.equal(coverage.complete, true);
   assert.equal(chooseRecallEscalation({ coverage, query: 'CSI' }), null);
 });
+
+test('complete entity aggregation returns an exact deterministic count without an LLM call', async () => {
+  const answer = await answerStep({
+    message: 'how many products are there in Solvis',
+    history: [],
+    evidence: {
+      memories: [], evidence: [], recall_packets: [], relationships: [], live: [],
+      aggregate: { count: 6, entity_kind: 'product', parent: 'Solvis' },
+      coverage: { aggregate_complete: true },
+    },
+    plan: {
+      requires_complete_coverage: true,
+      aggregate: { kind: 'products', parent: 'Solvis' },
+    },
+    language: 'en',
+    model: 'unused', apiKey: 'unused', ctx: {},
+  });
+  assert.equal(answer.response, 'Solvis has 6 distinct products.');
+  assert.equal(answer.grounded, true);
+  assert.equal(answer.confidence, 0.99);
+});

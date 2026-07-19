@@ -373,8 +373,15 @@ model PendingWrite {
   userId     String    @map("user_id") @db.Uuid
   orgId      String?   @map("org_id") @db.Uuid
   provider   String    @db.VarChar(50) // slack, notion, gmail, …
+  toolGroup  String?   @map("tool_group") @db.VarChar(120)
   toolName   String    @map("tool_name") @db.VarChar(120)
   toolArgs   Json      @map("tool_args") @db.JsonB
+  argsHash   String?   @map("args_hash") @db.VarChar(64)
+  projectId  String?   @map("project_id") @db.Uuid
+  connectionId String? @map("connection_id") @db.VarChar(160)
+  traceId    String?   @map("trace_id") @db.VarChar(160)
+  idempotencyKey String? @unique @map("idempotency_key") @db.VarChar(160)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
   preview    String?   @db.Text // short human-readable summary for UI
   status     String    @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
   result     Json?     @db.JsonB // tool response on send
@@ -385,6 +392,7 @@ model PendingWrite {
 
   @@index([userId, status, createdAt])
   @@index([orgId, createdAt])
+  @@index([orgId, status, expiresAt])
   @@map("pending_writes")
 }
 

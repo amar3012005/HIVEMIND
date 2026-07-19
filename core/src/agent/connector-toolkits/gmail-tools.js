@@ -12,7 +12,7 @@
 
 import { nangoProxyFetch } from './nango-fetch.js';
 
-const GMAIL_PROVIDER = 'google-mail';
+const GMAIL_PROVIDER = 'gmail';
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
 const SKILL_NOTES = [

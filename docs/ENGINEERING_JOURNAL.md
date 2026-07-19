@@ -50,6 +50,22 @@ or uncommitted changes as completed work.
 - Rollback: not applicable
 - Next: verify, commit, push the session branch, then integrate separately.
 
+## 2026-07-19 UTC - SINGULANCE deployment governor committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/singulance-01`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `484b9dcb`
+- Scope: `DEPLOY_GOVERNOR.md`, governing agent instructions, and
+  `scripts/quick-deploy.sh`; cache-preserving service selection, exclusive
+  deployment lock, and fetched-commit image-label verification.
+- Verification: `bash -n scripts/quick-deploy.sh`, `git diff --check`, and
+  production host availability check for `/usr/bin/flock` passed.
+- Production: not deployed
+- Rollback: not applicable
+- Next: integrate a focused frontend release and deploy through the governed
+  quick-deploy path.
+
 ## 2026-07-16 UTC - Contextual durable-memory ingestion
 
 - State: Started

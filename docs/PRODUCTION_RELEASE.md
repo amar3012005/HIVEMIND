@@ -11,7 +11,7 @@ parent:
   sha: c98a742762482dbf493dc7bc133a48121e5c4a07
 frontend:
   declared_gitlink_sha: 1702fa72952c2ae74dae7a7b47950737417e1863
-  recreated: false
+  recreated: true
 runtime:
   VERSION: prod-20260719-c98a7427
   NEXT_VERSION: prod-20260719-c98a7427
@@ -22,7 +22,7 @@ images:
   tara_deepgram_unchanged: sha256:ee371b7bb007742f60ead7ab2db96c547b8014808ca8a901d94465527866469b
   byod_broker_unchanged: sha256:ae0fe36a8468690f7c0da07a1af5ae608d069fd3f8b8e1d4d2b6088706340eee
   playwright_unchanged: sha256:4177c43a4414d50b0028a957c85bce332201fc5a1c72fbbbc65179dd5144ee94
-  frontend_single_unchanged: sha256:41eb07c1de48f0f371e533f327cdba5e9c0efbfa999d19da15e825401c121637
+  frontend_single: sha256:fcbf0022382f9a04656f69660f4f92fb6760d40efff9468188e23749bcf7cd0a
 migrations: []
 changes:
   - Deterministic chat recall controls now pass through Toolkit validation while arbitrary hidden arguments remain rejected.
@@ -48,6 +48,11 @@ acceptance:
     model: openai/gpt-oss-20b
     helpful_partial-evidence_response: true
     total_ms: 25861
+  served_frontend:
+    project_payload_bundle_markers: 7
+    legacy_language_prefix_constructors: 0
+    local_status: 200
+    public_status: 200
   bounded_recall:
     unscoped_count: 4
     unscoped_ms: 1186
@@ -63,5 +68,6 @@ untested_side_effects:
   - No customer writes, connector actions, or memory mutations were performed.
 rollback:
   core: hivemind/core-api:rollback-20260719T180937Z
+  frontend: hivemind/fe:rollback-20260719T182735Z
   env_backup: /root/hivemind/.env.bak-prod-20260719-c98a7427
 ```

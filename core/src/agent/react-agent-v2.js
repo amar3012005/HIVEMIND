@@ -1138,7 +1138,7 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
         title: citation.title || citation.source_label || section.document_title || 'Workspace source',
         snippet: section.snippet || section.content || citation.snippet || '',
         page: citation.page ?? section.page ?? null,
-        source_type: 'document_evidence',
+        source_type: citation.source_type || 'document_evidence',
         score: Number.isFinite(section.score) ? section.score : null,
       });
     }
@@ -1182,10 +1182,10 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const parent = evidence.aggregate.parent || plan.aggregate?.parent || '';
     const lang = String(language || 'en').slice(0, 2).toLowerCase();
     const responses = {
-      de: `${parent} hat ${count} verschiedene ${kind}.`,
-      fr: `${parent} compte ${count} ${kind} distincts.`,
-      es: `${parent} tiene ${count} ${kind} distintos.`,
-      en: `${parent} has ${count} distinct ${kind}${count === 1 ? '' : 's'}.`,
+      de: `Das kanonische Register enthält ${count} für ${parent} als ${kind} klassifizierte Einträge.`,
+      fr: `Le registre canonique contient ${count} entités associées à ${parent} classées comme ${kind}.`,
+      es: `El registro canónico contiene ${count} entidades asociadas a ${parent} clasificadas como ${kind}.`,
+      en: `The canonical registry contains ${count} entities associated with ${parent} classified as ${kind}${count === 1 ? '' : 's'}.`,
     };
     const response = responses[lang] || responses.en;
     const aggregatePacket = aggregateCitationPacket(evidence.aggregate);

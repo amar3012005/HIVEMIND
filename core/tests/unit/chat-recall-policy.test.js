@@ -179,7 +179,7 @@ test('complete entity aggregation returns an exact deterministic count without a
     language: 'en',
     model: 'unused', apiKey: 'unused', ctx: {},
   });
-  assert.equal(answer.response, 'Solvis has 6 distinct products.');
+  assert.equal(answer.response, 'The canonical registry contains 6 entities associated with Solvis classified as products.');
   assert.equal(answer.grounded, true);
   assert.equal(answer.confidence, 0.99);
   assert.deepEqual(answer.claims[0].citation_ids, ['P1-A1']);

@@ -816,6 +816,8 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   if (plan.aggregate?.parent && plan.aggregate?.kind && remaining() > 0) {
     const aggregateArgs = {
       parent_name: plan.aggregate.parent,
+      parent_candidates: [...new Set([plan.aggregate.parent, ...(plan.named_entities || [])]
+        .filter((value) => typeof value === 'string' && value.trim()))].slice(0, 12),
       entity_kind: plan.aggregate.kind,
       limit: 1000,
     };

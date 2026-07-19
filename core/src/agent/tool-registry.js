@@ -53,6 +53,7 @@ export const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           parent_name: { type: 'string', description: 'Canonical parent/entity name, for example Solvis.' },
+          parent_candidates: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Optional exact entity names resolved from the user request. Used only as tenant-scoped deterministic fallbacks when parent_name is not a canonical entity.' },
           entity_kind: { type: 'string', description: 'Entity kind to aggregate, for example product.' },
           limit: { type: 'integer', minimum: 1, maximum: 1000, default: 500 },
         },
@@ -365,20 +366,24 @@ const TOOL_HANDLERS = {
       };
     }
     const parentName = String(args.parent_name || '').trim();
+    const parentCandidates = [...new Set([
+      parentName,
+      ...(Array.isArray(args.parent_candidates) ? args.parent_candidates : []),
+    ].map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 12);
     const rawKind = String(args.entity_kind || '').trim().toLowerCase();
     const entityKind = rawKind.endsWith('s') ? rawKind.slice(0, -1) : rawKind;
     const limit = Math.max(1, Math.min(Number(args.limit) || 500, 1000));
-    const parentForms = [...new Set([parentName, parentName.toLowerCase(), parentName.toUpperCase()])];
+    const parentForms = [...new Set(parentCandidates.flatMap((value) => [value, value.toLowerCase(), value.toUpperCase()]))];
     const parentEntities = await ctx.prisma.entity.findMany({
       where: {
         orgId: ctx.orgId,
         isActive: true,
         OR: [
-          { canonicalName: { equals: parentName, mode: 'insensitive' } },
+          ...parentCandidates.map((value) => ({ canonicalName: { equals: value, mode: 'insensitive' } })),
           { aliases: { hasSome: parentForms } },
         ],
       },
-      select: { id: true, canonicalName: true },
+      select: { id: true, canonicalName: true, aliases: true },
       take: 10,
     });
     if (parentEntities.length === 0) {
@@ -389,6 +394,13 @@ const TOOL_HANDLERS = {
       };
     }
 
+    const normalizeParent = (value) => String(value || '').trim().toLocaleLowerCase();
+    const parentEntity = parentCandidates
+      .map((candidate) => parentEntities.find((entity) => (
+        normalizeParent(entity.canonicalName) === normalizeParent(candidate)
+        || (entity.aliases || []).some((alias) => normalizeParent(alias) === normalizeParent(candidate))
+      )))
+      .find(Boolean) || parentEntities[0];
     const orgRole = String(ctx.accessContext?.orgRole || '').toLowerCase();
     const privilegedOrgReader = orgRole === 'owner' || orgRole === 'admin';
     const authorizedProjectTags = (ctx.accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
@@ -433,7 +445,7 @@ const TOOL_HANDLERS = {
       return {
         count: 0,
         entities: [],
-        parent: parentEntities[0].canonicalName,
+        parent: parentEntity.canonicalName,
         coverage: { complete: !parentCutoff, cutoff: parentCutoff, reason: parentCutoff ? 'parent_mention_cap' : null },
       };
     }
@@ -461,7 +473,7 @@ const TOOL_HANDLERS = {
     return {
       count: cutoff ? null : members.length,
       entity_kind: entityKind,
-      parent: parentEntities[0].canonicalName,
+      parent: parentEntity.canonicalName,
       entities: members.map((entity) => ({
         id: entity.id,
         name: entity.canonicalName,

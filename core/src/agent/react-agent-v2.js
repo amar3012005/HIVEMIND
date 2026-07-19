@@ -153,7 +153,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
 
 // ── STEP 1 — quick direct-answer for greetings / smalltalk / self-Q ───
 
-async function answerDirectly({ message, gateKind, language, assistantName, orgName, model, apiKey, signal }) {
+async function answerDirectly({ message, gateKind, language, assistantName, orgName, model, apiKey, signal, plannerDraft = null }) {
   const lang = languageName(language);
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this HIVEMIND workspace' : orgName;
   const name = assistantName || 'HIVE';
@@ -167,7 +167,9 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
             `  - You carry persistent memory of our team's facts, decisions, projects, people.\n` +
             `  - You can recall, save, link, time-travel through that memory, and pull live web results when needed.\n` +
             `Do NOT cite memories. Do NOT mention internal tool names. Plain text only.`,
-    general: `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely. Plain text only. No JSON, no tool talk.`,
+    general: plannerDraft
+      ? `${LANG_BLOCK}\n\nYou are ${name}. Produce the final reply using the planner draft below only as a bounded intent draft. Preserve its meaning, answer the user concisely, and do not introduce claims or topics absent from the user request or draft. Plain text only.\n\nPLANNER DRAFT:\n${String(plannerDraft).slice(0, 1200)}`
+      : `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely and only address the user's request. Do not introduce unrelated claims. Plain text only. No JSON, no tool talk.`,
   };
 
   const resp = await chatCompletionFetch(model, {
@@ -2058,6 +2060,7 @@ export async function runReactAgentV2({
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,
         model: answerModel, apiKey, signal: abortCtrl.signal,
+        plannerDraft: plan._direct_answer,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });

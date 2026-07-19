@@ -1195,13 +1195,19 @@ export class RecallRouter {
     const traceLatency = {};
     const startedAt = Date.now();
     let recallPlan = resolveRecallPlan(options);
+    // Chat arrives with a structured planner that is responsible for declaring
+    // a source read. Do not turn an entity-only question such as "Solvis" into
+    // an arbitrary Solvis-named PDF: that makes a broad answer look
+    // source-specific and can hide better product evidence. Legacy /api/recall
+    // callers retain metadata-based filename resolution for compatibility.
+    const allowImplicitSource = !options.structured_intent && !recallPlan.source.requested;
     const [implicitSource, canonicalEntities] = await Promise.all([
-      recallPlan.source.requested ? null : resolveImplicitSource({
+      allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
         query,
         ctx,
         timeoutMs: 250,
-      }),
+      }) : null,
       withTimeout(
         resolveCanonicalEntities({ prisma: this.prisma, orgId: ctx.orgId, query }),
         250,

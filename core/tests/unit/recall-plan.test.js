@@ -159,6 +159,24 @@ test('Hop-0 resolves implicit source artifacts before broad recall', async () =>
   assert.equal(result.trace.recall_plan.source.title, 'Wald.pdf');
 });
 
+test('structured chat intent does not convert an entity match into a source filter', async () => {
+  const router = new RecallRouter({
+    persistentMemoryStore: { recall: async () => ({ memories: [] }) },
+    evidenceRetrieval: {
+      resolveSourceFromQuery: async () => [{ id: 'unrelated-doc', document_title: 'Solvis brochure.pdf' }],
+    },
+    prisma: null,
+  });
+
+  const result = await router.recall('What do you know about Solvis?', {
+    mode: 'fact',
+    structured_intent: true,
+  }, { userId: 'user-1', orgId: 'org-1' });
+
+  assert.equal(result.trace.recall_plan.source.requested, false);
+  assert.equal(result.trace.recall_plan.source.document_id, null);
+});
+
 test('an unresolved explicit source fails closed before memory recall', async () => {
   let recalled = false;
   const router = new RecallRouter({

@@ -45,6 +45,16 @@ health_gate() { local c="$1"; for i in $(seq 1 45); do
   s=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo missing)
   [ "$s" = healthy ] || [ "$s" = running ] && { echo "  $c → $s"; return 0; }; sleep 4; done
   echo "  FATAL: $c never became healthy ($s)"; return 1; }
+smoke_url() {
+  local u="$1" c=""
+  for i in $(seq 1 12); do
+    c=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$u" || true)
+    case "$c" in 2*|3*|401|403) echo "$u → $c"; return 0;; esac
+    sleep 3
+  done
+  echo "$u → $c"
+  return 1
+}
 
 # ── rollback path ──────────────────────────────────────────────────────────
 if [ "${1:-}" = "--rollback" ]; then
@@ -127,7 +137,8 @@ done
 
 # public smoke
 for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind https://api.singulancelabs.com/health https://core.singulancelabs.com/health; do
-  c=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$u"); echo "$u → $c"; done
+  smoke_url "$u"
+done
 # Keep the box lean WITHOUT killing warm cache — pruning all cache made every
 # build cold (re-npm-install etc.). Keep recent layers so a code-only change
 # rebuilds in seconds; only evict cache older than 7 days + dangling images.

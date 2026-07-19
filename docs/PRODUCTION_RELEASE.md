@@ -36,6 +36,11 @@ acceptance:
     project: 66275318-c11c-4dcb-b6a9-457b43c3bfda
     result: 5 memories plus source-specific expansion with 3 evidence passages
     total_ms: 3851
+  authenticated_public_proxy_chat:
+    status: 200
+    result: 5 memories plus 8 evidence passages through /v1/proxy/chat
+    source_count: 2
+    total_ms: 6860
   authenticated_all_authorized_chat:
     result: SolvisPia project evidence found without an explicit project
     total_ms: 4845

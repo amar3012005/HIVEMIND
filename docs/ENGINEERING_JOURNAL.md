@@ -129,3 +129,54 @@ or uncommitted changes as completed work.
 - Production: consult `docs/PRODUCTION_RELEASE.md` and the running image tags.
 - Rollback: not applicable
 - Next: reconcile any new feature branch into `hivemind-main` before release.
+## 2026-07-19 UTC - Deterministic chat orchestration hardening
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/chat-orchestration`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `pending`
+- Scope: shared Core `/api/chat` orchestration, intent and scope planning,
+  event-driven recall/tool hops, connector authorization, and focused regression
+  coverage; no frontend or production service change yet.
+- Verification: not run
+- Production: not deployed
+- Rollback: not applicable
+- Next: map the current V2 path and convert the reported failures into focused
+  deterministic tests before implementation.
+
+## 2026-07-19 UTC - Deterministic chat orchestration verification
+
+- State: Verified on session branch; not release-accepted
+- Owner: Codex
+- Branch: `codex/chat-orchestration`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `pending`
+- Scope: deterministic language/history-aware intent overlay; bounded event
+  lifecycle; exact-source and complete-aggregate retrieval; project, memory-ID,
+  connector, and approval scoping; versioned memory updates.
+- Verification: `node --check` for all changed JavaScript; `git diff --check`;
+  105 focused and adjacent Node tests passed.
+- Production: not deployed; not accepted. Canonical route convergence, pre-route
+  scope admission, and legacy fallback removal remain release gates.
+- Rollback: revert the eventual session-branch commit before integration.
+- Next: rebase on `origin/singulance-main`, rerun the focused suite, publish the
+  session branch, and open the remaining route gates as explicit follow-up work.
+
+## 2026-07-19 UTC - Structured LLM chat router and unified toolkits
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/chat-orchestration`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `pending`
+- Scope: replace reachable English phrase routing in Core `/api/chat` with one
+  required structured fast-model decision; select lazy AgentScope-style native
+  and connector toolkit groups; fail connector writes closed; emit one bounded
+  event lifecycle; preserve project, entity, source, memory, and approval scope.
+- Verification: changed JavaScript syntax and `git diff --check` passed; 12
+  router, toolkit, authorization-surface, and end-to-end orchestration tests
+  passed after the final fail-closed event changes. The broader adjacent suite
+  will be rerun after rebasing onto `origin/singulance-main`.
+- Production: not deployed; not accepted
+- Rollback: revert the eventual session-branch commit before integration
+- Next: commit the isolated branch, rebase it onto current
+  `origin/singulance-main`, rerun all focused and adjacent tests, then push for
+  review without deploying.

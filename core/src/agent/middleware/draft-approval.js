@@ -12,6 +12,7 @@
  *   5. Agent re-runs of the same tool in this turn with
  *      approval_token=<draft_id> bypass the middleware (skip flag).
  */
+import { createHash } from 'node:crypto';
 
 // Tool name conventions diverge per MCP provider:
 //   slack  → snake_case  (slack_send_message)
@@ -52,6 +53,18 @@ function buildPreview(toolName, args) {
   return `${provider}/${toolName}: ${JSON.stringify(args || {}).slice(0, 200)}`;
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashArgs(args) {
+  return createHash('sha256').update(stableJson(args || {})).digest('hex');
+}
+
 /**
  * @param {{ prisma: any, logger?: any }} deps
  * @returns middleware fn (kwargs, next)
@@ -62,7 +75,7 @@ export function createDraftApprovalMiddleware({ prisma, logger = console }) {
     const { tool } = tool_call;
 
     // Read tools pass through unchanged.
-    if (tool.readOnly) {
+    if (tool.readOnly || tool.external !== true) {
       return next(kwargs);
     }
 
@@ -73,10 +86,36 @@ export function createDraftApprovalMiddleware({ prisma, logger = console }) {
       const row = await prisma.pendingWrite.findUnique({
         where: { id: args._approval_token },
       }).catch(() => null);
-      if (row && row.status === 'approved' && row.toolName === tool.name && row.userId === ctx.userId) {
+      const cleanArgs = { ...args };
+      delete cleanArgs._approval_token;
+      const currentHash = hashArgs(cleanArgs);
+      const unexpired = row?.expiresAt && new Date(row.expiresAt).getTime() > Date.now();
+      if (row && row.status === 'approved' && row.toolName === tool.name
+          && row.toolGroup === tool.groupName && row.userId === ctx.userId && row.orgId === ctx.orgId
+          && (row.projectId || null) === (ctx.projectId || null)
+          && row.argsHash === currentHash && unexpired) {
+        const claimed = await prisma.pendingWrite.updateMany({
+          where: {
+            id: row.id,
+            status: 'approved',
+            toolName: tool.name,
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            toolGroup: tool.groupName,
+            argsHash: currentHash,
+            projectId: ctx.projectId || null,
+            expiresAt: { gt: new Date() },
+          },
+          data: { status: 'executing' },
+        }).catch(() => ({ count: 0 }));
+        if (claimed.count !== 1) {
+          return {
+            content: [{ type: 'text', text: 'draft was already claimed or its authorization changed' }],
+            status: 'error',
+            meta: { error: 'approval_replay_or_scope_mismatch' },
+          };
+        }
         // Strip the token before invoking the real handler.
-        const cleanArgs = { ...args };
-        delete cleanArgs._approval_token;
         const innerResp = await next({ ...kwargs, args: cleanArgs });
         // Persist result.
         await prisma.pendingWrite.update({
@@ -98,8 +137,13 @@ export function createDraftApprovalMiddleware({ prisma, logger = console }) {
     }
 
     // Create draft.
-    const provider = inferProvider(tool.name) || 'unknown';
+    const provider = tool.groupName || inferProvider(tool.name) || 'unknown';
     const preview = buildPreview(tool.name, args);
+    const argsHash = hashArgs(args);
+    const expiresAt = new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000));
+    const idempotencyKey = createHash('sha256')
+      .update(`${ctx.orgId}:${ctx.userId}:${ctx.projectId || ''}:${tool.groupName}:${tool.name}:${argsHash}:${ctx._trace?.traceId || ''}`)
+      .digest('hex');
     let draftId;
     try {
       const row = await prisma.pendingWrite.create({
@@ -107,8 +151,15 @@ export function createDraftApprovalMiddleware({ prisma, logger = console }) {
           userId: ctx.userId,
           orgId: ctx.orgId || null,
           provider,
+          toolGroup: tool.groupName,
           toolName: tool.name,
           toolArgs: args || {},
+          argsHash,
+          projectId: ctx.projectId || null,
+          connectionId: ctx.connectionId || null,
+          traceId: ctx._trace?.traceId || null,
+          idempotencyKey,
+          expiresAt,
           preview,
           status: 'draft',
         },

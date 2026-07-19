@@ -79,6 +79,7 @@ function entityQueryForms(query) {
   for (const word of words) {
     forms.add(word);
     forms.add(word.toLocaleLowerCase());
+    if (/^[\p{L}\p{N}]{2,6}$/u.test(word)) forms.add(word.toLocaleUpperCase());
   }
   for (let size = Math.min(4, words.length); size >= 2; size -= 1) {
     for (let start = 0; start + size <= words.length; start += 1) {
@@ -115,6 +116,7 @@ async function resolveImplicitSource({ evidence, query, ctx, timeoutMs }) {
       query,
       userId: ctx.userId,
       orgId: ctx.orgId,
+      projectId: ctx.projectId || null,
       deadlineAt: Date.now() + timeoutMs,
     }),
     timeoutMs,
@@ -160,7 +162,7 @@ export function resolveRecallPlan(input = {}) {
   // the deadline before reaching explain (observed: chat compound answers
   // dropped a delivered fact + falsely marked a source uncovered).
   const _q = String(input.query_context || input.query || input.context || '');
-  const _compound = _q.length > 40 && (
+  const _compound = input.structured_intent !== true && _q.length > 40 && (
     (_q.match(/\?/g) || []).length > 1
     || /\b(and|plus|as well as|both|compare|across|versus|vs\.?|along with|together with)\b/i.test(_q)
     || (_q.match(/[.;]/g) || []).length >= 2
@@ -362,14 +364,15 @@ async function hop1Memory({ store, query, options, ctx }) {
   // the recall to tag=<connector> + ordered by created_at desc instead
   // of pure FTS.
   const ql = String(query || '').toLowerCase();
+  const allowLanguageHeuristics = options.structured_intent !== true;
   const CONNECTOR_KW = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
-  const matchedConnector = CONNECTOR_KW.find(k => ql.includes(k));
-  const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
+  const matchedConnector = allowLanguageHeuristics ? CONNECTOR_KW.find(k => ql.includes(k)) : null;
+  const isRecentish = allowLanguageHeuristics && /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
   let hasValidAt = !!(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime()));
   // Inline date detection — pulls "as of May 13", "before March 2025",
   // "on 2026-04-10", "in October" out of the query when caller didn't
   // pass valid_at explicitly. Planner often misses these.
-  if (!hasValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ql)) {
+  if (allowLanguageHeuristics && !hasValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ql)) {
     const MONTH = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11, january: 0, february: 1, march: 2, april: 3, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
     const now = new Date();
     const year = now.getUTCFullYear();
@@ -439,6 +442,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     include_superseded: options.include_superseded === true,
     exact_source: !!(options.source_document_id || options.source_title),
     canonical_entities: options.canonical_entities || [],
+    scope_filter: options.scope_filter || null,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -624,7 +628,7 @@ export function inspectMemories(memories) {
 // Only used when a memory has `filename:` tag without a resolved document_id
 // (legacy data pre-`aebf344`).
 
-async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) {
+async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId, projectId = null }) {
   if (!filenames.length) return [];
   // Remote (self-host): KB docs live on the agent — list them and match filename→title client-side.
   if (orgIsRemote(orgId)) {
@@ -649,6 +653,7 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
     const rows = await prisma.knowledgeDocument.findMany({
       where: {
         orgId,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
         OR: filenames.map((f) => ({ title: { contains: f, mode: 'insensitive' } })),
       },
       select: { id: true },
@@ -700,6 +705,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   if (docIds.length === 0 && inspection.filenames.length > 0) {
     docIds = await resolveDocIdsFromFilenames({
       prisma, filenames: inspection.filenames, userId: ctx.userId, orgId: ctx.orgId,
+      projectId: ctx.projectId || null,
     });
   }
   // Dig wider: no hop-1 anchors but a project is in scope → search the whole
@@ -1174,6 +1180,17 @@ export class RecallRouter {
     if (!query || typeof query !== 'string') {
       return { memories: [], evidence: [], live: [], trace: { error: 'empty query' } };
     }
+    if (ctx.projectId) {
+      const authorizedProjectIds = Array.isArray(ctx.accessContext?.projectIds)
+        ? ctx.accessContext.projectIds
+        : [];
+      if (!authorizedProjectIds.includes(ctx.projectId)) {
+        return {
+          memories: [], evidence: [], live: [],
+          trace: { error: 'project_access_denied', cutoff_reason: 'project_access_denied' },
+        };
+      }
+    }
 
     const traceLatency = {};
     const startedAt = Date.now();
@@ -1222,6 +1239,7 @@ export class RecallRouter {
         this.evidence.resolveSourceDocuments({
           userId: ctx.userId,
           orgId: ctx.orgId,
+          projectId: ctx.projectId || null,
           documentId: options.source_document_id || null,
           title: options.source_title || null,
         }),
@@ -1401,7 +1419,7 @@ export class RecallRouter {
     rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
-    rankedMemories = applyEventTimeBoost(rankedMemories, query);
+    if (options.structured_intent !== true) rankedMemories = applyEventTimeBoost(rankedMemories, query);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
     rankedMemories = collapseClusterDuplicates(rankedMemories);
     // Exact-id dedup BEFORE the top-N slice. RRF/lane-fusion + graph expansion

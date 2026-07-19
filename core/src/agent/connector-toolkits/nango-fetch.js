@@ -10,11 +10,12 @@
 
 import { getConnectionId, fetchBearerFromNango } from '../../connectors/mcp/nango-service.js';
 
-const _bearerCache = new Map();  // key=`${userId}:${providerKey}`, value={ token, expires }
+const _bearerCache = new Map();  // key=`${userId}:${orgId}:${providerKey}`, value={ token, expires }
 const BEARER_TTL_MS = 4 * 60 * 1000; // 4 min — comfortably below typical 5-min OAuth refresh window
 
 export async function getNangoBearer({ userId, orgId, providerKey, prisma }) {
-  const cacheKey = `${userId}:${providerKey}`;
+  if (!orgId) throw new Error('orgId is required for Nango connector resolution');
+  const cacheKey = `${userId}:${orgId}:${providerKey}`;
   const cached = _bearerCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) {
     return cached.token;
@@ -45,6 +46,7 @@ export async function nangoProxyFetch({ providerKey, url, method = 'GET', header
   });
   const opts = {
     method,
+    ...(ctx?.signal ? { signal: ctx.signal } : {}),
     headers: {
       Authorization: `Bearer ${bearer}`,
       'Content-Type': 'application/json',

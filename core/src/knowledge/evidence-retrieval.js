@@ -107,7 +107,7 @@ export class EvidenceRetrievalService {
         query,
         filter: {
           must: [
-            { key: 'user_id', match: { value: userId } },
+            ...(!docIdSet ? [{ key: 'user_id', match: { value: userId } }] : []),
             { key: 'org_id', match: { value: orgId } },
             ...docFilter,
           ]
@@ -126,7 +126,7 @@ export class EvidenceRetrievalService {
       const segments = await this.db.knowledgeSegment.findMany({
         where: {
           id: { in: segmentIds },
-          userId,
+          ...(!docIdSet ? { userId } : {}),
           orgId,
           document: { archivedAt: null },
         },
@@ -208,7 +208,7 @@ export class EvidenceRetrievalService {
             // always; by docIdSet when the caller scoped to specific docs.
             const lexSegments = await this.db.knowledgeSegment.findMany({
               where: {
-                userId,
+                ...(!docIdSet ? { userId } : {}),
                 orgId,
                 document: { archivedAt: null },
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
@@ -271,15 +271,16 @@ export class EvidenceRetrievalService {
   }
 
   /** Resolve an explicitly requested source without trusting a model-supplied id. */
-  async resolveSourceDocuments({ userId, orgId, documentId = null, title = null, limit = 3 }) {
+  async resolveSourceDocuments({ userId, orgId, projectId = null, documentId = null, title = null, limit = 3 }) {
     if (orgIsRemote(orgId)) return [];
     if (!this.db?.knowledgeDocument || (!documentId && !title)) return [];
 
     return this.db.knowledgeDocument.findMany({
       where: {
-        userId,
+        ...(!projectId ? { userId } : {}),
         orgId,
         archivedAt: null,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
         ...(documentId ? { id: documentId } : {}),
         ...(!documentId && title ? {
           OR: [
@@ -306,10 +307,16 @@ export class EvidenceRetrievalService {
    * This is metadata-only: source eligibility never depends on vector scores or
    * an LLM extracting an English filename.
    */
-  async resolveSourceFromQuery({ userId, orgId, query, limit = 1 }) {
+  async resolveSourceFromQuery({ userId, orgId, projectId = null, query, limit = 1 }) {
+    const filenameMatch = String(query || '').normalize('NFKC').match(
+      /([^\n"'()[\]{}]{1,220}\.(?:pdf|docx?|xlsx?|pptx?|txt|md|html?|csv|json|png|jpe?g|webp))/i,
+    );
+    const filename = filenameMatch
+      ? filenameMatch[1].trim().replace(/^(?:what\s+(?:exactly\s+)?does|what\s+is\s+in|tell\s+me\s+what|send|share|email|open|read)\s+/i, '')
+      : null;
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
     const tokens = [...new Set(
-      [...segmenter.segment(String(query || '').normalize('NFKC'))]
+      [...segmenter.segment(filename || String(query || '').normalize('NFKC'))]
         .filter((part) => part.isWordLike && part.segment.length >= 3)
         .map((part) => part.segment.toLocaleLowerCase()),
     )].slice(0, 12);
@@ -323,6 +330,10 @@ export class EvidenceRetrievalService {
     };
 
     if (orgIsRemote(orgId)) {
+      // The remote KB listing does not yet expose enforceable project tags.
+      // A requested project must therefore fail closed rather than match an
+      // org-wide same-name file.
+      if (projectId) return [];
       const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
       return (listed?.documents || [])
         .filter((document) => !document.userId || document.userId === userId)
@@ -335,9 +346,10 @@ export class EvidenceRetrievalService {
     if (!this.db?.knowledgeDocument) return [];
     const documents = await this.db.knowledgeDocument.findMany({
       where: {
-        userId,
+        ...(!projectId ? { userId } : {}),
         orgId,
         archivedAt: null,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
         OR: tokens.flatMap((token) => [
           { title: { contains: token, mode: 'insensitive' } },
           { sourceId: { contains: token, mode: 'insensitive' } },

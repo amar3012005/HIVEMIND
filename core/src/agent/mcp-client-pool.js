@@ -1,7 +1,7 @@
 /**
  * MCP Client Pool — per-user Streamable HTTP MCP clients.
  *
- * Each entry binds (userId, provider) → live MCP client. Clients hold the
+ * Each entry binds (userId, orgId, provider) → live MCP client. Clients hold the
  * Mcp-Session-Id assigned by the server on initialize. Bearer tokens are
  * resolved lazily via the Nango bridge (token rotation handled there).
  *
@@ -192,16 +192,17 @@ export class McpClientPool {
     this._cache = new Map();
   }
 
-  _cacheKey(userId, provider) { return `${userId}:${provider}`; }
+  _cacheKey(userId, orgId, provider) { return `${userId}:${orgId}:${provider}`; }
 
   /**
-   * Get (or create) an MCP client for (userId, provider).
-   * Returns null when no Nango connection exists for that user+provider.
+   * Get (or create) an MCP client for (userId, orgId, provider).
+   * Returns null when no Nango connection exists for that exact tenant binding.
    */
-  async resolve(userId, provider) {
+  async resolve(userId, orgId, provider) {
+    if (!orgId) throw new Error('orgId is required for MCP connector resolution');
     const url = MCP_ENDPOINTS[provider];
     if (!url) throw new Error(`unknown MCP provider: ${provider}`);
-    const key = this._cacheKey(userId, provider);
+    const key = this._cacheKey(userId, orgId, provider);
     const cached = this._cache.get(key);
     if (cached) {
       if (Date.now() - cached.lastUsed > IDLE_TTL_MS) {
@@ -214,11 +215,11 @@ export class McpClientPool {
     const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
     const bearerResolver = async () => {
       const row = await this.prisma.nangoConnection.findFirst({
-        where: { userId, providerKey: nangoKey, status: 'active' },
+        where: { userId, orgId, providerKey: nangoKey, status: 'active' },
         select: { connectionId: true },
       });
       if (!row?.connectionId) {
-        throw new Error(`no active Nango connection for ${provider} (user ${userId})`);
+        throw new Error(`no active Nango connection for ${provider} in the active organisation`);
       }
       const { fetchBearerFromNango } = await import('../connectors/mcp/nango-service.js');
       return await fetchBearerFromNango(nangoKey, row.connectionId);
@@ -228,8 +229,8 @@ export class McpClientPool {
     return client;
   }
 
-  evict(userId, provider) {
-    this._cache.delete(this._cacheKey(userId, provider));
+  evict(userId, orgId, provider) {
+    this._cache.delete(this._cacheKey(userId, orgId, provider));
   }
 
   evictAllForUser(userId) {

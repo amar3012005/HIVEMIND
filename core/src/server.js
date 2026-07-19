@@ -8288,31 +8288,41 @@ exit \$RC
           const draftId = pwMatch[1];
           const action = pwMatch[2];
           try {
-            const row = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
+            const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
             if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
-            if (row.userId !== userId) return jsonResponse(res, { error: 'forbidden' }, 403);
             if (row.status !== 'draft') {
               return jsonResponse(res, { error: `draft already ${row.status}` }, 409);
             }
+            if (!row.expiresAt || new Date(row.expiresAt).getTime() <= Date.now()) {
+              await prisma.pendingWrite.updateMany({
+                where: { id: draftId, userId, orgId, status: 'draft' }, data: { status: 'expired' },
+              });
+              return jsonResponse(res, { error: 'draft expired' }, 410);
+            }
             if (action === 'cancel') {
-              await prisma.pendingWrite.update({
-                where: { id: draftId },
+              const cancelled = await prisma.pendingWrite.updateMany({
+                where: { id: draftId, userId, orgId, status: 'draft' },
                 data: { status: 'cancelled' },
               });
+              if (cancelled.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
               return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
             }
             // Approve → mark approved, then re-dispatch tool with
             // _approval_token. Middleware verifies + flips to sent.
-            await prisma.pendingWrite.update({
-              where: { id: draftId },
+            const approved = await prisma.pendingWrite.updateMany({
+              where: { id: draftId, userId, orgId, status: 'draft', expiresAt: { gt: new Date() } },
               data: { status: 'approved', approvedAt: new Date() },
             });
+            if (approved.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
             try {
               const { buildToolkitForUser } = await import('./agent/toolkit-factory.js');
-              const tk = await buildToolkitForUser({ prisma, userId, orgId, hivemindTools: [] });
-              tk.resetEquippedTools([row.provider]);
+              const groupName = row.toolGroup || row.provider;
+              const tk = await buildToolkitForUser({ prisma, userId, orgId, selectedGroups: [groupName] });
+              tk.resetEquippedTools([groupName]);
               const execArgs = { ...(row.toolArgs || {}), _approval_token: draftId };
-              const resp = await tk.execute(row.toolName, execArgs, { userId, orgId, prisma });
+              const resp = await tk.execute(row.toolName, execArgs, {
+                userId, orgId, projectId: row.projectId || null, prisma, _approvalFlow: true,
+              });
               const final = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
               return jsonResponse(res, {
                 ok: resp.status !== 'error',
@@ -21125,6 +21135,13 @@ exit \$RC
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
 
+            // Authorize the complete chat scope before any working-set tap,
+            // parser call, retrieval, connector discovery, or memory write.
+            const agentAccessCtx = await buildAccessContext(userId, orgId);
+            if (requestProjectId && !(agentAccessCtx.projectIds || []).includes(requestProjectId)) {
+              return jsonResponse(res, { error: 'project_access_denied' }, 403);
+            }
+
             // WorkingSet auto-extract — fire-and-forget. Pulls proper-noun
             // entities from the message + threads/projects referenced and
             // upserts to working_sets. Recall router reads this to boost
@@ -21152,7 +21169,7 @@ exit \$RC
             // tools dynamically (recall, save, update, traverse_graph, at,
             // diff, timeline, web_search, ...). Falls back to legacy
             // recall-then-LLM flow on HIVEMIND_AGENT_MODE=off or on error.
-            const agentEnabled = process.env.HIVEMIND_AGENT_MODE !== 'off';
+            const agentEnabled = true;
             if (agentEnabled) {
               try {
                 // Still honour the onboarding state machine — it cannot be
@@ -21163,7 +21180,7 @@ exit \$RC
                 let agentOrgName = 'your organisation';
                 try {
                   const {
-                    getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                    getAssistantName, ASSISTANT_IDENTITY,
                     hasShownOnboardingIntro, markOnboardingShown,
                   } = await import('./services/assistant-identity.js');
                   let agentNameMemoryId = null;
@@ -21182,26 +21199,6 @@ exit \$RC
                     ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                     : false;
 
-                  // Dynamic naming intent (ANY turn) — only (re)name when the user
-                  // EXPLICITLY asks ("call yourself X", "your name is X", quoted).
-                  // A normal question is NEVER consumed as a name. Works after a
-                  // name is set too → user can rename anytime.
-                  const intentName = extractNameIfIntent(message);
-                  if (intentName) {
-                    try {
-                      const payload = buildAssistantNamePayload({ name: intentName, userId, orgId, prevMemoryId: agentNameMemoryId });
-                      if (persistentMemoryEngine?.ingestMemory) {
-                        await persistentMemoryEngine.ingestMemory({ ...payload, skipProcessing: true, smartIngest: false });
-                      }
-                      if (persistentMemoryStore && !introShown) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                    } catch {}
-                    return jsonResponse(res, {
-                      response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
-                      sources: [], usage: null, assistant_name: intentName,
-                      onboarding: { step: 'name_saved', name: intentName, org_name: agentOrgName },
-                    });
-                  }
-
                   // One-time greeting (NON-blocking) — surfaced as the agent's
                   // first message via `onboarding.intro`; the user's real query is
                   // still answered below. Shown once, then the sentinel is set.
@@ -21213,15 +21210,9 @@ exit \$RC
                   }
                 } catch {}
 
-                // v2 = plan-then-act pipeline (4 LLM steps, structured
-                // JSON I/O, language-aware, evidence-audited). Default
-                // ON; flip HIVEMIND_AGENT_V1=true to fall back to the
-                // legacy two-loop ReAct path.
-                const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
-                const { runReactAgent } = useV2
-                  ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
-                  : await import('./agent/react-agent.js');
-                const agentAccessCtx = await buildAccessContext(userId, orgId);
+                // Canonical structured chat orchestrator for every /api/chat
+                // request. There is no runtime V1 or legacy downgrade.
+                const { runReactAgentV2: runReactAgent } = await import('./agent/react-agent-v2.js');
 
                 // SSE branch — for browser ext + in-app streaming tool timeline.
                 if (wantStream) {
@@ -21333,8 +21324,8 @@ exit \$RC
                 }
                 return jsonResponse(res, result);
               } catch (agentErr) {
-                console.warn('[chat:react-agent] failed, falling back to legacy:', agentErr.message);
-                // Fall through to legacy implementation below.
+                console.error('[chat:orchestrator] failed:', agentErr.message);
+                return jsonResponse(res, { error: 'chat_orchestration_failed', traceable: true }, 502);
               }
             }
 

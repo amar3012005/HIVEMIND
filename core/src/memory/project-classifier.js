@@ -15,8 +15,8 @@
  * named "SOLVIS" whose description was "solar inverter installs").
  *
  * LLM is best-effort: a Groq json_object call (gpt-oss-120b) with a short
- * timeout. On any failure it degrades to the name-substring heuristic — the
- * save NEVER blocks on the classifier.
+ * timeout. On failure it returns an explicit scope question; it never guesses
+ * project placement from a locale-specific name substring.
  */
 
 const CLASSIFY_MODEL = process.env.PROJECT_CLASSIFY_MODEL || 'openai/gpt-oss-120b';
@@ -79,24 +79,6 @@ async function llmClassify({ text, projects, signal }) {
   }
 }
 
-// Fallback when the LLM is unavailable: match a project NAME as a substring of
-// the memory text. Single match → modest confidence; multiple → ambiguous.
-function heuristic({ text, projects }) {
-  const hay = String(text || '').toLowerCase();
-  const matchIdx = [];
-  projects.forEach((p, i) => {
-    const n = String(p.name || '').toLowerCase().trim();
-    if (n.length >= 3 && hay.includes(n)) matchIdx.push(i);
-  });
-  if (matchIdx.length === 1) {
-    return { best: matchIdx[0] + 1, confidence: 0.75, second: null, second_confidence: 0, reason: 'name-substring (heuristic)' };
-  }
-  if (matchIdx.length > 1) {
-    return { best: null, confidence: 0.5, second: null, second_confidence: 0, reason: 'multiple name matches (heuristic)', _ambiguous: matchIdx };
-  }
-  return { best: null, confidence: 0, second: null, second_confidence: 0, reason: 'no name match (heuristic)' };
-}
-
 /**
  * classifyProjectForMemory({ text, projects, signal })
  *   projects: [{ id, name, slug, description }]
@@ -107,19 +89,16 @@ export async function classifyProjectForMemory({ text, projects, signal }) {
   if (!Array.isArray(projects) || projects.length === 0) {
     return { decision: 'personal', projectId: null, confidence: 0, reason: 'no projects' };
   }
-  let r = await llmClassify({ text, projects, signal });
-  if (!r) r = heuristic({ text, projects });
-
   const candidates = projects.map((p) => ({ id: p.id, name: p.name, slug: p.slug }));
+  const r = await llmClassify({ text, projects, signal });
+  if (!r) {
+    return { decision: 'ask', projectId: null, confidence: 0, reason: 'project_classifier_unavailable', candidates };
+  }
   const bestIdx = (Number.isInteger(r.best) && r.best >= 1 && r.best <= projects.length) ? r.best - 1 : null;
   const conf = clamp01(r.confidence);
   const secConf = clamp01(r.second_confidence);
 
   if (bestIdx == null || conf < CONF_FLOOR) {
-    // Heuristic multi-name-match is a real ambiguity → ask. Otherwise personal.
-    if (Array.isArray(r._ambiguous) && r._ambiguous.length > 1) {
-      return { decision: 'ask', projectId: null, suggestedId: null, confidence: conf, reason: r.reason, candidates };
-    }
     return { decision: 'personal', projectId: null, confidence: conf, reason: r.reason || 'no fit' };
   }
 

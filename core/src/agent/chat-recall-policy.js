@@ -68,12 +68,6 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
 }
 
 export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {}) {
-  if (!coverage.evidence_found) {
-    return {
-      reason: 'empty_anchor_coverage',
-      args: { query, mode: 'explain', limit: 12 },
-    };
-  }
   if (coverage.source_requested && !coverage.source_covered) {
     return {
       reason: 'source_coverage',
@@ -101,6 +95,12 @@ export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {})
           ...(plan.time?.range ? { range: plan.time.range } : {}),
         },
       },
+    };
+  }
+  if (!coverage.evidence_found) {
+    return {
+      reason: 'empty_anchor_coverage',
+      args: { query, mode: 'explain', limit: 12 },
     };
   }
   if (coverage.graph_requested && !coverage.graph_covered) {

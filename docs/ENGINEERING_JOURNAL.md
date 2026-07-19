@@ -37,6 +37,19 @@ or uncommitted changes as completed work.
 
 ## Current Git Baseline
 
+## 2026-07-19 UTC - SINGULANCE deployment governor started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/singulance-01`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `pending`
+- Scope: repository deployment governance, deprecated legacy operator, and
+  cache-preserving `scripts/quick-deploy.sh`; no application service change.
+- Verification: shell syntax, diff check, and static policy checks pending.
+- Production: not deployed
+- Rollback: not applicable
+- Next: verify, commit, push the session branch, then integrate separately.
+
 ## 2026-07-16 UTC - Contextual durable-memory ingestion
 
 - State: Started

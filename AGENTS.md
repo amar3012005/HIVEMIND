@@ -1,5 +1,14 @@
 # HIVEMIND Autonomous Agent System
 
+## Mandatory Deployment Governor
+
+Every production action must use
+[`DEPLOY_GOVERNOR.md`](DEPLOY_GOVERNOR.md) and the
+`singulance-deploy-governor` agent. It is the operational authority for the
+cache-preserving `singulance-main` fast path. The legacy `deploy-operator` is a
+deprecated alias and must not use raw hosts, Coolify, Vercel, or generic
+container restarts.
+
 ## Mandatory Production Release Rule
 
 Before feature work, read and follow

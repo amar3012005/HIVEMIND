@@ -1,5 +1,13 @@
 ## MCP Tools: code-review-graph
 
+## Mandatory Deployment Governor
+
+Every production action must first load [`DEPLOY_GOVERNOR.md`](DEPLOY_GOVERNOR.md)
+and `.claude/agents/singulance-deploy-governor.md`. Deploy only pushed
+`singulance-main` to the SSH alias `singulance` through the foreground
+cache-preserving quick-deploy path. Never use the legacy raw-IP/Coolify/Vercel
+instructions.
+
 ## Mandatory Production Release Rule
 
 Before feature work, read and follow

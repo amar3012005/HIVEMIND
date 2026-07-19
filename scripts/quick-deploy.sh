@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # quick-deploy.sh — fast single-branch deploy. Run ON the singulance box.
 #
-#   bash scripts/quick-deploy.sh [branch]      # default: hivemind-main
+#   bash scripts/quick-deploy.sh [branch]      # default: singulance-main
 #
 # Model (per operator request, replaces the heavy immutable-release dance):
 #   • ONE live branch. Box pulls it (push from your laptop, pull here) and hard-
-#     resets the deploy checkout to origin — live is ALWAYS latest, no merge
+#     resets the deploy checkout to FETCH_HEAD — live is ALWAYS latest, no merge
 #     conflicts, no worktrees, no per-SHA tags.
 #   • Exactly ONE rollback per service: the image that was live is retagged
 #     `:stable` right before it's replaced. `:stable` is SAVED, never run as a
@@ -19,6 +19,10 @@
 # Rollback (one command):  bash scripts/quick-deploy.sh --rollback <service...>
 set -euo pipefail
 
+# Exactly one production release may mutate images/containers at a time.
+exec 9>/run/lock/singulance-quick-deploy.lock
+flock -n 9 || { echo "another SINGULANCE deployment is already running"; exit 1; }
+
 REPO=/root/hivemind-next
 ENV=/root/hivemind/.env
 NEXTENV=/root/hivemind-next/.env.embedding-canary-runtime
@@ -28,11 +32,11 @@ NEXT=infra/docker-compose.next.yml
 # container + build recipe per service
 declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-deepgram]=tara-deepgram [fe]=hivemind-next-frontend-1 )
 build_one() { case "$1" in
-  core)          docker build -t "hivemind/core-api:latest" -f Dockerfile.production . ;;
-  control-plane) docker build -t "hivemind/control-plane:latest" -f Dockerfile.control-plane . ;;
-  employees)     docker build -t "hivemind/employees:latest" ./employees-service ;;
-  tara-deepgram) docker build -t "hivemind/tara-deepgram:latest" ./services/tara-deepgram ;;
-  fe)            docker build -t "hivemind/fe:latest-single" ./frontend/Da-vinci ;;
+  core)          docker build --label "org.opencontainers.image.revision=$NOW" -t "hivemind/core-api:latest" -f Dockerfile.production . ;;
+  control-plane) docker build --label "org.opencontainers.image.revision=$NOW" -t "hivemind/control-plane:latest" -f Dockerfile.control-plane . ;;
+  employees)     docker build --label "org.opencontainers.image.revision=$NOW" -t "hivemind/employees:latest" ./employees-service ;;
+  tara-deepgram) docker build --label "org.opencontainers.image.revision=$NOW" -t "hivemind/tara-deepgram:latest" ./services/tara-deepgram ;;
+  fe)            docker build --label "org.opencontainers.image.revision=$NOW" -t "hivemind/fe:latest-single" ./frontend/Da-vinci ;;
 esac; }
 img_of() { case "$1" in
   core) echo core-api;; control-plane) echo control-plane;; employees) echo employees;;
@@ -93,11 +97,11 @@ if [ -z "$PREV" ] || ! git cat-file -e "$PREV^{commit}" 2>/dev/null; then
 else
   chg() { ! git diff --quiet "$PREV" "$NOW" -- "$@"; }
   SVCS=()
-  chg core/src/control-plane-server.js core/src/outreach core/src/security core/src/billing && SVCS+=(control-plane)
-  chg core/src core/prisma && SVCS+=(core)
+  chg Dockerfile.control-plane core/package.json core/package-lock.json core/prisma core/config core/src/control-plane-server.js core/src/outreach core/src/security core/src/billing && SVCS+=(control-plane)
+  chg Dockerfile.production core/package.json core/package-lock.json core/prisma core/config core/scripts core/src extensions && SVCS+=(core)
   chg employees-service && SVCS+=(employees)
   chg services/tara-aaas services/tara-deepgram && SVCS+=(tara-deepgram)
-  chg frontend/Da-vinci && SVCS+=(fe)
+  chg frontend/Da-vinci frontend/Da-vinci/Dockerfile frontend/Da-vinci/package.json frontend/Da-vinci/package-lock.json && SVCS+=(fe)
 fi
 # de-dup
 SVCS=($(printf '%s\n' "${SVCS[@]}" | awk '!seen[$0]++'))
@@ -132,6 +136,9 @@ for s in "${SVCS[@]}"; do
   docker image inspect "hivemind/$i:$tag" >/dev/null 2>&1 && docker tag "hivemind/$i:$tag" "hivemind/$i:$stag" || echo "  (no prior :$tag — first deploy, no rollback saved)"
   cd "$REPO"            # build context must be the worktree
   build_one "$s"
+  built_revision=$(docker image inspect "hivemind/$i:$tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+  [ "$built_revision" = "$NOW" ] || { echo "FATAL: $s image revision $built_revision != fetched $NOW"; exit 1; }
+  echo "  image revision verified: ${built_revision:0:12}"
   recreate_one "$s"; health_gate "${CONTAINER[$s]}" || { echo "FATAL — roll back with: quick-deploy.sh --rollback $s"; exit 1; }
 done
 
@@ -139,10 +146,8 @@ done
 for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind https://api.singulancelabs.com/health https://core.singulancelabs.com/health; do
   smoke_url "$u"
 done
-# Keep the box lean WITHOUT killing warm cache — pruning all cache made every
-# build cold (re-npm-install etc.). Keep recent layers so a code-only change
-# rebuilds in seconds; only evict cache older than 7 days + dangling images.
-docker builder prune -f --filter 'until=168h' >/dev/null 2>&1 || true
-docker image prune -f >/dev/null 2>&1 || true
+# Cache and image cleanup is deliberately excluded from deployment. It is a
+# separately scheduled maintenance concern; releases must keep warm layers and
+# must never delete rollback material.
 echo "$NOW" > "$LASTSHA"   # record what's now live for the next deploy's diff
 echo "== deployed $(git rev-parse --short $NOW). free: $(df -h / | awk 'NR==2{print $4}'). rollback: quick-deploy.sh --rollback <svc>"

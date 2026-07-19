@@ -180,3 +180,24 @@ or uncommitted changes as completed work.
 - Next: commit the isolated branch, rebase it onto current
   `origin/singulance-main`, rerun all focused and adjacent tests, then push for
   review without deploying.
+
+## 2026-07-19 UTC - Structured chat orchestration committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/chat-orchestration`
+- Base / commit: `ed90a2e8e6bb635c1b164e813c0edad394748934` ->
+  `ce24b7b891ccd48bca8740f489f7990cbb0d07ff`
+- Scope: canonical Core `/api/chat` fast structured intent decision, lazy
+  AgentScope-style HIVEMIND and connector toolkits, event lifecycle, scoped
+  source/entity/project recall, versioned memory mutation, and external-write
+  authorization migration and middleware.
+- Verification: rebased successfully onto `origin/singulance-main`; all changed
+  JavaScript passed `node --check`; Prisma schema validation and
+  `git diff --check` passed; 126 focused and adjacent Node tests passed. Local
+  test logs contained expected missing optional retrieval telemetry tables and
+  unavailable localhost Qdrant diagnostics, with zero test failures.
+- Production: not deployed; not accepted
+- Rollback: revert `ce24b7b891ccd48bca8740f489f7990cbb0d07ff`
+- Next: review and merge the pushed branch, then run the additive migration and
+  authenticated `/api/chat` canaries through the production release protocol.

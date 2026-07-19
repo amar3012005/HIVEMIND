@@ -314,6 +314,7 @@ export class EvidenceRetrievalService {
     const filename = filenameMatch
       ? filenameMatch[1].trim().replace(/^(?:what\s+(?:exactly\s+)?does|what\s+is\s+in|tell\s+me\s+what|send|share|email|open|read)\s+/i, '')
       : null;
+    const sourceMatch = filename ? 'filename' : 'metadata_tokens';
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
     const tokens = [...new Set(
       [...segmenter.segment(filename || String(query || '').normalize('NFKC'))]
@@ -337,7 +338,7 @@ export class EvidenceRetrievalService {
       const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
       return (listed?.documents || [])
         .filter((document) => !document.userId || document.userId === userId)
-        .map((document) => ({ ...document, _sourceScore: score(document) }))
+        .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
         .filter((document) => document._sourceScore >= 0.34)
         .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
         .slice(0, Math.max(1, Math.min(limit, 3)));
@@ -362,7 +363,7 @@ export class EvidenceRetrievalService {
       take: 30,
     });
     return documents
-      .map((document) => ({ ...document, _sourceScore: score(document) }))
+      .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
       .filter((document) => document._sourceScore >= 0.34)
       .sort((a, b) => b._sourceScore - a._sourceScore
         || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())

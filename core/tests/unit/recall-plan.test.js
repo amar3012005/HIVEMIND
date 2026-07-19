@@ -177,6 +177,29 @@ test('structured chat intent does not convert an entity match into a source filt
   assert.equal(result.trace.recall_plan.source.document_id, null);
 });
 
+test('structured chat intent resolves a literal filename as a source boundary', async () => {
+  const router = new RecallRouter({
+    persistentMemoryStore: { recall: async () => ({ memories: [] }) },
+    evidenceRetrieval: {
+      resolveSourceFromQuery: async () => [{
+        id: 'solvis-pia-doc',
+        document_title: 'SolvisPia.pdf',
+        _sourceMatch: 'filename',
+      }],
+      resolveSourceDocuments: async () => [],
+    },
+    prisma: null,
+  });
+
+  const result = await router.recall('What does SolvisPia.pdf say about refrigerant?', {
+    mode: 'explain',
+    structured_intent: true,
+  }, { userId: 'user-1', orgId: 'org-1' });
+
+  assert.equal(result.trace.recall_plan.source.requested, true);
+  assert.equal(result.trace.recall_plan.source.document_id, 'solvis-pia-doc');
+});
+
 test('an unresolved explicit source fails closed before memory recall', async () => {
   let recalled = false;
   const router = new RecallRouter({

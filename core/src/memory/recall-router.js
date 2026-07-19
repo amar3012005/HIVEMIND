@@ -109,7 +109,7 @@ export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {
   return [...new Set(entities.map((entity) => entity.canonicalName).filter(Boolean))];
 }
 
-async function resolveImplicitSource({ evidence, query, ctx, timeoutMs }) {
+async function resolveImplicitSource({ evidence, query, ctx, timeoutMs, requireFilename = false }) {
   if (!evidence?.resolveSourceFromQuery || !query) return null;
   const resolved = await withTimeout(
     evidence.resolveSourceFromQuery({
@@ -124,6 +124,7 @@ async function resolveImplicitSource({ evidence, query, ctx, timeoutMs }) {
   );
   const source = Array.isArray(resolved) ? resolved[0] : resolved;
   if (!source) return null;
+  if (requireFilename && source._sourceMatch !== 'filename') return null;
   const documentId = source.document_id || source.documentId || source.id || null;
   const title = source.title || source.document_title || source.documentTitle || null;
   return documentId || title ? { document_id: documentId, title } : null;
@@ -1207,6 +1208,9 @@ export class RecallRouter {
         query,
         ctx,
         timeoutMs: 250,
+        // Structured chat may recover a source only from a literal file
+        // artifact. Metadata-token matches stay available to legacy recall.
+        requireFilename: options.structured_intent === true,
       }) : null,
       withTimeout(
         resolveCanonicalEntities({ prisma: this.prisma, orgId: ctx.orgId, query }),

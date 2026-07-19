@@ -79,6 +79,7 @@ test('source metadata resolution is tenant-scoped and does not require an LLM fi
   assert.equal(where.orgId, 'org-1');
   assert.equal(where.archivedAt, null);
   assert.deepEqual(documents.map((document) => document.id), ['brochure']);
+  assert.equal(documents[0]._sourceMatch, 'filename');
 });
 
 test('source metadata resolution rejects a weak one-token coincidence', async () => {

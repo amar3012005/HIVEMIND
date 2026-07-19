@@ -64,13 +64,13 @@ cd "$REPO"
 # checkout may sit on an unrelated/dirty branch from another session). Empty on
 # the very first run → rebuild everything.
 PREV=$(cat "$LASTSHA" 2>/dev/null || true)
-git fetch origin "$BRANCH" -q
+git -c submodule.recurse=false -c fetch.recurseSubmodules=false fetch origin "$BRANCH" -q
 # Reset to FETCH_HEAD, NOT origin/$BRANCH: this box's remote-tracking ref lags
 # (fetch updates FETCH_HEAD but not refs/remotes/origin/$BRANCH), which silently
 # rebuilt ancient code. FETCH_HEAD is always the tip we just fetched. -f discards
 # any local drift so live == canonical ("no overwrites").
 git checkout -qf -B "$BRANCH" FETCH_HEAD
-git submodule update --init --force -q frontend/Da-vinci
+git -c submodule.recurse=false submodule update --init --force -q frontend/Da-vinci
 NOW=$(git rev-parse HEAD)
 if [ -n "$PREV" ] && [ "$PREV" = "$NOW" ]; then echo "already at $(git rev-parse --short HEAD) — nothing to deploy"; exit 0; fi
 echo "== deploy ${PREV:0:8}${PREV:+ → }$(git rev-parse --short $NOW) on $BRANCH"

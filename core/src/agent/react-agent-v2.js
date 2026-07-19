@@ -1940,6 +1940,25 @@ export async function runReactAgentV2({
       time: recallTime || intentDecision.time,
     });
 
+    // API/UI recall controls are server-owned requirements, not hints for the
+    // intent model. A direct-answer plan must never bypass an explicit source,
+    // time, or mode request, otherwise the endpoint can answer a named
+    // document without reading it.
+    const explicitRetrievalRequested = Boolean(
+      recallMode
+      || recallSource?.document_id
+      || recallSource?.documentId
+      || recallSource?.title
+      || recallTime?.valid_at
+      || recallTime?.known_at
+      || recallTime?.range,
+    );
+    if (explicitRetrievalRequested) {
+      plan.operation = 'recall';
+      delete plan._direct_answer;
+      if (!plan.sub_queries.length) plan.sub_queries = [message];
+    }
+
     // Router direct-answer short-circuit: the router already wrote a
     // language-correct reply (no tool needed) → skip the extra answerDirectly
     // call + save-rescue. 1 LLM call total for greetings/smalltalk.

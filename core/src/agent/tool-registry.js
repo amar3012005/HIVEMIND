@@ -15,6 +15,7 @@ import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
 import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
+import { applyProjectScopeFilter } from '../routes/recall.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -534,6 +535,12 @@ const TOOL_HANDLERS = {
       projectId:     ctx.projectId,
       accessContext: ctx.accessContext,
     });
+    // PROJECT-SCOPE POLICY — same authority as /api/recall (routes/recall.js).
+    // The agent path calls router.recall DIRECTLY, bypassing the HTTP route, so
+    // without this a projectless chat leaked project KB docs (Solvis whitepaper
+    // answering an org-scope question) and a project-scoped chat was not
+    // actually restricted to its project.
+    await applyProjectScopeFilter(ctx.prisma, ctx.orgId, result, ctx.projectId || null);
     const effectivePlan = result.trace?.recall_plan || recallPlan;
 
     let graph = [];

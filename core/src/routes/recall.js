@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 //   caller WITH project  → org-plane memories + that project's memories;
 //   caller WITHOUT project → org-plane ONLY (scope='project' rows dropped).
 // Mutates and returns `result`, stamping result.project_scope_applied.
-async function applyProjectScopeFilter(prisma, orgId, result, recallProjectId) {
+export async function applyProjectScopeFilter(prisma, orgId, result, recallProjectId) {
   if (Array.isArray(result?.memories) && result.memories.length && prisma) {
     try {
       const ids = result.memories.map((m) => m.id).filter(Boolean);

@@ -21126,7 +21126,14 @@ exit \$RC
             if (orgId && !rateLimitAllowOrgRequest(orgId)) {
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
-            const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
+            let { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
+            // Legacy clients prepended a '[STRICT LANGUAGE: ...]' directive to the
+            // message itself — it poisoned recall embeddings ('solvis' → 0 hits
+            // because the query was the directive) and echoed back in fallback
+            // copy. Language is a first-class param; strip the prefix defensively.
+            if (typeof message === 'string') {
+              message = message.replace(/^\s*\[STRICT LANGUAGE:[^\]]*\]\s*/i, '').trim();
+            }
             // Project scope from caller — when set, all recall/save tool
             // calls dispatched by the ReAct agent are auto-bound to this
             // project, and the auto-saved conversation memory inherits it.

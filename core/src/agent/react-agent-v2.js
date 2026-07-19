@@ -1196,20 +1196,23 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
       memoryCount ? `${memoryCount} related memor${memoryCount === 1 ? 'y' : 'ies'}` : '',
       sectionCount ? `${sectionCount} source passage${sectionCount === 1 ? '' : 's'}` : '',
     ].filter(Boolean).join(' and ');
+    // Human voice: first person, warm, no verbatim echo of a long question.
+    const topic = String(message || '').replace(/^\s*\[[^\]]*\]\s*/, '').slice(0, 80);
     const responses = {
-      de: `HIVEMIND hat ${context || 'relevanten Kontext'} gefunden. Dieser Kontext beantwortet jedoch nicht direkt: "${message}". Fuege die dazugehoerige Datei, Entscheidung oder Nachricht hinzu, dann kann ich sie mit dem vorhandenen Wissen verbinden.`,
-      fr: `HIVEMIND a trouve ${context || 'du contexte pertinent'}, mais il ne repond pas directement a : "${message}". Ajoutez le document, la decision ou le message concerne afin que je puisse le relier au contexte existant.`,
-      es: `HIVEMIND encontro ${context || 'contexto relevante'}, pero no responde directamente a: "${message}". Anade el documento, la decision o el mensaje relacionado para poder conectarlo con el contexto existente.`,
-      en: `HIVEMIND found ${context || 'relevant workspace context'}, but it does not directly establish: "${message}". Add the related document, decision, or message and I can connect it to the context already stored here.`,
+      de: `Ich habe ${context || 'etwas Kontext'} dazu gefunden — aber nichts, was deine Frage direkt beantwortet. Wenn du mir das passende Dokument, die Entscheidung oder die Nachricht dazu gibst, verbinde ich es mit dem, was ich schon weiss.`,
+      fr: `J'ai trouve ${context || 'du contexte'} a ce sujet — mais rien qui reponde directement a ta question. Partage le document, la decision ou le message concerne et je le relierai a ce que je sais deja.`,
+      es: `Encontre ${context || 'algo de contexto'} sobre esto — pero nada que responda directamente a tu pregunta. Compárteme el documento, la decision o el mensaje relacionado y lo conectare con lo que ya se.`,
+      en: `I found ${context || 'some related context'} — but nothing that directly answers your question. Share the document, decision, or message behind it and I'll connect it with what I already know.`,
     };
     return responses[lang] || responses.en;
   }
 
+  const topic = String(message || '').replace(/^\s*\[[^\]]*\]\s*/, '').slice(0, 80);
   const responses = {
-    de: `Fuer "${message}" gibt es in diesem Workspace noch keine passende Quelle. Fuege eine Datei, Nachricht oder Entscheidung dazu hinzu, dann kann HIVEMIND sie kuenftig als Kontext verwenden.`,
-    fr: `Aucune source correspondante n'est encore enregistree dans cet espace de travail pour "${message}". Ajoutez un document, un message ou une decision afin que HIVEMIND puisse l'utiliser comme contexte.`,
-    es: `Todavia no hay una fuente correspondiente en este espacio de trabajo para "${message}". Anade un documento, mensaje o decision para que HIVEMIND pueda usarlo como contexto.`,
-    en: `There is no matching source stored in this workspace yet for "${message}". Add a document, message, or decision and HIVEMIND can use it as grounded context next time.`,
+    de: `Dazu habe ich noch nichts in meinem Gedaechtnis — "${topic}" taucht bisher in keiner Quelle auf. Lade ein Dokument hoch oder erzaehl mir kurz davon, dann merke ich es mir und kann beim naechsten Mal antworten.`,
+    fr: `Je n'ai encore rien en memoire a ce sujet — "${topic}" n'apparait dans aucune source pour l'instant. Importe un document ou raconte-le-moi, je m'en souviendrai la prochaine fois.`,
+    es: `Todavia no tengo nada en mi memoria sobre eso — "${topic}" no aparece en ninguna fuente. Sube un documento o cuentamelo y lo recordare para la proxima vez.`,
+    en: `I don't have anything in my memory about that yet — "${topic}" doesn't appear in any source so far. Upload a document or just tell me about it, and I'll remember it for next time.`,
   };
   return responses[lang] || responses.en;
 }

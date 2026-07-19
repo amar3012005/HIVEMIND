@@ -1,3 +1,8 @@
+-- Core connects with ?schema=hivemind. The production migration runner invokes
+-- psql directly, so pin the same schema instead of relying on its default
+-- search_path (which is normally public).
+SET search_path TO hivemind, public;
+
 -- Some long-lived production databases predate the original draft table
 -- migration. Create the legacy shape first so this authorization migration is
 -- self-contained and safe to apply on both histories.

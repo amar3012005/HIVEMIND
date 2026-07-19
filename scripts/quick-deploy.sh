@@ -126,7 +126,14 @@ if [ -n "$NEWMIG" ]; then
   echo "== new migrations: $NEWMIG — backing up first"
   docker exec hm-postgres pg_dump -U hivemind_user -d hivemind -Fc -f /tmp/bk.dump
   docker cp hm-postgres:/tmp/bk.dump "/root/backups/hivemind/pre-$(git rev-parse --short $NOW)-$TS.dump"; docker exec hm-postgres rm -f /tmp/bk.dump
-  for m in $NEWMIG; do echo "  apply $m"; docker exec -i hm-postgres psql -U hivemind_user -d hivemind -v ON_ERROR_STOP=1 < "$REPO/core/prisma/migrations/$m/migration.sql"; done
+  for m in $NEWMIG; do
+    echo "  apply $m"
+    # Prisma connects to the hivemind schema; direct psql otherwise defaults to
+    # public and can report a successful migration that Core cannot see.
+    docker exec -e PGOPTIONS='-c search_path=hivemind,public' -i hm-postgres \
+      psql -U hivemind_user -d hivemind -v ON_ERROR_STOP=1 \
+      < "$REPO/core/prisma/migrations/$m/migration.sql"
+  done
 fi
 
 # build → save ONE stable rollback (the outgoing live image) → run :latest

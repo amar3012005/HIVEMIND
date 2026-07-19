@@ -1201,7 +1201,7 @@ export class RecallRouter {
     // an arbitrary Solvis-named PDF: that makes a broad answer look
     // source-specific and can hide better product evidence. Legacy /api/recall
     // callers retain metadata-based filename resolution for compatibility.
-    const allowImplicitSource = !options.structured_intent && !recallPlan.source.requested;
+    const allowImplicitSource = !recallPlan.source.requested;
     const [implicitSource, canonicalEntities] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,

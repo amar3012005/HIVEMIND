@@ -1,5 +1,60 @@
 import crypto from 'node:crypto';
 
+// PROJECT-SCOPE FILTER — one authority for BOTH recall branches (bounded
+// fact/explain/full AND legacy). Hydrates scope/project/owner from the DB, then:
+//   caller WITH project  → org-plane memories + that project's memories;
+//   caller WITHOUT project → org-plane ONLY (scope='project' rows dropped).
+// Mutates and returns `result`, stamping result.project_scope_applied.
+async function applyProjectScopeFilter(prisma, orgId, result, recallProjectId) {
+  if (Array.isArray(result?.memories) && result.memories.length && prisma) {
+    try {
+      const ids = result.memories.map((m) => m.id).filter(Boolean);
+      if (ids.length) {
+        const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT m.id, m.user_id, m.scope, m.project_id,
+                  COALESCE(array_agg(mp.project_id::text) FILTER (WHERE mp.project_id IS NOT NULL), '{}') AS project_ids,
+                  u.display_name AS dn, u.email AS em
+           FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
+           LEFT JOIN hivemind.memory_projects mp ON mp.memory_id = m.id
+           WHERE m.org_id = $1::uuid AND m.id IN (${ph})
+           GROUP BY m.id, m.user_id, m.scope, m.project_id, u.display_name, u.email`,
+          orgId, ...ids,
+        );
+        const byId = Object.fromEntries((rows || []).map((r) => [r.id, r]));
+        for (const m of result.memories) {
+          const r = byId[m.id];
+          if (!r) continue;
+          if (!m.user_id) m.user_id = r.user_id;
+          if (!m.scope) m.scope = r.scope;
+          if (m.project_id == null) m.project_id = r.project_id || null;
+          if (!Array.isArray(m.project_ids)) m.project_ids = Array.isArray(r.project_ids) ? r.project_ids : [];
+          const nm = r.dn || r.em || null;
+          if (!m.owner_name) m.owner_name = nm;
+          if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
+        }
+      }
+    } catch {}
+  }
+  if (Array.isArray(result?.memories)) {
+    const before = result.memories.length;
+    if (recallProjectId) {
+      result.memories = result.memories.filter((m) => {
+        const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
+        return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
+      });
+    } else {
+      result.memories = result.memories.filter((m) => m.scope !== 'project');
+    }
+    result.project_scope_applied = {
+      project_id: recallProjectId || null,
+      kept: result.memories.length,
+      dropped: before - result.memories.length,
+    };
+  }
+  return result;
+}
+
 function resolveWithinDeadline(promise, timeoutMs, fallback) {
   return new Promise((resolve) => {
     let settled = false;
@@ -195,14 +250,22 @@ export async function handleRecallRoute(ctx = {}) {
         trace: bounded.trace,
       });
       if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
+      // PROJECT-SCOPE FILTER — this bounded branch returns EARLY, so it must
+      // apply the same scope rules as the legacy path below. Without this,
+      // every fact/explain/full recall (the sidecar's default mode) leaked
+      // other projects' memories into projectless callers — a client project's
+      // KB (SOLVIS) contaminated org-scope rooms' company brief.
+      const _boundedScoped = await applyProjectScopeFilter(
+        prisma, orgId, { memories: bounded.memories || [] }, recallProjectId);
       return jsonResponse(res, {
-        memories: bounded.memories || [],
+        memories: _boundedScoped.memories,
         evidence: bounded.evidence || [],
         live: bounded.live || [],
         mode_used: effectivePlan.mode,
         recall_plan: effectivePlan,
         evidence_packet: packet,
         cutoff_reason: cutoffReason,
+        project_scope_applied: _boundedScoped.project_scope_applied,
         latency_ms: Date.now() - _recallT0,
       });
     }
@@ -278,58 +341,7 @@ export async function handleRecallRoute(ctx = {}) {
       };
     }
 
-    if (Array.isArray(result?.memories) && result.memories.length && prisma) {
-      try {
-        const ids = result.memories.map((m) => m.id).filter(Boolean);
-        if (ids.length) {
-          const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
-          const rows = await prisma.$queryRawUnsafe(
-            `SELECT m.id, m.user_id, m.scope, m.project_id,
-                    COALESCE(array_agg(mp.project_id::text) FILTER (WHERE mp.project_id IS NOT NULL), '{}') AS project_ids,
-                    u.display_name AS dn, u.email AS em
-             FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
-             LEFT JOIN hivemind.memory_projects mp ON mp.memory_id = m.id
-             WHERE m.org_id = $1::uuid AND m.id IN (${ph})
-             GROUP BY m.id, m.user_id, m.scope, m.project_id, u.display_name, u.email`,
-            orgId, ...ids,
-          );
-          const byId = Object.fromEntries((rows || []).map((r) => [r.id, r]));
-          for (const m of result.memories) {
-            const r = byId[m.id];
-            if (!r) continue;
-            if (!m.user_id) m.user_id = r.user_id;
-            if (!m.scope) m.scope = r.scope;
-            if (m.project_id == null) m.project_id = r.project_id || null;
-            if (!Array.isArray(m.project_ids)) m.project_ids = Array.isArray(r.project_ids) ? r.project_ids : [];
-            const nm = r.dn || r.em || null;
-            if (!m.owner_name) m.owner_name = nm;
-            if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
-          }
-        }
-      } catch {}
-    }
-
-    if (Array.isArray(result?.memories)) {
-      const before = result.memories.length;
-      if (recallProjectId) {
-        // Project-scoped caller: org-plane memories + THIS project's memories only.
-        result.memories = result.memories.filter((m) => {
-          const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
-          return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
-        });
-      } else {
-        // No project on the caller (e.g. a projectless HyperAgents room): the
-        // default plane is ORG-WIDE memories ONLY. Project-scoped documents must
-        // never bleed into unrelated rooms — that's how one project's KB (e.g. a
-        // client's docs) contaminated another company's outreach synthesis.
-        result.memories = result.memories.filter((m) => m.scope !== 'project');
-      }
-      result.project_scope_applied = {
-        project_id: recallProjectId || null,
-        kept: result.memories.length,
-        dropped: before - result.memories.length,
-      };
-    }
+    await applyProjectScopeFilter(prisma, orgId, result, recallProjectId);
 
     if (recallAuthorId && Array.isArray(result?.memories)) {
       const before = result.memories.length;

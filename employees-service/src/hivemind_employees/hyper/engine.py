@@ -1879,6 +1879,45 @@ class Director:
             keep.add(n)
         return [n for n in all_names if n in keep]
 
+    async def _compose_places_queries(self) -> List[str]:
+        """Compose the best Google Places queries for THIS turn — an LLM call with
+        the task + board context, not a deterministic pattern. Returns [] when Maps
+        adds nothing (already-rich board, no geography, no org angle)."""
+        prospects = len([l for l in self.blackboard if "PROSPECT:" in str(l)])
+        board_ctx = "\n".join(str(l)[:200] for l in self.blackboard[-14:])[:2200]
+        schema = {"type": "object",
+                  "properties": {"queries": {"type": "array", "items": {"type": "string"}, "maxItems": 3}},
+                  "required": ["queries"], "additionalProperties": False}
+        sysp = (
+            _now_block() + self._company_identity_block() +
+            "You compose Google Places TEXT SEARCH queries to source REAL prospect firms for the task. "
+            "Places indexes local BUSINESSES; it returns name, phone, website, address.\n"
+            "RULES:\n"
+            "- Two query shapes ONLY: '<Organisation name> <city>' to look up a SPECIFIC organisation the "
+            "context already names, or '<business category> in <city/region>' for discovery (3-6 words).\n"
+            "- Use the task's REAL geography and industry — any country, any language local to that market "
+            "(a German market query may be German, a French one French: local-language categories rank better).\n"
+            "- Prefer named-org lookups for organisations the board already identified but lacks contacts for.\n"
+            "- Government/regulatory bodies are poorly indexed — prefer the businesses that serve or are "
+            "regulated in that sector.\n"
+            "- NEVER: verbs, full sentences, 'with contact details', method names, or queries unrelated to "
+            "the task. Fewer, sharper queries beat many — each costs money.\n"
+            "- Return {\"queries\": []} when the board already has enough prospects or Maps cannot help."
+        )
+        user = (f"TASK: {(self.user_message or '')[:500]}\n"
+                f"PROSPECTS ALREADY ON BOARD: {prospects}\n"
+                f"BOARD (latest context):\n{board_ctx}")
+        try:
+            msg = await self._groq([{"role": "system", "content": sysp},
+                                    {"role": "user", "content": user}],
+                                   schema=schema, temp=0.2, bucket="plan")
+            plan = json.loads((msg or {}).get("content") or "{}")
+            out = [str(q).strip() for q in (plan.get("queries") or []) if str(q).strip()]
+            return out[:3]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] places query composer failed: %s", exc)
+            return []
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
@@ -2483,63 +2522,27 @@ class Director:
         #   a) org names surfaced by web/debate get looked up on Maps for REAL contacts;
         #   b) a sharpened company-oriented Places query runs when discovery was weak.
         try:
-            _wants_contacts = _wants_discovery(self.user_message)
+            # Event-driven gate: the planner (LLM) asking for a places_query IS the
+            # discovery signal — works in any language; the regex is only a fallback.
+            _wants_contacts = bool(plan.get("places_query")) or _wants_discovery(self.user_message)
             _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
             if _wants_contacts and len(_prospect_rows) < 3:
                 await self.emit({"t": "typing", "agent": "director",
                                  "note": "Completing the task — sourcing real contacts for the named organisations…"})
-                # a) ORG-SHAPED names only, from web/debate board lines. A candidate
-                # must carry a legal/institutional marker (GmbH, AG, Bank, Institut,
-                # Stadtwerke, …) — bare capitalized phrases produced junk lookups
-                # ("PROSPECT QUALIFICATION Germany", "KI Beratung Germany") that
-                # burned Places calls on nothing.
-                _ORG_MARK = re.compile(
-                    r"(GmbH|AG\b|SE\b|B\.V\.|N\.V\.|Ltd\.?|PLC|KGaA|e\.V\.|Bank\b|Sparkasse|"
-                    r"Versicherung|Institut|Universität|Klinik|Stadtwerke|Ministerium|Behörde)", re.I)
-                _STOP = re.compile(
-                    r"^(the|our|this|key|gaps|next|touch|subject|recommend|prospect|cold|method|"
-                    r"important|insight|risk|note|executive|ideal|success|sequence|germany|europe)\b", re.I)
-                _names, _seen_n = [], set()
-                for line in self.blackboard:
-                    s = str(line)
-                    if not re.search(r"\bweb\b|WEB|http|Debate|debate", s):
-                        continue
-                    for m in re.finditer(r"\b([A-ZÄÖÜ][\w&.-]+(?:\s+[A-ZÄÖÜ(][\w&().-]+){1,3}\s*(?:GmbH|AG|B\.V\.|Ltd\.?|SE)?)", s):
-                        nm = m.group(1).strip(" .,")
-                        low = nm.lower()
-                        if (len(nm) > 7 and low not in _seen_n and not _STOP.match(nm)
-                                and _ORG_MARK.search(nm)):
-                            _seen_n.add(low)
-                            _names.append(nm)
-                for nm in _names[:3]:
+                # LLM QUERY COMPOSER — global, context-driven (no locale-specific
+                # regexes). One small structured call sees the task + what the board
+                # already surfaced and emits the OPTIMAL Google Places text queries:
+                # named-org lookups ("<Org name> <city>") for organisations the web/
+                # debate already identified, plus category discovery ("<business
+                # category> in <city/region>") matching the task's real geography and
+                # industry. 0-3 queries; empty when Maps can't help. The _places_search
+                # sanitizer stays as the final cost guard.
+                queries = await self._compose_places_queries()
+                for q in queries[:3]:
                     try:
-                        await self._places_search(f"{nm} Germany")
+                        await self._places_search(q)
                     except Exception:  # noqa: BLE001
                         pass
-                # b) One sharpened retry when discovery stayed thin — a CLEAN
-                # '<category> in <region>' query built from the task's own nouns
-                # (never the raw message: rewriting it produced garbage like
-                # 'Germany (source Germany'). _places_search sanitizes + rejects
-                # anything still too vague, so this can no-op but never junk-spend.
-                if len([l for l in self.blackboard if "PROSPECT:" in str(l)]) < 3:
-                    _msg = (self.user_message or "")
-                    _loc_m = re.search(
-                        r"\bin\s+([A-ZÄÖÜ][\w-]+(?:\s+[A-ZÄÖÜ][\w-]+)?)", _msg)
-                    _loc = (_loc_m.group(1) if _loc_m else "Germany").strip()
-                    _cat_m = re.search(
-                        r"\b(law firms?|legal firms?|banks?|insurers?|insurance compan\w+|"
-                        r"utilit\w+|hospitals?|clinics?|consultanc\w+|manufacturers?|"
-                        r"logistics compan\w+|software compan\w+|financial institutions?|"
-                        r"regulated (?:institutions?|compan\w+)|firms?|compan\w+)\b", _msg, re.I)
-                    _cat = (_cat_m.group(1) if _cat_m else "").strip()
-                    if _cat:
-                        # Places indexes businesses — government phrasings get a business synonym.
-                        _cat = re.sub(r"regulated (?:institutions?|compan\w+)|financial institutions?",
-                                      "banks and financial services companies", _cat, flags=re.I)
-                        try:
-                            await self._places_search(f"{_cat} in {_loc}")
-                        except Exception:  # noqa: BLE001
-                            pass
         except Exception as exc:  # noqa: BLE001 — completion pass must never sink the turn
             log.warning("[hyper-engine] completion pass failed: %s", exc)
 

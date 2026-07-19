@@ -1481,7 +1481,7 @@ if (process.env.DOCLING_URL) {
 
         // ── Image-only files (PNG/JPG/TIFF/WebP) → direct Groq vision OCR ──
         // Cheaper + faster than full Docling pipeline for a single bitmap.
-        if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && process.env.GROQ_API_KEY) {
+        if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
           try {
             const { ocrSingleImage } = await import('./knowledge/enterprise/groq-vision-parser.js');
             if (typeof ocrSingleImage === 'function') {
@@ -1544,7 +1544,7 @@ if (process.env.DOCLING_URL) {
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
-            if (fast.isImageHeavy && process.env.GROQ_API_KEY) {
+            if (fast.isImageHeavy && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
               const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {

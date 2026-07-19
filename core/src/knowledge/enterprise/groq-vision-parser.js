@@ -2,8 +2,9 @@
  * Groq Vision PDF parser — Tier 3.
  *
  * Renders each PDF page to a PNG via ImageMagick (`convert`), then sends
- * each page in parallel to a Groq vision model (default
- * `meta-llama/llama-4-scout-17b-16e-instruct`) for OCR + structure extraction.
+ * each page in parallel to the configured vision model for OCR + structure
+ * extraction. Production prefers the low-latency OpenRouter model and keeps
+ * Groq Scout as an independent fallback.
  *
  * Outputs markdown stitched in page order.
  *
@@ -17,18 +18,21 @@ import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'google/gemini-2.5-flash-lite';
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
 const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for convert
+const OCR_MAX_TOKENS = Number(process.env.HIVEMIND_VISION_OCR_MAX_TOKENS || 2600);
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
 - Use # / ## / ### for headings as in the source
 - Format tables as Markdown tables
 - Format lists with - or 1. 2. 3.
-- Inline product names, prices, codes verbatim
-- For diagrams or schematics, write a 1-line description
-- Do not summarise or omit content. Extract everything readable.
+- Preserve names, dates, measurements, prices, units, codes, and table cells verbatim where readable.
+- For diagrams or schematics, list visible labels and write a one-line relationship description.
+- Do not summarise, omit content, or infer unreadable text. Mark unreadable fragments as [illegible].
 - No commentary. Markdown only.`;
 
 /**
@@ -36,7 +40,7 @@ const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page i
  * @returns {Promise<{text: string, pages: number, markdown: string, error: string|null}>}
  */
 export async function parsePdfWithGroqVision(pdfPath) {
-  if (!GROQ_KEY) return { text: '', pages: 0, markdown: '', error: 'GROQ_API_KEY not set' };
+  if (!GROQ_KEY && !OPENROUTER_KEY) return { text: '', pages: 0, markdown: '', error: 'No vision provider API key set' };
   const workDir = path.join(os.tmpdir(), `vision-${crypto.randomUUID()}`);
   fs.mkdirSync(workDir, { recursive: true });
   try {
@@ -107,7 +111,7 @@ export async function parsePdfWithGroqVision(pdfPath) {
  * @returns {Promise<{text:string, markdown:string, error:string|null}>}
  */
 export async function ocrSingleImage(imagePath) {
-  if (!GROQ_KEY) return { text: '', markdown: '', error: 'GROQ_API_KEY not set' };
+  if (!GROQ_KEY && !OPENROUTER_KEY) return { text: '', markdown: '', error: 'No vision provider API key set' };
   try {
     const text = await visionOcrPage(imagePath, 1);
     return { text, markdown: text, error: null };
@@ -124,7 +128,7 @@ async function visionOcrPage(imagePath, pageNum) {
   const body = {
     model: VISION_MODEL,
     temperature: 0.0,
-    max_tokens: 4096,
+    max_tokens: OCR_MAX_TOKENS,
     messages: [
       {
         role: 'user',
@@ -136,7 +140,7 @@ async function visionOcrPage(imagePath, pageNum) {
     ],
   };
 
-  const orKey = process.env.OPENROUTER_API_KEY;
+  const orKey = OPENROUTER_KEY;
   // Provider order. When Groq is billing-blocked/delinquent org-wide (every call
   // 400s "restricted because of overdue payment"), preferring OpenRouter skips the
   // always-failing Groq attempt + its noisy error + 60s timeout risk. Flag-gated
@@ -168,7 +172,7 @@ async function visionOcrPage(imagePath, pageNum) {
   };
   const tryOR = async () => {
     if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
-    const orModel = process.env.GROQ_VISION_OR_MODEL || 'meta-llama/llama-4-scout';
+    const orModel = OPENROUTER_VISION_MODEL;
     const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://hivemind.davinciai.eu', 'X-Title': 'HIVEMIND' },

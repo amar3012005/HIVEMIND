@@ -38,6 +38,14 @@ export const TOOL_SCHEMAS = [
           source_title: { type: 'string', description: 'Exact or partial source filename/title. Resolves to a hard document filter in explain/full.' },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
           known_at: { type: 'string', description: 'ISO timestamp for what the workspace had learned by that time.' },
+          date_range: {
+            type: 'object',
+            description: 'Bounded event-time range selected by the server-side intent planner.',
+            properties: {
+              start: { type: 'string' },
+              end: { type: 'string' },
+            },
+          },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
           scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Server-owned scope restriction for typed requests such as self-profile recall.' },
         },

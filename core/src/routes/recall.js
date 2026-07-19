@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 // PROJECT-SCOPE FILTER — one authority for BOTH recall branches (bounded
 // fact/explain/full AND legacy). Hydrates scope/project/owner from the DB, then:
 //   caller WITH project  → org-plane memories + that project's memories;
-//   caller WITHOUT project → org-plane ONLY (scope='project' rows dropped).
+//   caller WITHOUT project → every tier already authorized by access_context.
+// This helper only narrows an explicit project. Authorization remains the
+// recall router's responsibility and must happen before this step.
 // Mutates and returns `result`, stamping result.project_scope_applied.
 export async function applyProjectScopeFilter(prisma, orgId, result, recallProjectId) {
   if (Array.isArray(result?.memories) && result.memories.length && prisma) {
@@ -43,11 +45,10 @@ export async function applyProjectScopeFilter(prisma, orgId, result, recallProje
         const pids = Array.isArray(m.project_ids) ? m.project_ids : [];
         return m.scope !== 'project' || m.project_id === recallProjectId || pids.includes(recallProjectId);
       });
-    } else {
-      result.memories = result.memories.filter((m) => m.scope !== 'project');
     }
     result.project_scope_applied = {
       project_id: recallProjectId || null,
+      mode: recallProjectId ? 'selected_project' : 'all_authorized',
       kept: result.memories.length,
       dropped: before - result.memories.length,
     };

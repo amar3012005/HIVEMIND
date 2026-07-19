@@ -19,6 +19,14 @@
 
 const BASIC_GROUP = 'basic';
 
+// Server-generated controls used by the deterministic chat orchestrator.
+// Keep this allowlist narrow: arbitrary underscore-prefixed arguments are
+// still rejected and these fields are not exposed in the LLM tool schema.
+const TRUSTED_INTERNAL_ARGUMENTS = new Set([
+  '_explicit_mode',
+  '_structured_intent',
+]);
+
 export class Toolkit {
   constructor({ logger = console } = {}) {
     this.logger = logger;
@@ -216,7 +224,7 @@ export class Toolkit {
    * Execute a tool through the middleware chain.
    * Returns a ToolResponse: { content: [{ type: 'text', text }], status, meta }
    */
-  async execute(name, args, ctx = {}) {
+  async execute(name, args, ctx = {}, { trustedInternalArgs = false } = {}) {
     const tool = this._tools.get(name);
     if (!tool) {
       return {
@@ -237,6 +245,7 @@ export class Toolkit {
     const required = tool.parameters?.required || [];
     const unknown = Object.keys(supplied).filter((key) => {
       if (key === '_approval_token' && ctx?._approvalFlow === true) return false;
+      if (trustedInternalArgs && TRUSTED_INTERNAL_ARGUMENTS.has(key)) return false;
       return !(key in properties) && !(key in tool.presetKwargs);
     });
     if (unknown.length) {

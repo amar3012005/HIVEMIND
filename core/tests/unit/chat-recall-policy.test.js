@@ -5,6 +5,7 @@ import {
   assessRecallCoverage,
   chooseRecallEscalation,
 } from '../../src/agent/chat-recall-policy.js';
+import { resolveAnswerModel } from '../../src/agent/react-agent-v2.js';
 import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
 
 test('document anchor with no exact source evidence produces one explain escalation', () => {
@@ -101,9 +102,14 @@ test('source-specific chat fails closed when the single escalation still has no 
     },
     plan: {}, model: 'unused', apiKey: 'unused', ctx: {},
   });
-  assert.equal(answer.response, 'No grounded workspace evidence found');
+  assert.match(answer.response, /could not retrieve a verified passage/i);
   assert.equal(answer.confidence, 0);
   assert.deepEqual(answer.evidence_used, []);
+});
+
+test('chat synthesis honors the caller-selected model and retains the 120B fallback', () => {
+  assert.equal(resolveAnswerModel('custom/provider-model'), 'custom/provider-model');
+  assert.equal(resolveAnswerModel('  '), 'openai/gpt-oss-120b');
 });
 
 test('validated claim citations become server-owned public document sources', () => {

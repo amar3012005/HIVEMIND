@@ -41,7 +41,11 @@ async function dispatchTool(name, args, ctx, opts = {}) {
   const t0 = Date.now();
   const invoke = async () => {
     if (ctx?._toolkit?.hasTool(name)) {
-      const response = await ctx._toolkit.execute(name, args, ctx);
+      const response = await ctx._toolkit.execute(name, args, ctx, {
+        // These calls are assembled by the deterministic server orchestrator,
+        // not copied from model-generated tool arguments.
+        trustedInternalArgs: true,
+      });
       if (response.status === 'error') {
         return { error: response.meta?.error || response.content?.[0]?.text || 'tool_error', _failure_mode: 'INVALID_ARGS' };
       }
@@ -92,11 +96,16 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 //     language synthesis.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
-// Routing decides authorization-sensitive source/aggregate behavior. Use the
-// same capable model as final chat unless operators explicitly choose another;
-// the smaller internal model remains for bounded toolkit follow-ups.
-const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || 'openai/gpt-oss-120b';
+// Intent is a bounded structured classification call, so it uses the fast
+// internal model. The caller-selected model is reserved for user-facing
+// synthesis below.
+const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || INTERNAL_MODEL;
 const FINAL_MODEL    = process.env.HIVEMIND_AGENT_FINAL_MODEL    || 'openai/gpt-oss-120b';
+
+export function resolveAnswerModel(selectedModel) {
+  const requested = typeof selectedModel === 'string' ? selectedModel.trim() : '';
+  return requested || FINAL_MODEL;
+}
 
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
 const LANGUAGE_NAMES = {
@@ -748,7 +757,6 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
           mode: recallMode,
           limit: recallLimit,
           _explicit_mode: !!plan.explicit_recall_mode,
-          deadline_at: activeDeadlineAt,
           ...recallExtras,
         };
         try {
@@ -859,7 +867,6 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         const expanded = await beforeDeadline(dispatchTool('hivemind_recall', {
           ...recallExtras,
           ...escalation.args,
-          deadline_at: activeDeadlineAt,
         }, ctx));
         recordTool(
           'hivemind_recall',
@@ -1901,6 +1908,7 @@ export async function runReactAgentV2({
   if (!apiKey) throw new Error('GROQ_API_KEY required');
   if (!message) throw new Error('message required');
   const abortCtrl = new AbortController();
+  const answerModel = resolveAnswerModel(model);
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
   const usages = [];
   const steps = [];
@@ -2275,10 +2283,10 @@ export async function runReactAgentV2({
     // the model to refuse / return empty for self-contained questions
     // like '2+2' that have no recall context to lean on.
     if (plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
-      // No-recall direct answer is user-facing → FINAL_MODEL
+      // No-recall direct answer uses the model selected by the caller.
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,
-        model: FINAL_MODEL, apiKey, signal: abortCtrl.signal,
+        model: answerModel, apiKey, signal: abortCtrl.signal,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
@@ -2319,10 +2327,10 @@ export async function runReactAgentV2({
     };
     onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
-    // STEP 4 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
+    // STEP 4 — Answer with the caller-selected user-facing model.
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
+      model: answerModel, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
     if (answer.usage) usages.push(answer.usage);
     onEvent?.({

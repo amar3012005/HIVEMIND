@@ -45,3 +45,27 @@ test('approval token is rejected unless the server marks an approval flow', asyn
   const denied = await toolkit.execute('external_write', { value: 'x', _approval_token: 'draft' }, {});
   assert.equal(denied.status, 'error');
 });
+
+test('toolkit accepts only allowlisted server-owned recall controls', async () => {
+  const toolkit = new Toolkit();
+  let received;
+  toolkit.registerToolFunction({
+    name: 'recall_read', description: 'recall', readOnly: true,
+    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    handler: async (args) => { received = args; return args; },
+  });
+
+  const ok = await toolkit.execute('recall_read', {
+    query: 'SolvisPia',
+    _structured_intent: true,
+    _explicit_mode: false,
+  }, {}, { trustedInternalArgs: true });
+  assert.equal(ok.status, 'ok');
+  assert.equal(received._structured_intent, true);
+
+  const denied = await toolkit.execute('recall_read', { query: 'SolvisPia', _unsafe_internal: true });
+  assert.equal(denied.status, 'error');
+
+  const untrusted = await toolkit.execute('recall_read', { query: 'SolvisPia', _explicit_mode: true });
+  assert.equal(untrusted.status, 'error');
+});

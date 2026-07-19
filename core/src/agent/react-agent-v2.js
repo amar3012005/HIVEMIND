@@ -1132,7 +1132,7 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
         segment_id: citation.segment_id || null,
         document_id: citation.document_id || section.document_id || null,
         title: citation.title || citation.source_label || section.document_title || 'Workspace source',
-        snippet: section.snippet || section.content || '',
+        snippet: section.snippet || section.content || citation.snippet || '',
         page: citation.page ?? section.page ?? null,
         source_type: 'document_evidence',
         score: Number.isFinite(section.score) ? section.score : null,
@@ -1150,6 +1150,25 @@ export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKn
   );
 }
 
+function aggregateCitationPacket(aggregate) {
+  if (!aggregate || !Number.isInteger(aggregate.count)) return null;
+  const kind = aggregate.entity_kind || 'entity';
+  const parent = aggregate.parent || 'workspace';
+  const names = (aggregate.entities || [])
+    .map((entity) => entity?.name)
+    .filter(Boolean)
+    .slice(0, 20);
+  return {
+    citations: [{
+      id: 'A1',
+      source_type: 'entity_aggregate',
+      source_label: `Canonical ${kind} registry for ${parent}`,
+      title: `Canonical ${kind} registry for ${parent}`,
+      snippet: `Complete tenant-scoped canonical ${kind} aggregation: ${aggregate.count} distinct ${kind}${aggregate.count === 1 ? '' : 's'}${names.length ? ` (${names.join(', ')})` : ''}.`,
+    }],
+  };
+}
+
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
@@ -1165,20 +1184,28 @@ export async function answerStep({ message, history, evidence, plan, language, a
       en: `${parent} has ${count} distinct ${kind}${count === 1 ? '' : 's'}.`,
     };
     const response = responses[lang] || responses.en;
-    return {
-      response,
+    const aggregatePacket = aggregateCitationPacket(evidence.aggregate);
+    const aggregatePackets = [...(evidence.recall_packets || []), aggregatePacket].filter(Boolean);
+    const aggregateCitationId = `P${aggregatePackets.length}-A1`;
+    const validated = validateChatAnswer({
+      answer: response,
       claims: [{
         text: response,
         grounded: true,
-        citation_ids: [],
+        citation_ids: [aggregateCitationId],
         provenance: 'entity_aggregate',
       }],
-      rejected_claims: [],
-      grounded: true,
+    }, aggregatePackets, { allowGeneralKnowledge });
+    return {
+      response: validated.answer || response,
+      claims: validated.claims,
+      rejected_claims: validated.rejected_claims,
+      grounded: validated.grounded,
       evidence_used: [],
       confidence: 0.99,
       gaps: [],
       usage: null,
+      aggregate_citation_packet: aggregatePacket,
     };
   }
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete !== true) {
@@ -2221,7 +2248,10 @@ export async function runReactAgentV2({
     onEvent?.({ type: 'finish', text: finalResponse });
     onEvent?.({ type: 'turn_completed', grounded: answer.grounded, confidence: answer.confidence });
 
-    const citationSources = buildChatCitationSources(evidence.recall_packets || [], answer.claims);
+    const citationPackets = answer.aggregate_citation_packet
+      ? [...(evidence.recall_packets || []), answer.aggregate_citation_packet]
+      : (evidence.recall_packets || []);
+    const citationSources = buildChatCitationSources(citationPackets, answer.claims);
     const memorySources = evidence.memories.slice(0, 10).map(m => {
       const tags = m.tags || [];
       const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
@@ -2272,7 +2302,7 @@ export async function runReactAgentV2({
       })),
       // Synthesis chains (insight-mode only) — FE renders claim + sources tree.
       synthesis_chains: (evidence.synthesis_chains || []).slice(0, 5),
-      evidence_packets: (evidence.recall_packets || []).slice(0, 3),
+      evidence_packets: citationPackets.slice(0, 3),
       aggregate: evidence.aggregate || null,
       steps,
       evidence_used: answer.evidence_used,

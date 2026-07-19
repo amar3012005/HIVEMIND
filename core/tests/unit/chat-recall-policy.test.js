@@ -164,7 +164,12 @@ test('complete entity aggregation returns an exact deterministic count without a
     history: [],
     evidence: {
       memories: [], evidence: [], recall_packets: [], relationships: [], live: [],
-      aggregate: { count: 6, entity_kind: 'product', parent: 'Solvis' },
+      aggregate: {
+        count: 6,
+        entity_kind: 'product',
+        parent: 'Solvis',
+        entities: [{ name: 'SolvisPia' }, { name: 'SolvisMax' }],
+      },
       coverage: { aggregate_complete: true },
     },
     plan: {
@@ -177,4 +182,6 @@ test('complete entity aggregation returns an exact deterministic count without a
   assert.equal(answer.response, 'Solvis has 6 distinct products.');
   assert.equal(answer.grounded, true);
   assert.equal(answer.confidence, 0.99);
+  assert.deepEqual(answer.claims[0].citation_ids, ['P1-A1']);
+  assert.equal(answer.aggregate_citation_packet.citations[0].source_type, 'entity_aggregate');
 });

@@ -26,7 +26,11 @@ export function resolveDocumentArtifact(memories = []) {
 }
 
 export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], relationships = [] } = {}) {
-  const source = plan.source || resolveDocumentArtifact(memories);
+  // A retrieved document is evidence, not an instruction to narrow the turn to
+  // that document. Only the structured planner or an explicit caller control
+  // may establish a source boundary. Otherwise a broad entity question can be
+  // accidentally converted into "what does the first matching PDF say?".
+  const source = plan.source || null;
   const evidenceFound = memories.length > 0 || evidence.length > 0;
   const sourceIds = new Set(evidence.map((item) => documentIdentity(item).document_id).filter(Boolean));
   const sourceTitles = new Set(evidence.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));

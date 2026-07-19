@@ -8,8 +8,8 @@ import {
 import { resolveAnswerModel } from '../../src/agent/react-agent-v2.js';
 import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
 
-test('document anchor with no exact source evidence produces one explain escalation', () => {
-  const plan = { named_entities: [] };
+test('explicit document anchor with no exact source evidence produces one explain escalation', () => {
+  const plan = { named_entities: [], source: { document_id: 'doc-1', title: 'HIVEMIND Brochure.pdf' } };
   const memories = [{
     id: 'm1',
     title: 'Brochure summary',
@@ -27,6 +27,21 @@ test('document anchor with no exact source evidence produces one explain escalat
       source_document_id: 'doc-1',
     },
   });
+});
+
+test('broad entity recall does not narrow to the first retrieved document', () => {
+  const coverage = assessRecallCoverage({
+    plan: { named_entities: ['Solvis'] },
+    memories: [{
+      id: 'm1',
+      title: 'Solvis brochure summary',
+      tags: ['doc-id:solvis-brochure', 'filename:Solvis brochure.pdf'],
+    }],
+    evidence: [],
+  });
+
+  assert.equal(coverage.source_requested, false);
+  assert.equal(chooseRecallEscalation({ plan: {}, coverage, query: 'What do you know about Solvis?' }), null);
 });
 
 test('matching source evidence ends retrieval without another escalation', () => {

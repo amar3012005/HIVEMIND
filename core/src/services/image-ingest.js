@@ -5,9 +5,8 @@
  * canonical ingestion pipeline, not the vision model, promotes durable facts,
  * resolves entities, and creates graph relationships from that evidence.
  *
- * Returns an ingest-ready payload matching the shape buildRoutedIngestPayloads
- * expects, so the same downstream graph + dedup + scope routing applies as
- * text memories.
+ * Returns a provider-neutral payload for the canonical ingest envelope. The
+ * image model does not classify memories or emit entity/relationship JSON.
  *
  * No Docling involvement. The fast OpenRouter vision model is primary and the
  * existing Groq vision model is a provider fallback only.
@@ -97,7 +96,7 @@ async function callDetailedVision({ base64DataUrl, prompt }) {
 }
 
 /**
- * Top-level: classify + extract → ingest-ready payload.
+ * Top-level: describe the image once and return canonical raw evidence.
  *
  * @param {object} opts
  * @param {Buffer} opts.imageBuffer
@@ -147,7 +146,7 @@ export async function buildImageMemoryPayload({
     model: vision.model,
   };
 
-  // Shape the provider-neutral extraction into the canonical memory payload.
+  // Shape the provider-neutral description into the canonical source payload.
   // Title ALWAYS leads with the original filename when present, so recall
   // by filename matches via title field even if Groq misread the image.
   // Vision's interpretation comes as a colon-suffix descriptor.
@@ -167,13 +166,13 @@ export async function buildImageMemoryPayload({
     ...(filename ? [`filename:${filename}`] : []),
   ];
 
-  const memory_type = 'fact';
-
   const payload = {
     title,
     content,
     tags,
-    memory_type,
+    // This is source evidence, not a pre-classified durable fact. The canonical
+    // document curator decides which durable memory types are justified.
+    memory_type: 'summary',
     user_id: userId,
     org_id: orgId,
     project_ids: projectId ? [projectId] : [],

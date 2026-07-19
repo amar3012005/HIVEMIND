@@ -1466,7 +1466,29 @@ class Director:
         Key from GOOGLE_MAPS_API_KEY (deployment env). Writes prospect rows to the
         blackboard + emits a `prospects` gather event so the FE can list them. Bounded
         by the web budget so a room can't burn the API."""
-        query = (query or "").strip()
+        # SANITIZE — Places Text Search wants "<business category> in <place>", not
+        # prose. Real failures this guards: a full planner PARAGRAPH ("Find regulated
+        # institutions in Germany (e.g., banks…) Return real firms with contact name…"
+        # → 1 junk hit), method-skill names leaking in ("PROSPECT QUALIFICATION
+        # Germany" → 0 hits), and mangled fragments ("Germany (source Germany").
+        # Every API call costs money — reject junk instead of spending on it.
+        query = re.sub(r"\((?:e\.g\.|eg |source|i\.e\.)[^)]*\)?", " ", (query or ""), flags=re.I)
+        query = re.sub(r"[()\[\]{}\"“”]", " ", query)
+        query = re.split(r"\b(?:with|that|which|who|return(?:ing)?|includ\w+|plus)\b|[.;:\n]",
+                         query, maxsplit=1, flags=re.I)[0]
+        query = re.sub(r"^\s*(?:find|search(?:\s+for)?|get|list|give\s+me|look\s+up|locate)\b", "",
+                       query, flags=re.I)
+        query = re.sub(r"\s+", " ", query).strip(" ,—–-")
+        words = query.split()
+        if len(words) > 8:
+            query = " ".join(words[:8]).strip(" ,—–-")
+            words = query.split()
+        _method_junk = re.compile(
+            r"^(prospect qualification|cold[- ]email|call[- ]opening|evidence[- ]first|"
+            r"decision[- ]hygiene|polished[- ]email)\b", re.I)
+        if len(words) < 2 or _method_junk.match(query) or not re.search(r"[a-zäöüß]", query):
+            return json.dumps({"error": f"query too vague for Places ('{query[:60]}') — give a "
+                               "'<business category> in <city/region>' query, e.g. 'law firms in Hannover'"})
         key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY") or ""
         if not query:
             return json.dumps({"error": "empty query"})
@@ -1768,9 +1790,27 @@ class Director:
         })
 
     # ── main loop ─────────────────────────────────────────────────────
+    def _company_identity_block(self) -> str:
+        """Hard identity pin — WHO WE ARE, derived from the onboarded room goal
+        ('Company: X — mission…') and the company brief. Recalled memories can
+        describe OTHER companies (client/project KB docs live in the same org
+        brain); without this pin the synthesis has adopted a client's products
+        as ours (a SOLVIS heat-pump report signed by a SINGULANCE room)."""
+        m = re.search(r"Company:\s*([A-Z][A-Za-z0-9&.\- ]{1,40}?)(?:\s+[—–-]|\.|,|$)", self.room_goal or "")
+        name = (m.group(1).strip() if m else "").strip()
+        if not name:
+            return ""
+        return (
+            f"\nCOMPANY IDENTITY — WE ARE {name}. Every plan, prospect list, email and report this room "
+            f"produces is BY {name}, selling {name}'s products, in {name}'s industry. Recalled memories may "
+            f"describe OTHER companies (client projects, ingested documents); those companies are NEVER us — "
+            f"never adopt their products, industry, guarantees, subsidies, or claims as ours. Use another "
+            f"company's facts ONLY when the task is explicitly about that company (e.g. as a prospect).\n")
+
     def _system_prompt(self) -> str:
         roster = ", ".join(f"{p.get('name') or p.get('slug')} ({p.get('_lane') or 'Communicator'})" for p in self.participants)
         goal = f"\nROOM GOAL: {self.room_goal}" if self.room_goal else ""
+        goal += self._company_identity_block()
         tmpl = (f"\nThis is a '{self.room_template}' room — frame the discussion and the final output to "
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
@@ -1877,12 +1917,13 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
-            "- places_query: a local-business discovery query ONLY when THIS turn asks to FIND or SOURCE "
-            "NEW real firms/prospects/contacts to reach (e.g. 'find law firms in Hannover', 'get contacts "
-            "for regulated banks Amsterdam') — returns REAL firms with phone + website. Return NULL when "
-            "the turn drafts/writes emails or a sequence, reasons over already-identified targets, or is a "
-            "strategy/analysis/decision task — do NOT re-discover prospects the room already has. When in "
-            "doubt, null.\n"
+            "- places_query: a Google-Maps business search, ONLY when THIS turn asks to FIND or SOURCE "
+            "NEW real firms/prospects/contacts. FORMAT IS STRICT: '<business category> in <city/region>', "
+            "3-6 words, nothing else — 'law firms in Hannover', 'private banks in Frankfurt', 'insurance "
+            "companies in Amsterdam'. NO verbs, NO sentences, NO '(e.g. …)', NO 'with contact details' "
+            "(Maps returns phone+website automatically; prose queries return junk and waste the API call). "
+            "Return NULL when the turn drafts/writes emails or a sequence, reasons over already-identified "
+            "targets, or is a strategy/analysis/decision task. When in doubt, null.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
             "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "
@@ -2406,7 +2447,17 @@ class Director:
             if _wants_contacts and len(_prospect_rows) < 3:
                 await self.emit({"t": "typing", "agent": "director",
                                  "note": "Completing the task — sourcing real contacts for the named organisations…"})
-                # a) Proper-noun org names from web/debate board lines (bounded).
+                # a) ORG-SHAPED names only, from web/debate board lines. A candidate
+                # must carry a legal/institutional marker (GmbH, AG, Bank, Institut,
+                # Stadtwerke, …) — bare capitalized phrases produced junk lookups
+                # ("PROSPECT QUALIFICATION Germany", "KI Beratung Germany") that
+                # burned Places calls on nothing.
+                _ORG_MARK = re.compile(
+                    r"(GmbH|AG\b|SE\b|B\.V\.|N\.V\.|Ltd\.?|PLC|KGaA|e\.V\.|Bank\b|Sparkasse|"
+                    r"Versicherung|Institut|Universität|Klinik|Stadtwerke|Ministerium|Behörde)", re.I)
+                _STOP = re.compile(
+                    r"^(the|our|this|key|gaps|next|touch|subject|recommend|prospect|cold|method|"
+                    r"important|insight|risk|note|executive|ideal|success|sequence|germany|europe)\b", re.I)
                 _names, _seen_n = [], set()
                 for line in self.blackboard:
                     s = str(line)
@@ -2415,8 +2466,8 @@ class Director:
                     for m in re.finditer(r"\b([A-ZÄÖÜ][\w&.-]+(?:\s+[A-ZÄÖÜ(][\w&().-]+){1,3}\s*(?:GmbH|AG|B\.V\.|Ltd\.?|SE)?)", s):
                         nm = m.group(1).strip(" .,")
                         low = nm.lower()
-                        if (len(nm) > 7 and low not in _seen_n
-                                and not re.match(r"^(the|our|this|key|gaps|next|touch|subject|recommend)", low)):
+                        if (len(nm) > 7 and low not in _seen_n and not _STOP.match(nm)
+                                and _ORG_MARK.search(nm)):
                             _seen_n.add(low)
                             _names.append(nm)
                 for nm in _names[:3]:
@@ -2424,15 +2475,30 @@ class Director:
                         await self._places_search(f"{nm} Germany")
                     except Exception:  # noqa: BLE001
                         pass
-                # b) One sharpened retry when discovery stayed thin — Places indexes
-                # BUSINESSES, so ask for firms/consultancies, not government bodies.
+                # b) One sharpened retry when discovery stayed thin — a CLEAN
+                # '<category> in <region>' query built from the task's own nouns
+                # (never the raw message: rewriting it produced garbage like
+                # 'Germany (source Germany'). _places_search sanitizes + rejects
+                # anything still too vague, so this can no-op but never junk-spend.
                 if len([l for l in self.blackboard if "PROSPECT:" in str(l)]) < 3:
-                    _q = re.sub(r"institutions?|authorit(?:y|ies)|agenc(?:y|ies)|bodies",
-                                "companies and consultancies", self.user_message or "", flags=re.I)[:160]
-                    try:
-                        await self._places_search(_q or "consultancies in Germany")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    _msg = (self.user_message or "")
+                    _loc_m = re.search(
+                        r"\bin\s+([A-ZÄÖÜ][\w-]+(?:\s+[A-ZÄÖÜ][\w-]+)?)", _msg)
+                    _loc = (_loc_m.group(1) if _loc_m else "Germany").strip()
+                    _cat_m = re.search(
+                        r"\b(law firms?|legal firms?|banks?|insurers?|insurance compan\w+|"
+                        r"utilit\w+|hospitals?|clinics?|consultanc\w+|manufacturers?|"
+                        r"logistics compan\w+|software compan\w+|financial institutions?|"
+                        r"regulated (?:institutions?|compan\w+)|firms?|compan\w+)\b", _msg, re.I)
+                    _cat = (_cat_m.group(1) if _cat_m else "").strip()
+                    if _cat:
+                        # Places indexes businesses — government phrasings get a business synonym.
+                        _cat = re.sub(r"regulated (?:institutions?|compan\w+)|financial institutions?",
+                                      "banks and financial services companies", _cat, flags=re.I)
+                        try:
+                            await self._places_search(f"{_cat} in {_loc}")
+                        except Exception:  # noqa: BLE001
+                            pass
         except Exception as exc:  # noqa: BLE001 — completion pass must never sink the turn
             log.warning("[hyper-engine] completion pass failed: %s", exc)
 

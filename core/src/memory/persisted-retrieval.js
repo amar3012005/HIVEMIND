@@ -755,8 +755,15 @@ async function vectorCandidatesForRecall(store, {
         (m.scope === 'personal' && m.user_id === user_id) ||
         (m.scope === 'organization' && m.org_id === org_id && !isGuest) ||
         (m.scope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
-        (m.scope === 'project' && Array.isArray(m.project_ids) &&
-           m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)));
+        // Project memories may carry a project_ids ARRAY (memory_projects link)
+        // or only the single project_id column — accept either. Requiring the
+        // array silently dropped every single-project memory whenever an access
+        // context was active (scoped /chat recall → 0 hits on 61 memories).
+        (m.scope === 'project' && (
+          (Array.isArray(m.project_ids)
+            && m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)))
+          || (m.project_id && (access_context.projectIds || []).includes(m.project_id))
+        ));
       if (!ok) return null;
     }
     // Project-scope narrowing (replaces the broken Qdrant `project` pre-filter):

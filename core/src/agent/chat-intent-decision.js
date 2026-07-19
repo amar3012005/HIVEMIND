@@ -7,6 +7,8 @@
  * recall of the unchanged user message.
  */
 
+import { chatCompletionFetch } from '../llm/chat-provider.js';
+
 const CHAT_INTENT_VERSION = 'chat-intent.v2';
 const OPERATIONS = new Set([
   'direct', 'recall', 'source_read', 'aggregate', 'connector_read',
@@ -262,11 +264,11 @@ Available tool groups:\n${JSON.stringify(catalog)}`;
     else signal.addEventListener('abort', () => parserController.abort(), { once: true });
   }
   try {
-    const response = await fetchImpl(process.env.CHAT_INTENT_URL || 'https://api.groq.com/openai/v1/chat/completions', {
+    const response = await chatCompletionFetch(model, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body), signal: parserController.signal,
-    });
+    }, { fallbackApiKey: apiKey, fetchImpl });
     if (!response.ok) throw new Error(`intent_parser_http_${response.status}`);
     const data = await response.json();
     const call = data?.choices?.[0]?.message?.tool_calls?.find((item) => item.function?.name === 'route_chat_turn');

@@ -107,9 +107,11 @@ test('source-specific chat fails closed when the single escalation still has no 
   assert.deepEqual(answer.evidence_used, []);
 });
 
-test('chat synthesis honors the caller-selected model and retains the 120B fallback', () => {
+test('chat synthesis honors explicit models and maps legacy defaults to Cerebras 120B', () => {
   assert.equal(resolveAnswerModel('custom/provider-model'), 'custom/provider-model');
-  assert.equal(resolveAnswerModel('  '), 'openai/gpt-oss-120b');
+  assert.equal(resolveAnswerModel('  '), 'cerebras/gpt-oss-120b');
+  assert.equal(resolveAnswerModel('gpt-oss-120b'), 'cerebras/gpt-oss-120b');
+  assert.equal(resolveAnswerModel('openai/gpt-oss-120b'), 'cerebras/gpt-oss-120b');
 });
 
 test('validated claim citations become server-owned public document sources', () => {

@@ -21137,7 +21137,7 @@ exit \$RC
             if (orgId && !rateLimitAllowOrgRequest(orgId)) {
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
-            let { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
+            let { message, model = null, history = [], stream: wantStream = false, language = null } = body;
             // Legacy clients prepended a '[STRICT LANGUAGE: ...]' directive to the
             // message itself — it poisoned recall embeddings ('solvis' → 0 hits
             // because the query was the directive) and echoed back in fallback
@@ -21177,8 +21177,8 @@ exit \$RC
               }).catch(() => {});
             }
 
-            const groqKey = process.env.GROQ_API_KEY;
-            if (!groqKey) {
+            const groqKey = process.env.GROQ_API_KEY || null;
+            if (!groqKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
             }
 

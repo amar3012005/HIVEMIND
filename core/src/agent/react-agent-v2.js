@@ -31,6 +31,11 @@ import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
+import {
+  chatCompletionFetch,
+  DEFAULT_CHAT_PLANNER_MODEL,
+  resolveChatSynthesisModel,
+} from '../llm/chat-provider.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -75,8 +80,6 @@ async function dispatchTool(name, args, ctx, opts = {}) {
   return second;
 }
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
 // LLM budgets per step. gpt-oss reasoning models consume hidden
 // reasoning_tokens before content tokens; budgets are sized so even
 // chatty reasoning leaves room for the actual JSON output.
@@ -88,23 +91,17 @@ const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 200
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
 const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 6_500);
 
-// Model split (per user directive 2026-05-24):
-//   • internal steps (planner, reflection, classification, sub-tools) use
-//     a fast/cheap model — gpt-oss-20b — so deep multi-hop reasoning stays
-//     responsive.
-//   • final user-facing answer uses gpt-oss-120b for top-quality natural
-//     language synthesis.
+// Model split:
+//   • structured intent planning uses Gemini 2.5 Flash-Lite;
+//   • final user-facing synthesis uses GPT-OSS 120B pinned to Cerebras;
+//   • non-user-facing legacy helpers retain the internal Groq model.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
-// Intent is a bounded structured classification call, so it uses the fast
-// internal model. The caller-selected model is reserved for user-facing
-// synthesis below.
-const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || INTERNAL_MODEL;
-const FINAL_MODEL    = process.env.HIVEMIND_AGENT_FINAL_MODEL    || 'openai/gpt-oss-120b';
+// The caller-selected model is reserved for user-facing synthesis below.
+const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 
 export function resolveAnswerModel(selectedModel) {
-  const requested = typeof selectedModel === 'string' ? selectedModel.trim() : '';
-  return requested || FINAL_MODEL;
+  return resolveChatSynthesisModel(selectedModel);
 }
 
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
@@ -123,10 +120,10 @@ function languageName(code) {
   return LANGUAGE_NAMES[String(code).slice(0, 2).toLowerCase()] || 'English';
 }
 
-// ── Groq JSON helper ───────────────────────────────────────────────────
+// ── Provider-aware JSON helper ─────────────────────────────────────────
 
 async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal }) {
-  const resp = await fetch(GROQ_URL, {
+  const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -137,10 +134,10 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       temperature,
     }),
     signal,
-  });
+  }, { fallbackApiKey: apiKey });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Groq ${resp.status}: ${text.slice(0, 400)}`);
+    throw new Error(`Chat provider ${resp.status}: ${text.slice(0, 400)}`);
   }
   const data = await resp.json();
   const raw = data.choices?.[0]?.message?.content || '{}';
@@ -173,7 +170,7 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
     general: `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely. Plain text only. No JSON, no tool talk.`,
   };
 
-  const resp = await fetch(GROQ_URL, {
+  const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -186,10 +183,10 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
       temperature: 0.3,
     }),
     signal,
-  });
+  }, { fallbackApiKey: apiKey });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Groq ${resp.status}: ${text.slice(0, 400)}`);
+    throw new Error(`Chat provider ${resp.status}: ${text.slice(0, 400)}`);
   }
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content || '';
@@ -573,12 +570,12 @@ Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote
 
   let data = null;
   try {
-    const resp = await fetch(GROQ_URL, {
+    const resp = await chatCompletionFetch(routerModel, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
       signal,
-    });
+    }, { fallbackApiKey: apiKey });
     if (!resp.ok) {
       const t = (await resp.text().catch(() => '')).slice(0, 200);
       throw new Error(`router ${resp.status}: ${t}`);
@@ -1644,12 +1641,12 @@ async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ct
   const steps = [];
   const resultTexts = [];
   for (let round = 0; round < 3; round++) {
-    const response = await fetch(GROQ_URL, {
+    const response = await chatCompletionFetch(model, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model, messages, tools: schemas, tool_choice: 'auto', temperature: 0, max_tokens: 900 }),
       signal,
-    });
+    }, { fallbackApiKey: apiKey });
     if (!response.ok) throw new Error(`connector_read_model_${response.status}`);
     const data = await response.json();
     const msg = data?.choices?.[0]?.message || {};
@@ -1737,7 +1734,7 @@ RULES:
 
   // Max 3 iterations — enough for tool_call → tool_result → final answer.
   for (let iter = 0; iter < 3; iter++) {
-    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const resp = await chatCompletionFetch(model, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -1749,7 +1746,7 @@ RULES:
         temperature: 0.2,
       }),
       signal: ctx._signal,
-    });
+    }, { fallbackApiKey: apiKey });
     if (!resp.ok) {
       const errText = (await resp.text()).slice(0, 500);
       // Groq returns 400 with code=tool_use_failed when the LLM hallucinated
@@ -1763,7 +1760,7 @@ RULES:
         });
         continue;
       }
-      throw new Error(`Groq ${resp.status}: ${errText.slice(0, 300)}`);
+      throw new Error(`Chat provider ${resp.status}: ${errText.slice(0, 300)}`);
     }
     const data = await resp.json();
     const choice = data.choices?.[0];
@@ -1892,7 +1889,7 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
 export async function runReactAgentV2({
   message,
   history = [],
-  model = process.env.HIVEMIND_AGENT_MODEL || 'openai/gpt-oss-120b',
+  model = process.env.HIVEMIND_AGENT_MODEL || null,
   apiKey,
   assistantName,
   orgName,
@@ -1905,7 +1902,9 @@ export async function runReactAgentV2({
   recallTime,
   allowGeneralKnowledge = false,
 }) {
-  if (!apiKey) throw new Error('GROQ_API_KEY required');
+  if (!apiKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
+    throw new Error('chat provider API key required');
+  }
   if (!message) throw new Error('message required');
   const abortCtrl = new AbortController();
   const answerModel = resolveAnswerModel(model);
@@ -1929,6 +1928,10 @@ export async function runReactAgentV2({
     },
     failure_mode: null,
     confidence_path: [],
+    models: {
+      planner: INTENT_MODEL,
+      synthesis: answerModel,
+    },
   };
   let eventSequence = 0;
   const userOnEvent = onEvent;
@@ -2049,14 +2052,18 @@ export async function runReactAgentV2({
       if (!plan.sub_queries.length) plan.sub_queries = [message];
     }
 
-    // Router direct-answer short-circuit: the router already wrote a
-    // language-correct reply (no tool needed) → skip the extra answerDirectly
-    // call + save-rescue. 1 LLM call total for greetings/smalltalk.
+    // The planner classifies direct turns, but user-facing prose always comes
+    // from the synthesis model so every chat surface follows one model policy.
     if (intentDecision.operation === 'direct' && plan._direct_answer) {
-      onEvent?.({ type: 'finish', text: plan._direct_answer });
+      const { response, usage } = await answerDirectly({
+        message, gateKind: 'general', language, assistantName, orgName,
+        model: answerModel, apiKey, signal: abortCtrl.signal,
+      });
+      if (usage) usages.push(usage);
+      onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
       return {
-        response: plan._direct_answer,
+        response,
         sources: [], steps, evidence_used: [], confidence: 0.9, gaps: [],
         usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
@@ -2135,9 +2142,10 @@ export async function runReactAgentV2({
             args: { group_names: actionGroups },
             result_summary: `${activation.tools.length} tools active`,
           });
-          // Tool-call sub-loop is internal reasoning → INTERNAL_MODEL
+          // The planner selected the connector; Cerebras executes the tool
+          // turn and synthesizes the user-facing result.
           const sub = await runActionSubLoop({
-            toolkit, message, history, model: INTERNAL_MODEL, apiKey, ctx, onEvent,
+            toolkit, message, history, model: answerModel, apiKey, ctx, onEvent,
             provider: writeIntent.provider,
           });
           steps.push(...sub.steps);

@@ -66,6 +66,25 @@ or uncommitted changes as completed work.
 - Next: integrate a focused frontend release and deploy through the governed
   quick-deploy path.
 
+## 2026-07-19 UTC - Cache-preserving frontend release accepted
+
+- State: Accepted release
+- Owner: Codex
+- Branch: `singulance-main`
+- Base / commit: `3cca4b6b24ede1647a69a133c17a248a88000f0d` -> `0705d294`
+- Scope: removed two verified-unused landing videos and deployed the governed
+  frontend image; Core, Control, Employees, and TARA were unchanged.
+- Verification: Docker dependency install was cached; the image label matched
+  `0705d2947adcbec5e29be75811a46dc2a0cec0ba`; both removed files were absent
+  from `/srv`; `/hivemind` and `/hivemind/m/chat` returned `200`; no fresh
+  frontend fatal/error log lines were found.
+- Production: `0705d294`, `hivemind/fe:latest-single`; `/srv` reduced to
+  `73.6M` from `100.7M`.
+- Rollback: `hivemind/fe:stable-single` via
+  `/root/quick-deploy.sh --rollback fe`.
+- Next: replace CRA with Vite or move frontend compilation to CI/image
+  publishing; the current full CRA compilation took about 93 seconds.
+
 ## 2026-07-16 UTC - Contextual durable-memory ingestion
 
 - State: Started

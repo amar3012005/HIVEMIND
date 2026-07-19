@@ -1003,11 +1003,13 @@ CORE RULES:
    Use only IDs from the CITATION REGISTRY. Set grounded=false only
    when this request explicitly permits general knowledge.
 2. **PARTIAL coverage = USE IT, don't bail.** If even ONE evidence
-   row touches the user's question, build the answer around it. Quote
-   memory titles inline. Only respond "I don't have notes on X" when
-   the EVIDENCE / LIVE / DOC blocks are TRULY empty for that question.
-   Saying "I don't have notes" while 10 relevant memories are listed
-   above is a hard failure.
+   row touches the user's question, first synthesize what that evidence
+   establishes, then state the exact missing point as a gap and invite
+   the user to add the relevant source or context. Never replace useful
+   evidence with a blanket "I don't know" or "no evidence" response.
+   Only say that a matching source is absent when the EVIDENCE / LIVE /
+   DOC blocks are truly empty for that question. Every sentence in the
+   synthesis still needs a valid citation.
    **Hard rule for connector queries (slack/notion/gmail/github/linear):**
    if the user asked about that connector AND the EVIDENCE block
    contains AT LEAST ONE memory carrying the connector tag (slack,
@@ -1175,6 +1177,55 @@ function aggregateCitationPacket(aggregate) {
   };
 }
 
+function hasGroundedPacketEvidence(evidence) {
+  return (evidence?.recall_packets || []).some((packet) =>
+    (packet?.facts?.length || 0) > 0
+    || (packet?.sourceSections?.length || 0) > 0
+    || (packet?.citations?.length || 0) > 0,
+  );
+}
+
+function unavailableEvidenceResponse({ message, evidence, language }) {
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const memoryCount = evidence?.memories?.length || 0;
+  const sectionCount = evidence?.evidence?.length || 0;
+  const hasPartialContext = memoryCount > 0 || sectionCount > 0 || hasGroundedPacketEvidence(evidence);
+
+  if (hasPartialContext) {
+    const context = [
+      memoryCount ? `${memoryCount} related memor${memoryCount === 1 ? 'y' : 'ies'}` : '',
+      sectionCount ? `${sectionCount} source passage${sectionCount === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join(' and ');
+    const responses = {
+      de: `HIVEMIND hat ${context || 'relevanten Kontext'} gefunden. Dieser Kontext beantwortet jedoch nicht direkt: "${message}". Fuege die dazugehoerige Datei, Entscheidung oder Nachricht hinzu, dann kann ich sie mit dem vorhandenen Wissen verbinden.`,
+      fr: `HIVEMIND a trouve ${context || 'du contexte pertinent'}, mais il ne repond pas directement a : "${message}". Ajoutez le document, la decision ou le message concerne afin que je puisse le relier au contexte existant.`,
+      es: `HIVEMIND encontro ${context || 'contexto relevante'}, pero no responde directamente a: "${message}". Anade el documento, la decision o el mensaje relacionado para poder conectarlo con el contexto existente.`,
+      en: `HIVEMIND found ${context || 'relevant workspace context'}, but it does not directly establish: "${message}". Add the related document, decision, or message and I can connect it to the context already stored here.`,
+    };
+    return responses[lang] || responses.en;
+  }
+
+  const responses = {
+    de: `Fuer "${message}" gibt es in diesem Workspace noch keine passende Quelle. Fuege eine Datei, Nachricht oder Entscheidung dazu hinzu, dann kann HIVEMIND sie kuenftig als Kontext verwenden.`,
+    fr: `Aucune source correspondante n'est encore enregistree dans cet espace de travail pour "${message}". Ajoutez un document, un message ou une decision afin que HIVEMIND puisse l'utiliser comme contexte.`,
+    es: `Todavia no hay una fuente correspondiente en este espacio de trabajo para "${message}". Anade un documento, mensaje o decision para que HIVEMIND pueda usarlo como contexto.`,
+    en: `There is no matching source stored in this workspace yet for "${message}". Add a document, message, or decision and HIVEMIND can use it as grounded context next time.`,
+  };
+  return responses[lang] || responses.en;
+}
+
+function sourceUnavailableResponse({ evidence, language }) {
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const source = evidence?.coverage?.source?.title || evidence?.coverage?.source?.document_id || 'the requested source';
+  const responses = {
+    de: `HIVEMIND konnte keinen verifizierten Abschnitt aus "${source}" abrufen. Ich habe keine anderen Quellen als Ersatz verwendet, weil die Frage ausdruecklich dieses Dokument betrifft. Lade die Datei erneut hoch oder frage breiter nach dem Workspace-Kontext.`,
+    fr: `HIVEMIND n'a trouve aucun passage verifie dans "${source}". Je n'ai pas substitue d'autres sources, car votre question porte explicitement sur ce document. Reimportez le fichier ou posez une question plus large sur l'espace de travail.`,
+    es: `HIVEMIND no encontro ningun pasaje verificado en "${source}". No utilice otras fuentes como sustituto porque la pregunta se refiere explicitamente a este documento. Vuelve a cargar el archivo o pregunta de forma mas amplia sobre el espacio de trabajo.`,
+    en: `HIVEMIND could not retrieve a verified passage from "${source}". I did not substitute other sources because your question explicitly concerns this document. Re-upload the file or ask a broader workspace question.`,
+  };
+  return responses[lang] || responses.en;
+}
+
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
   const sys = answerPrompt({ language, assistantName, orgName });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
@@ -1234,28 +1285,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
     };
   }
   if (evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
-    // ONLY refuse when there is genuinely nothing to answer from. When recall
-    // DID surface grounded memories/evidence, answer from them and record the
-    // uncovered requested source as a GAP — do not discard valid evidence.
-    // (Observed: 5 correct facts thrown away because an explain-escalation
-    // deadline falsely marked the requested source uncovered.) Restore the old
-    // hard-refuse with RECALL_SOURCE_STRICT=true.
-    const _haveEvidence = (evidence.memories?.length || 0) > 0
-      || (evidence.evidence?.length || 0) > 0
-      || (evidence.recall_packets?.some((p) => (p?.facts?.length || 0) > 0)) === true;
-    if (!_haveEvidence || evidence.coverage.source_requested) {
-      return {
-        response: 'No grounded workspace evidence found',
-        claims: [],
-        rejected_claims: [],
-        grounded: false,
-        evidence_used: [],
-        confidence: 0,
-        gaps: ['The requested source was not covered by retrieved source evidence.'],
-        usage: null,
-      };
-    }
-    // else: fall through — answer from available evidence, gap noted below.
+    // A named source is a precision boundary. Do not substitute neighboring
+    // documents when its own evidence was not recovered.
+    return {
+      response: sourceUnavailableResponse({ evidence, language }),
+      claims: [],
+      rejected_claims: [],
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['The requested source was not covered by retrieved source evidence.'],
+      usage: null,
+    };
   }
 
   // Connector capability hint — built from active Nango connections so
@@ -1506,21 +1547,53 @@ ${message}`;
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
-
-  const validated = validateChatAnswer({
+  let answerPayload = parsed;
+  let validated = validateChatAnswer({
     answer: response,
     claims: parsed.claims,
   }, evidence.recall_packets || [], { allowGeneralKnowledge });
+
+  // The validator remains fail-closed. If the model ignored the citation
+  // contract despite a non-empty packet, give it one bounded repair pass over
+  // the same final context instead of discarding useful tenant evidence.
+  let repairUsage = null;
+  if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
+    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
+    const repaired = await callJsonLLM({
+      messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
+      model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
+    });
+    repairUsage = repaired.usage;
+    answerPayload = repaired.parsed;
+    response = typeof repaired.parsed.response === 'string' ? repaired.parsed.response.trim() : '';
+    validated = validateChatAnswer({
+      answer: response,
+      claims: repaired.parsed.claims,
+    }, evidence.recall_packets || [], { allowGeneralKnowledge });
+  }
+
+  if (!validated.claims.length) {
+    return {
+      response: unavailableEvidenceResponse({ message, evidence, language }),
+      claims: [],
+      rejected_claims: validated.rejected_claims,
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['No citation-valid claim could be produced from the final recall packet.'],
+      usage: repairUsage || usage,
+    };
+  }
 
   return {
     response: validated.answer,
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,
-    evidence_used: Array.isArray(parsed.evidence_used) ? parsed.evidence_used : [],
-    confidence:    Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
-    gaps:          Array.isArray(parsed.gaps) ? parsed.gaps : [],
-    usage,
+    evidence_used: Array.isArray(answerPayload.evidence_used) ? answerPayload.evidence_used : [],
+    confidence:    Number.isFinite(answerPayload.confidence) ? Math.max(0, Math.min(1, answerPayload.confidence)) : 0.5,
+    gaps:          Array.isArray(answerPayload.gaps) ? answerPayload.gaps : [],
+    usage: repairUsage || usage,
   };
 }
 

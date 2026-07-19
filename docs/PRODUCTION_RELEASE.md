@@ -63,7 +63,7 @@ residual_risks:
 untested_side_effects:
   - No customer writes, connector actions, or memory mutations were performed.
 rollback:
-  core: hivemind/core-api:rollback-20260720T190352Z
+  core: hivemind/core-api:rollback-20260720T185548Z
   frontend_unchanged: hivemind/fe:prod-20260719-c98a7427-single
   env_backup: /root/hivemind/.env.bak-prod-20260720-9937c452
 ```

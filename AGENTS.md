@@ -2,6 +2,13 @@
 
 ## Mandatory Production Release Rule
 
+Before feature work, read and follow
+[`docs/BRANCH_PROTOCOL.md`](docs/BRANCH_PROTOCOL.md). Work on a session branch
+or isolated worktree, rebase onto `origin/singulance-main`, and merge only a
+complete tested state into `singulance-main`. Do not commit feature work
+directly to `singulance-main`, and never point the parent repo at an unpushed
+`frontend/Da-vinci` commit.
+
 Before any production edit, build, migration, restart, or deployment, read and follow
 [`docs/PRODUCTION_RELEASE_PROTOCOL.md`](docs/PRODUCTION_RELEASE_PROTOCOL.md). Compare the intended
 commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop rather than deploy from

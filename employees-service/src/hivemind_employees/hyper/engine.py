@@ -1904,14 +1904,20 @@ class Director:
                 "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
+                "turn_mode": {"type": "string", "enum": ["chat", "task"]},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills"],
+            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "turn_mode"],
             "additionalProperties": False,
         }
         sysp = (
             _now_block() +
             "You plan the GATHER step for a HIVEMIND room turn. " + conn_line + " " + web_line + " "
             "Output a JSON gather plan:\n"
+            "- turn_mode: FIRST decide what the user's MESSAGE actually is. 'chat' = a greeting, smalltalk, "
+            "thanks, a question about the team/room itself, or any conversational message with NO work "
+            "deliverable ('hallo', 'who are you?', 'thanks!', 'what can you do?') — the room just REPLIES "
+            "as people; every other field must then be empty/null/false. 'task' = real work is requested. "
+            "The ROOM GOAL does NOT make a greeting a task — judge the MESSAGE, not the goal.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2402,6 +2408,35 @@ class Director:
             log.warning("[hyper-engine] population-sim failed (skipped): %s", exc)
             return None
 
+    async def _chat_turn(self, t0: float) -> Dict[str, Any]:
+        """Conversational short-circuit: the lead replies as a person — introduces the
+        team when greeted, answers meta-questions about the room, asks what to work
+        on. One small LLM call; no gather/web/Maps/debate/synthesis."""
+        lead = self.participants[0] if self.participants else {}
+        roster = ", ".join(
+            f"{p.get('name') or p.get('slug')} ({p.get('_lane') or 'Communicator'})"
+            for p in self.participants)
+        sysp = (
+            _now_block() + self._company_identity_block() +
+            f"You are {lead.get('name') or 'the room lead'}, lead of this HIVEMIND room. "
+            f"Your team: {roster}. The user said something CONVERSATIONAL — reply as a warm, "
+            "concise colleague (2-5 sentences, no headings, no tables, no report). If greeted, "
+            "greet back, briefly introduce the team and what this room works on"
+            + (f" (room goal: {self.room_goal[:200]})" if self.room_goal else "") +
+            ", and ask what they'd like the team to tackle. Match the user's language."
+            + self._lang_directive())
+        msg = await self._groq(
+            [{"role": "system", "content": sysp},
+             {"role": "user", "content": (self.user_message or "")[:1500]}],
+            force_text=True, temp=0.6, bucket="chat")
+        reply = ((msg or {}).get("content") or "").strip() or (
+            f"Hi! We're the {lead.get('name') or 'room'} team — tell us what you'd like us to work on.")
+        await self.emit({"t": "line", "agent": lead.get("slug") or "director",
+                         "kind": "synthesis", "content": reply})
+        log.info("[hyper-engine] chat turn — %d tokens, %dms", self.tokens, int((time.time() - t0) * 1000))
+        return {"cost_tokens": self.tokens, "final_text": reply, "transcript": self.transcript,
+                "gather_count": 0, "tool_calls": 0, "sim_report": None}
+
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
         # Instant feedback from t=0: connector-tool init + the first model call run
@@ -2415,6 +2450,12 @@ class Director:
         # decides what to recall / which connectors to read / web + debate. Replaces the
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
         plan = await self._plan_gather()
+        # EVENT-DRIVEN TURN ROUTER — the planner (an LLM, not a regex) classified the
+        # MESSAGE. 'chat' = conversational: the room replies as people — no gather, no
+        # web/Maps spend, no debate, no report. 'hallo' used to burn a 27k-token full
+        # pipeline ending in a fabricated report.
+        if str(plan.get("turn_mode") or "task").lower() == "chat":
+            return await self._chat_turn(t0)
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
         tool_calls_made = await self._run_gather(plan)
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a

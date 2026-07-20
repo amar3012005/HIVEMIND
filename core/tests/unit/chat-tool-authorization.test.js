@@ -53,6 +53,38 @@ test('memory-by-id tools use scoped lookup and correct mutation signatures', asy
   assert.deepEqual(calls.find((call) => call[0] === 'delete'), ['delete', 'allowed']);
 });
 
+test('query update resolves an exact authorized tag before semantic recall', async () => {
+  const projectId = authCtx.accessContext.projectIds[0];
+  let lookupWhere;
+  let updatedPayload;
+  const memory = {
+    id: 'exact-memory', title: 'Launch date', content: 'Old', tags: ['SECURITY_E2E'],
+    is_latest: true, scope: 'project', project_ids: [projectId], memory_type: 'fact',
+  };
+  const ctx = {
+    ...authCtx,
+    prisma: {
+      memory: {
+        async findMany({ where }) { lookupWhere = where; return [{ id: memory.id }]; },
+      },
+    },
+    persistentMemoryStore: {
+      async getMemoryScoped(id) { return id === memory.id ? memory : null; },
+    },
+    persistentMemoryEngine: {
+      async ingestMemory(payload) { updatedPayload = payload; return { memoryId: 'successor' }; },
+    },
+  };
+  const result = await dispatchTool('hivemind_update_memory', {
+    target_query: 'SECURITY_E2E', content: 'New', project_id: projectId,
+  }, ctx);
+  assert.equal(result.updated, true);
+  assert.equal(result.deprecated_id, memory.id);
+  assert.equal(lookupWhere.scope, 'project');
+  assert.deepEqual(lookupWhere.memoryProjects, { some: { projectId } });
+  assert.deepEqual(updatedPayload.relationship, { type: 'Updates', target_id: memory.id, confidence: 1 });
+});
+
 test('verified relationships require distinct endpoints bound to different requested entities', () => {
   const entities = ['SolvisPia', 'SolvisMax'];
   const bindings = new Map([

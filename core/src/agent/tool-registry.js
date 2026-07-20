@@ -996,11 +996,47 @@ const TOOL_HANDLERS = {
       if (args.project_id && !(ctx.accessContext?.projectIds || []).includes(args.project_id)) {
         return { updated: false, error: 'project_access_denied' };
       }
+      const normalizedTarget = String(args.target_query).trim().toLocaleLowerCase();
+      const prisma = ctx.prisma || ctx.persistentMemoryStore?.client;
+      if (prisma?.memory) {
+        const accessContext = args.project_id
+          ? { ...(ctx.accessContext || {}), projectIds: [args.project_id] }
+          : ctx.accessContext;
+        const exactCandidates = await prisma.memory.findMany({
+          where: {
+            ...scopedMemoryWhere({
+              user_id: ctx.userId,
+              org_id: ctx.orgId,
+              scope: 'all',
+              access_context: accessContext,
+            }),
+            isLatest: true,
+            ...(args.project_id ? {
+              scope: 'project',
+              memoryProjects: { some: { projectId: args.project_id } },
+            } : {}),
+            OR: [
+              { title: { equals: args.target_query, mode: 'insensitive' } },
+              { tags: { has: args.target_query } },
+            ],
+          },
+          select: { id: true },
+          take: 2,
+        }).catch(() => []);
+        if (exactCandidates.length === 1) targetId = exactCandidates[0].id;
+        else if (exactCandidates.length > 1) {
+          return {
+            updated: false,
+            needs_memory_choice: true,
+            candidates: exactCandidates.map(({ id }) => ({ id })),
+          };
+        }
+      }
+      if (!targetId) {
       const recalled = await TOOL_HANDLERS.hivemind_recall({
         query: args.target_query, mode: 'fact', limit: 5,
       }, args.project_id ? { ...ctx, projectId: args.project_id } : ctx);
       const candidates = (recalled?.memories || []).filter((memory) => memory?.id && memory.is_latest !== false);
-      const normalizedTarget = String(args.target_query).trim().toLocaleLowerCase();
       const exact = candidates.filter((memory) => String(memory.title || '').trim().toLocaleLowerCase() === normalizedTarget);
       if (exact.length === 1) {
         targetId = exact[0].id;
@@ -1020,6 +1056,7 @@ const TOOL_HANDLERS = {
             })),
           };
         }
+      }
       }
     }
     if (!targetId) return { updated: false, error: 'memory_target_required' };

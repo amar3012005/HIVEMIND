@@ -50,7 +50,7 @@ export function createChatIntentTool(groupCatalog = []) {
           operation: {
             type: 'string',
             enum: [...OPERATIONS],
-            description: 'Use aggregate whenever the user needs a complete, exact count or exhaustive list. Use source_read for a named file or source. Use recall only for a bounded evidence question where a top-ranked answer is sufficient.',
+            description: 'Use relation_between whenever the user asks how two or more named entities are connected, related, associated, dependent, compared, or mentioned together in any language. Use aggregate whenever the user needs a complete, exact count or exhaustive list. Use source_read for a named file or source. Use recall only for a bounded evidence question where a top-ranked answer is sufficient.',
           },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
           response_language: { type: 'string', description: 'BCP-47 language tag inferred from the request and history.' },
@@ -293,7 +293,8 @@ export async function parseChatIntent({
   const system = `You are the fast intent and capability parser for a multi-tenant enterprise assistant.
 Return exactly one route_chat_turn tool call. Understand the user's language directly; do not translate exact names, filenames, identifiers, or search queries.
 Use the conversation history to resolve references. Select the minimum tool groups whose descriptions match the request.
-Operation contract: use source_read for a named source/file. Use relation_between when the user asks how two or more exact entities are connected. Use aggregate for any request that requires a complete or exact count, or every member of a category. A top-K recall answer can never establish completeness, so do not use recall for an exhaustive count/list. Use recall only when the user needs relevant evidence rather than a complete set. Use connector_read for current connected-app data, and connector_write only for an explicit external side effect.
+  Operation contract: use source_read for a named source/file. Use relation_between when the user asks how two or more exact entities are connected, related, associated, dependent, compared, or mentioned together. This applies in every language and is not ordinary recall. Use aggregate for any request that requires a complete or exact count, or every member of a category. A top-K recall answer can never establish completeness, so do not use recall for an exhaustive count/list. Use recall only when the user needs relevant evidence rather than a complete set. Use connector_read for current connected-app data, and connector_write only for an explicit external side effect.
+  Routing examples: "How are SolvisPia and SolvisMax related?", "Wie hängen SolvisPia und SolvisMax zusammen?", "Quel est le lien entre SolvisPia et SolvisMax ?", "¿Qué relación hay entre SolvisPia y SolvisMax?", "SolvisPia और SolvisMax कैसे जुड़े हैं?", and "ما العلاقة بين SolvisPia وSolvisMax؟" all require operation=relation_between with relation.entities=["SolvisPia","SolvisMax"]. A question about only one entity requires recall instead.
 Always return query_original in the user's wording and query_canonical_en as a concise English retrieval formulation. Preserve exact filenames, people, companies, products, numbers, identifiers and aliases in both.
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.
 Use save only for an explicit save request or a high-confidence durable fact about the user's own world. Put the fully resolved fact in save.content; never return a pronoun or the save instruction itself.

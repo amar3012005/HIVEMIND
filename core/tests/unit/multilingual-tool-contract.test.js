@@ -40,6 +40,7 @@ test('router contract selects save in six languages with one structured call', a
         const request = JSON.parse(options.body);
         assert.equal(request.tool_choice.function.name, 'route_chat_turn');
         assert.match(request.messages[0].content, /Authorized projects/);
+        assert.match(request.messages[0].content, /operation=relation_between/);
         return {
           ok: true,
           async json() {

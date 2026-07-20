@@ -140,6 +140,42 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20f — FRONTEND deploy (the hazardous one — read before touching FE)
+
+Shipped the profile Rebuild button + caught prod FE was **29 commits behind**
+Da-vinci `origin/main`. Deployed the full latest FE. Hard-won FE deploy facts:
+
+- **The FE submodule checkout (`/root/hivemind/frontend/Da-vinci`) is DIRTY with
+  another session's UNCOMMITTED mobile work + on a detached HEAD.** NEVER commit
+  there. Build from a CLEAN worktree: `git worktree add --detach /root/builds/fe-main
+  origin/main`, merge your branch there, build there. Preserve the other session's
+  files by never staging them (unstage with `git restore --staged`).
+- **Two FE containers, two deploy mechanisms:** `hm-fe` = standalone `docker run`
+  (port 8088:80, bridge, restart unless-stopped, caddy default cmd, no mounts).
+  `hivemind-next-frontend-1` = compose project `hivemind-next` service `frontend`,
+  net `hivemind-next`, port 127.0.0.1:2388:80, net-aliases `frontend` +
+  `hivemind-next-frontend-1` (Caddy routes by alias).
+- **DO NOT bump `NEXT_VERSION` for an FE-only deploy** — it is SHARED with
+  core/control/employees in `docker-compose.next.yml`, and that file needs env
+  vars (NEXT_ALLOWED_ORIGINS…) not in `.env`. Instead: save a rollback tag of the
+  current `-single` image, then **`docker rm -f` + `docker run` each container on
+  the new immutable image directly** (replicate net/port/aliases/labels). No
+  compose, no shared-var bump.
+- **FE image build**: `frontend/Da-vinci/Dockerfile` (CRA → caddy). Tag
+  `hivemind/fe:prod-YYYYMMDD-<sha>-single`. CRA fails the build on ESLint
+  **no-undef / no-unused-vars** (my button broke because JSX went into
+  `KnowledgeIdentityCard` but the handler was in `ProfileFactsSection` — TWO
+  near-identical "brainKnows" headers exist; check the enclosing function with
+  awk before editing). babel parse ≠ CRA lint — only the real build catches scope
+  errors, so BUILD before deploy.
+- **Verify the SERVED bundle, not just source**: compare the hashed `main.<hash>.js`
+  from `curl http://127.0.0.1:2388/` vs `curl https://next.singulancelabs.com/hivemind`
+  — they must match, proving the new container is what the public domain serves
+  (map: FE gitlink/bundle drift is the #1 stale-UI incident).
+- **Gitlink**: set with `git update-index --cacheinfo 160000,<fe_sha>,frontend/Da-vinci`
+  in the build worktree (submodule not checked out there) — the FE commit must be
+  PUSHED to the Da-vinci remote first. Then commit + FF to singulance-main.
+
 ### 2026-07-20e — user/org profile subsystem activated (release prod-20260720-72609f55)
 
 The whole profile stack (`ProfileStore`, `ProfileDreamer`, `/api/profiles`,

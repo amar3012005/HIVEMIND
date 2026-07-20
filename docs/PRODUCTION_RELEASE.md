@@ -10,7 +10,7 @@ parent:
   branch: singulance-main
   sha: 72609f5593ff445cc84b60ed6fc5c2cbb07012e0
 frontend:
-  sha: 1702fa72952c2ae74dae7a7b47950737417e1863   # unchanged — Core-only release
+  sha: 62654d4cd973d9e10082f16f2f6f2a5eaa435330   # FE rebuilt from Da-vinci main (29-commit catch-up) + profile Rebuild button
 runtime:
   VERSION: prod-20260720-72609f55
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
@@ -26,9 +26,15 @@ images:
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
   employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
   tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
-  frontend_single: sha256:0ba7d5378c37e9269339903d89115abaa90220a9825f2096d8c90739f42dcfd4 # unchanged
+  frontend_single: sha256:1332c84dd6edb131467c653215c47ff47610219dc1146bd7b5330b3347be5eb1 # prod-20260720-62654d4c-single
 migration: none
 changes:
+  - FRONTEND rebuilt + deployed: Da-vinci origin/main (29 commits ahead of prior gitlink
+    1702fa72 — mobile chat rebuild, HyperAgents room/brochure reports, outreach/leads,
+    live-listen) + profile Rebuild button. Image prod-20260720-62654d4c-single deployed to
+    BOTH FE containers (hm-fe :8088, hivemind-next-frontend-1 :2388) via direct immutable-tag
+    recreate (NEXT_VERSION untouched — shared with core/control/employees). Served-bundle
+    verified (main.dfc1be31.js live on next.singulancelabs.com). FE rollback: rollback-<ts>-single.
   - PROFILE subsystem activated (was fully built but dark): 4 flags on; ProfileDreamer
     LLM-extracts grounded user+org facts from memories; onboarding mirrors company →
     org-scoped profile facts; new get_user_profile chat tool (caller-scoped, no id from

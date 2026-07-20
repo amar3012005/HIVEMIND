@@ -2184,10 +2184,21 @@ Every item must include a non-empty content field and one or more valid support_
     }
 
     // ── atomic mode ── one memory through the canonical engine gateway.
+    // Append the ingest-time (known_at) stamp to the CONTENT body so the
+    // timestamp survives into recall/synthesis prose, matching the existing
+    // "(2026-07-13T13:51Z)"-style convention. Atomic only: document mode is
+    // distilled into many facts downstream, so a single raw-content suffix
+    // there would be wrong. Idempotent — skip if a trailing ISO stamp is
+    // already present (re-ingest / dedup), using the same recorded_at the
+    // metadata + ts: tag carry so all three agree.
+    const _recStamp = `(${prov.recordedAtIso.slice(0, 16)}Z)`;
+    const _rawContent = typeof envelope.content === 'string' ? envelope.content : '';
+    const _alreadyStamped = /\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(_rawContent.trimEnd());
+    const atomicContent = _alreadyStamped ? _rawContent : `${_rawContent.trimEnd()} ${_recStamp}`;
     const res = await this.memoryGraphEngine.ingestMemory({
       user_id: userId,
       org_id: orgId,
-      content: envelope.content,
+      content: atomicContent,
       title: prov.title || undefined,
       memory_type: envelope.metadata?.memory_type || 'fact',
       source_type: sourceType,

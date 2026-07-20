@@ -174,6 +174,20 @@ export function normalizeProvenance(env) {
     if (!Number.isNaN(d.getTime())) documentDate = d;
   }
 
+  // Ingest-time (known_at) timestamp — when HIVEMIND recorded this memory, as
+  // distinct from documentDate/occurredAt (when the fact was true / the event
+  // happened). Every canonical memory carries it in THREE places: metadata
+  // (recorded_at, queryable), a ts: tag (read by temporal event-time ranking),
+  // and — appended by the caller — the content body. Idempotent: an existing
+  // recorded_at (re-ingest / dedup) is preserved so the timestamp and its
+  // ts: tag never drift or stack on re-processing.
+  const existingRecordedAt = source.metadata?.recorded_at;
+  const recordedAtDate = existingRecordedAt && !Number.isNaN(new Date(existingRecordedAt).getTime())
+    ? new Date(existingRecordedAt)
+    : new Date();
+  const recordedAtIso = recordedAtDate.toISOString();
+  const recordedAtDay = recordedAtIso.slice(0, 10);
+
   const sourceMetadata = {
     ...(source.metadata && typeof source.metadata === 'object' ? source.metadata : {}),
     source_platform: platform,
@@ -181,6 +195,7 @@ export function normalizeProvenance(env) {
     source_id: sourceId,
     source_url: sourceUrl,
     ingest_source: source.type,
+    recorded_at: recordedAtIso,
   };
 
   // Uniform provenance tags on EVERY memory regardless of source. Slugged +
@@ -189,11 +204,12 @@ export function normalizeProvenance(env) {
   const provenanceTags = [
     `source:${source.type}`,
     `platform:${slug(platform)}`,
+    `ts:${recordedAtDay}`,
   ];
   if (sourceId) provenanceTags.push(`source-id:${slug(sourceId)}`);
   if (source.filename) provenanceTags.push(`filename:${source.filename}`);
 
-  return { sourcePlatform: platform, sourceMetadata, documentDate, provenanceTags, title };
+  return { sourcePlatform: platform, sourceMetadata, documentDate, provenanceTags, title, recordedAtIso };
 }
 
 /**

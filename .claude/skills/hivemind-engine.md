@@ -140,6 +140,34 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20c — temporal/time-travel wired into chat (release prod-20260720-e41b46b1)
+
+The bi-temporal tools (`hivemind_at`/`_diff`/`_timeline`) EXISTED but chat never
+reached them: `chat-intent-decision` had no `timeline` operation and hardcoded
+`needs_time_travel:false` (temporal fields were parsed then discarded), and
+`gatherEvidence` had no dispatch branch. Fixes: `timeline` op (+ hivemind-recall
+native group + planner-prompt routing paragraph); `needs_time_travel` derived
+from parsed time; temporal-dispatch block in gatherEvidence (range→diff with
+"since X"→to=now, valid_at/known_at→at, bare timeline→timeline); timeline now
+resolves by `memory_id` via BiTemporalEngine (schema previously hard-required
+`query`, so the documented memory_id contract silently never worked).
+
+**TWO CRITICALS the adversarial review caught in MY new code — always run it:**
+1. Cross-tenant leak: `getTemporalTimeline`+`getMemories` are UNSCOPED (filter
+   by id only). Any UUID would read another tenant's memory + full history. Fix:
+   authorize the anchor AND every related row via `getMemoryScoped(user/org/
+   access_context)` — the store keeps unscoped getters for internal fan-out, so
+   ANY new read path taking an id from model/user input MUST use the scoped one.
+2. `hivemind_diff` removed rows rendered identically to live facts in the
+   synthesis block → model could assert superseded values as current. Fix:
+   `[REMOVED/SUPERSEDED]` prefix + prompt rule 11c.
+
+Verified live: "changed since 2025" → dispatches hivemind_diff (honest no-change
+answer); "as of <date>" → as-of recall; "history of X" → hivemind_timeline.
+Wrong-tenant memory_id (valid UUID format) → memory_not_found_or_forbidden, 0 rows.
+Still open: update path writes only isLatest flags, never the predecessor→
+successor `Updates` EDGE; terse tag-only memories rank low in semantic recall.
+
 ### 2026-07-20b — Cerebras-direct synthesis (biggest latency win, env-only)
 
 Adding `CEREBRAS_API_KEY` to `/root/hivemind/.env` routes gpt-oss-120b synthesis

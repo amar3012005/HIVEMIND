@@ -3,23 +3,23 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-08f01b38
+release_id: prod-20260720-e41b46b1
 host: singulance
-deployed_at_utc: 2026-07-20T15:11:43Z
+deployed_at_utc: 2026-07-20T16:00:04Z
 parent:
   branch: singulance-main
-  sha: 08f01b381771d76b78920e26fa9ffea3bb83e3fa
+  sha: e41b46b172a561f73e2bebde9e7251ee62c46ea4
 frontend:
   sha: 1702fa72952c2ae74dae7a7b47950737417e1863   # unchanged — Core-only release
 runtime:
-  VERSION: prod-20260720-08f01b38
+  VERSION: prod-20260720-e41b46b1
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
   env_change: CEREBRAS_API_KEY added post-deploy → synthesis routes Cerebras-direct
               (api.cerebras.ai) instead of gpt-oss via OpenRouter. Core recreated (same
               image, new env). Key is in /root/hivemind/.env only, NOT in the repo.
               OpenRouter sort=throughput remains the fallback path if the Cerebras key is absent.
 images:
-  core: sha256:b66b7f8ec300727194bf9756e989f7a1806564ff596ad8486cbc58f30e9f0a69
+  core: sha256:16909f6c253b75c476f9e35f6c31d437a7d4ff68e0067c9f5ad7f2f1b7be6f4c
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
   employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
   tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
@@ -46,6 +46,13 @@ changes:
     CanonicalEntity.createdAt/updatedAt. Idempotent on re-ingest. No migration.
   - Removed proven-dead legacy planner/router (planStep, planPrompt, ROUTER_TOOLS, routerPlan);
     kept callJsonLLM. Added trace.phases per-step latency instrumentation.
+  - TEMPORAL wired end-to-end: new 'timeline' planner operation; needs_time_travel derived from
+    parsed time fields (was hardcoded false); gatherEvidence dispatches hivemind_diff (range;
+    "since X" -> to=now) / hivemind_at (valid_at,known_at) / hivemind_timeline (full history);
+    hivemind_timeline resolves by memory_id via the MemoryVersion ledger. SECURITY: memory_id
+    path authorizes the anchor + every related row via getMemoryScoped (cross-tenant reads
+    refused, probe-verified); hivemind_diff removed rows rendered [REMOVED/SUPERSEDED] so
+    superseded values are never asserted as current.
 acceptance:
   public: [core_health_ok]
   authenticated:
@@ -55,6 +62,9 @@ acceptance:
     - relation_200_honest_no_edge_vs_comention
     - compare_200_both_entities_found             # was: reported both absent — FIXED
     - german_fact_source_relation_correct_in_de   # no English routing gate
+    - temporal_range_200_dispatches_hivemind_diff  # "changed since 2025" — honest no-change answer
+    - temporal_asof_200_valid_at_recall            # "as of 2026-06-01" — correct as-of description
+    - temporal_history_200_dispatches_hivemind_timeline
   latency_observed:                                  # after CEREBRAS_API_KEY added (synthesis → Cerebras-direct)
     fact: 2.25-3.25s      # target p95 1.5s — close; ~950ms planner + ~800ms recall + ~500ms synth floor
     explain: 3.65s        # target p95 3s — met/near
@@ -68,20 +78,20 @@ acceptance:
   known_gaps:
     - Latency above the aggressive p95 targets (fact 1.5s / chat 4s). No longer runaway; residual
       variance is in-answerStep DB work + occasional slow OpenRouter backend despite throughput sort.
-    - Temporal valid_at/known_at not proven end-to-end: base recall does not surface the terse
-      SECURITY_E2E test memories ("launches on 2027-06-01"); partly a synthetic-test-data artifact.
-      Also: the claimed Updates edge between predecessor/successor does NOT exist in the DB — only
-      isLatest flags wire the supersession.
+    - Temporal now wired end-to-end (timeline op → hivemind_diff/_at/_timeline; tenant-scoped
+      memory_id resolution; [REMOVED/SUPERSEDED] marking). Remaining niggle: terse tag-only test
+      memories still rank low in semantic recall, and the predecessor→successor Updates EDGE is
+      still not written by the update path (only isLatest flags).
 rollback:
-  core: hivemind/core-api:rollback-20260720T151143Z   # -> prior release 5e347266
+  core: hivemind/core-api:rollback-20260720T160004Z   # -> prior release 08f01b38
   control: hivemind/control-plane:stable
   employees: hivemind/employees:stable
   tara_deepgram: hivemind/tara-deepgram:stable
   frontend_single: hivemind/fe:stable-single
-  immediate_timestamped: 20260720T151143Z
+  immediate_timestamped: 20260720T160004Z
 aliases:
-  stable: prod-20260720-08f01b38
-  latest: prod-20260720-08f01b38
+  stable: prod-20260720-e41b46b1
+  latest: prod-20260720-e41b46b1
 ```
 
 No customer email, connector action, telephone call, or write operation was triggered during release acceptance. The disposable SECURITY_E2E_20260720 test memories (177de683, 65c9ca7b) were intentionally retained as the temporal fixture and NOT deleted.

@@ -1685,7 +1685,10 @@ export async function runReactAgentV2({
     // capability names/descriptions available to this user and organization;
     // the same instance executes any selected connector/native tools later.
     const { buildToolkitForUser, getCapabilityCatalogForUser } = await import('./toolkit-factory.js');
+    const _pt = (k, start) => { trace.phases[k] = Date.now() - start; };
+    let _ps = Date.now();
     const groupCatalog = await getCapabilityCatalogForUser({ prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId });
+    _pt('capability_catalog_ms', _ps);
     const authorizedProjectIds = Array.isArray(ctx.accessContext?.projectIds) ? ctx.accessContext.projectIds : [];
     const projectCatalog = authorizedProjectIds.length && ctx.prisma?.project
       ? await ctx.prisma.project.findMany({
@@ -1695,6 +1698,7 @@ export async function runReactAgentV2({
           take: 24,
         }).catch(() => [])
       : [];
+    _ps = Date.now();
     const intentParsed = await parseChatIntent({
       message, history, language,
       groupCatalog,
@@ -1703,8 +1707,10 @@ export async function runReactAgentV2({
       apiKey,
       signal: abortCtrl.signal,
     });
+    _pt('intent_parse_ms', _ps);
     const intentDecision = intentParsed.decision;
     if (intentParsed.usage) usages.push(intentParsed.usage);
+    _ps = Date.now();
     const turnToolkit = await buildToolkitForUser({
       prisma: ctx.prisma,
       userId: ctx.userId,
@@ -1712,6 +1718,7 @@ export async function runReactAgentV2({
       persistentMemoryEngine: ctx.persistentMemoryEngine,
       selectedGroups: intentDecision.tool_groups,
     });
+    _pt('toolkit_build_ms', _ps);
     turnToolkit.resetEquippedTools(intentDecision.tool_groups);
     ctx._toolkit = turnToolkit;
     onEvent?.({ type: 'intent_decided', schema_version: 1, trace_id: trace.traceId, decision: intentDecision });
@@ -1981,6 +1988,7 @@ export async function runReactAgentV2({
       source: plan.source || null,
       aggregate: plan.aggregate || null,
     });
+    _ps = Date.now();
     const evidence = await gatherEvidence({
       plan,
       ctx,
@@ -1989,6 +1997,7 @@ export async function runReactAgentV2({
       // consume the evidence window.
       deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
     });
+    _pt('gather_evidence_ms', _ps);
     steps.push(...evidence.steps);
     trace.recall = {
       coverage: evidence.coverage,
@@ -1997,10 +2006,12 @@ export async function runReactAgentV2({
     onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
     // STEP 4 — Answer with the caller-selected user-facing model.
+    _ps = Date.now();
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
       model: answerModel, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
     });
+    _pt('answer_step_ms', _ps);
     if (answer.usage) usages.push(answer.usage);
     onEvent?.({
       type: 'answer_validated',

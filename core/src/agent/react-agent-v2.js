@@ -430,7 +430,7 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
     // fired, and merges predecessors via the ONE flag-owning method — so the flag
     // WINS over any prior unflagged base entry (bus contract, R2). This makes
     // "over time" and "before it changed" answer identically.
-    await hydrateSupersededPredecessors(bus, ctx, { anchorMemories: tMems });
+    await hydrateSupersededPredecessors(bus, ctx, { anchorMemories: tMems, plan });
   } catch (error) {
     recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
   }
@@ -441,7 +441,7 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
 // flagged _superseded_predecessor. Additive + best-effort: never throws into the
 // timeline path. Owns fix #2's "previous value" so it is a single-place
 // capability, not a 4-branch alignment.
-async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [] } = {}) {
+async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [], plan = {} } = {}) {
   try {
     // Test seam: ctx._loadTypedGraphEvidence overrides the real import so the
     // characterization suite can drive the Updates walk with a fake graph.
@@ -449,11 +449,30 @@ async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [] } =
       || (await import('../memory/recall-router.js')).loadTypedGraphEvidence;
     if (!ctx?.prisma || !loadTypedGraphEvidence || !ctx.persistentMemoryStore?.getMemories) return;
     // Anchors: temporal-result ids + everything already in the bus (base recall).
-    const anchorIds = [...new Set([
+    const anchorIds = new Set([
       ...anchorMemories.map((m) => m?.id).filter(Boolean),
       ...bus.memoriesById.keys(),
-    ])];
-    if (!anchorIds.length) return;
+    ]);
+    // DETERMINISTIC ANCHORING (fix #2 reliability): a version-history answer must
+    // NOT depend on whether the LATEST memory happened to rank into top-K recall
+    // (run-to-run variance made "changed over time" surface the prior value only
+    // sometimes). When the plan names entities, resolve their LATEST memories
+    // directly and add them as anchors so the Updates walk always has a starting
+    // point. Bounded + best-effort. Test seam: ctx._anchorMemoriesForEntities.
+    try {
+      const entities = (Array.isArray(plan.named_entities) ? plan.named_entities : [])
+        .filter((e) => typeof e === 'string' && e.trim()).slice(0, 4);
+      if (entities.length && ctx.prisma?.memory?.findMany) {
+        const orClauses = entities.map((e) => ({ content: { contains: e, mode: 'insensitive' } }));
+        const latest = await ctx.prisma.memory.findMany({
+          where: { orgId: ctx.orgId, deletedAt: null, isLatest: true, OR: orClauses },
+          select: { id: true }, orderBy: { updatedAt: 'desc' }, take: 8,
+        }).catch(() => []);
+        for (const m of latest) if (m?.id) anchorIds.add(m.id);
+      }
+    } catch { /* entity anchoring is additive */ }
+    if (!anchorIds.size) return;
+    const anchorIdList = [...anchorIds];
     // Project-scope visibility: loadTypedGraphEvidence's visible() filter drops a
     // scope='project' edge unless accessContext.projectIds contains the project.
     // The version chain (e.g. launch-date Aug18→Aug19) is project-scoped, so if
@@ -470,15 +489,14 @@ async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [] } =
       ])],
     };
     const graph = await loadTypedGraphEvidence({
-      prisma: ctx.prisma, memoryIds: anchorIds,
+      prisma: ctx.prisma, memoryIds: anchorIdList,
       userId: ctx.userId, orgId: ctx.orgId, accessContext: walkAccess,
     }).catch(() => ({ items: [] }));
     const updatesEdges = (graph.items || []).filter((e) => String(e.type).toLowerCase() === 'updates');
     if (!updatesEdges.length) return;
     // Predecessor = edge.to_id (the superseded side of an Updates edge) not
     // already an anchor.
-    const anchorSet = new Set(anchorIds);
-    const predIds = [...new Set(updatesEdges.map((e) => e.to_id).filter((id) => id && !anchorSet.has(id)))];
+    const predIds = [...new Set(updatesEdges.map((e) => e.to_id).filter((id) => id && !anchorIds.has(id)))];
     if (predIds.length) {
       const predMap = await ctx.persistentMemoryStore.getMemories(predIds).catch(() => new Map());
       const preds = predIds.map((id) => predMap.get?.(id)).filter(Boolean);

@@ -1904,8 +1904,9 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
           project_choice: { projects: r.projects || [], draft: r.draft || null } };
       }
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
-      onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' });
-      return { tool: 'hivemind_save_memory', args, result: r, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
+      const summary = r?.error ? `error: ${r.error}` : (r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved');
+      onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary });
+      return { tool: 'hivemind_save_memory', args, result: r, result_summary: summary };
     } catch (err) {
       return { tool: 'hivemind_save_memory', args, result_summary: `error: ${err.message}` };
     }

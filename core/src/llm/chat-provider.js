@@ -45,9 +45,14 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
         apiKey: process.env.OPENROUTER_API_KEY,
         wireModel: wireModel === 'gpt-oss-120b' ? 'openai/gpt-oss-120b' : wireModel,
         providerPolicy: {
-          // Keep the model fixed while allowing OpenRouter to route around a
-          // transient Cerebras outage. Requiring one provider turned a 429
-          // into a platform-wide chat failure despite compatible capacity.
+          // sort:'throughput' makes OpenRouter pick the FASTEST backend for
+          // gpt-oss-120b (measured: Cerebras/Groq ~0.5-0.9s) instead of its
+          // default routing, which landed on DekaLLM/WandB/Parasail at
+          // 7-15s — THE dominant chat-latency cause. allow_fallbacks stays
+          // true so a fast-provider 429/outage still routes around rather
+          // than failing the turn. Override the sort via
+          // OPENROUTER_GPT_OSS_SORT (e.g. 'latency') without a code change.
+          sort: process.env.OPENROUTER_GPT_OSS_SORT || 'throughput',
           allow_fallbacks: true,
           require_parameters: true,
           data_collection: 'deny',
@@ -65,6 +70,9 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
       apiKey: process.env.OPENROUTER_API_KEY,
       wireModel: requested,
       providerPolicy: {
+        // Same throughput routing for the Gemini planner — its default
+        // routing also drifted to slow backends.
+        sort: process.env.OPENROUTER_GOOGLE_SORT || 'throughput',
         allow_fallbacks: true,
         require_parameters: true,
         data_collection: 'deny',

@@ -10,7 +10,7 @@ parent:
   branch: singulance-main
   sha: 72609f5593ff445cc84b60ed6fc5c2cbb07012e0
 frontend:
-  sha: 9d613f817cadc0dc6c7367f4b43b660d18b73ac4   # FE: participants-array crash fix on top of the 29-commit catch-up + profile button
+  sha: 4efdd809510f4c467dea03c2ad6e3cb092865948   # FULL reconciled FE: main(29) + singulance-hyper mobile/chat parity + per-account storage + profile button + participants crash fix
 runtime:
   VERSION: prod-20260720-72609f55
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
@@ -26,7 +26,7 @@ images:
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
   employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
   tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
-  frontend_single: sha256:90f07bf071fbdb38d633d0473e31e64a9ef97d8e34438bfdfb6c417350563cda # prod-20260720-9d613f81-single
+  frontend_single: sha256:f7a2dc6d81ad99d6e3f4b742cc1e4cdf07e18cbdf0bd8eef18d39c2500e67341 # prod-20260720-4efdd809-single
 migration: none
 changes:
   - FRONTEND rebuilt + deployed: Da-vinci origin/main (29 commits ahead of prior gitlink
@@ -34,7 +34,7 @@ changes:
     live-listen) + profile Rebuild button. Image prod-20260720-62654d4c-single deployed to
     BOTH FE containers (hm-fe :8088, hivemind-next-frontend-1 :2388) via direct immutable-tag
     recreate (NEXT_VERSION untouched — shared with core/control/employees). Served-bundle
-    verified (main.5ed6452e.js live on next.singulancelabs.com; fixed a prod room-render crash "(s||[]).find is not a function" (TurnView participants normalized to array)). FE rollback: rollback-<ts>-single.
+    verified (main.0ddd5cd2.js live on next.singulancelabs.com (fully reconciled FE: merged claude/singulance-hyper for latest mobile+chat parity + claude-chat shared module + per-account browser storage); fixed a prod room-render crash "(s||[]).find is not a function" (TurnView participants normalized to array)). FE rollback: rollback-<ts>-single.
   - PROFILE subsystem activated (was fully built but dark): 4 flags on; ProfileDreamer
     LLM-extracts grounded user+org facts from memories; onboarding mirrors company →
     org-scoped profile facts; new get_user_profile chat tool (caller-scoped, no id from

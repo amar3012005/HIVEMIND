@@ -16,6 +16,7 @@ import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
 import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 import { applyProjectScopeFilter } from '../routes/recall.js';
+import { loadTypedGraphEvidence } from '../memory/recall-router.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -707,14 +708,20 @@ const TOOL_HANDLERS = {
     const entities = [...new Set((args.entities || []).map((entity) => String(entity).trim()).filter(Boolean))].slice(0, 6);
     if (entities.length < 2) return { error: 'at_least_two_entities_required' };
     const shared = {
-      mode: args.mode === 'fact' ? 'fact' : 'explain', limit: 8,
+      mode: 'fact', limit: 5,
       ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
       ...(args.source_title ? { source_title: args.source_title } : {}),
       ...(args.valid_at ? { valid_at: args.valid_at } : {}),
       ...(args.known_at ? { known_at: args.known_at } : {}),
     };
     const recalled = await Promise.all(entities.map((entity) =>
-      TOOL_HANDLERS.hivemind_recall({ ...shared, query: `${entity}\n${args.query || ''}`.trim() }, ctx)));
+      TOOL_HANDLERS.hivemind_recall({
+        ...shared,
+        query: entity,
+        query_original: entity,
+        query_canonical_en: entity,
+        entities: [entity],
+      }, ctx)));
     const memories = new Map();
     const evidence = new Map();
     const edges = new Map();
@@ -737,6 +744,21 @@ const TOOL_HANDLERS = {
       }
       if (result?.evidence_packet) packets.push(result.evidence_packet);
     });
+
+    const anchorIds = [...memories.keys()];
+    if (anchorIds.length) {
+      const graphResult = await loadTypedGraphEvidence({
+        prisma: ctx.prisma,
+        memoryIds: anchorIds,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        accessContext: ctx.accessContext || {},
+        time: { known_at: args.known_at || null },
+      }).catch(() => ({ items: [] }));
+      for (const edge of (graphResult.items || [])) {
+        if (edge?.from_id && edge?.to_id && edge?.type) edges.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
+      }
+    }
 
     const allEdges = [...edges.values()];
     const directEdges = allEdges.filter((edge) => {

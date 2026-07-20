@@ -252,7 +252,11 @@ function createEvidenceBus() {
       for (const m of (rows || [])) {
         if (!m?.id) continue;
         if (!memoriesById.has(m.id)) {
-          memoriesById.set(m.id, (flags && cloneOnFlag) ? { ...m, ...flags } : m);
+          // On insert: clone-with-flags when cloneOnFlag (preserves the caller's
+          // row identity, e.g. _diff_removed), else mutate the row in place so a
+          // flag passed WITHOUT the row already carrying it is still applied
+          // (e.g. Updates-walk predecessors flagged _superseded_predecessor).
+          memoriesById.set(m.id, (flags && cloneOnFlag) ? { ...m, ...flags } : (flags ? Object.assign(m, flags) : m));
         } else if (flags && !absentOnly) {
           Object.assign(memoriesById.get(m.id), flags);
         }
@@ -414,9 +418,61 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
     bus.mergeMemories(temporalResult?.removed, { flags: { _diff_removed: true }, absentOnly: true, cloneOnFlag: true });
     bus.mergeEvidence(temporalResult?.evidence, { keyMode: 'noPage' });
     bus.addPacket(temporalResult?.evidence_packet);
+
+    // fix #2 — this capability OWNS version-history end-to-end. The temporal tool
+    // ranks the LATEST memory but the superseded predecessor (isLatest=false,
+    // near-identical text) rarely ranks in, and hivemind_diff/hivemind_at do NOT
+    // do the Updates walk at all — so "how has X changed over time" dropped the
+    // prior value while "what was X before it changed" (which routes to
+    // hivemind_timeline, whose handler walks Updates) surfaced it. Now execTimeline
+    // walks the Updates chain from WHATEVER anchors we have (temporal result +
+    // base-recall memories already in the bus) regardless of which temporal tool
+    // fired, and merges predecessors via the ONE flag-owning method — so the flag
+    // WINS over any prior unflagged base entry (bus contract, R2). This makes
+    // "over time" and "before it changed" answer identically.
+    await hydrateSupersededPredecessors(bus, ctx, { anchorMemories: tMems });
   } catch (error) {
     recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
   }
+}
+
+// Walk typed Updates edges from the anchor memories (temporal result ∪ whatever
+// base recall already merged into the bus) and hydrate the predecessor rows,
+// flagged _superseded_predecessor. Additive + best-effort: never throws into the
+// timeline path. Owns fix #2's "previous value" so it is a single-place
+// capability, not a 4-branch alignment.
+async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [] } = {}) {
+  try {
+    // Test seam: ctx._loadTypedGraphEvidence overrides the real import so the
+    // characterization suite can drive the Updates walk with a fake graph.
+    const loadTypedGraphEvidence = ctx?._loadTypedGraphEvidence
+      || (await import('../memory/recall-router.js')).loadTypedGraphEvidence;
+    if (!ctx?.prisma || !loadTypedGraphEvidence || !ctx.persistentMemoryStore?.getMemories) return;
+    // Anchors: temporal-result ids + everything already in the bus (base recall).
+    const anchorIds = [...new Set([
+      ...anchorMemories.map((m) => m?.id).filter(Boolean),
+      ...bus.memoriesById.keys(),
+    ])];
+    if (!anchorIds.length) return;
+    const graph = await loadTypedGraphEvidence({
+      prisma: ctx.prisma, memoryIds: anchorIds,
+      userId: ctx.userId, orgId: ctx.orgId, accessContext: ctx.accessContext || {},
+    }).catch(() => ({ items: [] }));
+    const updatesEdges = (graph.items || []).filter((e) => String(e.type).toLowerCase() === 'updates');
+    if (!updatesEdges.length) return;
+    // Predecessor = edge.to_id (the superseded side of an Updates edge) not
+    // already an anchor.
+    const anchorSet = new Set(anchorIds);
+    const predIds = [...new Set(updatesEdges.map((e) => e.to_id).filter((id) => id && !anchorSet.has(id)))];
+    if (predIds.length) {
+      const predMap = await ctx.persistentMemoryStore.getMemories(predIds).catch(() => new Map());
+      const preds = predIds.map((id) => predMap.get?.(id)).filter(Boolean);
+      // mergeMemories with the flag: WINS over any prior unflagged entry (R2).
+      bus.mergeMemories(preds, { flags: { _superseded_predecessor: true } });
+    }
+    // Surface the Updates edges themselves so synthesis can state the transition.
+    bus.mergeEdges(updatesEdges.map((e) => ({ from_id: e.from_id, to_id: e.to_id, type: e.type || 'Updates', ...e })), { overwrite: false });
+  } catch { /* additive — never break the timeline on it */ }
 }
 
 // ── Profile dispatch ──────────────────────────────────────────────────

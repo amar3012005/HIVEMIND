@@ -370,6 +370,66 @@ test('R10/R9: web path uses recordTool only (no tool_selected/started for web)',
 // ─────────────────────────────────────────────────────────────────────────
 // R9 — deadline discipline: past deadline → no dispatch at all.
 // ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// fix #2 (Stage C step 5) — execTimeline OWNS the version-history walk. Even
+// when the temporal tool returns only the LATEST memory (no predecessor), the
+// executor walks the injected Updates edges and hydrates the predecessor,
+// flagged _superseded_predecessor — regardless of which temporal tool fired.
+// This is what makes "over time" answer identically to "before it changed".
+// ─────────────────────────────────────────────────────────────────────────
+test('fix#2: execTimeline walks Updates edges to hydrate superseded predecessor', async () => {
+  const LATEST = 'launch-latest';   // Aug 19 (isLatest)
+  const PRED = 'launch-pred';       // Aug 18 (superseded)
+  const { ctx } = makeCtx({
+    // base recall surfaces only the LATEST memory (predecessor doesn't rank in)
+    hivemind_recall: { memories: [{ id: LATEST, content: 'launch date is August 19, 2026' }] },
+    // hivemind_diff (the "over time" route) returns the latest as added, NO predecessor
+    hivemind_diff: { added: [{ id: LATEST, content: 'launch date is August 19, 2026' }], added_count: 1, removed_count: 0 },
+  });
+  // Inject the graph loader + memory store so the Updates walk can run.
+  ctx.prisma = {};
+  ctx._loadTypedGraphEvidence = async () => ({
+    items: [{ from_id: LATEST, to_id: PRED, type: 'Updates' }],
+  });
+  ctx.persistentMemoryStore = {
+    async getMemories(ids) {
+      const m = new Map();
+      if (ids.includes(PRED)) m.set(PRED, { id: PRED, content: 'launch date is August 18, 2026' });
+      return m;
+    },
+  };
+  const r = await gatherEvidence({
+    // "over time" → time.range triggers hivemind_diff, the path that previously
+    // dropped the predecessor.
+    plan: basePlan({ operation: 'timeline', needs_time_travel: true, time: { range: { start: '2026-01-01' } } }),
+    ctx, onEvent: undefined, deadlineAt: FAR(),
+  });
+  const pred = r.memories.find((m) => m.id === PRED);
+  assert.ok(pred, 'fix#2: predecessor hydrated even though diff did not return it');
+  assert.equal(pred._superseded_predecessor, true, 'fix#2: predecessor flagged');
+  assert.ok(/August 18/.test(pred.content), 'fix#2: the prior value (Aug 18) is now available to synthesis');
+  const latest = r.memories.find((m) => m.id === LATEST);
+  assert.ok(latest && !latest._superseded_predecessor, 'latest stays unflagged');
+  assert.ok(r.relationships.some((e) => e.to_id === PRED && String(e.type).toLowerCase() === 'updates'),
+    'fix#2: the Updates edge is surfaced for synthesis');
+});
+
+test('fix#2: no Updates edges → timeline unchanged (additive, never breaks)', async () => {
+  const { ctx } = makeCtx({
+    hivemind_recall: { memories: [{ id: 'X', content: 'only current value' }] },
+    hivemind_timeline: { memories: [{ id: 'X', content: 'only current value' }], version_count: 1 },
+  });
+  ctx.prisma = {};
+  ctx._loadTypedGraphEvidence = async () => ({ items: [] });   // no Updates edges
+  ctx.persistentMemoryStore = { async getMemories() { return new Map(); } };
+  const r = await gatherEvidence({
+    plan: basePlan({ operation: 'timeline' }),
+    ctx, onEvent: undefined, deadlineAt: FAR(),
+  });
+  assert.deepEqual(memIds(r), ['X'], 'no predecessor invented when no Updates edge exists');
+  assert.equal(r.memories[0]._superseded_predecessor, undefined);
+});
+
 test('R9: deadline already passed → base recall skipped, empty result', async () => {
   const { ctx, calls } = makeCtx({
     hivemind_recall: { memories: memRows('A') },

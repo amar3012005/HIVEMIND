@@ -209,7 +209,10 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
-async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
+// Exported for the characterization test (gather-evidence-characterization.test.js),
+// the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
+// fake dispatcher — no real recall/LLM. Not part of the public module surface.
+export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const steps = [];
   const memoriesById = new Map();
   const liveItems = [];

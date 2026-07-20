@@ -7,7 +7,19 @@ test('direct multilingual turn uses one structured parser call and one event con
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (_url, options) => {
-    calls.push(JSON.parse(options.body));
+    const request = JSON.parse(options.body);
+    calls.push(request);
+    if (!request.tool_choice) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            choices: [{ message: { content: 'नमस्ते! मैं आपकी कैसे मदद कर सकता हूँ?' } }],
+            usage: { prompt_tokens: 14, completion_tokens: 8, total_tokens: 22 },
+          };
+        },
+      };
+    }
     return {
       ok: true,
       async json() {
@@ -38,8 +50,9 @@ test('direct multilingual turn uses one structured parser call and one event con
       onEvent: (event) => events.push(event),
     });
     assert.equal(result.response, 'नमस्ते! मैं आपकी कैसे मदद कर सकता हूँ?');
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
     assert.equal(calls[0].tool_choice.function.name, 'route_chat_turn');
+    assert.equal(calls[1].tool_choice, undefined);
     assert.deepEqual(events.map((event) => event.type).filter((type) => ['turn_accepted', 'intent_decided', 'turn_completed'].includes(type)), [
       'turn_accepted', 'intent_decided', 'turn_completed',
     ]);
@@ -84,7 +97,7 @@ test('complete aggregate uses one parser call, scoped entity executor, and no an
       },
     });
     assert.equal(modelCalls, 1);
-    assert.match(result.response, /2 distinct product/);
+    assert.match(result.response, /contains 2 entities associated with Solvis classified as products/);
     assert.equal(result.aggregate.count, 2);
     assert.equal(result.grounded, true);
   } finally {

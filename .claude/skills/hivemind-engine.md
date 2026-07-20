@@ -140,6 +140,44 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20e — user/org profile subsystem activated (release prod-20260720-72609f55)
+
+The whole profile stack (`ProfileStore`, `ProfileDreamer`, `/api/profiles`,
+`Profile.jsx` routed at /hivemind/app/profile, `persona-router`) was BUILT but
+DARK — profiles were empty so the page showed "No facts." Root cause: FOUR flags
+off + the always-on regex extractor (`profile-store.js` PROFILE_PATTERNS) only
+matches English "my name is / I work at", never business content. **The flags:
+`PROFILE_DREAM_ENABLED`, `PROFILE_DREAM_APPLY` (SEPARATE — dreamer gates persist
+on `opts.apply && PROFILE_DREAM_APPLY`, so apply:true ALONE silently no-ops and
+echoes apply:false — this bit me), `ENABLE_PROFILE_DREAM_CRON`,
+`PERSONA_ROUTER_ENABLED`.** All now true in prod .env.
+
+Population = `ProfileDreamer.dreamProfilesForOrg` (LLM extracts grounded
+static/preference/goal/dynamic facts from raw memories, evidence-cited, decayed).
+Backfill via `POST /api/profiles/dream {apply:true}` (admin/owner only). Canary
+went 0 → 10 facts incl `company=Solvis GmbH`.
+
+Code added this release:
+- `get_user_profile` chat tool (tool-registry) — caller-scoped by ctx.userId/orgId,
+  NO id from the model (can't read another tenant — verified live: other tenant → 0).
+- `profile` planner operation (chat-intent-decision) + dedicated lane (no blended
+  recall competing) + gatherEvidence dispatch; profile exposed as a synthetic
+  citeable PROFILE1 packet so the grounded-claim validator accepts a profile-only
+  answer (same trick as aggregateCitationPacket).
+- Onboarding (control-plane ~7729) mirrors company → ORG-scoped profile facts.
+- Dreamer pulls `summary` memories but ONLY tagged company-profile/org-canon
+  (untagged summaries = rollups/captions would bloat every dream).
+- `getSharedProfileStore(prisma)` singleton — throwaway ProfileStore instances
+  don't cross-invalidate the 60s cache (review HIGH).
+
+**Reusable lesson:** for a "make X functional / X is dead" ask, CHECK FLAGS FIRST
+(`grep ^FLAG= .env` + probe the endpoint for a `skipped:FLAG!=true` response) —
+this whole subsystem was one env change from alive. And watch for MULTI-flag gates
+(enable + apply as separate flags).
+
+Note: `Profile.jsx` already HAS a company section (getOrganizationProfile) — FE work
+is smaller than assumed; verify it renders the now-populated data before editing.
+
 ### 2026-07-20d — owner canary findings = NEXT-SESSION QUEUE (priority order)
 
 Owner-run canary after the temporal release surfaced four open defects. Start

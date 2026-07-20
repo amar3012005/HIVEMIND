@@ -3,29 +3,37 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-e41b46b1
+release_id: prod-20260720-72609f55
 host: singulance
 deployed_at_utc: 2026-07-20T16:00:04Z
 parent:
   branch: singulance-main
-  sha: 3a0de3c1ef1ca36e485243e3c12dfe28371b2e8b
+  sha: 72609f5593ff445cc84b60ed6fc5c2cbb07012e0
 frontend:
   sha: 1702fa72952c2ae74dae7a7b47950737417e1863   # unchanged — Core-only release
 runtime:
-  VERSION: prod-20260720-e41b46b1
+  VERSION: prod-20260720-72609f55
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
   env_change: CEREBRAS_API_KEY added post-deploy → synthesis routes Cerebras-direct
               (api.cerebras.ai) instead of gpt-oss via OpenRouter. Core recreated (same
               image, new env). Key is in /root/hivemind/.env only, NOT in the repo.
               OpenRouter sort=throughput remains the fallback path if the Cerebras key is absent.
+              PROFILE FLAGS enabled: PROFILE_DREAM_ENABLED, PROFILE_DREAM_APPLY,
+              ENABLE_PROFILE_DREAM_CRON, PERSONA_ROUTER_ENABLED = true (activates
+              the previously-dark user/org profile subsystem + persona injection).
 images:
-  core: sha256:16909f6c253b75c476f9e35f6c31d437a7d4ff68e0067c9f5ad7f2f1b7be6f4c
+  core: sha256:22badeecf7c5483d03744b919cd0c0d3ebc0d46432741adb4edafb51a788f362
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
   employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
   tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
   frontend_single: sha256:0ba7d5378c37e9269339903d89115abaa90220a9825f2096d8c90739f42dcfd4 # unchanged
 migration: none
 changes:
+  - PROFILE subsystem activated (was fully built but dark): 4 flags on; ProfileDreamer
+    LLM-extracts grounded user+org facts from memories; onboarding mirrors company →
+    org-scoped profile facts; new get_user_profile chat tool (caller-scoped, no id from
+    model) + 'profile' planner op. Backfill applied (canary: 10 facts incl company=Solvis
+    GmbH). Live: profile chat EN grounded; tenant-isolation verified (other tenant → 0).
   - Source-explain / full reconstruction FIXED. Two combined root causes — (1) explicit-source
     hydration was wrapped in withTimeout at CREATION but awaited after hop1/hop2/RRF/boost, so a
     ~50ms hydration always resolved to {timed_out} and fell back to document-lead boilerplate;
@@ -65,6 +73,9 @@ acceptance:
     - temporal_range_200_dispatches_hivemind_diff  # "changed since 2025" — honest no-change answer
     - temporal_asof_200_valid_at_recall            # "as of 2026-06-01" — correct as-of description
     - temporal_history_200_dispatches_hivemind_timeline
+    - profile_populated_10_facts_incl_company        # dreamer backfill wrote real facts
+    - profile_chat_tool_grounded_en                  # get_user_profile routed + grounded
+    - profile_tenant_isolation_other_tenant_zero     # no cross-tenant profile leak
   latency_observed:                                  # after CEREBRAS_API_KEY added (synthesis → Cerebras-direct)
     fact: 2.25-3.25s      # target p95 1.5s — close; ~950ms planner + ~800ms recall + ~500ms synth floor
     explain: 3.65s        # target p95 3s — met/near
@@ -83,15 +94,15 @@ acceptance:
       memories still rank low in semantic recall, and the predecessor→successor Updates EDGE is
       still not written by the update path (only isLatest flags).
 rollback:
-  core: hivemind/core-api:rollback-20260720T160004Z   # -> prior release 08f01b38
+  core: hivemind/core-api:rollback-20260720T164750Z   # -> prior release e41b46b1
   control: hivemind/control-plane:stable
   employees: hivemind/employees:stable
   tara_deepgram: hivemind/tara-deepgram:stable
   frontend_single: hivemind/fe:stable-single
-  immediate_timestamped: 20260720T160004Z
+  immediate_timestamped: 20260720T164750Z
 aliases:
-  stable: prod-20260720-e41b46b1
-  latest: prod-20260720-e41b46b1
+  stable: prod-20260720-72609f55
+  latest: prod-20260720-72609f55
 ```
 
 No customer email, connector action, telephone call, or write operation was triggered during release acceptance. The disposable SECURITY_E2E_20260720 test memories (177de683, 65c9ca7b) were intentionally retained as the temporal fixture and NOT deleted.

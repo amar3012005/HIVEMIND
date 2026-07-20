@@ -23,9 +23,12 @@ const CASES = [
 ];
 
 test('router contract selects save in six languages with one structured call', async () => {
-  for (const [language, message] of CASES) {
-    let calls = 0;
-    const result = await parseChatIntent({
+  const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+  try {
+    for (const [language, message] of CASES) {
+      let calls = 0;
+      const result = await parseChatIntent({
       message,
       language,
       groupCatalog: GROUPS,
@@ -61,12 +64,16 @@ test('router contract selects save in six languages with one structured call', a
           },
         };
       },
-    });
-    assert.equal(calls, 1);
-    assert.equal(result.decision.operation, 'save');
-    assert.equal(result.decision.save.project_id, 'project-1');
-    assert.deepEqual(result.decision.save.entities, ['SolvisPia']);
-    assert.equal(intentDecisionToPlan(result.decision, message).sub_queries.length, 0);
+      });
+      assert.equal(calls, 1);
+      assert.equal(result.decision.operation, 'save');
+      assert.equal(result.decision.save.project_id, 'project-1');
+      assert.deepEqual(result.decision.save.entities, ['SolvisPia']);
+      assert.equal(intentDecisionToPlan(result.decision, message).sub_queries.length, 0);
+    }
+  } finally {
+    if (previousOpenRouterKey == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
   }
 });
 

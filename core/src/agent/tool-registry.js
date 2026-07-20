@@ -720,7 +720,13 @@ const TOOL_HANDLERS = {
     const entities = [...new Set((args.entities || []).map((entity) => String(entity).trim()).filter(Boolean))].slice(0, 6);
     if (entities.length < 2) return { error: 'at_least_two_entities_required' };
     const shared = {
-      mode: 'fact', limit: 5,
+      // explain (not fact) per entity lane: compare/relation needs each entity's
+      // EVIDENCE, not just its top current facts. Fact mode skips evidence
+      // expansion, so "Compare SolvisPia and SolvisLea" recalled only brand-level
+      // memories and reported both absent though each has 28-31 KB segments.
+      // explain pulls each entity's document evidence so synthesis can actually
+      // compare them. limit bumped 5→8 for the richer two-entity merge.
+      mode: 'explain', limit: 8,
       ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
       ...(args.source_title ? { source_title: args.source_title } : {}),
       ...(args.valid_at ? { valid_at: args.valid_at } : {}),

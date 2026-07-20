@@ -81,7 +81,8 @@ Use hivemind_context operation=timeline for version history / change questions: 
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
-- "List every X and exact count" => hivemind_context operation=aggregate.
+- "List every X and exact count" (exhaustive enumeration of a category) => hivemind_context operation=aggregate.
+- "Which files/sources/documents mention X", "In which file is X described", "where is X mentioned" (SOURCE DISCOVERY — find which sources reference a named entity, NOT an exhaustive count) => hivemind_context operation=recall with mode=explain. Keep only the real entity name in named_entities; do NOT add words like file, source, document. This is NOT aggregate (aggregate is for counting members of a category, not locating an entity's sources).
 - "Remember X" or "Recuerda X" => hivemind_memory operation=save.
 - "Update X to Y" => hivemind_memory operation=update.
 - "Find the Google Doc about X" => use_connector provider=google-docs intent=read.
@@ -122,7 +123,13 @@ const iso = (v) => (typeof v === 'string' && !Number.isNaN(new Date(v).getTime()
 //      "my quarterly objectives"). "team/company/language/location" are NOT in
 //      this arm (qualified forms like "my email to the team" are NOT profile).
 //  (b) `my <profile-noun>` — the direct form, includes the weaker nouns.
-const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|mon (rôle|objectif|entreprise)|sobre mí|mi (rol|empresa|objetivo)/i;
+// Identity/name questions are matched ONLY when tied to the first person
+// (my name / what am i called / who am i), never a generic "the name of X" or
+// "the file name" — those stay recall.
+// Identity/name questions match ONLY on first-person forms ("my name",
+// "what am i called", "who am i") — a generic "the name of X" / "the file name"
+// stays recall. "What is my name" already contains the literal "my name".
+const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me|what am i called|my name)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|wie hei(ß|ss)e ich|mein name|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|comment je m'appelle|mon (nom|rôle|objectif|entreprise)|sobre mí|cómo me llamo|mi (nombre|rol|empresa|objetivo)/i;
 
 async function callRouter({ message, history, apiKey, signal }) {
   const histMsgs = Array.isArray(history)

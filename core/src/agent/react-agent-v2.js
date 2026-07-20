@@ -1441,7 +1441,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // (which only fired on persona-ish queries and only when a flag was set).
   const profileForAnswer = evidence.profile_context || preloadedProfileContext || '';
   const personaNote = profileForAnswer
-    ? `\n\nUSER + ORG PROFILE (who you're talking to and their organization — authoritative for identity/personalization; the definitive answer to "what do you know about me/my company"; use it directly; never invent beyond it):\n${profileForAnswer}`
+    ? `\n\nUSER + ORG PROFILE (who you're talking to and their organization — authoritative for identity/personalization; the definitive answer to "what do you know about me/my company"; use it directly; never invent beyond it).\nIMPORTANT: this profile also holds the user's OWN goals, preferences, role, company, and strategies. When the question asks about the user's OWN goal/strategy/preference/plan ("what is MY … / my content strategy / my goals / how do I prefer …"), the matching profile fact IS the authoritative answer — state it directly. Do NOT answer "not found in the evidence" when a matching profile fact exists here, and do NOT let lower-ranked corpus passages override an explicit profile fact.\n${profileForAnswer}`
     : '';
 
   // COVERAGE DISCLOSURE (multi-entity compare/relation). When the planner

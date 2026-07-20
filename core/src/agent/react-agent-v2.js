@@ -1816,14 +1816,22 @@ export async function runReactAgentV2({
         }).catch(() => [])
       : [];
     _ps = Date.now();
-    const intentParsed = await parseChatIntent({
-      message, history, language,
-      groupCatalog,
-      projectCatalog,
-      model: INTENT_MODEL,
-      apiKey,
-      signal: abortCtrl.signal,
-    });
+    // FLAG: CHAT_ROUTER=progressive swaps ONLY the intent-selection stage for
+    // the 6-tool Cerebras-direct progressive router. The adapter returns the
+    // SAME decision shape, so intentDecisionToPlan + everything downstream is
+    // unchanged. Default (unset/any other value) = the current parseChatIntent.
+    const intentParsed = process.env.CHAT_ROUTER === 'progressive'
+      ? await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
+          message, history, language, apiKey, signal: abortCtrl.signal,
+        })
+      : await parseChatIntent({
+          message, history, language,
+          groupCatalog,
+          projectCatalog,
+          model: INTENT_MODEL,
+          apiKey,
+          signal: abortCtrl.signal,
+        });
     _pt('intent_parse_ms', _ps);
     const intentDecision = intentParsed.decision;
     if (intentParsed.usage) usages.push(intentParsed.usage);

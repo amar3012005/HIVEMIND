@@ -140,6 +140,23 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20b — Cerebras-direct synthesis (biggest latency win, env-only)
+
+Adding `CEREBRAS_API_KEY` to `/root/hivemind/.env` routes gpt-oss-120b synthesis
+to **Cerebras-direct** (`api.cerebras.ai`) instead of OpenRouter — `answer_step`
+dropped ~11s → **452-658ms** (warm 276-318ms), fact-query total 26-60s(start)
+→ **2.25-3.25s**. `resolveChatCompletionRoute` already prefers Cerebras when the
+key is set (chat-provider.js:28-36); OpenRouter `sort=throughput` stays the
+fallback when the key is absent. The key was NOT on the box before — that alone
+was the dominant latency cause. **Lesson: check `CEREBRAS_API_KEY` presence
+FIRST for any chat-latency complaint** — it's a one-line env fix, no rebuild
+(recreate core to reload env). Never put the key in a command-line arg (classifier
+blocks secrets in argv) or the repo; use a 600-perm `--env-file`.
+Residual: fact ~2.3s floor = planner ~950ms + recall ~800ms + synth ~500ms; to
+beat 1.5s you'd parallelize planner+recall or cache the planner. Compare recall
+is FLAKY (grounded 6-10 sources most runs, occasional thin) — per-entity retrieval
+robustness is the next accuracy item.
+
 ### 2026-07-20 — recall/chat accuracy + latency overhaul (release prod-20260720-08f01b38)
 
 **Root causes found & fixed (all probe-verified live):**

@@ -14,6 +14,10 @@ frontend:
 runtime:
   VERSION: prod-20260720-08f01b38
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
+  env_change: CEREBRAS_API_KEY added post-deploy → synthesis routes Cerebras-direct
+              (api.cerebras.ai) instead of gpt-oss via OpenRouter. Core recreated (same
+              image, new env). Key is in /root/hivemind/.env only, NOT in the repo.
+              OpenRouter sort=throughput remains the fallback path if the Cerebras key is absent.
 images:
   core: sha256:b66b7f8ec300727194bf9756e989f7a1806564ff596ad8486cbc58f30e9f0a69
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
@@ -51,12 +55,14 @@ acceptance:
     - relation_200_honest_no_edge_vs_comention
     - compare_200_both_entities_found             # was: reported both absent — FIXED
     - german_fact_source_relation_correct_in_de   # no English routing gate
-  latency_observed:
-    fact: 3.3-7.7s        # target p95 1.5s — NOT met (down 8x from runaway; provider/arch floor)
-    explain: ~11s          # target p95 3s — NOT met
-    compare: 4.9s
+  latency_observed:                                  # after CEREBRAS_API_KEY added (synthesis → Cerebras-direct)
+    fact: 2.25-3.25s      # target p95 1.5s — close; ~950ms planner + ~800ms recall + ~500ms synth floor
+    explain: 3.65s        # target p95 3s — met/near
+    full: 5.46s
+    compare: 3.8-6.2s     # flaky: grounded 6-10 sources most runs, occasional thin recall
     relation: 2.5-5.8s
-    german: 2.5-4.9s
+    german: 4.7s
+    note: answer_step dropped ~11s → 452-658ms once synthesis routed Cerebras-direct (warm 276-318ms).
   fresh_fatal_errors: 0
   runtime: [core_healthy, exit_0, restarts_0, oom_false]
   known_gaps:

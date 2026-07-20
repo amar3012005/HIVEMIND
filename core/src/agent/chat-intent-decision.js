@@ -29,6 +29,10 @@ function boundedStrings(value, maxItems = 12, maxLength = 512) {
     : [];
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(boundedText(value, 64));
+}
+
 export function normalizeChatHistory(history, limit = 6) {
   return (Array.isArray(history) ? history : [])
     .filter((turn) => turn && (turn.role === 'user' || turn.role === 'assistant') && turn.content)
@@ -93,11 +97,12 @@ export function createChatIntentTool(groupCatalog = []) {
           update: {
             type: 'object', additionalProperties: false,
             properties: {
-              id: { type: 'string' }, target_query: { type: 'string' }, content: { type: 'string' },
+              id: { type: 'string', description: 'Existing memory UUID only. If unknown, leave empty and use target_query.' }, target_query: { type: 'string', description: 'Exact title, entity, or prior claim used to resolve the authorized current memory.' }, content: { type: 'string', description: 'Complete replacement claim including its subject; never an empty string or pronoun fragment.' },
               title: { type: 'string' }, reason: { type: 'string' }, project_id: { type: 'string' },
               project_hint: { type: 'string' }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
               event_time: { type: 'string' },
             },
+            required: ['content'],
           },
           relation: {
             type: 'object', additionalProperties: false,
@@ -221,10 +226,12 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
           confidence: Math.max(0, Math.min(1, Number(raw.save.confidence) || 0)),
         }
       : null,
-    update: raw.update && (boundedText(raw.update.id, 128) || boundedText(raw.update.target_query, 1000))
+    update: raw.update && boundedText(raw.update.content)
+      && (boundedText(raw.update.id, 128) || boundedText(raw.update.target_query, 1000))
       ? {
-          id: boundedText(raw.update.id, 128) || null,
-          target_query: boundedText(raw.update.target_query, 1000) || null,
+          id: isUuid(raw.update.id) ? boundedText(raw.update.id, 64) : null,
+          target_query: boundedText(raw.update.target_query, 1000)
+            || (!isUuid(raw.update.id) ? boundedText(raw.update.id, 1000) : null),
           content: boundedText(raw.update.content), title: boundedText(raw.update.title, 200),
           reason: boundedText(raw.update.reason, 500), project_id: boundedText(raw.update.project_id, 128) || null,
           project_hint: boundedText(raw.update.project_hint, 256) || null,
@@ -302,7 +309,7 @@ Always return query_original in the user's wording and query_canonical_en as a c
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.
 Use save only for an explicit save request or a high-confidence durable fact about the user's own world. Put the fully resolved fact in save.content; never return a pronoun or the save instruction itself.
 For implicit durable facts, use save only at confidence >= 0.80. For save/update, choose project_id only from the authorized project catalog below; if no project clearly fits, leave project_id null. Never invent a project id.
-For update, provide either the exact memory id from conversation context or a precise target_query; downstream code resolves authorized latest memories and refuses ambiguity.
+For update, provide either the exact memory UUID from conversation context or a precise target_query; never put an entity name in id. update.content must be the complete replacement claim, including the exact subject and new value. Downstream code resolves authorized latest memories and refuses ambiguity.
 When the prior assistant requested a project choice, resolve it through continuation instead of copying the prior prompt text.
 Use scope_filter=personal for questions specifically about the user. Writes require approval. Never broaden organization or project scope.
 For direct conversational replies, supply direct_response in the user's language.

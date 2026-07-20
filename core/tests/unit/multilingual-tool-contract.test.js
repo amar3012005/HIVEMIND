@@ -112,6 +112,14 @@ test('relation and query-based update are first-class, language-neutral operatio
   assert.equal(update.operation, 'update');
   assert.equal(update.update.target_query, 'SolvisPia launch date');
   assert.ok(update.tool_groups.includes('hivemind-memory-write'));
+
+  const nonUuidTarget = normalizeIntentDecision({
+    operation: 'update', confidence: 0.97, response_language: 'de', queries: [], named_entities: ['SolvisPia'],
+    recall_mode: 'fact', tool_groups: [], side_effect_policy: 'read_only',
+    update: { id: 'SolvisPia', content: 'SolvisPia startet im April 2027.' },
+  }, { message: 'Aktualisiere SolvisPia', language: 'de', allowedGroups });
+  assert.equal(nonUuidTarget.update.id, null);
+  assert.equal(nonUuidTarget.update.target_query, 'SolvisPia');
 });
 
 test('implicit saves require confidence 0.80 and full remains explicit-only', () => {

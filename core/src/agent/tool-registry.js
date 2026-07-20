@@ -30,6 +30,9 @@ export const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Natural-language query.' },
+          query_original: { type: 'string', description: 'Original-language query for multilingual vector and lexical retrieval.' },
+          query_canonical_en: { type: 'string', description: 'English-canonical lexical formulation; exact names and identifiers remain unchanged.' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entities selected by the structured router.' },
           mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
@@ -96,6 +99,8 @@ export const TOOL_SCHEMAS = [
             enum: ['personal', 'project', 'team', 'organization'],
             description: 'Memory scope. Defaults to personal. Use "organization" when the user explicitly says "save to the whole company"; use "project" when project_id/project is set; use "team" rarely.',
           },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entity names preserved by the router.' },
+          event_time: { type: 'string', description: 'ISO event/valid time explicitly supplied by the user.' },
         },
         required: ['title', 'content', 'tags'],
       },
@@ -110,12 +115,33 @@ export const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           id: { type: 'string' },
+          target_query: { type: 'string', description: 'Precise title/entity/content query used only when the memory id is unknown.' },
           content: { type: 'string' },
           title: { type: 'string' },
           tags: { type: 'array', items: { type: 'string' } },
           reason: { type: 'string', description: 'Why it changed.' },
+          project_id: { type: 'string' },
+          project_hint: { type: 'string' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          event_time: { type: 'string' },
         },
-        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'hivemind_relation_between',
+      description: 'Resolve two or more exact entities and return verified typed edges first, then bounded shared-source/shared-entity paths. Co-mentions are explicitly separated from graph relations.',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          entities: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 6 },
+          query: { type: 'string' }, mode: { type: 'string', enum: ['fact', 'explain'], default: 'explain' },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' },
+          valid_at: { type: 'string' }, known_at: { type: 'string' },
+        },
+        required: ['entities'],
       },
     },
   },
@@ -520,7 +546,8 @@ const TOOL_HANDLERS = {
     });
     const planMode = recallPlan.mode;
     const recallStartedAt = Date.now();
-    const result = await router.recall(args.query, {
+    const originalQuery = args.query_original || args.query;
+    const result = await router.recall(originalQuery, {
       mode:           planMode,
       explicit_mode:  args._explicit_mode === true,
       limit:          args.limit,
@@ -537,6 +564,10 @@ const TOOL_HANDLERS = {
       live_intent:    args.live_intent === true,
       scope_filter:   args.scope_filter,
       structured_intent: args._structured_intent === true,
+      alternate_lexical_query: args.query_canonical_en && args.query_canonical_en !== originalQuery
+        ? args.query_canonical_en
+        : null,
+      named_entities: args.entities || [],
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,
@@ -672,6 +703,85 @@ const TOOL_HANDLERS = {
     };
   },
 
+  async hivemind_relation_between(args, ctx) {
+    const entities = [...new Set((args.entities || []).map((entity) => String(entity).trim()).filter(Boolean))].slice(0, 6);
+    if (entities.length < 2) return { error: 'at_least_two_entities_required' };
+    const shared = {
+      mode: args.mode === 'fact' ? 'fact' : 'explain', limit: 8,
+      ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+      ...(args.source_title ? { source_title: args.source_title } : {}),
+      ...(args.valid_at ? { valid_at: args.valid_at } : {}),
+      ...(args.known_at ? { known_at: args.known_at } : {}),
+    };
+    const recalled = await Promise.all(entities.map((entity) =>
+      TOOL_HANDLERS.hivemind_recall({ ...shared, query: `${entity}\n${args.query || ''}`.trim() }, ctx)));
+    const memories = new Map();
+    const evidence = new Map();
+    const edges = new Map();
+    const packets = [];
+    const memoryIdsByEntity = new Map();
+    recalled.forEach((result, index) => {
+      const ids = new Set();
+      for (const memory of (result?.memories || [])) {
+        if (!memory?.id) continue;
+        ids.add(memory.id);
+        if (!memories.has(memory.id)) memories.set(memory.id, memory);
+      }
+      memoryIdsByEntity.set(entities[index], ids);
+      for (const item of (result?.evidence || [])) {
+        const key = item?.id || `${item?.document_id || item?.document_title}|${item?.page || ''}|${String(item?.content || item?.snippet || '').slice(0, 80)}`;
+        if (!evidence.has(key)) evidence.set(key, item);
+      }
+      for (const edge of (result?.relationships || [])) {
+        if (edge?.from_id && edge?.to_id && edge?.type) edges.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
+      }
+      if (result?.evidence_packet) packets.push(result.evidence_packet);
+    });
+
+    const allEdges = [...edges.values()];
+    const directEdges = allEdges.filter((edge) => {
+      const touched = entities.filter((entity) => {
+        const ids = memoryIdsByEntity.get(entity);
+        return ids?.has(edge.from_id) || ids?.has(edge.to_id);
+      });
+      return touched.length >= 2;
+    });
+    const sourceGroups = new Map();
+    for (const [entity, ids] of memoryIdsByEntity.entries()) {
+      for (const id of ids) {
+        const memory = memories.get(id);
+        const sourceId = memory?.source_metadata?.document_id
+          || memory?.source_metadata?.source_id
+          || memory?.source_id
+          || null;
+        if (!sourceId) continue;
+        if (!sourceGroups.has(sourceId)) sourceGroups.set(sourceId, new Map());
+        sourceGroups.get(sourceId).set(entity, id);
+      }
+    }
+    const sharedPaths = [...sourceGroups.entries()]
+      .filter(([, members]) => members.size >= 2)
+      .slice(0, 12)
+      .map(([source_id, members]) => ({
+        type: 'shared_source', source_id,
+        entities: [...members.keys()], memory_ids: [...members.values()], verified_relation: false,
+      }));
+    return {
+      entities,
+      direct_edges: directEdges,
+      shared_paths: sharedPaths,
+      co_mentions: sharedPaths.map((path) => ({ ...path, type: 'co_mention' })),
+      verified_relation_found: directEdges.length > 0,
+      memories: [...memories.values()], evidence: [...evidence.values()],
+      relationships: allEdges, evidence_packets: packets,
+      coverage: {
+        requested_entities: entities,
+        resolved_entities: entities.filter((entity) => (memoryIdsByEntity.get(entity)?.size || 0) > 0),
+        complete: entities.every((entity) => (memoryIdsByEntity.get(entity)?.size || 0) > 0),
+      },
+    };
+  },
+
   async hivemind_save_memory(args, ctx) {
     if (!ctx.persistentMemoryEngine || !ctx.buildRoutedIngestPayloads) {
       throw new Error('ingest pipeline unavailable');
@@ -720,6 +830,12 @@ const TOOL_HANDLERS = {
       }
     }
     let resolvedProjectName = null;
+    if (resolvedProjectId && ctx.persistentMemoryStore?.client?.project) {
+      const project = await ctx.persistentMemoryStore.client.project.findFirst({
+        where: { id: resolvedProjectId, orgId: ctx.orgId }, select: { name: true },
+      }).catch(() => null);
+      resolvedProjectName = project?.name || null;
+    }
     if (!resolvedProjectId && args.project && ctx.persistentMemoryStore?.client?.project) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
       if (accessProjectIds.length > 0) {
@@ -803,7 +919,13 @@ const TOOL_HANDLERS = {
       org_id: ctx.orgId,
       scope,
       project_ids: resolvedProjectId ? [resolvedProjectId] : [],
-      source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
+      entities: Array.isArray(args.entities) ? args.entities : [],
+      ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
+      source_metadata: {
+        source_platform: 'talk-to-hive', source_type: 'chat-turn', via: 'react-agent',
+        source_id: args._source_id || null,
+        original_content: args._original_content || args.content,
+      },
     };
     let saved;
     if (ctx.ingestCanonicalPayload) {
@@ -834,10 +956,45 @@ const TOOL_HANDLERS = {
     if (!ctx.persistentMemoryStore || !ctx.persistentMemoryEngine?.ingestMemory) {
       throw new Error('versioned memory update unavailable');
     }
-    const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(args.id, {
+    let targetId = args.id || null;
+    if (!targetId && args.target_query) {
+      if (args.project_id && !(ctx.accessContext?.projectIds || []).includes(args.project_id)) {
+        return { updated: false, error: 'project_access_denied' };
+      }
+      const recalled = await TOOL_HANDLERS.hivemind_recall({
+        query: args.target_query, mode: 'fact', limit: 5,
+      }, args.project_id ? { ...ctx, projectId: args.project_id } : ctx);
+      const candidates = (recalled?.memories || []).filter((memory) => memory?.id && memory.is_latest !== false);
+      const normalizedTarget = String(args.target_query).trim().toLocaleLowerCase();
+      const exact = candidates.filter((memory) => String(memory.title || '').trim().toLocaleLowerCase() === normalizedTarget);
+      if (exact.length === 1) {
+        targetId = exact[0].id;
+      } else {
+        const first = candidates[0];
+        const second = candidates[1];
+        const firstScore = Number(first?.score || 0);
+        const secondScore = Number(second?.score || 0);
+        if (first && firstScore >= 0.72 && (firstScore - secondScore >= 0.10 || !second)) {
+          targetId = first.id;
+        } else {
+          return {
+            updated: false,
+            needs_memory_choice: true,
+            candidates: candidates.slice(0, 5).map((memory) => ({
+              id: memory.id, title: memory.title, snippet: String(memory.content || '').slice(0, 240), score: memory.score,
+            })),
+          };
+        }
+      }
+    }
+    if (!targetId) return { updated: false, error: 'memory_target_required' };
+    const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(targetId, {
       user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
     });
     if (!existing) return { updated: false, error: 'memory_not_found_or_forbidden' };
+    if (existing.is_latest === false || existing.isLatest === false) {
+      return { updated: false, error: 'memory_target_is_superseded' };
+    }
     const result = await ctx.persistentMemoryEngine.ingestMemory({
       title: args.title || existing.title,
       content: args.content || existing.content,
@@ -847,20 +1004,24 @@ const TOOL_HANDLERS = {
       org_id: ctx.orgId,
       scope: existing.scope || 'personal',
       project_ids: existing.project_ids || [],
-      relationship: { type: 'Updates', target_id: args.id, confidence: 1.0 },
+      relationship: { type: 'Updates', target_id: targetId, confidence: 1.0 },
       _authorized_relationship: true,
       source_metadata: {
         source_type: 'chat-update',
-        source_id: args.id,
-        metadata: { update_reason: args.reason || null },
+        source_id: targetId,
+        metadata: { update_reason: args.reason || null, original_target_query: args.target_query || null },
       },
+      ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
     });
     return {
       updated: true,
       id: result?.memoryId || result?.id || null,
-      deprecated_id: args.id,
+      deprecated_id: targetId,
       operation: result?.operation || 'updated',
       reason: args.reason,
+      edges_created: result?.id || result?.memoryId
+        ? [{ type: 'Updates', from_id: result?.memoryId || result?.id, to_id: targetId }]
+        : [],
     };
   },
 
@@ -1226,6 +1387,7 @@ export function normalizeAgentRecallMode(mode) {
 const TOOL_TIMEOUTS_MS = {
   hivemind_aggregate_entities: 5_000,
   hivemind_recall:           8_000,
+  hivemind_relation_between: 8_000,
   hivemind_at:               9_000,   // wraps recall + extra date filter
   hivemind_diff:            16_000,  // 2x recall
   hivemind_timeline:         8_000,

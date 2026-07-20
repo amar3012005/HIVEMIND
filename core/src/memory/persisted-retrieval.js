@@ -1323,6 +1323,7 @@ async function _recallPersistedMemoriesImpl(store, {
                              // and merge extra candidates. null = env default.
   exact_source = false,
   canonical_entities = [],
+  alternate_lexical_query = null,
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1588,20 +1589,19 @@ async function _recallPersistedMemoriesImpl(store, {
   })();
   _userProfilePromise.catch(() => {});
 
-  const lexicalCandidates = await store.searchMemories({
-    query: query_context,
-    user_id,
-    org_id,
-    project,
-    tags: _effectiveTags,
-    is_latest: effectiveIsLatest,
-    n_results: candidatePoolSize,
-    created_after: effectiveDateRange?.start,
-    created_before: effectiveDateRange?.end,
-    valid_at,
-    known_at,
-    access_context,
-  });
+  const lexicalArgs = {
+    user_id, org_id, project, tags: _effectiveTags, is_latest: effectiveIsLatest,
+    n_results: candidatePoolSize, created_after: effectiveDateRange?.start,
+    created_before: effectiveDateRange?.end, valid_at, known_at, access_context,
+  };
+  const lexicalQueries = [...new Set([query_context, alternate_lexical_query]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.trim()))].slice(0, 2);
+  const lexicalLanes = await Promise.all(lexicalQueries.map((query) =>
+    store.searchMemories({ ...lexicalArgs, query })));
+  const lexicalCandidates = [...new Map(
+    lexicalLanes.flat().filter((memory) => memory?.id).map((memory) => [memory.id, memory]),
+  ).values()];
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     const memTags = memory.tags || [];

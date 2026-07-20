@@ -1,138 +1,105 @@
 /**
- * project-classifier.js — decide which project a memory belongs to from the
- * project NAME + DESCRIPTION, semantically. Auto-assign when one project is a
- * clear winner; ask the user only when it is genuinely ambiguous; fall through
- * to personal when nothing fits.
- *
- * Used by every save surface so behavior is identical everywhere:
- *   • chat agent  (react-agent-v2.js  ask-project gate)
- *   • Slack "save this"  (server.js)
- *   • MCP hivemind_save_memory  (tool-registry.js)
- *   • Meeting Notes ingest  (server.js)
- *
- * Replaces the old name-substring heuristic that ignored descriptions entirely
- * (e.g. a memory about "solar inverter commissioning" never matched a project
- * named "SOLVIS" whose description was "solar inverter installs").
- *
- * LLM is best-effort: a Groq json_object call (gpt-oss-120b) with a short
- * timeout. On failure it returns an explicit scope question; it never guesses
- * project placement from a locale-specific name substring.
+ * Deterministic multilingual project resolution for every memory-write surface.
+ * BGE-M3 embeddings compare the memory with authorized project names and
+ * descriptions. The result is cached, bounded, and never invokes a chat model.
  */
 
-const CLASSIFY_MODEL = process.env.PROJECT_CLASSIFY_MODEL || 'openai/gpt-oss-120b';
-// Confidence to auto-assign without asking.
-const CONF_AUTO  = Number(process.env.PROJECT_CLASSIFY_AUTO_CONF || 0.72);
-// Below this, the memory fits no project → personal (no ask).
-const CONF_FLOOR = Number(process.env.PROJECT_CLASSIFY_FLOOR || 0.4);
-// Best must beat the runner-up by this margin to count as a clear winner.
-const MARGIN     = Number(process.env.PROJECT_CLASSIFY_MARGIN || 0.15);
-const TIMEOUT_MS = Number(process.env.PROJECT_CLASSIFY_TIMEOUT_MS || 6000);
+import { getEmbedService } from '../embeddings/factory.js';
 
-const clamp01 = (n) => (typeof n === 'number' && isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
+const CONF_AUTO = Number(process.env.PROJECT_CLASSIFY_AUTO_CONF || 0.72);
+const CONF_FLOOR = Number(process.env.PROJECT_CLASSIFY_FLOOR || 0.40);
+const MARGIN = Number(process.env.PROJECT_CLASSIFY_MARGIN || 0.15);
+const TIMEOUT_MS = Number(process.env.PROJECT_CLASSIFY_TIMEOUT_MS || 1500);
+const CACHE_MAX = Number(process.env.PROJECT_EMBED_CACHE_MAX || 2000);
+const projectVectorCache = new Map();
 
-async function llmClassify({ text, projects, signal }) {
-  if (!process.env.GROQ_API_KEY) return null;
-  const list = projects
-    .map((p, i) => `${i + 1}. ${p.name}${p.description ? ` — ${String(p.description).slice(0, 300)}` : ' — (no description)'}`)
-    .join('\n');
-  const sys =
-    'You route ONE memory to the single best-matching project, judging by each project\'s name AND description. ' +
-    'Return STRICT JSON: {"best": int|null, "confidence": number, "second": int|null, "second_confidence": number, "reason": string}. ' +
-    '"best" = the 1-based project number that best fits, or null if NONE fit. ' +
-    'confidence and second_confidence are in [0,1]. ' +
-    'Judge by topical/semantic fit to the description, not mere keyword overlap. ' +
-    'If the memory is generic, personal, or fits no project, set best=null with low confidence.';
-  const usr = `MEMORY:\n${String(text || '').slice(0, 2000)}\n\nPROJECTS:\n${list}`;
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  // Tie an externally-supplied signal to our timeout controller.
-  if (signal) {
-    if (signal.aborted) ctrl.abort();
-    else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+function projectText(project) {
+  return [project.name, project.slug, project.description].filter(Boolean).join('\n').slice(0, 2000);
+}
+
+function projectKey(project) {
+  return `${project.id}:${projectText(project)}`;
+}
+
+function cosine(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || left.length === 0) return 0;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index++) {
+    dot += left[index] * right[index];
+    leftNorm += left[index] * left[index];
+    rightNorm += right[index] * right[index];
   }
+  return leftNorm > 0 && rightNorm > 0 ? dot / Math.sqrt(leftNorm * rightNorm) : 0;
+}
+
+async function embedWithDeadline(texts, signal) {
+  if (signal?.aborted) throw new Error('project_classifier_aborted');
+  let timer;
   try {
-    const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: CLASSIFY_MODEL,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }],
+    return await Promise.race([
+      getEmbedService().embed(texts),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('project_classifier_timeout')), TIMEOUT_MS);
+        signal?.addEventListener('abort', () => reject(new Error('project_classifier_aborted')), { once: true });
       }),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) return null;
-    const j = await resp.json();
-    const parsed = JSON.parse(j?.choices?.[0]?.message?.content || '{}');
-    return {
-      best: Number.isInteger(parsed.best) ? parsed.best : null,
-      confidence: clamp01(parsed.confidence),
-      second: Number.isInteger(parsed.second) ? parsed.second : null,
-      second_confidence: clamp01(parsed.second_confidence),
-      reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 200) : '',
-    };
-  } catch {
-    return null;
+    ]);
   } finally {
-    clearTimeout(to);
+    clearTimeout(timer);
   }
 }
 
-/**
- * classifyProjectForMemory({ text, projects, signal })
- *   projects: [{ id, name, slug, description }]
- * → { decision: 'auto'|'ask'|'personal', projectId, projectName?, suggestedId?,
- *     suggestedName?, confidence, reason, candidates? }
- */
+async function rankProjects({ text, projects, signal }) {
+  const missing = projects.filter((project) => !projectVectorCache.has(projectKey(project)));
+  const inputs = [String(text || '').slice(0, 4000), ...missing.map(projectText)];
+  const vectors = await embedWithDeadline(inputs, signal);
+  const queryVector = vectors[0];
+  missing.forEach((project, index) => projectVectorCache.set(projectKey(project), vectors[index + 1]));
+  while (projectVectorCache.size > CACHE_MAX) projectVectorCache.delete(projectVectorCache.keys().next().value);
+  return projects
+    .map((project) => ({ project, score: Math.max(0, Math.min(1, cosine(queryVector, projectVectorCache.get(projectKey(project))))) }))
+    .sort((left, right) => right.score - left.score);
+}
+
 export async function classifyProjectForMemory({ text, projects, signal }) {
   if (!Array.isArray(projects) || projects.length === 0) {
     return { decision: 'personal', projectId: null, confidence: 0, reason: 'no projects' };
   }
-  const candidates = projects.map((p) => ({ id: p.id, name: p.name, slug: p.slug }));
-  const r = await llmClassify({ text, projects, signal });
-  if (!r) {
-    return { decision: 'ask', projectId: null, confidence: 0, reason: 'project_classifier_unavailable', candidates };
+  const candidates = projects.map((project) => ({ id: project.id, name: project.name, slug: project.slug }));
+  let ranked;
+  try {
+    ranked = await rankProjects({ text, projects, signal });
+  } catch (error) {
+    return { decision: 'ask', projectId: null, confidence: 0, reason: error.message, candidates };
   }
-  const bestIdx = (Number.isInteger(r.best) && r.best >= 1 && r.best <= projects.length) ? r.best - 1 : null;
-  const conf = clamp01(r.confidence);
-  const secConf = clamp01(r.second_confidence);
-
-  if (bestIdx == null || conf < CONF_FLOOR) {
-    return { decision: 'personal', projectId: null, confidence: conf, reason: r.reason || 'no fit' };
+  const best = ranked[0];
+  const secondScore = ranked[1]?.score || 0;
+  if (!best || best.score < CONF_FLOOR) {
+    return { decision: 'personal', projectId: null, confidence: best?.score || 0, reason: 'no semantic project fit' };
   }
-
-  const best = projects[bestIdx];
-  const clearWinner = conf >= CONF_AUTO && (conf - secConf) >= MARGIN;
-  if (clearWinner) {
-    return { decision: 'auto', projectId: best.id, projectName: best.name, confidence: conf, reason: r.reason || '' };
+  if (best.score >= CONF_AUTO && best.score - secondScore >= MARGIN) {
+    return {
+      decision: 'auto', projectId: best.project.id, projectName: best.project.name,
+      confidence: best.score, reason: 'bge-m3 semantic project match',
+    };
   }
-  // Plausible but not clear → ask, with the best as the pre-selected suggestion.
-  return { decision: 'ask', projectId: null, suggestedId: best.id, suggestedName: best.name, confidence: conf, reason: r.reason || '', candidates };
+  return {
+    decision: 'ask', projectId: null, suggestedId: best.project.id,
+    suggestedName: best.project.name, confidence: best.score,
+    reason: 'ambiguous semantic project fit', candidates,
+  };
 }
 
-/**
- * resolveProjectForSave({ text, projects, policy, callerProjectId, signal })
- * One front door that folds the org's memory_save_policy into the decision:
- *   • explicit caller project   → use it (always wins)
- *   • policy 'org-wide'          → org scope, no project
- *   • no accessible projects     → personal
- *   • policy 'ask'               → always ask (manual mode, no auto-classify)
- *   • policy 'private'|'auto'|*  → semantic classify (auto / ask-on-doubt / personal)
- *
- * Returns { decision: 'explicit'|'org'|'personal'|'auto'|'ask', projectId, ... }
- */
 export async function resolveProjectForSave({ text, projects, policy, callerProjectId, signal }) {
   if (callerProjectId) return { decision: 'explicit', projectId: callerProjectId };
-  const pol = String(policy || 'private').toLowerCase();
-  if (pol === 'org-wide') return { decision: 'org', projectId: null };
+  const normalizedPolicy = String(policy || 'private').toLowerCase();
+  if (normalizedPolicy === 'org-wide') return { decision: 'org', projectId: null };
   if (!Array.isArray(projects) || projects.length === 0) return { decision: 'personal', projectId: null };
-  if (pol === 'ask') {
+  if (normalizedPolicy === 'ask') {
     return {
-      decision: 'ask',
-      projectId: null,
-      suggestedId: null,
-      candidates: projects.map((p) => ({ id: p.id, name: p.name, slug: p.slug })),
+      decision: 'ask', projectId: null, suggestedId: null,
+      candidates: projects.map((project) => ({ id: project.id, name: project.name, slug: project.slug })),
       reason: 'org policy = ask',
     };
   }

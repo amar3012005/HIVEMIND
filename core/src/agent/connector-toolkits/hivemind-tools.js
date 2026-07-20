@@ -13,7 +13,7 @@ const WRITE_TOOLS = new Set([
 const GROUPS = {
   'hivemind-recall': {
     description: 'Tenant-scoped HIVEMIND memory, evidence, exact-source, entity aggregation, temporal recall and graph retrieval.',
-    tools: new Set(['hivemind_recall', 'hivemind_aggregate_entities', 'hivemind_get_memory', 'hivemind_list_memories', 'hivemind_traverse_graph', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_query_with_ai']),
+    tools: new Set(['hivemind_recall', 'hivemind_relation_between', 'hivemind_aggregate_entities', 'hivemind_get_memory', 'hivemind_list_memories', 'hivemind_traverse_graph', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_query_with_ai']),
   },
   'hivemind-memory-write': {
     description: 'Versioned HIVEMIND memory creation, update, deletion, decisions and assistant identity. Mutations are scoped and approval/policy checked.',

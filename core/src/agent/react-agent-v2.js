@@ -27,7 +27,6 @@
  */
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
-import { resolveProjectForSave } from '../memory/project-classifier.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
@@ -89,7 +88,7 @@ const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 400
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
-const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 6_500);
+const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 3_000);
 
 // Model split:
 //   • structured intent planning uses Gemini 2.5 Flash-Lite;
@@ -744,7 +743,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // The shared router owns wide lexical/vector/entity lanes; firing several
   // independent recalls duplicates those lanes and makes latency/merging
   // nondeterministic under load.
-  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read';
+  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
     ? [plannedQueries.join('\nRelated focus: ')]
     : [];
@@ -753,6 +752,9 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       recallQueries.map(async (q) => {
         const args = {
           query: q,
+          query_original: plan.query_original || plan.user_message || q,
+          query_canonical_en: plan.query_canonical_en || q,
+          entities: plan.named_entities || [],
           mode: recallMode,
           limit: recallLimit,
           _explicit_mode: !!plan.explicit_recall_mode,
@@ -817,6 +819,40 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
           synthesisChains.set(chain.synthesis_id, chain);
         }
       }
+    }
+  }
+
+  if (plan.operation === 'relation_between' && plan.relation_intent?.entities?.length >= 2 && remaining() > 0) {
+    const relationArgs = {
+      entities: plan.relation_intent.entities,
+      query: plan.query_canonical_en || plan.user_message,
+      mode: 'explain',
+      ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
+      ...(plan.source?.title ? { source_title: plan.source.title } : {}),
+      ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
+      ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
+    };
+    try {
+      startTool('hivemind_relation_between', relationArgs);
+      const relationResult = await beforeDeadline(dispatchTool('hivemind_relation_between', relationArgs, ctx));
+      recordTool(
+        'hivemind_relation_between', relationArgs,
+        `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
+        relationResult,
+      );
+      for (const memory of (relationResult?.memories || [])) {
+        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
+      }
+      for (const item of (relationResult?.evidence || [])) {
+        const key = item?.id || `${item?.document_title || '?'}|${item?.page || ''}|${String(item?.content || item?.snippet || '').slice(0, 40)}`;
+        if (!evidenceSeen.has(key)) { evidenceSeen.add(key); evidenceItems.push(item); }
+      }
+      for (const edge of (relationResult?.relationships || [])) {
+        if (edge?.from_id && edge?.to_id && edge?.type) edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
+      }
+      recallPackets.push(...(relationResult?.evidence_packets || []));
+    } catch (error) {
+      recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
     }
   }
 
@@ -1833,7 +1869,13 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       // forward it explicitly here as project_id so audit-logged args (and
       // any downstream code that bypasses the fallback) carry the scope.
       ...(plan.save_intent.project_hint ? { project: plan.save_intent.project_hint } : {}),
-      ...(ctx.projectId && !plan.save_intent.project_id && !plan.save_intent.project_hint
+      ...(plan.save_intent.project_id ? { project_id: plan.save_intent.project_id, scope: 'project' } : {}),
+      ...(plan.save_intent.memory_type ? { memory_type: plan.save_intent.memory_type } : {}),
+      ...(plan.save_intent.entities?.length ? { entities: plan.save_intent.entities } : {}),
+      ...(plan.save_intent.event_time ? { event_time: plan.save_intent.event_time } : {}),
+      _source_id: ctx._trace?.traceId || null,
+      _original_content: message,
+      ...(ctx.projectId
         ? { project_id: ctx.projectId, scope: 'project' }
         : {}),
     };
@@ -1845,7 +1887,7 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       }
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' });
-      return { tool: 'hivemind_save_memory', args, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
+      return { tool: 'hivemind_save_memory', args, result: r, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
     } catch (err) {
       return { tool: 'hivemind_save_memory', args, result_summary: `error: ${err.message}` };
     }
@@ -1865,9 +1907,13 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       content: as.content,
       tags: Array.isArray(as.tags) ? as.tags : [],
       source_type: ['decision','preference','event','goal','lesson','relationship'].includes(as.memory_type) ? as.memory_type : 'text',
-      ...(ctx.projectId
-        ? { project_id: ctx.projectId, scope: 'project' }
-        : {}),
+      ...(as.project_id ? { project_id: as.project_id, scope: 'project' } : {}),
+      ...(as.project_hint ? { project: as.project_hint } : {}),
+      ...(as.entities?.length ? { entities: as.entities } : {}),
+      ...(as.event_time ? { event_time: as.event_time } : {}),
+      _source_id: ctx._trace?.traceId || null,
+      _original_content: message,
+      ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
@@ -1878,12 +1924,46 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       const summary = r?.id ? `auto-saved ${(r.id || '').slice(0, 8)} (conf=${as.confidence.toFixed(2)})` : 'auto-saved';
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify({ ...args, __auto: true }) });
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary });
-      return { tool: 'hivemind_save_memory', args, result_summary: summary };
+      return { tool: 'hivemind_save_memory', args, result: r, result_summary: summary };
     } catch (err) {
       return { tool: 'hivemind_save_memory', args, result_summary: `auto-save error: ${err.message}` };
     }
   }
   return null;
+}
+
+function mutationConfirmation(operation, language, result = {}) {
+  const lang = String(language || 'en').toLowerCase().split('-')[0];
+  const labels = {
+    en: { saved: 'Saved to HIVEMIND.', updated: 'Memory updated.', needs_project_choice: 'Choose where this memory belongs.' },
+    de: { saved: 'In HIVEMIND gespeichert.', updated: 'Erinnerung aktualisiert.', needs_project_choice: 'Wählen Sie aus, wohin diese Erinnerung gehört.' },
+    fr: { saved: 'Enregistré dans HIVEMIND.', updated: 'Mémoire mise à jour.', needs_project_choice: 'Choisissez où enregistrer cette mémoire.' },
+    es: { saved: 'Guardado en HIVEMIND.', updated: 'Memoria actualizada.', needs_project_choice: 'Elige dónde guardar esta memoria.' },
+    hi: { saved: 'HIVEMIND में सहेजा गया।', updated: 'मेमोरी अपडेट की गई।', needs_project_choice: 'चुनें कि यह मेमोरी कहाँ सहेजी जाए।' },
+    ar: { saved: 'تم الحفظ في HIVEMIND.', updated: 'تم تحديث الذاكرة.', needs_project_choice: 'اختر مكان حفظ هذه الذاكرة.' },
+  };
+  const table = labels[lang] || labels.en;
+  const key = result.needs_project_choice ? 'needs_project_choice' : operation;
+  return table[key] || labels.en[key] || labels.en.saved;
+}
+
+function buildActionResult(operation, result = {}) {
+  if (result.needs_project_choice) {
+    return {
+      operation: 'needs_project_choice', memory_id: null, project_id: null,
+      project_name: null, deprecated_ids: [], edges_created: [],
+    };
+  }
+  return {
+    operation,
+    memory_id: result.id || null,
+    project_id: result.project_id || null,
+    project_name: result.project || null,
+    deprecated_ids: result.deprecated_id ? [result.deprecated_id] : [],
+    edges_created: result.edges_created || (operation === 'updated' && result.deprecated_id && result.id
+      ? [{ type: 'Updates', from_id: result.id, to_id: result.deprecated_id }]
+      : []),
+  };
 }
 
 // ── Public entry — same signature as v1 ────────────────────────────────
@@ -1996,9 +2076,19 @@ export async function runReactAgentV2({
     // the same instance executes any selected connector/native tools later.
     const { buildToolkitForUser, getCapabilityCatalogForUser } = await import('./toolkit-factory.js');
     const groupCatalog = await getCapabilityCatalogForUser({ prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId });
+    const authorizedProjectIds = Array.isArray(ctx.accessContext?.projectIds) ? ctx.accessContext.projectIds : [];
+    const projectCatalog = authorizedProjectIds.length && ctx.prisma?.project
+      ? await ctx.prisma.project.findMany({
+          where: { id: { in: authorizedProjectIds }, orgId: ctx.orgId, status: 'active' },
+          select: { id: true, name: true, slug: true, description: true },
+          orderBy: { updatedAt: 'desc' },
+          take: 24,
+        }).catch(() => [])
+      : [];
     const intentParsed = await parseChatIntent({
       message, history, language,
       groupCatalog,
+      projectCatalog,
       model: INTENT_MODEL,
       apiKey,
       signal: abortCtrl.signal,
@@ -2032,7 +2122,7 @@ export async function runReactAgentV2({
     plan = applyExplicitRecallControls(plan, {
       mode: recallMode,
       source: recallSource,
-      time: recallTime || intentDecision.time,
+      time: recallTime || intentDecision.relation?.time || intentDecision.time,
     });
 
     // API/UI recall controls are server-owned requirements, not hints for the
@@ -2084,13 +2174,18 @@ export async function runReactAgentV2({
       const result = await dispatchTool(toolName, toolArgs, ctx);
       const succeeded = !result?.error && result?.updated !== false && result?.deleted !== false;
       onEvent?.({ type: 'tool_completed', name: toolName, status: succeeded ? 'ok' : 'error', result });
-      const response = succeeded ? intentDecision.acknowledgement : `${intentDecision.acknowledgement} (${result?.error || 'operation_failed'})`;
+      const response = succeeded
+        ? (intentDecision.operation === 'update'
+            ? mutationConfirmation('updated', intentDecision.response_language || language, result)
+            : intentDecision.acknowledgement)
+        : `${intentDecision.failure_response || 'Memory update failed.'} (${result?.error || 'operation_failed'})`;
       onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: succeeded });
       return {
         response, sources: [], steps: [{ tool: toolName, args: toolArgs, result_summary: succeeded ? 'completed' : String(result?.error || 'failed') }],
         evidence_used: [], confidence: succeeded ? 1 : 0, gaps: succeeded ? [] : [String(result?.error || 'operation_failed')],
         usage: sumUsage(usages), trace: finalizeTrace(trace, usages), assistant_name: plan.assistant_name_intent || assistantName || null,
+        action_result: succeeded && intentDecision.operation === 'update' ? buildActionResult('updated', result) : null,
       };
     }
 
@@ -2186,74 +2281,6 @@ export async function runReactAgentV2({
       }
     }
 
-    // Save intent without a resolvable project scope → ASK *only* when:
-    //   • the planner explicitly flagged ask_for_project, OR
-    //   • content mentions a known project name OR
-    //   • the user has multiple projects AND the content TOPICALLY MATCHES
-    //     one of them (best-match score > 0.5 against project name).
-    // Otherwise default to personal scope silently. Previously we asked on
-    // every save when user had ≥2 projects — every chat turn got blocked
-    // by "Which project?" question even for totally unrelated facts.
-    if (plan.intent_kind === 'save' && plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
-      const accessProjectIds = (ctx.accessContext?.projectIds) || [];
-      if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length >= 1) {
-        let projects = [];
-        try {
-          if (ctx.persistentMemoryStore?.client?.project) {
-            projects = await ctx.persistentMemoryStore.client.project.findMany({
-              where: { id: { in: accessProjectIds }, orgId: ctx.orgId, status: 'active' },
-              select: { id: true, name: true, slug: true, description: true },
-              take: 24,
-            });
-          }
-        } catch {}
-
-        // Org memory_save_policy: 'org-wide' | 'ask' | 'private'(auto-classify).
-        let policy = 'private';
-        try {
-          const org = await ctx.persistentMemoryStore?.client?.organization?.findUnique({
-            where: { id: ctx.orgId }, select: { memorySavePolicy: true },
-          });
-          policy = org?.memorySavePolicy || 'private';
-        } catch {}
-
-        // Semantic classify against project name + DESCRIPTION (replaces the
-        // old name-substring heuristic that ignored descriptions). Confident
-        // match → assign silently; ambiguous → ask (suggested floated to top);
-        // nothing fits → personal.
-        const decision = await resolveProjectForSave({
-          text: `${plan.save_intent.title || ''}\n${plan.save_intent.content || ''}\n${message || ''}`,
-          projects,
-          policy,
-        });
-
-        if (decision.decision === 'auto' && decision.projectName) {
-          plan.save_intent.project_hint = decision.projectName;
-          plan.ask_for_project = false;
-          // fall through to the save branch (acks "(project: X)").
-        } else if (decision.decision === 'ask') {
-          const ordered = decision.suggestedId
-            ? [...projects].sort((a, b) => (a.id === decision.suggestedId ? -1 : b.id === decision.suggestedId ? 1 : 0))
-            : projects;
-          const list = ordered
-            .map(p => `• ${p.name}`)
-            .join('\n');
-          const ask = `${plan.project_prompt}\n${list}`.trim();
-          onEvent?.({ type: 'finish', text: ask });
-          onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: false, reason: 'project_scope_unresolved' });
-          return {
-            response: ask, sources: [], steps,
-            evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
-            usage: sumUsage(usages),
-            trace: finalizeTrace(trace, usages),
-            assistant_name: assistantName || null,
-          };
-        }
-        // 'personal' / 'org' → fall through to save (personal scope unless a
-        // project_hint was just set above).
-      }
-    }
-
     // Pure save intent (no recall needed) — write the memory then ack.
     // Requires intent_kind === 'save' (enforced upstream in planStep) AND
     // a populated save_intent payload. Pure-noun / filename-only inputs
@@ -2265,7 +2292,7 @@ export async function runReactAgentV2({
       // Deferred for project choice — ask (the FE renders project buttons),
       // do NOT claim it was saved.
       if (saveStep?.project_choice) {
-        const askText = plan.project_prompt;
+        const askText = mutationConfirmation('saved', intentDecision.response_language || language, { needs_project_choice: true });
         onEvent?.({ type: 'finish', text: askText });
         onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: false, reason: 'project_scope_unresolved' });
         return {
@@ -2275,17 +2302,23 @@ export async function runReactAgentV2({
           trace: finalizeTrace(trace, usages),
           assistant_name: assistantName || null,
           project_choice: saveStep.project_choice,
+          action_result: buildActionResult('saved', { needs_project_choice: true }),
         };
       }
-      const ackText = plan.acknowledgement;
+      const saveResult = saveStep?.result || {};
+      const saveSucceeded = saveResult.saved !== false && !saveResult.error;
+      const ackText = saveSucceeded
+        ? mutationConfirmation('saved', intentDecision.response_language || language, saveResult)
+        : `${intentDecision.failure_response || 'Memory save failed.'} (${saveResult.error || 'operation_failed'})`;
       onEvent?.({ type: 'finish', text: ackText });
-      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: true });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: saveSucceeded });
       return {
         response: ackText, sources: [], steps,
-        evidence_used: [], confidence: 1.0, gaps: [],
+        evidence_used: [], confidence: saveSucceeded ? 1.0 : 0, gaps: saveSucceeded ? [] : [saveResult.error || 'operation_failed'],
         usage: sumUsage(usages),
         trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
+        action_result: saveSucceeded ? buildActionResult('saved', saveResult) : null,
       };
     }
 
@@ -2358,13 +2391,24 @@ export async function runReactAgentV2({
     //       confidence >= 0.75 in any intent_kind. The function checks
     //       both intents and prefers explicit save when both present.
     let recallProjectChoice = null;
+    let recallActionResult = null;
+    let recallSaveResult = null;
     if ((plan.intent_kind === 'save' && plan.save_intent) || plan.auto_save_intent) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
       if (saveStep?.project_choice) recallProjectChoice = saveStep.project_choice;
+      if (saveStep?.result?.saved) {
+        recallSaveResult = saveStep.result;
+        recallActionResult = buildActionResult('saved', saveStep.result);
+      }
     }
 
-    const finalResponse = recallProjectChoice ? plan.project_prompt : answer.response;
+    const savedDisclosure = recallActionResult
+      ? `\n\n${mutationConfirmation('saved', intentDecision.response_language || language, recallSaveResult)}`
+      : '';
+    const finalResponse = recallProjectChoice
+      ? mutationConfirmation('saved', intentDecision.response_language || language, { needs_project_choice: true })
+      : `${answer.response}${savedDisclosure}`;
     onEvent?.({ type: 'finish', text: finalResponse });
     onEvent?.({ type: 'turn_completed', grounded: answer.grounded, confidence: answer.confidence });
 
@@ -2434,6 +2478,9 @@ export async function runReactAgentV2({
       usage:         sumUsage(usages),
       trace:         finalizeTrace(trace, usages),
       assistant_name: assistantName || null,
+      action_result: recallProjectChoice
+        ? buildActionResult('saved', { needs_project_choice: true })
+        : recallActionResult,
     };
   } catch (error) {
     onEvent?.({ type: 'turn_failed', error: error?.code || error?.name || 'chat_orchestration_failed' });

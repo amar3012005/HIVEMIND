@@ -12,7 +12,7 @@ import { chatCompletionFetch } from '../llm/chat-provider.js';
 const CHAT_INTENT_VERSION = 'chat-intent.v2';
 const OPERATIONS = new Set([
   'direct', 'recall', 'source_read', 'aggregate', 'connector_read',
-  'connector_write', 'save', 'update', 'delete', 'rename_assistant',
+  'connector_write', 'save', 'update', 'relation_between', 'delete', 'rename_assistant',
 ]);
 const RECALL_MODES = new Set(['fact', 'explain', 'full']);
 const SCOPES = new Set(['personal', 'project', 'team', 'organization']);
@@ -56,6 +56,8 @@ export function createChatIntentTool(groupCatalog = []) {
           response_language: { type: 'string', description: 'BCP-47 language tag inferred from the request and history.' },
           direct_response: { type: 'string', description: 'Same-language response. Required only for direct.' },
           queries: { type: 'array', items: { type: 'string' }, maxItems: 3 },
+          query_original: { type: 'string', description: 'Original user retrieval wording. Preserve names, filenames, identifiers and aliases exactly.' },
+          query_canonical_en: { type: 'string', description: 'Concise English retrieval formulation. Preserve exact names, filenames, numbers and identifiers.' },
           named_entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
           recall_mode: { type: 'string', enum: [...RECALL_MODES] },
           source: {
@@ -81,13 +83,36 @@ export function createChatIntentTool(groupCatalog = []) {
               title: { type: 'string' }, content: { type: 'string' },
               tags: { type: 'array', items: { type: 'string' }, maxItems: 12 },
               memory_type: { type: 'string' }, project_hint: { type: 'string' },
+              project_id: { type: 'string', description: 'Choose only an authorized project id supplied in the project catalog.' },
+              entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+              event_time: { type: 'string', description: 'ISO event/valid time when explicitly supplied.' },
               confidence: { type: 'number', minimum: 0, maximum: 1 },
             },
             required: ['title', 'content'],
           },
           update: {
             type: 'object', additionalProperties: false,
-            properties: { id: { type: 'string' }, content: { type: 'string' }, title: { type: 'string' }, reason: { type: 'string' } },
+            properties: {
+              id: { type: 'string' }, target_query: { type: 'string' }, content: { type: 'string' },
+              title: { type: 'string' }, reason: { type: 'string' }, project_id: { type: 'string' },
+              project_hint: { type: 'string' }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+              event_time: { type: 'string' },
+            },
+          },
+          relation: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              entities: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 6 },
+              source: {
+                type: 'object', additionalProperties: false,
+                properties: { document_id: { type: 'string' }, title: { type: 'string' } },
+              },
+              time: {
+                type: 'object', additionalProperties: false,
+                properties: { valid_at: { type: 'string' }, known_at: { type: 'string' } },
+              },
+            },
+            required: ['entities'],
           },
           delete: {
             type: 'object', additionalProperties: false,
@@ -128,9 +153,10 @@ function safeRecallDecision({ message, language, reason }) {
     operation: 'recall', confidence: 0,
     response_language: boundedText(language, 32) || 'und',
     direct_response: '', queries: [boundedText(message)], named_entities: [],
+    query_original: boundedText(message), query_canonical_en: boundedText(message),
     recall_mode: 'fact', source: null, aggregate: null, tool_groups: ['hivemind-recall'],
     connector_provider: null, scope_filter: null, side_effect_policy: 'read_only',
-    save: null, update: null, delete: null, time: null, continuation: null,
+    save: null, update: null, relation: null, delete: null, time: null, continuation: null,
     assistant_name: null, project_prompt: '', acknowledgement: '', failure_response: '',
     parser_fallback: reason || 'intent_parser_unavailable',
   };
@@ -156,7 +182,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     ? { parent: boundedText(raw.aggregate.parent, 256), kind: boundedText(raw.aggregate.kind, 128), requires_complete_coverage: true }
     : null;
   const toolGroups = boundedStrings(raw.tool_groups, 12, 128).filter((name) => allowed.has(name));
-  const requiredNativeGroup = ['recall', 'source_read', 'aggregate'].includes(operation)
+  const requiredNativeGroup = ['recall', 'source_read', 'aggregate', 'relation_between'].includes(operation)
     ? 'hivemind-recall'
     : ['save', 'update', 'delete', 'rename_assistant'].includes(operation) ? 'hivemind-memory-write' : null;
   if (requiredNativeGroup && allowed.has(requiredNativeGroup) && !toolGroups.includes(requiredNativeGroup)) {
@@ -169,8 +195,14 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     response_language: boundedText(raw.response_language, 32) || boundedText(language, 32) || 'und',
     direct_response: boundedText(raw.direct_response, 2000),
     queries,
+    query_original: boundedText(raw.query_original, 2000) || boundedText(message, 2000),
+    query_canonical_en: boundedText(raw.query_canonical_en, 2000) || queries[0] || boundedText(message, 2000),
     named_entities: boundedStrings(raw.named_entities, 12, 256),
-    recall_mode: RECALL_MODES.has(raw.recall_mode) ? raw.recall_mode : 'fact',
+    // Full reconstruction is caller-explicit only. The router can request at
+    // most explain; applyExplicitRecallControls may promote to full later.
+    recall_mode: raw.recall_mode === 'full'
+      ? 'explain'
+      : (RECALL_MODES.has(raw.recall_mode) ? raw.recall_mode : 'fact'),
     source,
     aggregate,
     tool_groups: toolGroups,
@@ -182,11 +214,35 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
           title: boundedText(raw.save.title, 200), content: boundedText(raw.save.content),
           tags: boundedStrings(raw.save.tags, 12, 128), memory_type: boundedText(raw.save.memory_type, 64) || 'fact',
           project_hint: boundedText(raw.save.project_hint, 256) || null,
+          project_id: boundedText(raw.save.project_id, 128) || null,
+          entities: boundedStrings(raw.save.entities, 12, 256),
+          event_time: boundedText(raw.save.event_time, 64) || null,
           confidence: Math.max(0, Math.min(1, Number(raw.save.confidence) || 0)),
         }
       : null,
-    update: raw.update && boundedText(raw.update.id, 128)
-      ? { id: boundedText(raw.update.id, 128), content: boundedText(raw.update.content), title: boundedText(raw.update.title, 200), reason: boundedText(raw.update.reason, 500) }
+    update: raw.update && (boundedText(raw.update.id, 128) || boundedText(raw.update.target_query, 1000))
+      ? {
+          id: boundedText(raw.update.id, 128) || null,
+          target_query: boundedText(raw.update.target_query, 1000) || null,
+          content: boundedText(raw.update.content), title: boundedText(raw.update.title, 200),
+          reason: boundedText(raw.update.reason, 500), project_id: boundedText(raw.update.project_id, 128) || null,
+          project_hint: boundedText(raw.update.project_hint, 256) || null,
+          entities: boundedStrings(raw.update.entities, 12, 256),
+          event_time: boundedText(raw.update.event_time, 64) || null,
+        }
+      : null,
+    relation: raw.relation && boundedStrings(raw.relation.entities, 6, 256).length >= 2
+      ? {
+          entities: boundedStrings(raw.relation.entities, 6, 256),
+          source: raw.relation.source ? {
+            document_id: boundedText(raw.relation.source.document_id, 128) || null,
+            title: boundedText(raw.relation.source.title, 512) || null,
+          } : null,
+          time: raw.relation.time ? {
+            valid_at: boundedText(raw.relation.time.valid_at, 64) || null,
+            known_at: boundedText(raw.relation.time.known_at, 64) || null,
+          } : null,
+        }
       : null,
     delete: raw.delete && boundedText(raw.delete.id, 128)
       ? { id: boundedText(raw.delete.id, 128), reason: boundedText(raw.delete.reason, 500) }
@@ -212,17 +268,17 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     || (operation === 'connector_write' && (!normalized.connector_provider || normalized.tool_groups.length === 0))
     || (operation === 'save' && !normalized.save)
     || (operation === 'update' && !normalized.update)
+    || (operation === 'relation_between' && !normalized.relation)
     || (operation === 'delete' && !normalized.delete)
     || (operation === 'rename_assistant' && !normalized.assistant_name)
     || (['connector_read', 'connector_write'].includes(operation) && !normalized.failure_response)
-    || (['connector_write', 'save', 'update', 'delete', 'rename_assistant'].includes(operation) && !normalized.acknowledgement)
-    || (operation === 'save' && !normalized.project_prompt);
+    || (['connector_write', 'delete', 'rename_assistant'].includes(operation) && !normalized.acknowledgement);
   return invalid ? safeRecallDecision({ message, language, reason: 'invalid_intent_combination' }) : normalized;
 }
 
 export async function parseChatIntent({
   message, language = null, history = [], groupCatalog = [], model, apiKey,
-  signal, fetchImpl = globalThis.fetch,
+  signal, fetchImpl = globalThis.fetch, projectCatalog = [],
 } = {}) {
   const allowedGroups = groupCatalog.map((group) => group.name).filter(Boolean);
   const catalog = groupCatalog.map((group) => ({
@@ -237,14 +293,17 @@ export async function parseChatIntent({
   const system = `You are the fast intent and capability parser for a multi-tenant enterprise assistant.
 Return exactly one route_chat_turn tool call. Understand the user's language directly; do not translate exact names, filenames, identifiers, or search queries.
 Use the conversation history to resolve references. Select the minimum tool groups whose descriptions match the request.
-Operation contract: use source_read for a named source/file. Use aggregate for any request that requires a complete or exact count, or every member of a category. A top-K recall answer can never establish completeness, so do not use recall for an exhaustive count/list. Use recall only when the user needs relevant evidence rather than a complete set. Use connector_read for current connected-app data, and connector_write only for an explicit external side effect.
+Operation contract: use source_read for a named source/file. Use relation_between when the user asks how two or more exact entities are connected. Use aggregate for any request that requires a complete or exact count, or every member of a category. A top-K recall answer can never establish completeness, so do not use recall for an exhaustive count/list. Use recall only when the user needs relevant evidence rather than a complete set. Use connector_read for current connected-app data, and connector_write only for an explicit external side effect.
+Always return query_original in the user's wording and query_canonical_en as a concise English retrieval formulation. Preserve exact filenames, people, companies, products, numbers, identifiers and aliases in both.
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.
 Use save only for an explicit save request or a high-confidence durable fact about the user's own world. Put the fully resolved fact in save.content; never return a pronoun or the save instruction itself.
+For implicit durable facts, use save only at confidence >= 0.80. For save/update, choose project_id only from the authorized project catalog below; if no project clearly fits, leave project_id null. Never invent a project id.
+For update, provide either the exact memory id from conversation context or a precise target_query; downstream code resolves authorized latest memories and refuses ambiguity.
 When the prior assistant requested a project choice, resolve it through continuation instead of copying the prior prompt text.
 Use scope_filter=personal for questions specifically about the user. Writes require approval. Never broaden organization or project scope.
 For direct conversational replies, supply direct_response in the user's language.
 For connector operations, supply failure_response in the user's language for a safe execution failure. For connector_write also supply acknowledgement.
-Available tool groups:\n${JSON.stringify(catalog)}`;
+Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAvailable tool groups:\n${JSON.stringify(catalog)}`;
   const body = {
     model,
     messages: [
@@ -293,10 +352,12 @@ export function intentDecisionToPlan(decision, message) {
     user_message: message,
     operation,
     intents: [operation],
-    sub_queries: decision.queries,
+    sub_queries: ['save', 'update', 'delete', 'rename_assistant'].includes(operation) ? [] : decision.queries,
     named_entities: decision.named_entities,
+    query_original: decision.query_original,
+    query_canonical_en: decision.query_canonical_en,
     recall_mode: decision.source || decision.aggregate ? 'explain' : decision.recall_mode,
-    source: decision.source,
+    source: decision.relation?.source || decision.source,
     aggregate: decision.aggregate,
     requires_complete_coverage: !!decision.aggregate,
     scope_filter: decision.scope_filter,
@@ -304,17 +365,19 @@ export function intentDecisionToPlan(decision, message) {
     live_providers: operation === 'connector_read' && decision.connector_provider ? [decision.connector_provider] : [],
     action_intent: operation === 'connector_write' ? decision.connector_provider : null,
     save_intent: operation === 'save' ? decision.save : null,
-    auto_save_intent: operation !== 'save' && decision.save?.confidence >= 0.75 ? decision.save : null,
+    auto_save_intent: operation !== 'save' && decision.save?.confidence >= 0.80 ? decision.save : null,
     update_intent: operation === 'update' ? decision.update : null,
+    relation_intent: operation === 'relation_between' ? decision.relation : null,
     delete_intent: operation === 'delete' ? decision.delete : null,
-    recall_time: decision.time,
+    recall_time: decision.relation?.time || decision.time,
+    time: decision.relation?.time || decision.time,
     continuation: decision.continuation,
     assistant_name_intent: operation === 'rename_assistant' ? decision.assistant_name : null,
     _direct_answer: operation === 'direct' ? decision.direct_response : null,
     project_prompt: decision.project_prompt,
     acknowledgement: decision.acknowledgement,
     failure_response: decision.failure_response,
-    needs_traverse: false, needs_time_travel: false, time_travel: null,
+    needs_traverse: operation === 'relation_between', needs_time_travel: false, time_travel: null,
     needs_web: false, ask_for_project: false, expected_evidence_types: [],
   };
 }

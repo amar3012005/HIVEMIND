@@ -443,6 +443,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     include_superseded: options.include_superseded === true,
     exact_source: !!(options.source_document_id || options.source_title),
     canonical_entities: options.canonical_entities || [],
+    alternate_lexical_query: options.alternate_lexical_query || null,
     scope_filter: options.scope_filter || null,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
@@ -1224,10 +1225,13 @@ export class RecallRouter {
         source: implicitSource,
       });
     }
+    const plannedEntities = Array.isArray(options.named_entities) ? options.named_entities : [];
+    const mergedCanonicalEntities = [...new Set([...plannedEntities, ...canonicalEntities]
+      .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
     recallPlan = {
       ...recallPlan,
-      entities: canonicalEntities,
-      named_entities: canonicalEntities,
+      entities: mergedCanonicalEntities,
+      named_entities: mergedCanonicalEntities,
     };
     options = {
       ...options,
@@ -1237,7 +1241,7 @@ export class RecallRouter {
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
       include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
-      canonical_entities: canonicalEntities,
+      canonical_entities: mergedCanonicalEntities,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     let cutoffReason = null;

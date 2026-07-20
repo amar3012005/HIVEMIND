@@ -1262,18 +1262,37 @@ export class RecallRouter {
       );
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
         const fullSource = recallPlan.mode === 'full';
-        explicitSourceHydration = withTimeout(
-          this.evidence.hydrateSourceDocuments({
-            documents: explicitSourceDocuments,
-            query,
-            userId: ctx.userId,
-            orgId: ctx.orgId,
-            perDocument: fullSource ? 8 : 3,
-            total: fullSource ? 16 : 8,
-          }),
-          Math.min(fullSource ? 2_200 : 1_200, remainingBudget()),
-          { timed_out: true },
-        );
+        // Anchor the source windows on the ENTITY, not the raw NL query. The
+        // user's message ("What does PL Neuheiten 2025_V2.pdf say about
+        // SolvisPia?") is contaminated with the filename and question words:
+        // vector-anchoring on it ranks the document title / boilerplate
+        // (which lexically echo the filename "Preisliste Produktneuheiten")
+        // ABOVE the actual SolvisPia technical passages, so the windows land
+        // on the cover page and the answer wrongly reports the entity absent.
+        // When the planner extracted named entities, search for those; they
+        // are exactly what the user wants located inside the source.
+        const hydrationQuery = mergedCanonicalEntities.length
+          ? mergedCanonicalEntities.join(' ')
+          : query;
+        // Start the hydration query NOW (runs concurrently with hop1/hop2), but
+        // DO NOT wrap it in withTimeout here: withTimeout's clock starts at
+        // creation, and the promise is only awaited far below — after hop1
+        // (up to HOP1_TIMEOUT_MS), the project-scope retry, hop2, RRF and the
+        // cross-cluster boost. Those consumed the whole budget, so a ~50ms
+        // hydration always resolved to {timed_out} and the answer fell back to
+        // hop2's document-lead boilerplate. Keep the raw promise; apply a
+        // fresh-clock timeout at the await.
+        explicitSourceHydration = this.evidence.hydrateSourceDocuments({
+          documents: explicitSourceDocuments,
+          query: hydrationQuery,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          perDocument: fullSource ? 8 : 3,
+          total: fullSource ? 16 : 8,
+        }).catch((err) => {
+          console.warn('[recall-router] explicit source hydration failed:', err.message);
+          return { hydration_error: true };
+        });
       }
     }
     // A requested source is an authorization boundary, not a ranking hint.
@@ -1465,7 +1484,14 @@ export class RecallRouter {
     }
     let selectedEvidence = hop2.items || [];
     if (explicitSourceHydration) {
-      const hydrated = await explicitSourceHydration;
+      // Fresh-clock timeout applied HERE, not at creation. The hydration query
+      // has been running concurrently since it was kicked off above; give it a
+      // real slice of the remaining budget now (floored so an explicit source
+      // read — which IS the answer for explain/full — is never starved to a
+      // 0ms wait by earlier hops). Hydration typically completes in ~50ms.
+      const fullSource = recallPlan.mode === 'full';
+      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, remainingBudget()));
+      const hydrated = await withTimeout(explicitSourceHydration, hydrationBudget, { timed_out: true });
       if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
       else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
     }

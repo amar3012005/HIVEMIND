@@ -454,9 +454,24 @@ async function hydrateSupersededPredecessors(bus, ctx, { anchorMemories = [] } =
       ...bus.memoriesById.keys(),
     ])];
     if (!anchorIds.length) return;
+    // Project-scope visibility: loadTypedGraphEvidence's visible() filter drops a
+    // scope='project' edge unless accessContext.projectIds contains the project.
+    // The version chain (e.g. launch-date Aug18→Aug19) is project-scoped, so if
+    // the request carries the active project on ctx.projectId but not yet in
+    // accessContext.projectIds, the predecessor edge is silently filtered out
+    // (the live "changed over time drops the prior value" bug). Augment
+    // projectIds with ctx.projectId — the same pattern the recall lane uses
+    // (recall-router.js:366) — so project-scoped predecessors are visible.
+    const walkAccess = {
+      ...(ctx.accessContext || {}),
+      projectIds: [...new Set([
+        ...((ctx.accessContext && ctx.accessContext.projectIds) || []),
+        ...(ctx.projectId ? [ctx.projectId] : []),
+      ])],
+    };
     const graph = await loadTypedGraphEvidence({
       prisma: ctx.prisma, memoryIds: anchorIds,
-      userId: ctx.userId, orgId: ctx.orgId, accessContext: ctx.accessContext || {},
+      userId: ctx.userId, orgId: ctx.orgId, accessContext: walkAccess,
     }).catch(() => ({ items: [] }));
     const updatesEdges = (graph.items || []).filter((e) => String(e.type).toLowerCase() === 'updates');
     if (!updatesEdges.length) return;

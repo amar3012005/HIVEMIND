@@ -320,7 +320,7 @@ Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAv
     max_tokens: 650,
   };
   const parserController = new AbortController();
-  const timeout = setTimeout(() => parserController.abort(), Number(process.env.CHAT_INTENT_TIMEOUT_MS || 1500));
+  const timeout = setTimeout(() => parserController.abort(), Number(process.env.CHAT_INTENT_TIMEOUT_MS || 2500));
   if (signal) {
     if (signal.aborted) parserController.abort();
     else signal.addEventListener('abort', () => parserController.abort(), { once: true });

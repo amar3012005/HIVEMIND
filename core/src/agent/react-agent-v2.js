@@ -209,23 +209,116 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
+// EvidenceBus (Stage C) — a plain-object factory (not a class, to match file
+// style) that OWNS the 9 shared accumulators + their two dedup index sets, and
+// encapsulates each merge pattern as a method. The factory returns the SAME
+// Map/array references the merge code has always used, so aliasing the fields
+// back to locals is a byte-identical drop-in. The merge methods formalize, in
+// ONE place, the merge semantics that were previously scattered inline:
+//   - mergeMemories flag precedence: _superseded_predecessor WINS over a prior
+//     unflagged entry; _diff_removed inserts a tagged CLONE only when absent.
+//   - mergeEvidence key modes: 'withPage' (base/relation/escalation) vs 'noPage'
+//     (temporal) — the exact key strings are preserved, NOT unified.
+//   - mergeEdges: {overwrite:false} (base if-absent) vs {overwrite:true}
+//     (relation/escalation last-writer-wins).
+//   - mergeLive: {dedup:true} (base, keyed id||source|title) vs raw push
+//     (connector/profile).
+// See gather-evidence-characterization.test.js (R1-R11) for the contract.
+function createEvidenceBus() {
+  const memoriesById = new Map();
+  const liveItems = [];
+  const evidenceItems = [];
+  const edgesByKey = new Map();
+  const synthesisChains = new Map();
+  const recallPackets = [];
+  const coMentions = [];
+  const _evidenceSeen = new Set();
+  const _liveSeen = new Set();
+
+  return {
+    memoriesById, liveItems, evidenceItems, edgesByKey,
+    synthesisChains, recallPackets, coMentions,
+    _evidenceSeen, _liveSeen,
+
+    // rows: memory rows. opts:
+    //   flags        — object of flags to apply (e.g. {_superseded_predecessor:true})
+    //   absentOnly   — when true, only insert if id absent; never touch existing (default false)
+    //   cloneOnFlag  — when inserting with flags, store {...row, ...flags} instead of mutating row
+    // Behavior matrix (preserves the current three inline patterns exactly):
+    //   base/relation/escalation: mergeMemories(rows)            → insert-if-absent, store row as-is
+    //   temporal added:           mergeMemories(rows,{flags:{_superseded_predecessor}}) → flag WINS on existing
+    //   diff removed:             mergeMemories(rows,{flags:{_diff_removed}, absentOnly:true, cloneOnFlag:true})
+    mergeMemories(rows, { flags = null, absentOnly = false, cloneOnFlag = false } = {}) {
+      for (const m of (rows || [])) {
+        if (!m?.id) continue;
+        if (!memoriesById.has(m.id)) {
+          memoriesById.set(m.id, (flags && cloneOnFlag) ? { ...m, ...flags } : m);
+        } else if (flags && !absentOnly) {
+          Object.assign(memoriesById.get(m.id), flags);
+        }
+      }
+    },
+
+    // keyMode: 'withPage' includes page in the dedup key (base/relation/escalation);
+    // 'noPage' omits page (temporal). The exact key string per mode is preserved.
+    mergeEvidence(rows, { keyMode = 'withPage' } = {}) {
+      for (const ev of (rows || [])) {
+        const k = keyMode === 'noPage'
+          ? (ev?.id || `${ev?.document_title || '?'}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`)
+          : (ev?.id || `${ev?.document_title || '?'}|${ev?.page || ''}|${String(ev?.content || ev?.snippet || '').slice(0, 40)}`);
+        if (_evidenceSeen.has(k)) continue;
+        _evidenceSeen.add(k);
+        evidenceItems.push(ev);
+      }
+    },
+
+    // overwrite:false — insert-if-absent (base). overwrite:true — last-writer-wins
+    // (relation/escalation). Invalid edges (missing from/to/type) are skipped.
+    mergeEdges(rows, { overwrite = false } = {}) {
+      for (const edge of (rows || [])) {
+        if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
+        const key = `${edge.from_id}|${edge.to_id}|${edge.type}`;
+        if (overwrite || !edgesByKey.has(key)) edgesByKey.set(key, edge);
+      }
+    },
+
+    // dedup:true — base lane, keyed id || `${source}|${title}`. dedup:false —
+    // connector/profile raw push (no dedup).
+    mergeLive(rows, { dedup = false } = {}) {
+      for (const li of (rows || [])) {
+        if (dedup) {
+          const k = li?.id || `${li?.source || '?'}|${li?.title || ''}`;
+          if (_liveSeen.has(k)) continue;
+          _liveSeen.add(k);
+        }
+        liveItems.push(li);
+      }
+    },
+
+    // first-writer-wins by synthesis_id.
+    mergeSynthesisChains(rows) {
+      for (const chain of (rows || [])) {
+        if (chain && !synthesisChains.has(chain.synthesis_id)) synthesisChains.set(chain.synthesis_id, chain);
+      }
+    },
+
+    addPacket(packet) { if (packet) recallPackets.push(packet); },
+    addPackets(list) { for (const p of (list || [])) recallPackets.push(p); },
+    addCoMentions(list) { for (const c of (list || [])) coMentions.push(c); },
+  };
+}
+
 // Exported for the characterization test (gather-evidence-characterization.test.js),
 // the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
 // fake dispatcher — no real recall/LLM. Not part of the public module surface.
 export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const steps = [];
-  const memoriesById = new Map();
-  const liveItems = [];
-  const evidenceItems = [];
-  // Typed graph edges returned by the shared recall service.
-  const edgesByKey = new Map();   // key = `${from_id}|${to_id}|${type}` → edge
-  // Synthesis evidence chains from insight-mode recall. Each chain is a
-  // canonical-fact or synthesis-bridge memory + its top-4 evidence
-  // memories. Passed to answerStep so the LLM can cite synth claims AND
-  // their source rows in the same answer.
-  const synthesisChains = new Map(); // key = synthesis_id → chain
-  const recallPackets = [];
-  const coMentions = [];
+  const bus = createEvidenceBus();
+  // Alias bus accumulators back to the local names the inline merge code uses,
+  // so Step 1 is a byte-identical wrapper: same Map/array references, existing
+  // inline `if(!has)set` fragments keep compiling. Step 2 routes each fragment
+  // through the bus.merge* methods one accumulator at a time.
+  const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions } = bus;
   let relationChecked = false;
   let aggregateResult = null;
   let activeDeadlineAt = deadlineAt;

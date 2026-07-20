@@ -140,6 +140,38 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20d — owner canary findings = NEXT-SESSION QUEUE (priority order)
+
+Owner-run canary after the temporal release surfaced four open defects. Start
+the next engine session HERE:
+
+1. **Relation synthesis drops found edges.** relation_between reported "1 typed
+   edge + 3 shared paths" for SolvisPia/SolvisMax yet the answer claimed no
+   relationship. Filter at react-agent-v2.js ~1143 (`filteredEdges` requires an
+   endpoint in evidence.memories) uses the FULL merged set, so suspect either
+   (a) loadTypedGraphEvidence returns edges whose endpoint memories were never
+   merged into memoriesById (executor merges only per-entity recall memories),
+   or (b) endpoints render as bare id8 labels with no context so the model
+   ignores them. Repro live with trace, then either hydrate edge-endpoint
+   memories into the merge or label edges with entity names.
+2. **"What was KNOWN on <date>" maps to valid_at, should be known_at.** The
+   planner emitted valid_at=2026-07-15 for a knowledge-state question. Fix in
+   the planner prompt: "was known/did we know" → known_at; "was true/what was
+   the value" → valid_at. Also fact-recall noise: entities_covered 1/3, generic
+   brand memories outrank product rows.
+3. **German question answered in English.** Language enforcement leak in the
+   synthesis path — check languageName wiring + answerPrompt "Write in ${lang}"
+   vs actual response; likely the planner's response_language isn't reaching
+   answerStep for some ops.
+4. **Boot-time `prisma migrate` fails P3005 (schema not baselined) and is
+   swallowed.** App boots fine (no new migrations), but a REAL migration would
+   fail the same way silently. Baseline the prod DB (migrate resolve) or make
+   the entrypoint fail loudly on migrate errors when migrations are pending.
+
+Also: exact-filename fail-closed behavior CONFIRMED correct (unknown brochure
+filename → refuses, no substitution). Owner auth via `Authorization: Bearer`
+header also works (alias for X-API-Key).
+
 ### 2026-07-20c — temporal/time-travel wired into chat (release prod-20260720-e41b46b1)
 
 The bi-temporal tools (`hivemind_at`/`_diff`/`_timeline`) EXISTED but chat never

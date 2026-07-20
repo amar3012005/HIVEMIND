@@ -83,11 +83,19 @@ function entityQueryForms(query) {
   }
   for (let size = Math.min(4, words.length); size >= 2; size -= 1) {
     for (let start = 0; start + size <= words.length; start += 1) {
-      const phrase = words.slice(start, start + size).join(' ');
-      forms.add(phrase);
+      const slice = words.slice(start, start + size);
+      forms.add(slice.join(' '));
+      // ALSO the space-collapsed form. Users type product names split by a space
+      // ("Solvis pia", "Solvis Max") but the canonical entity is one token
+      // ("SolvisPia", "SolvisMax"). Without this, entity resolution matched only
+      // the generic parent ("SOLVIS") and recall returned the company blurb
+      // instead of the product — the phrasing-sensitive-answer bug. Match is
+      // case-insensitive downstream, so the concatenation resolves regardless of
+      // the user's casing.
+      if (size <= 3) forms.add(slice.join(''));
     }
   }
-  return [...forms].slice(0, 32);
+  return [...forms].slice(0, 48);
 }
 
 export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {

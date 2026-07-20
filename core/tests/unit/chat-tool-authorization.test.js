@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dispatchTool } from '../../src/agent/tool-registry.js';
+import { dispatchTool, findDirectEntityEdges } from '../../src/agent/tool-registry.js';
 import { createDraftApprovalMiddleware } from '../../src/agent/middleware/draft-approval.js';
 import { McpClientPool } from '../../src/agent/mcp-client-pool.js';
 import { RecallRouter } from '../../src/memory/recall-router.js';
@@ -45,9 +45,26 @@ test('memory-by-id tools use scoped lookup and correct mutation signatures', asy
   assert.deepEqual(updatePayload.relationship, { type: 'Updates', target_id: 'allowed', confidence: 1 });
   assert.equal(updatePayload._authorized_relationship, true);
 
-  const deleted = await dispatchTool('hivemind_delete_memory', { id: 'allowed' }, ctx);
+  const refusedDelete = await dispatchTool('hivemind_delete_memory', { id: 'allowed' }, ctx);
+  assert.equal(refusedDelete.deleted, false);
+  assert.equal(refusedDelete.error, 'explicit_delete_confirmation_required');
+  const deleted = await dispatchTool('hivemind_delete_memory', { id: 'allowed', _approval_token: 'approved' }, { ...ctx, _approvalFlow: true });
   assert.equal(deleted.deleted, true);
   assert.deepEqual(calls.find((call) => call[0] === 'delete'), ['delete', 'allowed']);
+});
+
+test('verified relationships require distinct endpoints bound to different requested entities', () => {
+  const entities = ['SolvisPia', 'SolvisMax'];
+  const bindings = new Map([
+    ['SolvisPia', new Set(['pia-fact', 'shared-memory'])],
+    ['SolvisMax', new Set(['max-fact', 'shared-memory'])],
+  ]);
+  const edges = [
+    { from_id: 'shared-memory', to_id: 'unrelated', type: 'Extends' },
+    { from_id: 'shared-memory', to_id: 'shared-memory', type: 'Mentions' },
+    { from_id: 'pia-fact', to_id: 'max-fact', type: 'Extends' },
+  ];
+  assert.deepEqual(findDirectEntityEdges(edges, entities, bindings), [edges[2]]);
 });
 
 test('save refuses a caller project outside the authorized project set', async () => {

@@ -18,6 +18,18 @@ import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence } from '../memory/recall-router.js';
 
+export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
+  return edges.filter((edge) => {
+    if (!edge?.from_id || !edge?.to_id || edge.from_id === edge.to_id) return false;
+    return entities.some((left, leftIndex) => entities.slice(leftIndex + 1).some((right) => {
+      const leftIds = memoryIdsByEntity.get(left) || new Set();
+      const rightIds = memoryIdsByEntity.get(right) || new Set();
+      return (leftIds.has(edge.from_id) && rightIds.has(edge.to_id))
+        || (leftIds.has(edge.to_id) && rightIds.has(edge.from_id));
+    }));
+  });
+}
+
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
 export const TOOL_SCHEMAS = [
@@ -761,13 +773,7 @@ const TOOL_HANDLERS = {
     }
 
     const allEdges = [...edges.values()];
-    const directEdges = allEdges.filter((edge) => {
-      const touched = entities.filter((entity) => {
-        const ids = memoryIdsByEntity.get(entity);
-        return ids?.has(edge.from_id) || ids?.has(edge.to_id);
-      });
-      return touched.length >= 2;
-    });
+    const directEdges = findDirectEntityEdges(allEdges, entities, memoryIdsByEntity);
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {
       for (const id of ids) {
@@ -1086,6 +1092,9 @@ const TOOL_HANDLERS = {
 
   async hivemind_delete_memory(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
+    if (!args._approval_token || ctx._approvalFlow !== true) {
+      return { deleted: false, error: 'explicit_delete_confirmation_required' };
+    }
     const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(args.id, {
       user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
     });

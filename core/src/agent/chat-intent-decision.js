@@ -33,6 +33,15 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(boundedText(value, 64));
 }
 
+function validIsoTime(value) {
+  const text = boundedText(value, 64);
+  if (!text || !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(text)) return null;
+  const [year, month, day] = text.slice(0, 10).split('-').map(Number);
+  const calendarDate = new Date(Date.UTC(year, month - 1, day));
+  if (calendarDate.getUTCFullYear() !== year || calendarDate.getUTCMonth() !== month - 1 || calendarDate.getUTCDate() !== day) return null;
+  return Number.isNaN(Date.parse(text)) ? null : text;
+}
+
 export function normalizeChatHistory(history, limit = 6) {
   return (Array.isArray(history) ? history : [])
     .filter((turn) => turn && (turn.role === 'user' || turn.role === 'assistant') && turn.content)
@@ -222,7 +231,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
           project_hint: boundedText(raw.save.project_hint, 256) || null,
           project_id: boundedText(raw.save.project_id, 128) || null,
           entities: boundedStrings(raw.save.entities, 12, 256),
-          event_time: boundedText(raw.save.event_time, 64) || null,
+          event_time: validIsoTime(raw.save.event_time),
           confidence: Math.max(0, Math.min(1, Number(raw.save.confidence) || 0)),
         }
       : null,
@@ -236,7 +245,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
           reason: boundedText(raw.update.reason, 500), project_id: boundedText(raw.update.project_id, 128) || null,
           project_hint: boundedText(raw.update.project_hint, 256) || null,
           entities: boundedStrings(raw.update.entities, 12, 256),
-          event_time: boundedText(raw.update.event_time, 64) || null,
+          event_time: validIsoTime(raw.update.event_time),
         }
       : null,
     relation: (raw.relation || (operation === 'relation_between' ? { entities: namedEntities } : null))
@@ -248,8 +257,8 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
             title: boundedText(raw.relation.source.title, 512) || null,
           } : null,
           time: raw.relation?.time ? {
-            valid_at: boundedText(raw.relation.time.valid_at, 64) || null,
-            known_at: boundedText(raw.relation.time.known_at, 64) || null,
+            valid_at: validIsoTime(raw.relation.time.valid_at),
+            known_at: validIsoTime(raw.relation.time.known_at),
           } : null,
         }
       : null,
@@ -257,9 +266,9 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
       ? { id: boundedText(raw.delete.id, 128), reason: boundedText(raw.delete.reason, 500) }
       : null,
     time: raw.time ? {
-      valid_at: boundedText(raw.time.valid_at, 64) || null,
-      known_at: boundedText(raw.time.known_at, 64) || null,
-      range: raw.time.range ? { start: boundedText(raw.time.range.start, 64) || null, end: boundedText(raw.time.range.end, 64) || null } : null,
+      valid_at: validIsoTime(raw.time.valid_at),
+      known_at: validIsoTime(raw.time.known_at),
+      range: raw.time.range ? { start: validIsoTime(raw.time.range.start), end: validIsoTime(raw.time.range.end) } : null,
     } : null,
     continuation: raw.continuation?.kind === 'project_choice'
       ? { kind: 'project_choice', project_hint: boundedText(raw.continuation.project_hint, 256) || null, selected_scope: SCOPES.has(raw.continuation.selected_scope) ? raw.continuation.selected_scope : null }

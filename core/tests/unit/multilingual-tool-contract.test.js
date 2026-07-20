@@ -138,3 +138,18 @@ test('implicit saves require confidence 0.80 and full remains explicit-only', ()
   assert.equal(intentDecisionToPlan(high, 'The launch is in March').auto_save_intent.confidence, 0.80);
   assert.ok(createChatIntentTool(GROUPS).function.parameters.properties.relation);
 });
+
+test('temporal fields accept ISO values and reject malformed model output', () => {
+  const allowedGroups = GROUPS.map((group) => group.name);
+  const normalized = normalizeIntentDecision({
+    operation: 'update', confidence: 0.95, response_language: 'en', queries: [], named_entities: ['SolvisPia'],
+    recall_mode: 'fact', tool_groups: ['hivemind-memory-write'], side_effect_policy: 'read_only',
+    update: { target_query: 'SolvisPia launch', content: 'SolvisPia launches in May 2027.', event_time: 'next Tuesday' },
+    time: { valid_at: '2027-05-01T00:00:00Z', known_at: '2027-02-30', range: { start: '2027-01-01', end: 'tomorrow' } },
+  }, { message: 'Update the launch', language: 'en', allowedGroups });
+  assert.equal(normalized.update.event_time, null);
+  assert.equal(normalized.time.valid_at, '2027-05-01T00:00:00Z');
+  assert.equal(normalized.time.known_at, null);
+  assert.equal(normalized.time.range.start, '2027-01-01');
+  assert.equal(normalized.time.range.end, null);
+});

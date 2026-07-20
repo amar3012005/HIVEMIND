@@ -33,9 +33,19 @@ ARG CACHE_BUST=1
 COPY core/src ./src
 COPY core/scripts ./scripts
 COPY core/config ./config
+COPY core/tests ./tests
 
 # Generate Prisma client
 RUN npx prisma generate
+
+# Release gate: execute the security-sensitive chat contracts in the same
+# dependency environment used to assemble the production image. Tests remain
+# in the builder and are not copied into the lean runtime stage.
+RUN node --test \
+    tests/unit/multilingual-tool-contract.test.js \
+    tests/integration/chat-orchestration.integration.test.js \
+    tests/unit/chat-tool-authorization.test.js \
+    tests/unit/chat-intent-decision.test.js
 
 # ── Bake Chrome extension zip for /install/chrome-extension.zip route ──
 # Copies extensions/chrome into the builder, then zips it into

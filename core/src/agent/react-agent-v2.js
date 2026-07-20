@@ -2184,7 +2184,9 @@ export async function runReactAgentV2({
 
     const mutationTool = {
       update: plan.update_intent ? ['hivemind_update_memory', plan.update_intent] : null,
-      delete: plan.delete_intent ? ['hivemind_delete_memory', plan.delete_intent] : null,
+      // Destructive memory deletion is never executed from a model decision.
+      // It requires the server approval flow to inject a one-time token.
+      delete: null,
       rename_assistant: plan.assistant_name_intent ? ['hivemind_set_assistant_name', { name: plan.assistant_name_intent }] : null,
     }[intentDecision.operation];
     if (mutationTool) {
@@ -2205,6 +2207,18 @@ export async function runReactAgentV2({
         evidence_used: [], confidence: succeeded ? 1 : 0, gaps: succeeded ? [] : [String(result?.error || 'operation_failed')],
         usage: sumUsage(usages), trace: finalizeTrace(trace, usages), assistant_name: plan.assistant_name_intent || assistantName || null,
         action_result: succeeded && intentDecision.operation === 'update' ? buildActionResult('updated', result) : null,
+      };
+    }
+
+    if (intentDecision.operation === 'delete') {
+      const response = intentDecision.response_language?.startsWith('de')
+        ? 'Das Löschen erfordert eine ausdrückliche Bestätigung in der Speicheransicht.'
+        : 'Deletion requires explicit confirmation in the Memories view.';
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'delete', success: false, reason: 'confirmation_required' });
+      return {
+        response, sources: [], steps: [], evidence_used: [], confidence: 1, gaps: [],
+        usage: sumUsage(usages), trace: finalizeTrace(trace, usages), assistant_name: assistantName || null,
+        action_result: { operation: 'confirmation_required', memory_id: plan.delete_intent?.id || null },
       };
     }
 

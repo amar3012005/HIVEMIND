@@ -139,12 +139,21 @@ export class QdrantClient {
     this.embedService = getEmbedService();
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
     this.connected = null;
-    this.collectionReady = null;
+    // Per-process set of collections whose payload indexes have already been
+    // ensured. MUST be a Set, not a single value: this is a MULTI-TENANT
+    // server that alternates between org_<id>, HIVEMIND_PERSONAL, and other
+    // containers every few requests. A scalar `collectionReady` was
+    // invalidated on every tenant switch, so EVERY query re-ran
+    // ensureMemoriesCollectionIndexes → createPayloadIndex(wait:true) × N
+    // fields — blocking Qdrant round-trips that dominated chat latency
+    // (observed 26–60s, growing as calls alternated tenants). A Set makes it
+    // once-per-collection-per-process, moving schema setup off the query path.
+    this.collectionReady = new Set();
     this._litellmReady = null;
   }
 
   async ensureCollection(collectionName = this.collectionName) {
-    if (this.collectionReady === collectionName) {
+    if (this.collectionReady.has(collectionName)) {
       return true;
     }
 
@@ -158,7 +167,7 @@ export class QdrantClient {
 
       if (response.ok) {
         await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
-        this.collectionReady = collectionName;
+        this.collectionReady.add(collectionName);
         return true;
       }
 
@@ -173,7 +182,7 @@ export class QdrantClient {
       // is gone along with the BUNDB AGENT singleton.
       await collections.createOrgContainer(resolvedCollectionName);
       await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
-      this.collectionReady = collectionName;
+      this.collectionReady.add(collectionName);
       return true;
     } catch (error) {
       console.error('Failed to ensure Qdrant collection:', error.message);

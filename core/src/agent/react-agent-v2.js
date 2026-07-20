@@ -121,7 +121,7 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal }) {
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort }) {
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -131,6 +131,13 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       response_format: { type: 'json_object' },
       max_completion_tokens: maxTokens,
       temperature,
+      // GPT-OSS is a reasoning model: with no reasoning_effort it defaults to
+      // HIGH and burns ~11s of hidden reasoning on a grounded-synthesis prompt
+      // (measured), which was the dominant chat latency. Grounded synthesis
+      // does not need deep reasoning — the evidence is already retrieved and
+      // the job is to WRITE a cited answer. Pass a low/medium effort when the
+      // caller asks. Harmless on non-reasoning providers (ignored field).
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -1194,10 +1201,14 @@ ${message}`;
   const answerCap = process.env.HIVEMIND_ANSWER_MAX_TOKENS
     ? ANSWER_MAX_TOKENS
     : (answerMode === 'full' ? 8000 : answerMode === 'explain' ? 4000 : 2000);
+  // Grounded synthesis over already-retrieved evidence needs little reasoning;
+  // full reconstruction gets 'medium', everything else 'low'. Env-overridable.
+  const answerReasoning = process.env.HIVEMIND_ANSWER_REASONING_EFFORT
+    || (answerMode === 'full' ? 'medium' : 'low');
 
   const { parsed, usage } = await callJsonLLM({
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
-    model, apiKey, maxTokens: answerCap, signal,
+    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1215,7 +1226,7 @@ ${message}`;
     const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
     const repaired = await callJsonLLM({
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
-      model, apiKey, maxTokens: answerCap, signal,
+      model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

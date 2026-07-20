@@ -262,16 +262,19 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_timeline',
       description:
-        'Chronological list of memories matching a query, ordered by document_date desc.\n\nFor connector-scoped timeline pass tags. Useful for "history of decisions in #X" or "all msgs from @user".',
+        'Full version chain / chronological history. Resolve by memory_id (exact — walks the MemoryVersion ledger: every revision, supersession, derive, contradict), OR by query / tags / file_path (semantic/scoped timeline ordered by date). Useful for "how has X changed", "history of the decision", "all msgs from @user".',
       parameters: {
         type: 'object',
         properties: {
+          memory_id: { type: 'string', description: 'Exact memory UUID — returns its full version chain directly.' },
           query: { type: 'string' },
           limit: { type: 'integer', default: 20 },
           tags: { type: 'array', items: { type: 'string' } },
+          file_path: { type: 'string', description: 'Code-scoped — translated to a file:<path> tag.' },
           valid_at: { type: 'string', description: 'Optional upper bound for time-travel.' },
         },
-        required: ['query'],
+        // No hard required: the handler accepts ANY of memory_id | query | tags |
+        // file_path and returns a bounded INVALID_ARGS error if none is present.
       },
     },
   },
@@ -1289,14 +1292,59 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_timeline(args, ctx) {
+    // Resolve by EXACT memory_id via the MemoryVersion ledger — the documented
+    // contract. Previously this ignored memory_id and required `query`, so
+    // "timeline of memory X" failed with missing-query. Walk the version chain
+    // directly (newest→oldest revisions, supersession, derive, contradict).
+    const memoryId = typeof args.memory_id === 'string' && args.memory_id.trim()
+      ? args.memory_id.trim() : null;
+    if (memoryId && ctx.persistentMemoryStore?.getMemoryScoped) {
+      try {
+        // TENANT ISOLATION: getTemporalTimeline + getMemories are UNSCOPED
+        // (they filter only by id). A user could pass any UUID and read another
+        // tenant's memory + full history. So authorize the ANCHOR first via the
+        // scoped getter — it returns null unless this user/org/project may see
+        // it — and refuse before walking the ledger. Related (superseded/
+        // derived) rows are each re-checked through the same scoped getter so a
+        // cross-tenant relatedMemoryId can never leak into the result.
+        const scope = { user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext || null };
+        const anchor = await ctx.persistentMemoryStore.getMemoryScoped(memoryId, scope);
+        if (!anchor) {
+          return { error: 'memory_not_found_or_forbidden', memory_id: memoryId, _failure_mode: 'NOT_AUTHORIZED' };
+        }
+        const { BiTemporalEngine } = await import('../memory/bi-temporal.js');
+        const engine = new BiTemporalEngine({ store: ctx.persistentMemoryStore, prisma: ctx.prisma });
+        const versions = await engine.getTemporalTimeline(memoryId);
+        // Authorize + hydrate related memories individually (chains are short).
+        const relatedIds = [...new Set(versions.map(v => v.relatedMemoryId).filter(Boolean))];
+        const related = (await Promise.all(
+          relatedIds.map(id => ctx.persistentMemoryStore.getMemoryScoped(id, scope).catch(() => null)),
+        )).filter(Boolean);
+        return {
+          memory_id: memoryId,
+          version_count: versions.length,
+          versions,
+          memories: [anchor, ...related],
+          resolved_by: 'memory_id',
+        };
+      } catch (err) {
+        return { error: `timeline_by_id_failed: ${err.message}`, memory_id: memoryId };
+      }
+    }
+    // Fall back to semantic/tag/file-scoped timeline recall.
+    const tags = Array.isArray(args.tags) && args.tags.length > 0 ? [...args.tags] : [];
+    if (typeof args.file_path === 'string' && args.file_path.trim()) tags.push(`file:${args.file_path.trim()}`);
+    if (!args.query && !tags.length) {
+      return { error: "hivemind_timeline needs one of: memory_id, query, tags, or file_path", _failure_mode: 'INVALID_ARGS' };
+    }
     return TOOL_HANDLERS.hivemind_recall(
       {
-        query: args.query,
+        query: args.query || tags.join(' '),
         mode: 'explain',
         operation: 'timeline',
         include_superseded: true,
         limit: args.limit || 20,
-        tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
+        tags: tags.length ? tags : undefined,
         ...(args.valid_at && !Number.isNaN(new Date(args.valid_at).getTime())
           ? { time: { valid_at: new Date(args.valid_at).toISOString() } }
           : {}),

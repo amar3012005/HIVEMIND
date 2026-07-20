@@ -419,6 +419,58 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
+  // ── Temporal dispatch ─────────────────────────────────────────────────
+  // "What changed / version history / what was true on date X" — route to the
+  // bi-temporal tools. base recall (above) already applied valid_at/known_at
+  // via recallExtras, so this ADDS the version chain / delta the plain recall
+  // lane cannot express. Merged into the same memory/evidence maps.
+  if ((plan.operation === 'timeline' || plan.needs_time_travel) && remaining() > 0) {
+    const t = plan.time_travel || plan.time || {};
+    const topic = plan.query_canonical_en || plan.user_message
+      || (Array.isArray(plan.named_entities) ? plan.named_entities.join(' ') : '');
+    let temporalTool = null;
+    let temporalArgs = null;
+    if (t.range?.start) {
+      // "since 2025" gives start with no end — diff from then to NOW.
+      temporalTool = 'hivemind_diff';
+      temporalArgs = { from: t.range.start, to: t.range.end || new Date().toISOString(), query: topic };
+    } else if (t.valid_at || t.known_at) {
+      temporalTool = 'hivemind_at';
+      temporalArgs = { ...(t.valid_at ? { valid_at: t.valid_at } : {}), ...(t.known_at ? { known_at: t.known_at } : {}), query: topic };
+    } else if (plan.operation === 'timeline') {
+      temporalTool = 'hivemind_timeline';
+      temporalArgs = { query: topic, limit: 20 };
+    }
+    if (temporalTool) {
+      try {
+        startTool(temporalTool, temporalArgs);
+        const temporalResult = await beforeDeadline(dispatchTool(temporalTool, temporalArgs, ctx));
+        // Normalise the varied temporal shapes into memories/evidence for synthesis.
+        const tMems = temporalResult?.memories
+          || temporalResult?.added || temporalResult?.results || [];
+        const summary = temporalTool === 'hivemind_diff'
+          ? `+${temporalResult?.added_count || 0} / -${temporalResult?.removed_count || 0} / =${temporalResult?.persisted_count || 0}`
+          : `${(tMems || []).length} memories${temporalResult?.version_count ? ` + ${temporalResult.version_count} versions` : ''}`;
+        recordTool(temporalTool, temporalArgs, summary, temporalResult);
+        for (const m of (tMems || [])) {
+          if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
+        }
+        // hivemind_diff also carries removed rows — include them so synthesis can
+        // state what disappeared, not only what was added.
+        for (const m of (temporalResult?.removed || [])) {
+          if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, { ...m, _diff_removed: true });
+        }
+        for (const ev of (temporalResult?.evidence || [])) {
+          const k = ev?.id || `${ev?.document_title || '?'}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`;
+          if (!evidenceSeen.has(k)) { evidenceSeen.add(k); evidenceItems.push(ev); }
+        }
+        if (temporalResult?.evidence_packet) recallPackets.push(temporalResult.evidence_packet);
+      } catch (error) {
+        recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
+      }
+    }
+  }
+
   let coverage = assessRecallCoverage({
     plan,
     memories: [...memoriesById.values()],
@@ -690,6 +742,11 @@ CORE RULES:
     else is content co-occurrence, which is suggestive but not a
     relation. Misreporting this is the #1 source of hallucinated
     history. When in doubt, default to the literal absence of the edge.
+11c. **[REMOVED/SUPERSEDED] rows are NO LONGER TRUE.** A row prefixed
+    [REMOVED/SUPERSEDED] was superseded/removed as of the queried time window
+    (from a temporal diff). Report it as a PAST value that changed ("the launch
+    date WAS X but changed to Y"), never as a current fact. Prefer the
+    non-removed row for the current value.
 12. **NEVER CONTRADICT THE DELIVERED EVIDENCE.** If a name, product,
     entity, date, or fact literally appears in the EVIDENCE / DOCUMENT
     SEGMENTS / LIVE blocks above, you may NOT state that it is absent,
@@ -1024,7 +1081,12 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const memTags = m.tags || [];
     const isCanonical = srcType === 'canonical-fact' || memTags.includes('synthesis:canonical');
     const isBridge    = srcType === 'synthesis-bridge' || memTags.includes('synthesis:bridge');
-    const synthTag = isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '';
+    // A row that hivemind_diff flagged as REMOVED between the two dates is NOT
+    // a current fact — without this prefix synthesis renders it identically to
+    // live facts and can assert a superseded value is still true. Mark it so
+    // the model reports it as "no longer true / removed".
+    const removedTag = m._diff_removed ? '[REMOVED/SUPERSEDED] ' : '';
+    const synthTag = removedTag + (isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '');
     const conf = m.synthesis_confidence != null ? ` conf=${Number(m.synthesis_confidence).toFixed(2)}` : '';
     const rev = m.synthesis_revision && m.synthesis_revision > 1 ? ` rev=${m.synthesis_revision}` : '';
     const xClusterBoost = m._cross_cluster_boost && m._cross_cluster_boost > 1.0

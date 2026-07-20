@@ -3,67 +3,45 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-9937c452
+release_id: prod-20260720-b3ca804a
 host: singulance
-deployed_at_utc: 2026-07-19T19:08:33Z
+deployed_at_utc: 2026-07-20T08:56:41Z
 parent:
   branch: singulance-main
-  sha: 9937c4521504daca3657e1427b0a3d2fb9488d1e
+  sha: b3ca804a111957f1ea47c9c07373af6f2cbed07b
 frontend:
-  declared_gitlink_sha: 1702fa72952c2ae74dae7a7b47950737417e1863
-  recreated: true
+  sha: 1702fa72952c2ae74dae7a7b47950737417e1863
 runtime:
-  VERSION: prod-20260720-9937c452
-  NEXT_VERSION: prod-20260720-9937c452
+  VERSION: prod-20260720-b3ca804a
+  NEXT_VERSION: prod-20260720-b3ca804a
 images:
-  core: sha256:f8592d488f4dc50b40f4579cd74ea38470fa5657ac5f141dfa2efabfddf83d1d
-  control_unchanged: sha256:edfedbab3f5938d0ad218fb93bfb08f15b8fc36b909c4f2292fc4413ae646172
-  employees_unchanged: sha256:53736acfd6d6c42c27041d7f28bd84722efd96e8228f8c424c1d43547ac30a24
-  tara_deepgram_unchanged: sha256:ee371b7bb007742f60ead7ab2db96c547b8014808ca8a901d94465527866469b
-  byod_broker_unchanged: sha256:ae0fe36a8468690f7c0da07a1af5ae608d069fd3f8b8e1d4d2b6088706340eee
-  playwright_unchanged: sha256:4177c43a4414d50b0028a957c85bce332201fc5a1c72fbbbc65179dd5144ee94
-  frontend_single: sha256:fcbf0022382f9a04656f69660f4f92fb6760d40efff9468188e23749bcf7cd0a
-migrations: []
+  core: sha256:396dda0757ae61af6448db1f8c2a6cfa38b54b0c3ed60d3c21d077d2befbfffc
+  control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4
+  employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29
+  tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876
+  frontend_single: sha256:0ba7d5378c37e9269339903d89115abaa90220a9825f2096d8c90739f42dcfd4
 changes:
-  - Every /api/chat surface now defaults structured intent planning to google/gemini-2.5-flash-lite.
-  - User-facing direct, grounded, and connector-action synthesis defaults to cerebras/gpt-oss-120b.
-  - The Cerebras default is pinned through OpenRouter to provider only cerebras with provider fallback disabled and data collection denied.
-  - Legacy frontend values gpt-oss-120b and openai/gpt-oss-120b resolve to the Cerebras default without a frontend rebuild.
-  - Direct synthesis is bounded to the planner draft so it cannot introduce unrelated claims.
+  - Released canonical source-grounded recall/chat updates through b3ca804a.
+  - Rebuilt Core, Control, Employees, TARA, and the vNext frontend from one clean parent commit.
+  - Reconciled active frontend routing to the vNext release and removed the unused hm-fe container.
+  - Retained stable aliases and immediate timestamped rollback references; pruned obsolete application image tags only.
 acceptance:
-  production_image_tests: 21/21
-  provider_smoke:
-    planner: google/gemini-2.5-flash-lite via Google
-    planner_ms: 492
-    synthesis: openai/gpt-oss-120b via Cerebras
-  authenticated_direct_chat:
-    status: 200
-    legacy_model_value: gpt-oss-120b
-    response: Hello!
-    planner: google/gemini-2.5-flash-lite
-    synthesis: cerebras/gpt-oss-120b
-    total_ms: 2165
-  authenticated_scoped_chat:
-    project: 66275318-c11c-4dcb-b6a9-457b43c3bfda
-    status: 200
-    query: What do you know about SolvisPia?
-    source_count: 2
-    grounded: true
-    confidence: 0.97
-    planner: google/gemini-2.5-flash-lite
-    synthesis: cerebras/gpt-oss-120b
-    total_ms: 4254
-  public_200: [hivemind_home, login, overview, api_health, core_health]
-  core_health: healthy
-  unchanged_tara_container_health: healthy
+  public: [homepage_200, hivemind_landing_200, api_health_200, core_health_200]
+  authenticated:
+    - direct_recall_200
+    - direct_chat_200_grounded_with_citations
+  runtime: [core_healthy, control_healthy, employees_healthy, tara_healthy, frontend_running]
+  release_marker: allowImplicitSource_equals_not_recallPlan_source_requested
   fresh_fatal_errors: 0
-residual_risks:
-  - The external tara.singulancelabs.com health request hit a pre-existing TLS handshake error; the unchanged tara-deepgram container remained healthy.
-  - Explicit non-default model selections remain supported; only legacy/default 120B values are remapped to Cerebras.
-untested_side_effects:
-  - No customer writes, connector actions, or memory mutations were performed.
+  notes:
+    - Recall fact-mode test reached its latency budget with no returned facts; grounded chat remained successful with citations.
 rollback:
-  core: hivemind/core-api:rollback-20260720T185548Z
-  frontend_unchanged: hivemind/fe:prod-20260719-c98a7427-single
-  env_backup: /root/hivemind/.env.bak-prod-20260720-9937c452
+  core: hivemind/core-api:stable
+  control: hivemind/control-plane:stable
+  employees: hivemind/employees:stable
+  tara_deepgram: hivemind/tara-deepgram:stable
+  frontend_single: hivemind/fe:stable-single
+  immediate_timestamped: 20260720T085005Z
 ```
+
+No customer email, connector action, telephone call, or write operation was triggered during release acceptance.

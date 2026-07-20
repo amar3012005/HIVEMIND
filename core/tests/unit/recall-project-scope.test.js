@@ -40,3 +40,30 @@ test('explicit project keeps shared tiers and only the selected project', async 
     dropped: 1,
   });
 });
+
+test('explicit project fails closed for evidence from another project', async () => {
+  let documentWhere;
+  const prisma = {
+    knowledgeDocument: {
+      findMany: async ({ where }) => {
+        documentWhere = where;
+        return [{ id: 'document-a' }];
+      },
+    },
+  };
+  const result = {
+    memories: [],
+    evidence: [
+      { id: 'segment-a', documentId: 'document-a', content: 'Selected project evidence.' },
+      { id: 'segment-b', document_id: 'document-b', content: 'Another project evidence.' },
+      { id: 'segment-unknown', content: 'No source provenance.' },
+    ],
+  };
+
+  await applyProjectScopeFilter(prisma, 'org-1', result, 'project-a');
+
+  assert.deepEqual(result.evidence.map((item) => item.id), ['segment-a']);
+  assert.equal(documentWhere.tags.has, 'scope-key:project:project-a');
+  assert.equal(result.project_scope_applied.evidence_kept, 1);
+  assert.equal(result.project_scope_applied.evidence_dropped, 2);
+});

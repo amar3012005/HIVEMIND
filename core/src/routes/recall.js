@@ -53,6 +53,46 @@ export async function applyProjectScopeFilter(prisma, orgId, result, recallProje
       dropped: before - result.memories.length,
     };
   }
+
+  // Evidence is independently retrieved from document segments. Filtering only
+  // memories leaves a project-scoped answer able to cite another project's
+  // source text. Under an explicit project scope, segment provenance must map
+  // to a document carrying the selected project tag; unknown provenance fails
+  // closed rather than becoming an implicit organization-wide document.
+  if (recallProjectId && Array.isArray(result?.evidence)) {
+    const before = result.evidence.length;
+    let allowedDocumentIds = new Set();
+    if (prisma?.knowledgeDocument) {
+      const documentIds = [...new Set(result.evidence.map((item) =>
+        item?.documentId || item?.document_id || item?.document?.id || null,
+      ).filter(Boolean))];
+      if (documentIds.length) {
+        try {
+          const documents = await prisma.knowledgeDocument.findMany({
+            where: {
+              id: { in: documentIds },
+              orgId,
+              archivedAt: null,
+              tags: { has: `scope-key:project:${recallProjectId}` },
+            },
+            select: { id: true },
+          });
+          allowedDocumentIds = new Set(documents.map((document) => document.id));
+        } catch {
+          allowedDocumentIds = new Set();
+        }
+      }
+    }
+    result.evidence = result.evidence.filter((item) => {
+      const documentId = item?.documentId || item?.document_id || item?.document?.id || null;
+      return !!documentId && allowedDocumentIds.has(documentId);
+    });
+    result.project_scope_applied = {
+      ...(result.project_scope_applied || {}),
+      evidence_kept: result.evidence.length,
+      evidence_dropped: before - result.evidence.length,
+    };
+  }
   return result;
 }
 

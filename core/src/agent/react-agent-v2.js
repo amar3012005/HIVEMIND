@@ -457,7 +457,13 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
           : `${(tMems || []).length} memories${temporalResult?.version_count ? ` + ${temporalResult.version_count} versions` : ''}`;
         recordTool(temporalTool, temporalArgs, summary, temporalResult);
         for (const m of (tMems || [])) {
-          if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
+          if (!m?.id) continue;
+          if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
+          // The superseded-predecessor flag must WIN even if base recall already
+          // added this id unflagged — otherwise synthesis renders the prior
+          // value as a current fact (the flag is the whole point of the timeline
+          // traversal). Propagate it onto the existing entry.
+          else if (m._superseded_predecessor) memoriesById.get(m.id)._superseded_predecessor = true;
         }
         // hivemind_diff also carries removed rows — include them so synthesis can
         // state what disappeared, not only what was added.

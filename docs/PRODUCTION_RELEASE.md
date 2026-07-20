@@ -23,7 +23,7 @@ images:
 changes:
   - Released canonical source-grounded recall/chat updates through b3ca804a.
   - Rebuilt Core, Control, Employees, TARA, and the vNext frontend from one clean parent commit.
-  - Reconciled active frontend routing to the vNext release and removed the unused hm-fe container.
+  - Reconciled both frontend routes to the vNext release: `hivemind-next-frontend-1` for next/personal/enterprise and `hm-fe` for the root domain.
   - Retained stable aliases and immediate timestamped rollback references; pruned obsolete application image tags only.
 acceptance:
   public: [homepage_200, hivemind_landing_200, api_health_200, core_health_200]

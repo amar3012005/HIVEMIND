@@ -1366,7 +1366,7 @@ const TOOL_HANDLERS = {
     if (!args.query && !tags.length) {
       return { error: "hivemind_timeline needs one of: memory_id, query, tags, or file_path", _failure_mode: 'INVALID_ARGS' };
     }
-    return TOOL_HANDLERS.hivemind_recall(
+    const recalled = await TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query || tags.join(' '),
         mode: 'explain',
@@ -1380,6 +1380,33 @@ const TOOL_HANDLERS = {
       },
       ctx
     );
+    // TRAVERSE the Updates chain: recall ranks the LATEST memory but the
+    // superseded predecessor (isLatest=false, near-identical text) rarely ranks
+    // into the delivered set — so "what was the previous value / show the change
+    // history" came back empty even though the Updates edge exists. Follow the
+    // typed Updates edges from the recalled memories and hydrate the
+    // predecessors (edge.to_id) so the answer can state "was X → now Y".
+    try {
+      const anchorIds = (recalled?.memories || []).map((m) => m.id).filter(Boolean);
+      if (anchorIds.length && ctx.prisma && loadTypedGraphEvidence) {
+        const graph = await loadTypedGraphEvidence({
+          prisma: ctx.prisma, memoryIds: anchorIds,
+          userId: ctx.userId, orgId: ctx.orgId, accessContext: ctx.accessContext || {},
+        }).catch(() => ({ items: [] }));
+        const updatesEdges = (graph.items || []).filter((e) => String(e.type).toLowerCase() === 'updates');
+        const predIds = [...new Set(updatesEdges.map((e) => e.to_id).filter((id) => id && !anchorIds.includes(id)))];
+        if (predIds.length && ctx.persistentMemoryStore?.getMemories) {
+          const predMap = await ctx.persistentMemoryStore.getMemories(predIds).catch(() => new Map());
+          const seen = new Set(anchorIds);
+          const preds = predIds.map((id) => predMap.get?.(id)).filter((m) => m && !seen.has(m.id));
+          if (preds.length) {
+            recalled.memories = [...(recalled.memories || []), ...preds.map((m) => ({ ...m, _superseded_predecessor: true }))];
+            recalled.relationships = [...(recalled.relationships || []), ...updatesEdges];
+          }
+        }
+      }
+    } catch { /* traversal is additive — never break the timeline on it */ }
+    return recalled;
   },
 
   async hivemind_query_with_ai(args, ctx) {

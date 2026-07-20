@@ -70,8 +70,10 @@ Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md o
 Use hivemind_memory for remember/save/update/delete/rename requests in every language; never acknowledge a write without this tool.
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
 Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
+Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
+- "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
 - "List every X and exact count" => hivemind_context operation=aggregate.
 - "Remember X" or "Recuerda X" => hivemind_memory operation=save.
 - "Update X to Y" => hivemind_memory operation=update.

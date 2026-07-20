@@ -1117,11 +1117,12 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const memTags = m.tags || [];
     const isCanonical = srcType === 'canonical-fact' || memTags.includes('synthesis:canonical');
     const isBridge    = srcType === 'synthesis-bridge' || memTags.includes('synthesis:bridge');
-    // A row that hivemind_diff flagged as REMOVED between the two dates is NOT
-    // a current fact — without this prefix synthesis renders it identically to
+    // A row that hivemind_diff flagged as REMOVED, OR a superseded predecessor
+    // pulled via the Updates-edge traversal in hivemind_timeline, is NOT a
+    // current fact — without this prefix synthesis renders it identically to
     // live facts and can assert a superseded value is still true. Mark it so
-    // the model reports it as "no longer true / removed".
-    const removedTag = m._diff_removed ? '[REMOVED/SUPERSEDED] ' : '';
+    // the model reports it as the PRIOR value ("was X, changed to Y").
+    const removedTag = (m._diff_removed || m._superseded_predecessor) ? '[REMOVED/SUPERSEDED] ' : '';
     const synthTag = removedTag + (isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '');
     const conf = m.synthesis_confidence != null ? ` conf=${Number(m.synthesis_confidence).toFixed(2)}` : '';
     const rev = m.synthesis_revision && m.synthesis_revision > 1 ? ` rev=${m.synthesis_revision}` : '';

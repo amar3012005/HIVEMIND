@@ -379,12 +379,25 @@ async function getTeamStore() {
 // Cached per-request access context: { projectIds, teamIds }
 // Cache TTL 60s to avoid hitting DB on every recall in tight loops.
 const _accessContextCache = new Map();
+// Recently-active tenants, so the recall keep-warm probe hits REAL orgs (keeping
+// their Qdrant collection + connection + collectionReady cache hot) instead of a
+// fixed dummy org. Keyed by orgId; holds a representative user + projectIds +
+// lastSeen. Pruned by the keep-warm sweep to a recent window.
+const _activeOrgs = new Map();
+function _recordActiveOrg(userId, orgId, value) {
+  if (!userId || !orgId) return;
+  _activeOrgs.set(orgId, {
+    userId,
+    projectIds: Array.isArray(value?.projectIds) ? value.projectIds.slice(0, 1) : [],
+    lastSeen: Date.now(),
+  });
+}
 async function buildAccessContext(userId, orgId) {
   if (!userId || !orgId) return null;
   const key = `${userId}:${orgId}`;
   const cached = _accessContextCache.get(key);
   const now = Date.now();
-  if (cached && cached.expiresAt > now) return cached.value;
+  if (cached && cached.expiresAt > now) { _recordActiveOrg(userId, orgId, cached.value); return cached.value; }
   const ts = await getTeamStore();
   if (!ts) return null;
   try {
@@ -425,6 +438,7 @@ async function buildAccessContext(userId, orgId) {
     }
     const value = { projectIds: effectiveProjectIds, teamIds, orgRole, crossProject: crossProject !== false };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
+    _recordActiveOrg(userId, orgId, value);
     return value;
   } catch (err) {
     console.warn('[access-context] build failed:', err.message);
@@ -22449,16 +22463,40 @@ async function warmUpRecall() {
   // only; never writes). Falls back to an embed ping if recall is unavailable.
   const warmOrg = process.env.RECALL_WARMUP_ORG || '67503d34-97e9-49a8-8c52-8ee30cc7603e';
   const warmUser = process.env.RECALL_WARMUP_USER || '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
-  const synthRecall = async () => {
+  // Warm a specific tenant's FULL recall pipeline (its Qdrant collection +
+  // connection + reranker + PG pool). Best-effort; falls back to an embed ping.
+  const warmTenant = async (uid, oid, pids) => {
     try {
       if (typeof recallPersistedMemories === 'function' && persistentMemoryStore) {
         await recallPersistedMemories(persistentMemoryStore, {
-          query_context: 'system keep-warm probe', user_id: warmUser, org_id: warmOrg, max_memories: 3,
+          query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
+          ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
+          max_memories: 3,
         });
-        return;
+        return true;
       }
-    } catch { /* fall through to embed-only warm */ }
+    } catch { /* fall through */ }
     try { await getQdrantClient().generateEmbedding('keep-warm ping'); } catch { /* best-effort */ }
+    return false;
+  };
+  // Keep-warm sweep: warm every RECENTLY-ACTIVE org (so real tenants' Qdrant
+  // collections stay hot, not just a dummy), plus the canonical probe org as a
+  // floor. Prune orgs idle > the active window so the sweep stays bounded.
+  const ACTIVE_WINDOW_MS = Number(process.env.RECALL_ACTIVE_WINDOW_MS || 900_000); // 15 min
+  const MAX_WARM_ORGS = Number(process.env.RECALL_MAX_WARM_ORGS || 12);
+  const synthRecall = async () => {
+    const now = Date.now();
+    for (const [oid, info] of _activeOrgs) {
+      if (now - info.lastSeen > ACTIVE_WINDOW_MS) _activeOrgs.delete(oid);
+    }
+    const targets = [...(_activeOrgs.entries())]
+      .sort((a, b) => b[1].lastSeen - a[1].lastSeen)
+      .slice(0, MAX_WARM_ORGS)
+      .map(([oid, info]) => ({ uid: info.userId, oid, pids: info.projectIds }));
+    // Always include the canonical probe org as a floor (warms shared infra even
+    // when no real org has been active recently).
+    targets.push({ uid: warmUser, oid: warmOrg, pids: [] });
+    for (const t of targets) { await warmTenant(t.uid, t.oid, t.pids); }
   };
   try {
     const qc = getQdrantClient();

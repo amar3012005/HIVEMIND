@@ -13,17 +13,18 @@ test('chat model policy uses Gemini Flash-Lite planning and Cerebras 120B synthe
   assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
 });
 
-test('Cerebras synthesis is pinned through OpenRouter when no direct key exists', () => {
+test('GPT-OSS synthesis permits provider failover through OpenRouter when no direct Cerebras key exists', () => {
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   const priorCerebras = process.env.CEREBRAS_API_KEY;
   process.env.OPENROUTER_API_KEY = 'or-test';
   delete process.env.CEREBRAS_API_KEY;
   try {
     const route = resolveChatCompletionRoute('cerebras/gpt-oss-120b');
-    assert.equal(route.provider, 'openrouter:cerebras');
+    assert.equal(route.provider, 'openrouter:gpt-oss');
     assert.equal(route.wireModel, 'openai/gpt-oss-120b');
-    assert.deepEqual(route.providerPolicy.only, ['cerebras']);
-    assert.equal(route.providerPolicy.allow_fallbacks, false);
+    assert.equal(route.providerPolicy.only, undefined);
+    assert.equal(route.providerPolicy.allow_fallbacks, true);
+    assert.equal(route.providerPolicy.data_collection, 'deny');
   } finally {
     if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = priorOpenRouter;

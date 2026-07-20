@@ -40,13 +40,15 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     }
     if (process.env.OPENROUTER_API_KEY) {
       return {
-        provider: 'openrouter:cerebras',
+        provider: 'openrouter:gpt-oss',
         url: OPENROUTER_CHAT_URL,
         apiKey: process.env.OPENROUTER_API_KEY,
         wireModel: wireModel === 'gpt-oss-120b' ? 'openai/gpt-oss-120b' : wireModel,
         providerPolicy: {
-          only: ['cerebras'],
-          allow_fallbacks: false,
+          // Keep the model fixed while allowing OpenRouter to route around a
+          // transient Cerebras outage. Requiring one provider turned a 429
+          // into a platform-wide chat failure despite compatible capacity.
+          allow_fallbacks: true,
           require_parameters: true,
           data_collection: 'deny',
         },

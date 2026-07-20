@@ -140,6 +140,40 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-20g — progressive 6-tool router (flag-gated) + live A/B (release prod-20260720-bc40fcaa)
+
+Built a Claude-style progressive tool-router (`chat-progressive-router.js`):
+ONE Cerebras-direct call over 6 high-level tools (hivemind_context / _memory /
+_projects / web_research / use_connector / respond_directly), then an ADAPTER
+(`adaptToDecision`) compiles the choice into the SAME `decision` shape
+`intentDecisionToPlan` consumes — so gatherEvidence/citations/synthesis are
+unchanged. Flag-gated `CHAT_ROUTER=progressive` (default = current
+parseChatIntent). NOTE: `.env` already had `CHAT_ROUTER=tool` (a legacy value),
+so my `=== 'progressive'` check keeps the default path live until deliberately set.
+
+**Adapter is the whole game** — the review caught that setting wrong `tool_groups`
+per capability silently kills it: connectors need `tool_groups:[provider]` (the
+provider name IS the toolkit group; `[]` = never registered); projects need
+`['hivemind-projects']`; profile queries must route to the dedicated 'profile'
+op (router enum has no profile — detect with a regex); web_research is inert on
+both routers (plan.needs_web unwired) so route to recall honestly, don't fake it.
+Always bound adapter strings + UUID-guard memory_id (the current path does this
+via normalizeIntentDecision; the adapter bypasses it).
+
+**LIVE END-TO-END A/B (default :2026 vs ephemeral progressive :2099, same
+network/env + CHAT_ROUTER=progressive) — progressive won every case:**
+- fact 3.4s (more specific), source-explain 1.98s vs 3.19s (real prices), relation
+  1.78s vs 3.29s, profile 1.64s vs 4.73s (3x), German 3.74s vs 4.22s.
+- direct-math: DEFAULT wrongly recalled ("nothing answers", 3.1s); PROGRESSIVE
+  answered "391" in 0.62s. Fixes the current planner's arithmetic-→-recall bug.
+Verdict: progressive is faster on every case + fixes correctness bugs. Earned
+"best for production." A/B done by running the flag-ON build in a scratch-port
+container while prod default stayed live — zero user risk.
+
+Flip plan: set `CHAT_ROUTER=progressive` in prod `.env` + recreate hm-core
+(config-only, instant rollback by unsetting). Recommended after a short prod
+canary window. Cerebras strict-tool calling verified live (12/12 tool_calls).
+
 ### 2026-07-20f — FRONTEND deploy (the hazardous one — read before touching FE)
 
 Shipped the profile Rebuild button + caught prod FE was **29 commits behind**

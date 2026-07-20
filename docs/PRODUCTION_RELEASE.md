@@ -3,7 +3,7 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-72609f55
+release_id: prod-20260720-bc40fcaa
 host: singulance
 deployed_at_utc: 2026-07-20T16:00:04Z
 parent:
@@ -12,7 +12,7 @@ parent:
 frontend:
   sha: 4efdd809510f4c467dea03c2ad6e3cb092865948   # FULL reconciled FE: main(29) + singulance-hyper mobile/chat parity + per-account storage + profile button + participants crash fix
 runtime:
-  VERSION: prod-20260720-72609f55
+  VERSION: prod-20260720-bc40fcaa
   NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
   env_change: CEREBRAS_API_KEY added post-deploy → synthesis routes Cerebras-direct
               (api.cerebras.ai) instead of gpt-oss via OpenRouter. Core recreated (same
@@ -22,13 +22,17 @@ runtime:
               ENABLE_PROFILE_DREAM_CRON, PERSONA_ROUTER_ENABLED = true (activates
               the previously-dark user/org profile subsystem + persona injection).
 images:
-  core: sha256:22badeecf7c5483d03744b919cd0c0d3ebc0d46432741adb4edafb51a788f362
+  core: sha256:359e941d542e3c524959693a69abf47b278df093877548b97ea43fddec4f4920
   control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
   employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
   tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
   frontend_single: sha256:f7a2dc6d81ad99d6e3f4b742cc1e4cdf07e18cbdf0bd8eef18d39c2500e67341 # prod-20260720-4efdd809-single
 migration: none
 changes:
+  - Progressive 6-tool router added, FLAG-GATED (CHAT_ROUTER=progressive, default OFF/current
+    planner live). One Cerebras-direct call → adapter → existing plan/gatherEvidence/synthesis.
+    Deployed DARK. Live A/B (default vs flag-ON scratch container) — progressive faster on every
+    case + fixed the direct-math→recall bug (391 in 0.62s vs wrong+3.1s). Not yet flipped.
   - FRONTEND rebuilt + deployed: Da-vinci origin/main (29 commits ahead of prior gitlink
     1702fa72 — mobile chat rebuild, HyperAgents room/brochure reports, outreach/leads,
     live-listen) + profile Rebuild button. Image prod-20260720-62654d4c-single deployed to

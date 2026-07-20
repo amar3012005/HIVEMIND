@@ -308,6 +308,251 @@ function createEvidenceBus() {
   };
 }
 
+// ── Capability executors (Stage C step 3) ────────────────────────────────
+// Each executor mutates the bus and returns a small patch for the scalar(s) it
+// owns (or undefined). Called from gatherEvidence in a fixed sequence that
+// matches the original top-to-bottom order; each keeps its own run/skip guard.
+
+async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  if (!(plan.operation === 'relation_between' && plan.relation_intent?.entities?.length >= 2 && remaining() > 0)) return;
+  const relationArgs = {
+    entities: plan.relation_intent.entities,
+    query: plan.query_canonical_en || plan.user_message,
+    mode: 'explain',
+    ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
+    ...(plan.source?.title ? { source_title: plan.source.title } : {}),
+    ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
+    ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
+  };
+  try {
+    startTool('hivemind_relation_between', relationArgs);
+    const relationResult = await beforeDeadline(dispatchTool('hivemind_relation_between', relationArgs, ctx));
+    recordTool(
+      'hivemind_relation_between', relationArgs,
+      `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
+      relationResult,
+    );
+    bus.mergeMemories(relationResult?.memories);
+    bus.mergeEvidence(relationResult?.evidence, { keyMode: 'withPage' });
+    bus.mergeEdges(relationResult?.relationships, { overwrite: true });
+    bus.addCoMentions(relationResult?.co_mentions);
+    bus.addPackets(relationResult?.evidence_packets);
+    return { relationChecked: true };
+  } catch (error) {
+    recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
+  }
+}
+
+async function execAggregate(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  if (!(plan.aggregate?.parent && plan.aggregate?.kind && remaining() > 0)) return;
+  const aggregateArgs = {
+    parent_name: plan.aggregate.parent,
+    parent_candidates: [...new Set([plan.aggregate.parent, ...(plan.named_entities || [])]
+      .filter((value) => typeof value === 'string' && value.trim()))].slice(0, 12),
+    entity_kind: plan.aggregate.kind,
+    limit: 1000,
+  };
+  try {
+    startTool('hivemind_aggregate_entities', aggregateArgs);
+    const aggregateResult = await beforeDeadline(dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx));
+    recordTool(
+      'hivemind_aggregate_entities',
+      aggregateArgs,
+      aggregateResult?.coverage?.complete
+        ? `${aggregateResult.count} distinct ${aggregateResult.entity_kind || plan.aggregate.kind}`
+        : `incomplete aggregate (${aggregateResult?.coverage?.reason || 'unknown'})`,
+      aggregateResult,
+    );
+    return { aggregateResult };
+  } catch (error) {
+    recordTool('hivemind_aggregate_entities', aggregateArgs, `error: ${error.message}`, null);
+  }
+}
+
+// ── Temporal dispatch ─────────────────────────────────────────────────
+// "What changed / version history / what was true on date X" — route to the
+// bi-temporal tools. base recall already applied valid_at/known_at via
+// recallExtras, so this ADDS the version chain / delta the plain recall lane
+// cannot express. Merged into the same bus memory/evidence maps.
+async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  if (!((plan.operation === 'timeline' || plan.needs_time_travel) && remaining() > 0)) return;
+  const t = plan.time_travel || plan.time || {};
+  const topic = plan.query_canonical_en || plan.user_message
+    || (Array.isArray(plan.named_entities) ? plan.named_entities.join(' ') : '');
+  let temporalTool = null;
+  let temporalArgs = null;
+  if (t.range?.start) {
+    // "since 2025" gives start with no end — diff from then to NOW.
+    temporalTool = 'hivemind_diff';
+    temporalArgs = { from: t.range.start, to: t.range.end || new Date().toISOString(), query: topic };
+  } else if (t.valid_at || t.known_at) {
+    temporalTool = 'hivemind_at';
+    temporalArgs = { ...(t.valid_at ? { valid_at: t.valid_at } : {}), ...(t.known_at ? { known_at: t.known_at } : {}), query: topic };
+  } else if (plan.operation === 'timeline') {
+    temporalTool = 'hivemind_timeline';
+    temporalArgs = { query: topic, limit: 20 };
+  }
+  if (!temporalTool) return;
+  try {
+    startTool(temporalTool, temporalArgs);
+    const temporalResult = await beforeDeadline(dispatchTool(temporalTool, temporalArgs, ctx));
+    // Normalise the varied temporal shapes into memories/evidence for synthesis.
+    const tMems = temporalResult?.memories
+      || temporalResult?.added || temporalResult?.results || [];
+    const summary = temporalTool === 'hivemind_diff'
+      ? `+${temporalResult?.added_count || 0} / -${temporalResult?.removed_count || 0} / =${temporalResult?.persisted_count || 0}`
+      : `${(tMems || []).length} memories${temporalResult?.version_count ? ` + ${temporalResult.version_count} versions` : ''}`;
+    recordTool(temporalTool, temporalArgs, summary, temporalResult);
+    // The superseded-predecessor flag must WIN even if base recall already added
+    // this id unflagged. bus.mergeMemories owns that precedence. Single pass to
+    // preserve exact insertion order across mixed flagged/unflagged rows.
+    for (const m of (tMems || [])) {
+      if (m?._superseded_predecessor) bus.mergeMemories([m], { flags: { _superseded_predecessor: true } });
+      else bus.mergeMemories([m]);
+    }
+    // hivemind_diff also carries removed rows — clone-if-absent, never overwrite.
+    bus.mergeMemories(temporalResult?.removed, { flags: { _diff_removed: true }, absentOnly: true, cloneOnFlag: true });
+    bus.mergeEvidence(temporalResult?.evidence, { keyMode: 'noPage' });
+    bus.addPacket(temporalResult?.evidence_packet);
+  } catch (error) {
+    recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
+  }
+}
+
+// ── Profile dispatch ──────────────────────────────────────────────────
+// "What do you know about me / my company?" → the caller-scoped profile.
+// get_user_profile takes NO id from the model (uses ctx.userId/orgId), so it can
+// only return the authenticated caller's own profile.
+async function execProfile(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  if (!(plan.operation === 'profile' && remaining() > 0)) return;
+  try {
+    startTool('get_user_profile', {});
+    const profileResult = await beforeDeadline(dispatchTool('get_user_profile', {}, ctx));
+    const profileContext = profileResult?.context || '';
+    // Expose the profile as a citeable packet so the grounded-claim validator
+    // (which fail-closes on uncited claims) accepts a profile-only answer.
+    if (profileContext) {
+      bus.addPacket({
+        citations: [{
+          id: 'PROFILE1',
+          source_type: 'user_profile',
+          source_label: 'Your maintained user + org profile',
+          title: 'User + org profile',
+          snippet: profileContext.slice(0, 1200),
+        }],
+      });
+    }
+    recordTool('get_user_profile', {}, `${profileResult?.fact_count || 0} profile facts`, profileResult);
+    return { profileContext };
+  } catch (error) {
+    recordTool('get_user_profile', {}, `error: ${error.message}`, null);
+  }
+}
+
+async function execConnectorRead(bus, plan, ctx, { beforeDeadline, recordTool, onEvent }) {
+  const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
+  if (!(plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit)) return;
+  try {
+    const readResult = await beforeDeadline(runToolkitReadLoop({
+      toolkit: ctx._readToolkit,
+      message: plan.user_message,
+      history: [],
+      model: ctx._internalModel,
+      apiKey: ctx._apiKey,
+      ctx,
+      signal: ctx._signal,
+      onEvent,
+    }));
+    for (const step of (readResult?.steps || [])) {
+      recordTool(step.tool, step.args, step.result_summary, step.raw || null);
+    }
+    if (readResult?.text) {
+      // Raw push (no dedup) — connector live rows were never deduped; preserve.
+      bus.mergeLive([{
+        source: selectedLiveGroups.join(','),
+        title: 'live connector result',
+        snippet: readResult.text.slice(0, 4000),
+      }], { dedup: false });
+    }
+  } catch (err) {
+    recordTool('connector_read_loop', { groups: selectedLiveGroups }, `error: ${err.message}`, null);
+  }
+}
+
+// (d) Web — only when planner explicitly flagged needs_web AND we got <2
+// memories. NOTE: unwrapped dispatch (no beforeDeadline, no startTool) — preserve
+// that asymmetry (R9/R10). memoriesById.size read AFTER all prior merges (R8).
+async function execWeb(bus, plan, ctx, { recordTool }) {
+  if (!(plan.needs_web && bus.memoriesById.size < 2 && plan.sub_queries.length > 0)) return;
+  try {
+    const args = { query: plan.sub_queries[0], limit: 5 };
+    const r = await dispatchTool('hivemind_web_search', args, ctx);
+    recordTool('hivemind_web_search', args, r?.job_id ? `job ${(r.job_id || '').slice(0, 8)}` : 'submitted', r);
+    return { webJob: r };
+  } catch (err) {
+    recordTool('hivemind_web_search', { query: plan.sub_queries[0] }, `error: ${err.message}`, null);
+  }
+}
+
+// Base recall — the always-on lane (skipped for dedicated lanes). Extracted LAST
+// (dossier order) because it carries the plan-mutation SIDE EFFECT: recall_plan
+// rewrites plan.source/time/named_entities, which the spine coverage + escalation
+// + relation stages read AFTER. Must run before those. recallExtras/recallMode/
+// recallLimit/recallQueries stay in gatherEvidence scope (escalation reuses them)
+// and are passed in.
+async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recordTool }, { recallQueries, recallMode, recallLimit, recallExtras }) {
+  if (recallQueries.length === 0) return;
+  const recallResults = await Promise.all(
+    recallQueries.map(async (q) => {
+      const args = {
+        query: q,
+        query_original: plan.query_original || plan.user_message || q,
+        query_canonical_en: plan.query_canonical_en || q,
+        entities: plan.named_entities || [],
+        mode: recallMode,
+        limit: recallLimit,
+        _explicit_mode: !!plan.explicit_recall_mode,
+        ...recallExtras,
+      };
+      try {
+        startTool('hivemind_recall', args);
+        const r = await beforeDeadline(dispatchTool('hivemind_recall', args, ctx));
+        const memCount = r?.memories?.length || 0;
+        const liveCount = r?.live_count || 0;
+        const evCount = r?.evidence_count || 0;
+        const chainCount = (r?.synthesis_evidence_chains || []).length;
+        const parts = [`${memCount} memories`];
+        if (chainCount > 0) parts.push(`${chainCount} synth chains`);
+        if (liveCount > 0) parts.push(`${liveCount} live`);
+        if (evCount > 0) parts.push(`${evCount} evidence`);
+        const summary = parts.join(' + ');
+        recordTool('hivemind_recall', { query: q, ...recallExtras, mode: recallMode }, summary, r);
+        return r;
+      } catch (err) {
+        recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);
+        return null;
+      }
+    })
+  );
+  // T1-3: dedup evidence + live items by id across all recall passes so the
+  // render slices hold distinct rows instead of repeats.
+  for (const r of recallResults) {
+    // PLAN-MUTATION SIDE EFFECT — the recall router's resolved plan rewrites the
+    // structured plan so coverage/escalation/relation read the resolved values.
+    if (r?.recall_plan) {
+      plan.source = r.recall_plan.source?.requested ? r.recall_plan.source : plan.source;
+      plan.time = r.recall_plan.time || plan.time;
+      plan.named_entities = r.recall_plan.named_entities || r.recall_plan.entities || plan.named_entities;
+    }
+    bus.mergeMemories(r?.memories);
+    bus.mergeLive(r?.live, { dedup: true });
+    bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
+    bus.mergeEdges(r?.relationships, { overwrite: false });
+    bus.addPacket(r?.evidence_packet);
+    bus.mergeSynthesisChains(r?.synthesis_evidence_chains);
+  }
+}
+
 // Exported for the characterization test (gather-evidence-characterization.test.js),
 // the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
 // fake dispatcher — no real recall/LLM. Not part of the public module surface.
@@ -320,7 +565,6 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // through the bus.merge* methods one accumulator at a time.
   const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions } = bus;
   let relationChecked = false;
-  let aggregateResult = null;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
   const beforeDeadline = (promise) => {
@@ -343,6 +587,11 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     onEvent?.({ type: 'tool_started', name: tool, arguments: args });
     onEvent?.({ type: 'tool_call', name: tool, arguments: JSON.stringify(args) });
   };
+
+  // Helpers bundle passed to every extracted executor. `remaining` is a live
+  // getter (closes over activeDeadlineAt in this scope) — NOT a snapshot — so an
+  // executor sees the budget consumed by earlier ones.
+  const helpers = { beforeDeadline, remaining, startTool, recordTool, onEvent };
 
   const recallExtras = {
     _structured_intent: true,
@@ -386,200 +635,18 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
     ? [plannedQueries.join('\nRelated focus: ')]
     : [];
-  if (recallQueries.length > 0) {
-    const recallResults = await Promise.all(
-      recallQueries.map(async (q) => {
-        const args = {
-          query: q,
-          query_original: plan.query_original || plan.user_message || q,
-          query_canonical_en: plan.query_canonical_en || q,
-          entities: plan.named_entities || [],
-          mode: recallMode,
-          limit: recallLimit,
-          _explicit_mode: !!plan.explicit_recall_mode,
-          ...recallExtras,
-        };
-        try {
-          startTool('hivemind_recall', args);
-          const r = await beforeDeadline(dispatchTool('hivemind_recall', args, ctx));
-          const memCount = r?.memories?.length || 0;
-          const liveCount = r?.live_count || 0;
-          const evCount = r?.evidence_count || 0;
-          const chainCount = (r?.synthesis_evidence_chains || []).length;
-          const parts = [`${memCount} memories`];
-          if (chainCount > 0) parts.push(`${chainCount} synth chains`);
-          if (liveCount > 0) parts.push(`${liveCount} live`);
-          if (evCount > 0) parts.push(`${evCount} evidence`);
-          const summary = parts.join(' + ');
-          recordTool('hivemind_recall', { query: q, ...recallExtras, mode: recallMode }, summary, r);
-          return r;
-        } catch (err) {
-          recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);
-          return null;
-        }
-      })
-    );
-    // T1-3: dedup evidence + live items by id across all recall passes so
-    // the render slices (.slice(0,8) DOC, .slice(0,10) LIVE) hold distinct
-    // rows instead of repeats — recovers prompt tokens AND improves coverage.
-    for (const r of recallResults) {
-      if (r?.recall_plan) {
-        plan.source = r.recall_plan.source?.requested ? r.recall_plan.source : plan.source;
-        plan.time = r.recall_plan.time || plan.time;
-        plan.named_entities = r.recall_plan.named_entities || r.recall_plan.entities || plan.named_entities;
-      }
-      bus.mergeMemories(r?.memories);
-      bus.mergeLive(r?.live, { dedup: true });
-      bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
-      bus.mergeEdges(r?.relationships, { overwrite: false });
-      bus.addPacket(r?.evidence_packet);
-      // Synthesis evidence chains — pulled when recall_mode='insight'.
-      // Each chain: { synthesis_id, synthesis_title, conf, rev, evidence[] }
-      bus.mergeSynthesisChains(r?.synthesis_evidence_chains);
-    }
-  }
+  await execBaseRecall(bus, plan, ctx, helpers, { recallQueries, recallMode, recallLimit, recallExtras });
 
-  if (plan.operation === 'relation_between' && plan.relation_intent?.entities?.length >= 2 && remaining() > 0) {
-    const relationArgs = {
-      entities: plan.relation_intent.entities,
-      query: plan.query_canonical_en || plan.user_message,
-      mode: 'explain',
-      ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
-      ...(plan.source?.title ? { source_title: plan.source.title } : {}),
-      ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
-      ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
-    };
-    try {
-      startTool('hivemind_relation_between', relationArgs);
-      const relationResult = await beforeDeadline(dispatchTool('hivemind_relation_between', relationArgs, ctx));
-      relationChecked = true;
-      recordTool(
-        'hivemind_relation_between', relationArgs,
-        `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
-        relationResult,
-      );
-      bus.mergeMemories(relationResult?.memories);
-      bus.mergeEvidence(relationResult?.evidence, { keyMode: 'withPage' });
-      bus.mergeEdges(relationResult?.relationships, { overwrite: true });
-      bus.addCoMentions(relationResult?.co_mentions);
-      bus.addPackets(relationResult?.evidence_packets);
-    } catch (error) {
-      recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
-    }
-  }
+  const relationPatch = await execRelationBetween(bus, plan, ctx, helpers);
+  if (relationPatch?.relationChecked) relationChecked = true;
 
-  if (plan.aggregate?.parent && plan.aggregate?.kind && remaining() > 0) {
-    const aggregateArgs = {
-      parent_name: plan.aggregate.parent,
-      parent_candidates: [...new Set([plan.aggregate.parent, ...(plan.named_entities || [])]
-        .filter((value) => typeof value === 'string' && value.trim()))].slice(0, 12),
-      entity_kind: plan.aggregate.kind,
-      limit: 1000,
-    };
-    try {
-      startTool('hivemind_aggregate_entities', aggregateArgs);
-      aggregateResult = await beforeDeadline(
-        dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx),
-      );
-      recordTool(
-        'hivemind_aggregate_entities',
-        aggregateArgs,
-        aggregateResult?.coverage?.complete
-          ? `${aggregateResult.count} distinct ${aggregateResult.entity_kind || plan.aggregate.kind}`
-          : `incomplete aggregate (${aggregateResult?.coverage?.reason || 'unknown'})`,
-        aggregateResult,
-      );
-    } catch (error) {
-      recordTool('hivemind_aggregate_entities', aggregateArgs, `error: ${error.message}`, null);
-    }
-  }
+  const aggregatePatch = await execAggregate(bus, plan, ctx, helpers);
+  let aggregateResult = aggregatePatch?.aggregateResult ?? null;
 
-  // ── Temporal dispatch ─────────────────────────────────────────────────
-  // "What changed / version history / what was true on date X" — route to the
-  // bi-temporal tools. base recall (above) already applied valid_at/known_at
-  // via recallExtras, so this ADDS the version chain / delta the plain recall
-  // lane cannot express. Merged into the same memory/evidence maps.
-  if ((plan.operation === 'timeline' || plan.needs_time_travel) && remaining() > 0) {
-    const t = plan.time_travel || plan.time || {};
-    const topic = plan.query_canonical_en || plan.user_message
-      || (Array.isArray(plan.named_entities) ? plan.named_entities.join(' ') : '');
-    let temporalTool = null;
-    let temporalArgs = null;
-    if (t.range?.start) {
-      // "since 2025" gives start with no end — diff from then to NOW.
-      temporalTool = 'hivemind_diff';
-      temporalArgs = { from: t.range.start, to: t.range.end || new Date().toISOString(), query: topic };
-    } else if (t.valid_at || t.known_at) {
-      temporalTool = 'hivemind_at';
-      temporalArgs = { ...(t.valid_at ? { valid_at: t.valid_at } : {}), ...(t.known_at ? { known_at: t.known_at } : {}), query: topic };
-    } else if (plan.operation === 'timeline') {
-      temporalTool = 'hivemind_timeline';
-      temporalArgs = { query: topic, limit: 20 };
-    }
-    if (temporalTool) {
-      try {
-        startTool(temporalTool, temporalArgs);
-        const temporalResult = await beforeDeadline(dispatchTool(temporalTool, temporalArgs, ctx));
-        // Normalise the varied temporal shapes into memories/evidence for synthesis.
-        const tMems = temporalResult?.memories
-          || temporalResult?.added || temporalResult?.results || [];
-        const summary = temporalTool === 'hivemind_diff'
-          ? `+${temporalResult?.added_count || 0} / -${temporalResult?.removed_count || 0} / =${temporalResult?.persisted_count || 0}`
-          : `${(tMems || []).length} memories${temporalResult?.version_count ? ` + ${temporalResult.version_count} versions` : ''}`;
-        recordTool(temporalTool, temporalArgs, summary, temporalResult);
-        // The superseded-predecessor flag must WIN even if base recall already
-        // added this id unflagged — otherwise synthesis renders the prior value
-        // as a current fact (the flag is the whole point of the timeline
-        // traversal). bus.mergeMemories owns that precedence: rows carrying the
-        // flag propagate it onto an existing unflagged entry; unflagged rows
-        // insert-if-absent as usual.
-        // Single pass to preserve exact insertion order across mixed rows.
-        for (const m of (tMems || [])) {
-          if (m?._superseded_predecessor) bus.mergeMemories([m], { flags: { _superseded_predecessor: true } });
-          else bus.mergeMemories([m]);
-        }
-        // hivemind_diff also carries removed rows — include them so synthesis can
-        // state what disappeared, not only what was added. Clone-if-absent: never
-        // overwrite or tag an existing same-id row.
-        bus.mergeMemories(temporalResult?.removed, { flags: { _diff_removed: true }, absentOnly: true, cloneOnFlag: true });
-        bus.mergeEvidence(temporalResult?.evidence, { keyMode: 'noPage' });
-        bus.addPacket(temporalResult?.evidence_packet);
-      } catch (error) {
-        recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
-      }
-    }
-  }
+  await execTimeline(bus, plan, ctx, helpers);
 
-  // ── Profile dispatch ──────────────────────────────────────────────────
-  // "What do you know about me / my company?" → the caller-scoped profile.
-  // get_user_profile takes NO id from the model (uses ctx.userId/orgId), so it
-  // can only return the authenticated caller's own profile.
-  let profileContext = '';
-  if (plan.operation === 'profile' && remaining() > 0) {
-    try {
-      startTool('get_user_profile', {});
-      const profileResult = await beforeDeadline(dispatchTool('get_user_profile', {}, ctx));
-      profileContext = profileResult?.context || '';
-      // Expose the profile as a citeable packet so the grounded-claim validator
-      // (which fail-closes on uncited claims) accepts a profile-only answer —
-      // same technique the aggregate path uses. Without this, "what do you know
-      // about me?" would be dropped as "no evidence" when no recall memory cites.
-      if (profileContext) {
-        bus.addPacket({
-          citations: [{
-            id: 'PROFILE1',
-            source_type: 'user_profile',
-            source_label: 'Your maintained user + org profile',
-            title: 'User + org profile',
-            snippet: profileContext.slice(0, 1200),
-          }],
-        });
-      }
-      recordTool('get_user_profile', {}, `${profileResult?.fact_count || 0} profile facts`, profileResult);
-    } catch (error) {
-      recordTool('get_user_profile', {}, `error: ${error.message}`, null);
-    }
-  }
+  const profilePatch = await execProfile(bus, plan, ctx, helpers);
+  const profileContext = profilePatch?.profileContext || '';
 
   let coverage = assessRecallCoverage({
     plan,
@@ -635,51 +702,12 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
-  // Connector reads use the same AgentScope-style toolkit as writes. The
-  // selected group's read-only schemas drive a bounded tool loop, allowing
-  // search -> read follow-ups without provider/tool-name switch statements.
-  const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
-  if (plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit) {
-    try {
-      const readResult = await beforeDeadline(runToolkitReadLoop({
-        toolkit: ctx._readToolkit,
-        message: plan.user_message,
-        history: [],
-        model: ctx._internalModel,
-        apiKey: ctx._apiKey,
-        ctx,
-        signal: ctx._signal,
-        onEvent,
-      }));
-      for (const step of (readResult?.steps || [])) {
-        recordTool(step.tool, step.args, step.result_summary, step.raw || null);
-      }
-      if (readResult?.text) {
-        // Raw push (no dedup) — connector live rows were never deduped; preserve.
-        bus.mergeLive([{
-          source: selectedLiveGroups.join(','),
-          title: 'live connector result',
-          snippet: readResult.text.slice(0, 4000),
-        }], { dedup: false });
-      }
-    } catch (err) {
-      recordTool('connector_read_loop', { groups: selectedLiveGroups }, `error: ${err.message}`, null);
-    }
-  }
+  // Connector reads use the same AgentScope-style toolkit as writes.
+  await execConnectorRead(bus, plan, ctx, helpers);
 
-  // (d) Web — only when planner explicitly flagged needs_web AND we got
-  // <2 memories. Saves credits + keeps HIVEMIND-first behaviour.
-  let webJob = null;
-  if (plan.needs_web && memoriesById.size < 2 && plan.sub_queries.length > 0) {
-    try {
-      const args = { query: plan.sub_queries[0], limit: 5 };
-      const r = await dispatchTool('hivemind_web_search', args, ctx);
-      webJob = r;
-      recordTool('hivemind_web_search', args, r?.job_id ? `job ${(r.job_id || '').slice(0, 8)}` : 'submitted', r);
-    } catch (err) {
-      recordTool('hivemind_web_search', { query: plan.sub_queries[0] }, `error: ${err.message}`, null);
-    }
-  }
+  // (d) Web — only when planner flagged needs_web AND we got <2 memories.
+  const webPatch = await execWeb(bus, plan, ctx, helpers);
+  const webJob = webPatch?.webJob ?? null;
 
   // (e) Save intent — fire async after answer (handled in caller).
 

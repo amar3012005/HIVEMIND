@@ -3,45 +3,79 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-b3ca804a
+release_id: prod-20260720-08f01b38
 host: singulance
-deployed_at_utc: 2026-07-20T08:56:41Z
+deployed_at_utc: 2026-07-20T15:11:43Z
 parent:
   branch: singulance-main
-  sha: b3ca804a111957f1ea47c9c07373af6f2cbed07b
+  sha: 08f01b381771d76b78920e26fa9ffea3bb83e3fa
 frontend:
-  sha: 1702fa72952c2ae74dae7a7b47950737417e1863
+  sha: 1702fa72952c2ae74dae7a7b47950737417e1863   # unchanged — Core-only release
 runtime:
-  VERSION: prod-20260720-b3ca804a
-  NEXT_VERSION: prod-20260720-b3ca804a
+  VERSION: prod-20260720-08f01b38
+  NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
 images:
-  core: sha256:396dda0757ae61af6448db1f8c2a6cfa38b54b0c3ed60d3c21d077d2befbfffc
-  control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4
-  employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29
-  tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876
-  frontend_single: sha256:0ba7d5378c37e9269339903d89115abaa90220a9825f2096d8c90739f42dcfd4
+  core: sha256:b66b7f8ec300727194bf9756e989f7a1806564ff596ad8486cbc58f30e9f0a69
+  control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
+  employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
+  tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
+  frontend_single: sha256:0ba7d5378c37e9269339903d89115abaa90220a9825f2096d8c90739f42dcfd4 # unchanged
+migration: none
 changes:
-  - Released canonical source-grounded recall/chat updates through b3ca804a.
-  - Rebuilt Core, Control, Employees, TARA, and the vNext frontend from one clean parent commit.
-  - Reconciled both frontend routes to the vNext release: `hivemind-next-frontend-1` for next/personal/enterprise and `hm-fe` for the root domain.
-  - Retained stable aliases and immediate timestamped rollback references; pruned obsolete application image tags only.
+  - Source-explain / full reconstruction FIXED. Two combined root causes — (1) explicit-source
+    hydration was wrapped in withTimeout at CREATION but awaited after hop1/hop2/RRF/boost, so a
+    ~50ms hydration always resolved to {timed_out} and fell back to document-lead boilerplate;
+    (2) hydration vector-anchored on the raw NL query (filename + question words) so windows landed
+    on the cover page, not the entity. Now: raw promise + fresh-clock timeout at the await, and
+    anchor on the planner's named entities.
+  - Compare / relation per-entity lanes switched from mode:fact (no evidence expansion) to
+    mode:explain, limit 5->8, so each entity pulls its document evidence. "Compare X and Y" no
+    longer reports both absent when each exists.
+  - Chat latency 26-60s (growing/runaway) -> 2.5-7.7s (stable). (1) Qdrant ensureCollection was
+    guarded by a scalar collectionReady, invalidated on every multi-tenant switch, re-running
+    createPayloadIndex(wait:true) per query -> Set (once per collection per process). (2) OpenRouter
+    default routing for openai/gpt-oss-120b landed on 7-15s backends (DekaLLM/WandB/Parasail) ->
+    provider.sort=throughput selects Cerebras/Groq at ~0.5-1s. (3) reasoning_effort=low on grounded
+    synthesis (medium for full).
+  - Every canonical memory now carries the ingest-time (known_at) timestamp: content-body suffix
+    (YYYY-MM-DDTHH:MMZ), metadata.recorded_at, ts:YYYY-MM-DD tag, entity first/last-seen via
+    CanonicalEntity.createdAt/updatedAt. Idempotent on re-ingest. No migration.
+  - Removed proven-dead legacy planner/router (planStep, planPrompt, ROUTER_TOOLS, routerPlan);
+    kept callJsonLLM. Added trace.phases per-step latency instrumentation.
 acceptance:
-  public: [homepage_200, hivemind_landing_200, api_health_200, core_health_200]
+  public: [core_health_ok]
   authenticated:
-    - direct_recall_200
-    - direct_chat_200_grounded_with_citations
-  runtime: [core_healthy, control_healthy, employees_healthy, tara_healthy, frontend_running]
-  release_marker: allowImplicitSource_equals_not_recallPlan_source_requested
+    - fact_recall_200_grounded_cited
+    - source_explain_200_grounded_correct         # was: falsely reported entity absent — FIXED
+    - full_reconstruction_200_grounded_correct    # was: falsely reported entity absent — FIXED
+    - relation_200_honest_no_edge_vs_comention
+    - compare_200_both_entities_found             # was: reported both absent — FIXED
+    - german_fact_source_relation_correct_in_de   # no English routing gate
+  latency_observed:
+    fact: 3.3-7.7s        # target p95 1.5s — NOT met (down 8x from runaway; provider/arch floor)
+    explain: ~11s          # target p95 3s — NOT met
+    compare: 4.9s
+    relation: 2.5-5.8s
+    german: 2.5-4.9s
   fresh_fatal_errors: 0
-  notes:
-    - Recall fact-mode test reached its latency budget with no returned facts; grounded chat remained successful with citations.
+  runtime: [core_healthy, exit_0, restarts_0, oom_false]
+  known_gaps:
+    - Latency above the aggressive p95 targets (fact 1.5s / chat 4s). No longer runaway; residual
+      variance is in-answerStep DB work + occasional slow OpenRouter backend despite throughput sort.
+    - Temporal valid_at/known_at not proven end-to-end: base recall does not surface the terse
+      SECURITY_E2E test memories ("launches on 2027-06-01"); partly a synthetic-test-data artifact.
+      Also: the claimed Updates edge between predecessor/successor does NOT exist in the DB — only
+      isLatest flags wire the supersession.
 rollback:
-  core: hivemind/core-api:stable
+  core: hivemind/core-api:rollback-20260720T151143Z   # -> prior release 5e347266
   control: hivemind/control-plane:stable
   employees: hivemind/employees:stable
   tara_deepgram: hivemind/tara-deepgram:stable
   frontend_single: hivemind/fe:stable-single
-  immediate_timestamped: 20260720T085005Z
+  immediate_timestamped: 20260720T151143Z
+aliases:
+  stable: prod-20260720-08f01b38
+  latest: prod-20260720-08f01b38
 ```
 
-No customer email, connector action, telephone call, or write operation was triggered during release acceptance.
+No customer email, connector action, telephone call, or write operation was triggered during release acceptance. The disposable SECURITY_E2E_20260720 test memories (177de683, 65c9ca7b) were intentionally retained as the temporal fixture and NOT deleted.

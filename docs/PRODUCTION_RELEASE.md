@@ -8,7 +8,7 @@ host: singulance
 deployed_at_utc: 2026-07-20T16:00:04Z
 parent:
   branch: singulance-main
-  sha: 
+  sha: 3a0de3c1ef1ca36e485243e3c12dfe28371b2e8b
 frontend:
   sha: 1702fa72952c2ae74dae7a7b47950737417e1863   # unchanged — Core-only release
 runtime:

@@ -684,6 +684,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // their source rows in the same answer.
   const synthesisChains = new Map(); // key = synthesis_id → chain
   const recallPackets = [];
+  const coMentions = [];
   let aggregateResult = null;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
@@ -850,6 +851,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       for (const edge of (relationResult?.relationships || [])) {
         if (edge?.from_id && edge?.to_id && edge?.type) edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
       }
+      coMentions.push(...(relationResult?.co_mentions || []));
       recallPackets.push(...(relationResult?.evidence_packets || []));
     } catch (error) {
       recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
@@ -887,6 +889,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     memories: [...memoriesById.values()],
     evidence: evidenceItems,
     relationships: [...edgesByKey.values()],
+    co_mentions: coMentions,
   });
   let escalationCount = 0;
   if (remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
@@ -1530,6 +1533,9 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const conf = typeof e.confidence === 'number' ? ` (conf=${e.confidence.toFixed(2)})` : '';
     return `[${(e.from_id || '').slice(0, 8)}] "${fromLabel}" ─${e.type}${conf}→ [${(e.to_id || '').slice(0, 8)}] "${toLabel}"`;
   }).join('\n');
+  const coMentionLines = (evidence.co_mentions || []).slice(0, 12).map((path) =>
+    `[UNVERIFIED CO-MENTION/${path.source_id || 'unknown'}] ${(path.entities || []).join(' + ')}. This is shared-source evidence, not a typed graph relationship.`,
+  ).join('\n');
 
   // SYNTHESIS CHAINS block — insight-mode recall returns curated
   // synthesis-tier memories + their evidence chain (top-4 source rows
@@ -1579,7 +1585,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
     ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
     : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` : ''}${coMentionLines ? `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

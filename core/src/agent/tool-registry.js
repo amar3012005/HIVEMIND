@@ -772,9 +772,16 @@ const TOOL_HANDLERS = {
     for (const [entity, ids] of memoryIdsByEntity.entries()) {
       for (const id of ids) {
         const memory = memories.get(id);
+        const tags = Array.isArray(memory?.tags) ? memory.tags : [];
+        const taggedDocumentId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'))?.slice('doc-id:'.length);
+        const taggedSourceId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('source-id:'))?.slice('source-id:'.length);
+        const taggedFilename = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'))?.slice('filename:'.length);
         const sourceId = memory?.source_metadata?.document_id
           || memory?.source_metadata?.source_id
           || memory?.source_id
+          || taggedDocumentId
+          || taggedSourceId
+          || taggedFilename
           || null;
         if (!sourceId) continue;
         if (!sourceGroups.has(sourceId)) sourceGroups.set(sourceId, new Map());

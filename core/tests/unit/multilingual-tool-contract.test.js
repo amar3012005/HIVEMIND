@@ -93,6 +93,16 @@ test('relation and query-based update are first-class, language-neutral operatio
   assert.ok(relation.tool_groups.includes('hivemind-recall'));
   assert.deepEqual(intentDecisionToPlan(relation, relation.query_original).relation_intent.entities, ['SolvisPia', 'SolvisMax']);
 
+  const relationFromNamedEntities = normalizeIntentDecision({
+    operation: 'relation_between', confidence: 0.91, response_language: 'de',
+    query_original: 'Wie hängen SolvisPia und SolvisMax zusammen?',
+    query_canonical_en: 'relationship between SolvisPia and SolvisMax',
+    queries: [], named_entities: ['SolvisPia', 'SolvisMax'], recall_mode: 'explain',
+    tool_groups: ['hivemind-recall'], side_effect_policy: 'read_only',
+  }, { message: 'Wie hängen SolvisPia und SolvisMax zusammen?', language: 'de', allowedGroups });
+  assert.equal(relationFromNamedEntities.operation, 'relation_between');
+  assert.deepEqual(relationFromNamedEntities.relation.entities, ['SolvisPia', 'SolvisMax']);
+
   const update = normalizeIntentDecision({
     operation: 'update', confidence: 0.97, response_language: 'fr', queries: [], named_entities: ['SolvisPia'],
     recall_mode: 'fact', tool_groups: [], side_effect_policy: 'read_only',

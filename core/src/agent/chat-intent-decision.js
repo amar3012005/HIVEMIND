@@ -172,6 +172,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     ? 'approval_required'
     : (SIDE_EFFECT_POLICIES.has(raw.side_effect_policy) ? raw.side_effect_policy : 'read_only');
   const queries = boundedStrings(raw.queries, 3, 1000);
+  const namedEntities = boundedStrings(raw.named_entities, 12, 256);
   if (operation !== 'direct' && queries.length === 0 && !['save', 'update', 'delete', 'rename_assistant'].includes(operation)) {
     queries.push(boundedText(message));
   }
@@ -197,7 +198,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     queries,
     query_original: boundedText(raw.query_original, 2000) || boundedText(message, 2000),
     query_canonical_en: boundedText(raw.query_canonical_en, 2000) || queries[0] || boundedText(message, 2000),
-    named_entities: boundedStrings(raw.named_entities, 12, 256),
+    named_entities: namedEntities,
     // Full reconstruction is caller-explicit only. The router can request at
     // most explain; applyExplicitRecallControls may promote to full later.
     recall_mode: raw.recall_mode === 'full'
@@ -231,14 +232,15 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
           event_time: boundedText(raw.update.event_time, 64) || null,
         }
       : null,
-    relation: raw.relation && boundedStrings(raw.relation.entities, 6, 256).length >= 2
+    relation: (raw.relation || (operation === 'relation_between' ? { entities: namedEntities } : null))
+      && boundedStrings(raw.relation?.entities || namedEntities, 6, 256).length >= 2
       ? {
-          entities: boundedStrings(raw.relation.entities, 6, 256),
-          source: raw.relation.source ? {
+          entities: boundedStrings(raw.relation?.entities || namedEntities, 6, 256),
+          source: raw.relation?.source ? {
             document_id: boundedText(raw.relation.source.document_id, 128) || null,
             title: boundedText(raw.relation.source.title, 512) || null,
           } : null,
-          time: raw.relation.time ? {
+          time: raw.relation?.time ? {
             valid_at: boundedText(raw.relation.time.valid_at, 64) || null,
             known_at: boundedText(raw.relation.time.known_at, 64) || null,
           } : null,

@@ -370,7 +370,6 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     : recallMode === 'explain' || recallMode === 'insight'
       ? 12
       : 8;
-  const evidenceSeen = new Set();
   const plannedQueries = [...new Set([
     plan.user_message,
     ...(Array.isArray(plan.sub_queries) ? plan.sub_queries : []),
@@ -423,42 +422,20 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // T1-3: dedup evidence + live items by id across all recall passes so
     // the render slices (.slice(0,8) DOC, .slice(0,10) LIVE) hold distinct
     // rows instead of repeats — recovers prompt tokens AND improves coverage.
-    const liveSeen = new Set();
     for (const r of recallResults) {
       if (r?.recall_plan) {
         plan.source = r.recall_plan.source?.requested ? r.recall_plan.source : plan.source;
         plan.time = r.recall_plan.time || plan.time;
         plan.named_entities = r.recall_plan.named_entities || r.recall_plan.entities || plan.named_entities;
       }
-      for (const m of (r?.memories || [])) {
-        if (!m?.id) continue;
-        if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
-      }
-      for (const li of (r?.live || [])) {
-        const k = li?.id || `${li?.source || '?'}|${li?.title || ''}`;
-        if (liveSeen.has(k)) continue;
-        liveSeen.add(k);
-        liveItems.push(li);
-      }
-      for (const ev of (r?.evidence || [])) {
-        const k = ev?.id || `${ev?.document_title || '?'}|${ev?.page || ''}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`;
-        if (evidenceSeen.has(k)) continue;
-        evidenceSeen.add(k);
-        evidenceItems.push(ev);
-      }
-      for (const edge of (r?.relationships || [])) {
-        if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
-        const key = `${edge.from_id}|${edge.to_id}|${edge.type}`;
-        if (!edgesByKey.has(key)) edgesByKey.set(key, edge);
-      }
-      if (r?.evidence_packet) recallPackets.push(r.evidence_packet);
+      bus.mergeMemories(r?.memories);
+      bus.mergeLive(r?.live, { dedup: true });
+      bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
+      bus.mergeEdges(r?.relationships, { overwrite: false });
+      bus.addPacket(r?.evidence_packet);
       // Synthesis evidence chains — pulled when recall_mode='insight'.
       // Each chain: { synthesis_id, synthesis_title, conf, rev, evidence[] }
-      for (const chain of (r?.synthesis_evidence_chains || [])) {
-        if (!synthesisChains.has(chain.synthesis_id)) {
-          synthesisChains.set(chain.synthesis_id, chain);
-        }
-      }
+      bus.mergeSynthesisChains(r?.synthesis_evidence_chains);
     }
   }
 
@@ -481,18 +458,11 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
         relationResult,
       );
-      for (const memory of (relationResult?.memories || [])) {
-        if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
-      }
-      for (const item of (relationResult?.evidence || [])) {
-        const key = item?.id || `${item?.document_title || '?'}|${item?.page || ''}|${String(item?.content || item?.snippet || '').slice(0, 40)}`;
-        if (!evidenceSeen.has(key)) { evidenceSeen.add(key); evidenceItems.push(item); }
-      }
-      for (const edge of (relationResult?.relationships || [])) {
-        if (edge?.from_id && edge?.to_id && edge?.type) edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
-      }
-      coMentions.push(...(relationResult?.co_mentions || []));
-      recallPackets.push(...(relationResult?.evidence_packets || []));
+      bus.mergeMemories(relationResult?.memories);
+      bus.mergeEvidence(relationResult?.evidence, { keyMode: 'withPage' });
+      bus.mergeEdges(relationResult?.relationships, { overwrite: true });
+      bus.addCoMentions(relationResult?.co_mentions);
+      bus.addPackets(relationResult?.evidence_packets);
     } catch (error) {
       recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
     }
@@ -557,25 +527,23 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
           ? `+${temporalResult?.added_count || 0} / -${temporalResult?.removed_count || 0} / =${temporalResult?.persisted_count || 0}`
           : `${(tMems || []).length} memories${temporalResult?.version_count ? ` + ${temporalResult.version_count} versions` : ''}`;
         recordTool(temporalTool, temporalArgs, summary, temporalResult);
+        // The superseded-predecessor flag must WIN even if base recall already
+        // added this id unflagged — otherwise synthesis renders the prior value
+        // as a current fact (the flag is the whole point of the timeline
+        // traversal). bus.mergeMemories owns that precedence: rows carrying the
+        // flag propagate it onto an existing unflagged entry; unflagged rows
+        // insert-if-absent as usual.
+        // Single pass to preserve exact insertion order across mixed rows.
         for (const m of (tMems || [])) {
-          if (!m?.id) continue;
-          if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
-          // The superseded-predecessor flag must WIN even if base recall already
-          // added this id unflagged — otherwise synthesis renders the prior
-          // value as a current fact (the flag is the whole point of the timeline
-          // traversal). Propagate it onto the existing entry.
-          else if (m._superseded_predecessor) memoriesById.get(m.id)._superseded_predecessor = true;
+          if (m?._superseded_predecessor) bus.mergeMemories([m], { flags: { _superseded_predecessor: true } });
+          else bus.mergeMemories([m]);
         }
         // hivemind_diff also carries removed rows — include them so synthesis can
-        // state what disappeared, not only what was added.
-        for (const m of (temporalResult?.removed || [])) {
-          if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, { ...m, _diff_removed: true });
-        }
-        for (const ev of (temporalResult?.evidence || [])) {
-          const k = ev?.id || `${ev?.document_title || '?'}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`;
-          if (!evidenceSeen.has(k)) { evidenceSeen.add(k); evidenceItems.push(ev); }
-        }
-        if (temporalResult?.evidence_packet) recallPackets.push(temporalResult.evidence_packet);
+        // state what disappeared, not only what was added. Clone-if-absent: never
+        // overwrite or tag an existing same-id row.
+        bus.mergeMemories(temporalResult?.removed, { flags: { _diff_removed: true }, absentOnly: true, cloneOnFlag: true });
+        bus.mergeEvidence(temporalResult?.evidence, { keyMode: 'noPage' });
+        bus.addPacket(temporalResult?.evidence_packet);
       } catch (error) {
         recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
       }
@@ -597,7 +565,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       // same technique the aggregate path uses. Without this, "what do you know
       // about me?" would be dropped as "no evidence" when no recall memory cites.
       if (profileContext) {
-        recallPackets.push({
+        bus.addPacket({
           citations: [{
             id: 'PROFILE1',
             source_type: 'user_profile',
@@ -651,21 +619,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
           `${expanded?.memories?.length || 0} memories + ${expanded?.evidence_count || 0} evidence (${escalation.reason})`,
           expanded,
         );
-        for (const memory of (expanded?.memories || [])) {
-          if (memory?.id && !memoriesById.has(memory.id)) memoriesById.set(memory.id, memory);
-        }
-        for (const item of (expanded?.evidence || [])) {
-          const key = item?.id || `${item?.document_title || '?'}|${item?.page || ''}|${(item?.content || item?.snippet || '').slice(0, 40)}`;
-          if (!evidenceSeen.has(key)) {
-            evidenceSeen.add(key);
-            evidenceItems.push(item);
-          }
-        }
-        for (const edge of (expanded?.relationships || [])) {
-          if (!edge?.from_id || !edge?.to_id || !edge?.type) continue;
-          edgesByKey.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
-        }
-        if (expanded?.evidence_packet) recallPackets.push(expanded.evidence_packet);
+        bus.mergeMemories(expanded?.memories);
+        bus.mergeEvidence(expanded?.evidence, { keyMode: 'withPage' });
+        bus.mergeEdges(expanded?.relationships, { overwrite: true });
+        bus.addPacket(expanded?.evidence_packet);
       } catch (error) {
         recordTool('hivemind_recall', escalation.args, `escalation error: ${error.message}`, null);
       }
@@ -698,11 +655,12 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         recordTool(step.tool, step.args, step.result_summary, step.raw || null);
       }
       if (readResult?.text) {
-        liveItems.push({
+        // Raw push (no dedup) — connector live rows were never deduped; preserve.
+        bus.mergeLive([{
           source: selectedLiveGroups.join(','),
           title: 'live connector result',
           snippet: readResult.text.slice(0, 4000),
-        });
+        }], { dedup: false });
       }
     } catch (err) {
       recordTool('connector_read_loop', { groups: selectedLiveGroups }, `error: ${err.message}`, null);

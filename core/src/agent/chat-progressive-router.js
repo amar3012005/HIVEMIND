@@ -105,7 +105,24 @@ const iso = (v) => (typeof v === 'string' && !Number.isNaN(new Date(v).getTime()
 // A self-referential query ("about me / my company") → the dedicated profile op
 // (the router's hivemind_context enum has no 'profile'; detect it here so the
 // caller-scoped get_user_profile path is preserved, not degraded to recall).
-const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|my (profile|preferences|role|goals))\b|über mich|meine firma|qui suis-je|sobre mí/i;
+// Self-referential queries about the USER's own maintained profile → the
+// dedicated caller-scoped profile op. Covers identity ("who am i / about me")
+// AND the user's OWN attributes/goals/strategy/preferences, which live as
+// structured profile facts (not well-embedded memory vectors), so plain recall
+// mis-ranks them (audit: "my content marketing strategy" → recall → corpus
+// mis-hit). The `my <attribute>` list is deliberately bounded to profile-type
+// nouns so "my file/document/note/email" still route to recall, not profile.
+// `my (…up to 3 qualifier words…) <profile-noun>` so "my content marketing
+// strategy" / "my go-to-market plan" match, while the noun list stays bounded
+// to profile-type attributes (file/document/note/email/meeting/competitor are
+// NOT in it, so they still route to recall). Qualifiers are letters/hyphens only.
+// Two arms:
+//  (a) `my (…≤3 qualifiers…) <strong-noun>` — nouns unambiguous enough that a
+//      qualified form is still about the user ("my content marketing strategy",
+//      "my quarterly objectives"). "team/company/language/location" are NOT in
+//      this arm (qualified forms like "my email to the team" are NOT profile).
+//  (b) `my <profile-noun>` — the direct form, includes the weaker nouns.
+const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|mon (rôle|objectif|entreprise)|sobre mí|mi (rol|empresa|objetivo)/i;
 
 async function callRouter({ message, history, apiKey, signal }) {
   const histMsgs = Array.isArray(history)

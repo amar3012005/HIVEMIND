@@ -41,7 +41,7 @@ RUN npx prisma generate
 # Release gate: execute the security-sensitive chat contracts in the same
 # dependency environment used to assemble the production image. Tests remain
 # in the builder and are not copied into the lean runtime stage.
-RUN node --test \
+RUN CEREBRAS_API_KEY=test-only OPENROUTER_API_KEY=test-only node --test \
     tests/unit/multilingual-tool-contract.test.js \
     tests/integration/chat-orchestration.integration.test.js \
     tests/unit/chat-tool-authorization.test.js \

@@ -278,7 +278,11 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // The shared router owns wide lexical/vector/entity lanes; firing several
   // independent recalls duplicates those lanes and makes latency/merging
   // nondeterministic under load.
-  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between';
+  // 'profile' is a dedicated lane: the get_user_profile tool IS the answer, so
+  // do not also run blended recall — otherwise tenant-scoped-but-unrelated
+  // memories compete with the profile facts in the synthesis prompt (review
+  // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
+  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
     ? [plannedQueries.join('\nRelated focus: ')]
     : [];
@@ -471,6 +475,37 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
   }
 
+  // ── Profile dispatch ──────────────────────────────────────────────────
+  // "What do you know about me / my company?" → the caller-scoped profile.
+  // get_user_profile takes NO id from the model (uses ctx.userId/orgId), so it
+  // can only return the authenticated caller's own profile.
+  let profileContext = '';
+  if (plan.operation === 'profile' && remaining() > 0) {
+    try {
+      startTool('get_user_profile', {});
+      const profileResult = await beforeDeadline(dispatchTool('get_user_profile', {}, ctx));
+      profileContext = profileResult?.context || '';
+      // Expose the profile as a citeable packet so the grounded-claim validator
+      // (which fail-closes on uncited claims) accepts a profile-only answer —
+      // same technique the aggregate path uses. Without this, "what do you know
+      // about me?" would be dropped as "no evidence" when no recall memory cites.
+      if (profileContext) {
+        recallPackets.push({
+          citations: [{
+            id: 'PROFILE1',
+            source_type: 'user_profile',
+            source_label: 'Your maintained user + org profile',
+            title: 'User + org profile',
+            snippet: profileContext.slice(0, 1200),
+          }],
+        });
+      }
+      recordTool('get_user_profile', {}, `${profileResult?.fact_count || 0} profile facts`, profileResult);
+    } catch (error) {
+      recordTool('get_user_profile', {}, `error: ${error.message}`, null);
+    }
+  }
+
   let coverage = assessRecallCoverage({
     plan,
     memories: [...memoriesById.values()],
@@ -593,6 +628,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
     recall_packets: recallPackets,
+    profile_context: profileContext,
     aggregate: aggregateResult,
     coverage: {
       ...coverage,
@@ -1184,17 +1220,25 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // "who you're talking to" block. Flag-gated PERSONA_ROUTER_ENABLED → inert no-op
   // by default; intent-gated so non-persona queries skip it; never fatal.
   let personaNote = '';
-  try {
-    const { routePersona, isPersonaRouterEnabled } = await import('../memory/persona-router.js');
-    if (isPersonaRouterEnabled()) {
-      const { ProfileStore } = await import('../memory/profile-store.js');
-      const ps = ctx?.prisma ? new ProfileStore(ctx.prisma) : null;
-      const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, projectId: ctx?.projectId || null, profileStore: ps });
-      if (pr.routed && pr.context) {
-        personaNote = `\n\nUSER PERSONA (who you're talking to — use for personalization; never contradict; never invent beyond it):\n${pr.context}`;
+  // Explicit path: the planner routed operation=profile and gatherEvidence
+  // already fetched the caller-scoped profile via get_user_profile. Prefer it.
+  if (evidence.profile_context) {
+    personaNote = `\n\nUSER + ORG PROFILE (who you're talking to and their organization — the authoritative answer to "what do you know about me/my company"; use it directly; never invent beyond it):\n${evidence.profile_context}`;
+  } else {
+    // Passive path: flag-gated persona router injects context on persona-ish
+    // queries even when the planner didn't pick operation=profile.
+    try {
+      const { routePersona, isPersonaRouterEnabled } = await import('../memory/persona-router.js');
+      if (isPersonaRouterEnabled()) {
+        const { getSharedProfileStore } = await import('../memory/profile-store.js');
+        const ps = ctx?.prisma ? getSharedProfileStore(ctx.prisma) : null;
+        const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, projectId: ctx?.projectId || null, profileStore: ps });
+        if (pr.routed && pr.context) {
+          personaNote = `\n\nUSER PERSONA (who you're talking to — use for personalization; never contradict; never invent beyond it):\n${pr.context}`;
+        }
       }
-    }
-  } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
+    } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
+  }
 
   // COVERAGE DISCLOSURE (multi-entity compare/relation). When the planner
   // asked about 2+ named entities, tell the model — from the packet's OWN

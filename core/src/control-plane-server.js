@@ -7719,6 +7719,34 @@ Write the persona now.`;
             await saveMemory({ ...sec, tags: canonTags });
           }
 
+          // Mirror the company identity into ORG-SCOPED profile facts so the
+          // /hivemind/app/profile page + the get_user_profile chat tool show the
+          // organization, not just the person. Onboarding already writes these as
+          // org-canon MEMORIES (above); profile facts are the structured,
+          // page-rendered surface. Best-effort — a fact-write failure must never
+          // break onboarding. orgId scopes them; the onboarding userId is the
+          // owner. Reuses ProfileStore.upsertFact (same store the API + dreamer use).
+          try {
+            const { getSharedProfileStore } = await import('./memory/profile-store.js');
+            const _ps = getSharedProfileStore(prisma);
+            const companyFacts = [
+              { key: 'company', value: companyName },
+              { key: 'company:mission', value: mission },
+              { key: 'company:positioning', value: profile.positioning || null },
+              { key: 'company:icp', value: profile.icp || null },
+              { key: 'company:website', value: siteUrl || null },
+            ].filter((f) => f.value && String(f.value).trim());
+            for (const f of companyFacts) {
+              await _ps.upsertFact({
+                userId, orgId, category: 'static',
+                key: f.key, value: String(f.value).slice(0, 500),
+                confidence: 0.95, sourceMemoryId: null,
+              }).catch(() => {});
+            }
+          } catch (err) {
+            console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
+          }
+
           say('Planning your first tasks');
           let tasks = [];
           try {

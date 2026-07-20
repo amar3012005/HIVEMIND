@@ -17,6 +17,9 @@ const OPERATIONS = new Set([
   // Served by the bi-temporal tools (hivemind_timeline / _at / _diff) in the
   // gatherEvidence executor. time.valid_at / time.range drive as-of vs diff.
   'timeline',
+  // profile: "what do you know about me / my company / my preferences" — served
+  // by the get_user_profile tool (caller-scoped; no id from the model).
+  'profile',
 ]);
 const RECALL_MODES = new Set(['fact', 'explain', 'full']);
 const SCOPES = new Set(['personal', 'project', 'team', 'organization']);
@@ -201,7 +204,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     ? { parent: boundedText(raw.aggregate.parent, 256), kind: boundedText(raw.aggregate.kind, 128), requires_complete_coverage: true }
     : null;
   const toolGroups = boundedStrings(raw.tool_groups, 12, 128).filter((name) => allowed.has(name));
-  const requiredNativeGroup = ['recall', 'source_read', 'aggregate', 'relation_between', 'timeline'].includes(operation)
+  const requiredNativeGroup = ['recall', 'source_read', 'aggregate', 'relation_between', 'timeline', 'profile'].includes(operation)
     ? 'hivemind-recall'
     : ['save', 'update', 'delete', 'rename_assistant'].includes(operation) ? 'hivemind-memory-write' : null;
   if (requiredNativeGroup && allowed.has(requiredNativeGroup) && !toolGroups.includes(requiredNativeGroup)) {
@@ -318,6 +321,7 @@ Use the conversation history to resolve references. Select the minimum tool grou
   Operation contract: use source_read only when the user names a specific source/file. When the user asks which file(s) or source(s) mention or describe an entity without naming a file, use operation=recall with recall_mode=explain and keep only real names/identifiers in named_entities. Use relation_between when the user asks how two or more exact entities are connected, related, associated, dependent, compared, or mentioned together. This applies in every language and is not ordinary recall. Use aggregate for any request that requires a complete or exact count, or every member of a category. A top-K recall answer can never establish completeness, so do not use recall for an exhaustive count/list. Use recall only when the user needs relevant evidence rather than a complete set. Use connector_read for current connected-app data, and connector_write only for an explicit external side effect.
   Routing examples: "How are SolvisPia and SolvisMax related?", "Wie hängen SolvisPia und SolvisMax zusammen?", "Quel est le lien entre SolvisPia et SolvisMax ?", "¿Qué relación hay entre SolvisPia y SolvisMax?", "SolvisPia और SolvisMax कैसे जुड़े हैं?", and "ما العلاقة بين SolvisPia وSolvisMax؟" all require operation=relation_between with relation.entities=["SolvisPia","SolvisMax"]. A question about only one entity requires recall instead.
   Source-discovery examples: "Which files mention SolvisPia?", "In welcher Datei wird SolvisPia beschrieben?", and equivalent questions in any language require operation=recall, recall_mode=explain, named_entities=["SolvisPia"]. Do not add generic words such as file, source, document, relationship, product, company, or question words to named_entities.
+  Profile routing: use operation=profile when the user asks about THEMSELVES or their OWN organization — "what do you know about me", "who am I", "my role/company/preferences/goals", "was weißt du über mich / meine Firma", equivalents in any language. It returns the maintained user+org profile. A question about some OTHER entity/person is recall, not profile.
   Temporal / timeline routing: use operation=timeline when the user asks how something CHANGED over time, its history/versions, or what was true AT a past date. Set time.valid_at (as-of a single instant, e.g. "as of March 2026", "letztes Jahr", "was it true on 2026-05-01"), OR time.range {start,end} (a span, e.g. "what changed between May and July", "seit 2025"), OR neither for a full version history ("what's the history of X", "how has the launch date changed", "wie hat sich X entwickelt"). Keep the topic in named_entities/query. Examples in any language: "What changed about SolvisPia since 2025?" (range start=2025-01-01), "What was the launch date as of last week?" (valid_at), "Show me the history of the pricing decision" (no time = full timeline). A plain current-fact question is NOT timeline — use recall.
 Always return query_original in the user's wording and query_canonical_en as a concise English retrieval formulation. Preserve exact filenames, people, companies, products, numbers, identifiers and aliases in both.
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.

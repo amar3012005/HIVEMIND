@@ -223,6 +223,15 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'get_user_profile',
+      description:
+        'Return the maintained profile of the CURRENT user and their organization — durable identity facts (name, role, company, mission, ICP, location, language), preferences, goals, and current focus. Call this for "what do you know about me", "who am I", "my preferences/role/company", "was weißt du über mich / meine Firma", or any request about the user or their org themselves (any language). Always scoped to the authenticated caller; takes no id.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_at',
       description:
         'Bi-temporal snapshot: what did we know about X on date Y? Filters to memories whose document_date ≤ valid_at AND were already ingested by then.\n\nFor connector-scoped time-travel pass tags. Examples:\n  • Slack: tags=["slack"] (+ optional channel:NAME, from:USER)\n  • Notion: tags=["notion"] (+ optional page:NAME)\n  • Gmail: tags=["gmail"] (+ optional from:EMAIL, thread:ID)',
@@ -1222,6 +1231,26 @@ const TOOL_HANDLERS = {
     };
   },
 
+  async get_user_profile(args, ctx) {
+    // TENANT-SAFE by construction: scoped to ctx.userId/ctx.orgId — the tool
+    // takes NO id from the model, so it can only ever return the authenticated
+    // caller's own profile. Returns the structured facts (for the UI/answer)
+    // plus the compact context string (for grounding). Reuses ProfileStore —
+    // the same store the /api/profiles routes and the dreamer write to.
+    if (!ctx.prisma) return { facts: [], context: '', error: 'profile_store_unavailable' };
+    try {
+      const { getSharedProfileStore } = await import('../memory/profile-store.js');
+      const store = getSharedProfileStore(ctx.prisma);
+      const [facts, context] = await Promise.all([
+        store.getProfile(ctx.userId, ctx.orgId, ctx.projectId || null),
+        store.buildProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null),
+      ]);
+      return { facts: facts || [], context: context || '', fact_count: (facts || []).length };
+    } catch (err) {
+      return { facts: [], context: '', error: `profile_read_failed: ${err.message}` };
+    }
+  },
+
   async hivemind_at(args, ctx) {
     const rawValidAt = args.valid_at || args.valid_time || null;
     const rawKnownAt = args.known_at || args.transaction_time || null;
@@ -1516,6 +1545,7 @@ export function normalizeAgentRecallMode(mode) {
 const TOOL_TIMEOUTS_MS = {
   hivemind_aggregate_entities: 5_000,
   hivemind_recall:           8_000,
+  get_user_profile:          3_000,   // two indexed Postgres reads, no LLM
   hivemind_relation_between: 8_000,
   hivemind_at:               9_000,   // wraps recall + extra date filter
   hivemind_diff:            16_000,  // 2x recall

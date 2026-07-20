@@ -109,6 +109,11 @@ export class ProfileDreamer {
     const _dreamExcl = ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge'];
     const raw = _remoteDream
       ? ((await remoteList(orgId, { user_id: userId, memory_type: ['fact', 'decision', 'preference', 'goal'], is_latest: true }, null, RAW_TAKE))?.memories || [])
+          // NOTE: self-host 'summary' company rows aren't tag-filterable through
+          // remoteList; kept out of the remote lane to avoid pulling all
+          // summaries. Central onboarding (the common path) gets company facts
+          // via the tag-scoped OR in the local branch below + the onboarding
+          // upsert. Revisit if self-host onboarding needs company personas.
           .filter((m) => !(m.tags || []).some((t) => _dreamExcl.includes(t)))
           .map((m) => ({
             id: m.memory_id || m.id,
@@ -120,8 +125,16 @@ export class ProfileDreamer {
           where: {
             userId, orgId, deletedAt: null,
             cognitiveLayerRole: null,
-            memoryType: { in: ['fact', 'decision', 'preference', 'goal'] },
             NOT: { tags: { hasSome: _dreamExcl } },
+            // fact/decision/preference/goal of any provenance, PLUS 'summary'
+            // ONLY when tagged company-profile/org-canon — i.e. the onboarding
+            // company IDENTITY/MISSION rows. Untagged 'summary' (cognition
+            // rollups, doc/image captions, chat-session summaries) is NOT pulled,
+            // so the dreamer prompt stays lean and on-signal.
+            OR: [
+              { memoryType: { in: ['fact', 'decision', 'preference', 'goal'] } },
+              { memoryType: 'summary', tags: { hasSome: ['company-profile', 'org-canon'] } },
+            ],
           },
           orderBy: { createdAt: 'desc' },
           take: RAW_TAKE,

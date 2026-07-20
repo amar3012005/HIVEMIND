@@ -685,6 +685,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const synthesisChains = new Map(); // key = synthesis_id → chain
   const recallPackets = [];
   const coMentions = [];
+  let relationChecked = false;
   let aggregateResult = null;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
@@ -836,6 +837,7 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     try {
       startTool('hivemind_relation_between', relationArgs);
       const relationResult = await beforeDeadline(dispatchTool('hivemind_relation_between', relationArgs, ctx));
+      relationChecked = true;
       recordTool(
         'hivemind_relation_between', relationArgs,
         `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
@@ -891,6 +893,16 @@ async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     relationships: [...edgesByKey.values()],
     co_mentions: coMentions,
   });
+  if (plan.operation === 'relation_between' && relationChecked) {
+    coverage = {
+      ...coverage,
+      graph_covered: true,
+      complete: coverage.evidence_found
+        && coverage.source_covered
+        && coverage.entities_covered === coverage.entities_requested
+        && (!coverage.temporal_requested || coverage.temporal_covered),
+    };
+  }
   let escalationCount = 0;
   if (remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
     const escalation = chooseRecallEscalation({

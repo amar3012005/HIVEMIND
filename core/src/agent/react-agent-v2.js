@@ -1289,7 +1289,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const evidenceTopK = _eventWindowHits > 0
     ? _eventWindowHits
     : (recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6));
-  const evidenceLines = evidence.memories.slice(0, evidenceTopK).map((m, i) => {
+  // Superseded predecessors / diff-removed rows are appended LAST by the
+  // Updates-edge walk (execTimeline), so a plain top-K slice can drop them —
+  // which is exactly the "changed over time" answer losing the prior value.
+  // These rows ARE the answer to a version-history question, so always include
+  // them: take the top-K, then union in any flagged rows the slice missed
+  // (bounded — there are only ever a handful of superseded predecessors).
+  const _topSlice = evidence.memories.slice(0, evidenceTopK);
+  const _flaggedMissed = evidence.memories
+    .slice(evidenceTopK)
+    .filter((m) => m && (m._superseded_predecessor || m._diff_removed))
+    .slice(0, 6);
+  const evidenceLines = [..._topSlice, ..._flaggedMissed].map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
     const content = (m.content || '').replace(/\n/g, ' ').slice(0, 240);

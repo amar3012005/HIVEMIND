@@ -20,6 +20,9 @@ const OPERATIONS = new Set([
   // profile: "what do you know about me / my company / my preferences" — served
   // by the get_user_profile tool (caller-scoped; no id from the model).
   'profile',
+  // update_profile: "change MY name/role/company/preferences" — caller-scoped
+  // profile WRITE (distinct from rename_assistant which renames HIVE). Terminal.
+  'update_profile',
 ]);
 const RECALL_MODES = new Set(['fact', 'explain', 'full']);
 const SCOPES = new Set(['personal', 'project', 'team', 'organization']);
@@ -120,6 +123,20 @@ export function createChatIntentTool(groupCatalog = []) {
             },
             required: ['content'],
           },
+          profile_update: {
+            type: 'object', additionalProperties: false,
+            description: 'operation=update_profile only: the CURRENT USER\'s own profile fields (never the assistant name).',
+            properties: {
+              fields: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  name: { type: 'string' }, role: { type: 'string' }, company: { type: 'string' },
+                  language: { type: 'string' }, location: { type: 'string' },
+                },
+              },
+              preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+            },
+          },
           relation: {
             type: 'object', additionalProperties: false,
             properties: {
@@ -194,7 +211,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     : (SIDE_EFFECT_POLICIES.has(raw.side_effect_policy) ? raw.side_effect_policy : 'read_only');
   const queries = boundedStrings(raw.queries, 3, 1000);
   const namedEntities = boundedStrings(raw.named_entities, 12, 256);
-  if (operation !== 'direct' && queries.length === 0 && !['save', 'update', 'delete', 'rename_assistant'].includes(operation)) {
+  if (operation !== 'direct' && queries.length === 0 && !['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(operation)) {
     queries.push(boundedText(message));
   }
   const source = raw.source && (boundedText(raw.source.document_id, 128) || boundedText(raw.source.title, 512))
@@ -206,7 +223,7 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
   const toolGroups = boundedStrings(raw.tool_groups, 12, 128).filter((name) => allowed.has(name));
   const requiredNativeGroup = ['recall', 'source_read', 'aggregate', 'relation_between', 'timeline', 'profile'].includes(operation)
     ? 'hivemind-recall'
-    : ['save', 'update', 'delete', 'rename_assistant'].includes(operation) ? 'hivemind-memory-write' : null;
+    : ['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(operation) ? 'hivemind-memory-write' : null;
   if (requiredNativeGroup && allowed.has(requiredNativeGroup) && !toolGroups.includes(requiredNativeGroup)) {
     toolGroups.push(requiredNativeGroup);
   }
@@ -272,6 +289,18 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     delete: raw.delete && boundedText(raw.delete.id, 128)
       ? { id: boundedText(raw.delete.id, 128), reason: boundedText(raw.delete.reason, 500) }
       : null,
+    profile_update: (() => {
+      const pu = raw.profile_update || (operation === 'update_profile' ? {} : null);
+      if (!pu) return null;
+      const f = pu.fields || {};
+      const fields = {};
+      for (const k of ['name', 'role', 'company', 'language', 'location']) {
+        const v = boundedText(f[k], 256);
+        if (v) fields[k] = v;
+      }
+      const preferences = boundedStrings(pu.preferences, 12, 256);
+      return (Object.keys(fields).length || preferences.length) ? { fields, preferences } : null;
+    })(),
     time: raw.time ? {
       valid_at: validIsoTime(raw.time.valid_at),
       known_at: validIsoTime(raw.time.known_at),
@@ -296,7 +325,11 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     || (operation === 'relation_between' && !normalized.relation)
     || (operation === 'delete' && !normalized.delete)
     || (operation === 'rename_assistant' && !normalized.assistant_name)
+    || (operation === 'update_profile' && !normalized.profile_update)
     || (['connector_read', 'connector_write'].includes(operation) && !normalized.failure_response)
+    // update_profile intentionally NOT here: the server-owned mutationConfirmation
+    // is the user-facing message for the write, and gemini-flash-lite reliably
+    // omits `acknowledgement` — requiring it discarded correct routing.
     || (['connector_write', 'delete', 'rename_assistant'].includes(operation) && !normalized.acknowledgement);
   return invalid ? safeRecallDecision({ message, language, reason: 'invalid_intent_combination' }) : normalized;
 }
@@ -322,6 +355,7 @@ Use the conversation history to resolve references. Select the minimum tool grou
   Routing examples: "How are SolvisPia and SolvisMax related?", "Wie hängen SolvisPia und SolvisMax zusammen?", "Quel est le lien entre SolvisPia et SolvisMax ?", "¿Qué relación hay entre SolvisPia y SolvisMax?", "SolvisPia और SolvisMax कैसे जुड़े हैं?", and "ما العلاقة بين SolvisPia وSolvisMax؟" all require operation=relation_between with relation.entities=["SolvisPia","SolvisMax"]. A question about only one entity requires recall instead.
   Source-discovery examples: "Which files mention SolvisPia?", "In welcher Datei wird SolvisPia beschrieben?", and equivalent questions in any language require operation=recall, recall_mode=explain, named_entities=["SolvisPia"]. Do not add generic words such as file, source, document, relationship, product, company, or question words to named_entities.
   Profile routing: use operation=profile when the user asks about THEMSELVES or their OWN organization — "what do you know about me", "who am I", "my role/company/preferences/goals", "was weißt du über mich / meine Firma", equivalents in any language. It returns the maintained user+org profile. A question about some OTHER entity/person is recall, not profile.
+  Profile WRITE routing: use operation=update_profile when the user states or changes a fact about THEMSELVES — "change my name to Amar Sai", "my role is Head of Product", "I work at Solvis", "meine Firma ist …", "call me …", equivalents in any language. Put the changed field in profile_update.fields (name/role/company/language/location) and any stated preference in profile_update.preferences, plus an acknowledgement. This is DISTINCT from rename_assistant: "call yourself Atlas", "rename the assistant", "your name is …" set the ASSISTANT name (rename_assistant), never the user profile. If a bare "change my name" is ambiguous about whose name, it refers to the USER (update_profile).
   Temporal / timeline routing: use operation=timeline when the user asks how something CHANGED over time, its history/versions, or what was true AT a past date. Set time.valid_at (as-of a single instant, e.g. "as of March 2026", "letztes Jahr", "was it true on 2026-05-01"), OR time.range {start,end} (a span, e.g. "what changed between May and July", "seit 2025"), OR neither for a full version history ("what's the history of X", "how has the launch date changed", "wie hat sich X entwickelt"). Keep the topic in named_entities/query. Examples in any language: "What changed about SolvisPia since 2025?" (range start=2025-01-01), "What was the launch date as of last week?" (valid_at), "Show me the history of the pricing decision" (no time = full timeline). A plain current-fact question is NOT timeline — use recall.
 Always return query_original in the user's wording and query_canonical_en as a concise English retrieval formulation. Preserve exact filenames, people, companies, products, numbers, identifiers and aliases in both.
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.
@@ -377,11 +411,13 @@ Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAv
 export function intentDecisionToPlan(decision, message) {
   const operation = decision.operation;
   return {
-    intent_kind: operation === 'save' ? 'save' : operation === 'connector_write' ? 'action' : 'lookup',
+    intent_kind: operation === 'save' ? 'save'
+      : (operation === 'connector_write' || operation === 'update_profile') ? 'action'
+      : 'lookup',
     user_message: message,
     operation,
     intents: [operation],
-    sub_queries: ['save', 'update', 'delete', 'rename_assistant'].includes(operation) ? [] : decision.queries,
+    sub_queries: ['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(operation) ? [] : decision.queries,
     named_entities: decision.named_entities,
     query_original: decision.query_original,
     query_canonical_en: decision.query_canonical_en,
@@ -398,6 +434,7 @@ export function intentDecisionToPlan(decision, message) {
     update_intent: operation === 'update' ? decision.update : null,
     relation_intent: operation === 'relation_between' ? decision.relation : null,
     delete_intent: operation === 'delete' ? decision.delete : null,
+    profile_update_intent: operation === 'update_profile' ? (decision.profile_update || { fields: {}, preferences: [] }) : null,
     recall_time: decision.relation?.time || decision.time,
     time: decision.relation?.time || decision.time,
     continuation: decision.continuation,

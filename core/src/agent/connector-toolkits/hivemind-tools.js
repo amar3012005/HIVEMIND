@@ -17,7 +17,7 @@ const GROUPS = {
   },
   'hivemind-memory-write': {
     description: 'Versioned HIVEMIND memory creation, update, deletion, decisions and assistant identity. Mutations are scoped and approval/policy checked.',
-    tools: new Set(['hivemind_save_memory', 'hivemind_update_memory', 'hivemind_delete_memory', 'hivemind_log_decision', 'hivemind_set_assistant_name']),
+    tools: new Set(['hivemind_save_memory', 'hivemind_update_memory', 'hivemind_delete_memory', 'hivemind_log_decision', 'hivemind_set_assistant_name', 'update_user_profile']),
   },
   'hivemind-projects': {
     description: 'Authorized project discovery and project-aware memory placement.',

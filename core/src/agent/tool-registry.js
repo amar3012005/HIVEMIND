@@ -360,8 +360,22 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_set_assistant_name',
-      description: 'Set the assistant\'s name (user gave it one).',
+      description: 'Set the ASSISTANT\'s name — "call yourself X", "rename the assistant". NOT for the user\'s own name.',
       parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_user_profile',
+      description: 'Update the CURRENT USER\'s own profile — "change MY name to X", "my role is Y", "I work at Z", "I prefer W". Caller-scoped; never the assistant\'s name. Returns a server-owned confirmation (terminal — no synthesis).',
+      parameters: {
+        type: 'object',
+        properties: {
+          fields: { type: 'object', description: 'Any of: name, role, company, language, location, timezone → new value.' },
+          preferences: { type: 'array', items: { type: 'string' }, description: 'Free-form durable preferences to record.' },
+        },
+      },
     },
   },
   {
@@ -1442,6 +1456,39 @@ const TOOL_HANDLERS = {
     return ctx.webIntelligence.status({ job_id: args.job_id });
   },
 
+  async update_user_profile(args, ctx) {
+    // Update the AUTHENTICATED caller's own profile facts (name, role, company,
+    // language, preferences). Caller-scoped by construction: ctx.userId/orgId,
+    // NO id from the model. Distinct from set_assistant_name (which renames
+    // HIVE) — "change MY name" belongs here, "call yourself X" belongs there.
+    if (!ctx.prisma) return { updated: false, error: 'profile_store_unavailable' };
+    const ALLOWED = new Set(['name', 'role', 'company', 'language', 'location', 'timezone']);
+    const fields = [];
+    // Structured fields.
+    for (const [k, v] of Object.entries(args?.fields || {})) {
+      if (ALLOWED.has(k) && typeof v === 'string' && v.trim()) fields.push({ category: 'static', key: k, value: v.trim().slice(0, 500) });
+    }
+    // Free-form preferences → preference:<slug>.
+    if (Array.isArray(args?.preferences)) {
+      for (const p of args.preferences) {
+        if (typeof p === 'string' && p.trim()) fields.push({ category: 'preference', key: `preference:${p.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`, value: p.trim().slice(0, 500) });
+      }
+    }
+    if (!fields.length) return { updated: false, error: 'no_valid_profile_fields' };
+    try {
+      const { getSharedProfileStore } = await import('../memory/profile-store.js');
+      const store = getSharedProfileStore(ctx.prisma);
+      const applied = [];
+      for (const f of fields) {
+        await store.upsertFact({ userId: ctx.userId, orgId: ctx.orgId, category: f.category, key: f.key, value: f.value, confidence: 1.0, sourceMemoryId: null }).catch(() => {});
+        applied.push({ key: f.key, value: f.value });
+      }
+      return { updated: true, fields: applied, _terminal: true };
+    } catch (err) {
+      return { updated: false, error: `profile_update_failed: ${err.message}` };
+    }
+  },
+
   async hivemind_set_assistant_name(args, ctx) {
     if (!ctx.persistentMemoryEngine) throw new Error('ingest pipeline unavailable');
     const { buildAssistantNamePayload } = await import('../services/assistant-identity.js');
@@ -1572,7 +1619,8 @@ export function normalizeAgentRecallMode(mode) {
 const TOOL_TIMEOUTS_MS = {
   hivemind_aggregate_entities: 5_000,
   hivemind_recall:           8_000,
-  get_user_profile:          3_000,   // two indexed Postgres reads, no LLM
+  get_user_profile:          3_000,
+  update_user_profile:       3_000,   // two indexed Postgres reads, no LLM
   hivemind_relation_between: 8_000,
   hivemind_at:               9_000,   // wraps recall + extra date filter
   hivemind_diff:            16_000,  // 2x recall

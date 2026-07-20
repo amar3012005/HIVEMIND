@@ -1666,12 +1666,12 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
 function mutationConfirmation(operation, language, result = {}) {
   const lang = String(language || 'en').toLowerCase().split('-')[0];
   const labels = {
-    en: { saved: 'Saved to HIVEMIND.', updated: 'Memory updated.', needs_project_choice: 'Choose where this memory belongs.' },
-    de: { saved: 'In HIVEMIND gespeichert.', updated: 'Erinnerung aktualisiert.', needs_project_choice: 'Wählen Sie aus, wohin diese Erinnerung gehört.' },
-    fr: { saved: 'Enregistré dans HIVEMIND.', updated: 'Mémoire mise à jour.', needs_project_choice: 'Choisissez où enregistrer cette mémoire.' },
-    es: { saved: 'Guardado en HIVEMIND.', updated: 'Memoria actualizada.', needs_project_choice: 'Elige dónde guardar esta memoria.' },
-    hi: { saved: 'HIVEMIND में सहेजा गया।', updated: 'मेमोरी अपडेट की गई।', needs_project_choice: 'चुनें कि यह मेमोरी कहाँ सहेजी जाए।' },
-    ar: { saved: 'تم الحفظ في HIVEMIND.', updated: 'تم تحديث الذاكرة.', needs_project_choice: 'اختر مكان حفظ هذه الذاكرة.' },
+    en: { saved: 'Saved to HIVEMIND.', updated: 'Memory updated.', profile_updated: 'Your profile has been updated.', assistant_renamed: 'Done — I\'ll go by that name now.', needs_project_choice: 'Choose where this memory belongs.' },
+    de: { saved: 'In HIVEMIND gespeichert.', updated: 'Erinnerung aktualisiert.', profile_updated: 'Dein Profil wurde aktualisiert.', assistant_renamed: 'Erledigt — ich heiße jetzt so.', needs_project_choice: 'Wählen Sie aus, wohin diese Erinnerung gehört.' },
+    fr: { saved: 'Enregistré dans HIVEMIND.', updated: 'Mémoire mise à jour.', profile_updated: 'Votre profil a été mis à jour.', assistant_renamed: 'C\'est fait — je porte ce nom désormais.', needs_project_choice: 'Choisissez où enregistrer cette mémoire.' },
+    es: { saved: 'Guardado en HIVEMIND.', updated: 'Memoria actualizada.', profile_updated: 'Tu perfil ha sido actualizado.', assistant_renamed: 'Listo — ahora me llamo así.', needs_project_choice: 'Elige dónde guardar esta memoria.' },
+    hi: { saved: 'HIVEMIND में सहेजा गया।', updated: 'मेमोरी अपडेट की गई।', profile_updated: 'आपकी प्रोफ़ाइल अपडेट कर दी गई।', assistant_renamed: 'हो गया — अब मैं इसी नाम से जाना जाऊँगा।', needs_project_choice: 'चुनें कि यह मेमोरी कहाँ सहेजी जाए।' },
+    ar: { saved: 'تم الحفظ في HIVEMIND.', updated: 'تم تحديث الذاكرة.', profile_updated: 'تم تحديث ملفك الشخصي.', assistant_renamed: 'تم — سأحمل هذا الاسم الآن.', needs_project_choice: 'اختر مكان حفظ هذه الذاكرة.' },
   };
   const table = labels[lang] || labels.en;
   const key = result.needs_project_choice ? 'needs_project_choice' : operation;
@@ -1933,25 +1933,35 @@ export async function runReactAgentV2({
       // It requires the server approval flow to inject a one-time token.
       delete: null,
       rename_assistant: plan.assistant_name_intent ? ['hivemind_set_assistant_name', { name: plan.assistant_name_intent }] : null,
+      // Caller-scoped profile write — "change MY name/role/company/preferences".
+      update_profile: plan.profile_update_intent
+        ? ['update_user_profile', { fields: plan.profile_update_intent.fields || {}, preferences: plan.profile_update_intent.preferences || [] }]
+        : null,
     }[intentDecision.operation];
     if (mutationTool) {
       const [toolName, toolArgs] = mutationTool;
       onEvent?.({ type: 'tool_started', name: toolName, arguments: toolArgs });
       const result = await dispatchTool(toolName, toolArgs, ctx);
-      const succeeded = !result?.error && result?.updated !== false && result?.deleted !== false;
+      const succeeded = !result?.error && result?.updated !== false && result?.deleted !== false && result?.set !== false;
       onEvent?.({ type: 'tool_completed', name: toolName, status: succeeded ? 'ok' : 'error', result });
+      // TERMINAL: every write returns a server-owned confirmation here and never
+      // falls through to recall-synthesis (which produced "I couldn't find
+      // relevant information" after a completed write). A confirmation is always
+      // produced on success — no reliance on a possibly-empty acknowledgement.
+      const confirmOp = intentDecision.operation === 'update' ? 'updated'
+        : intentDecision.operation === 'update_profile' ? 'profile_updated'
+        : intentDecision.operation === 'rename_assistant' ? 'assistant_renamed'
+        : 'saved';
       const response = succeeded
-        ? (intentDecision.operation === 'update'
-            ? mutationConfirmation('updated', intentDecision.response_language || language, result)
-            : intentDecision.acknowledgement)
-        : `${intentDecision.failure_response || 'Memory update failed.'} (${result?.error || 'operation_failed'})`;
+        ? (mutationConfirmation(confirmOp, intentDecision.response_language || language, result) || intentDecision.acknowledgement || 'Done.')
+        : `${intentDecision.failure_response || 'That change could not be completed.'} (${result?.error || 'operation_failed'})`;
       onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: succeeded });
       return {
         response, sources: [], steps: [{ tool: toolName, args: toolArgs, result_summary: succeeded ? 'completed' : String(result?.error || 'failed') }],
         evidence_used: [], confidence: succeeded ? 1 : 0, gaps: succeeded ? [] : [String(result?.error || 'operation_failed')],
         usage: sumUsage(usages), trace: finalizeTrace(trace, usages), assistant_name: plan.assistant_name_intent || assistantName || null,
-        action_result: succeeded && intentDecision.operation === 'update' ? buildActionResult('updated', result) : null,
+        action_result: succeeded ? buildActionResult(confirmOp, result) : null,
       };
     }
 

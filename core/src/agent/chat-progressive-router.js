@@ -1,8 +1,10 @@
 /**
- * Progressive tool-router (Claude-style capability disclosure) — FLAG-GATED.
+ * Progressive tool-router (Claude-style capability disclosure) — LIVE DEFAULT.
  *
- * Replaces ONLY the intent-selection stage of /api/chat when
- * CHAT_ROUTER=progressive. The router picks ONE of six high-level capabilities
+ * Replaces ONLY the intent-selection stage of /api/chat. Selected by
+ * CHAT_ROUTER=progressive, which is the live production default as of the
+ * 2026-07 flip (set CHAT_ROUTER=legacy to fall back to parseChatIntent, which
+ * is kept in sync). The router picks ONE of six high-level capabilities
  * via a single Cerebras-direct call; a compact adapter compiles that choice
  * into the SAME `decision` shape parseChatIntent produces, which then flows
  * through the UNCHANGED intentDecisionToPlan → gatherEvidence → citation
@@ -11,8 +13,8 @@
  *
  * Benchmarked: 96.7% routing accuracy, ~0.78s avg / 1.55s p95, ~1.3k tokens
  * (vs the current Gemini/GPT-OSS router at 69.6% / 2.47s). See
- * benchmarks/tool-routing/. Default OFF; the current planner remains primary
- * until the live end-to-end A/B gate passes.
+ * benchmarks/tool-routing/. The live A/B gate passed, so this is now the
+ * default path; the legacy planner remains the maintained fallback.
  */
 
 import { chatCompletionFetch } from '../llm/chat-provider.js';
@@ -38,10 +40,15 @@ export const HIGH_TOOLS = [
   { type: 'function', function: { name: 'hivemind_memory', strict: true,
     description: 'Use for durable memory creation, versioned updates, deletion requests, decisions and assistant renaming. The server scopes, validates, confirms destructive actions and creates graph provenance.',
     parameters: object({
-      operation: { type: 'string', enum: ['save', 'update', 'delete', 'rename_assistant'] }, response_language: { type: 'string' },
+      operation: { type: 'string', enum: ['save', 'update', 'delete', 'rename_assistant', 'update_profile'] }, response_language: { type: 'string' },
       title: nullable('string'), content: nullable('string'), target_query: nullable('string'), memory_id: nullable('string'),
       memory_type: nullable('string'), project_hint: nullable('string'), entities: { type: 'array', items: { type: 'string' } },
       event_time: nullable('string'), assistant_name: nullable('string'),
+      // Explicit properties (NOT a bare object) — strict-mode structured output
+      // rejects an object type with no properties.
+      profile_name: nullable('string'), profile_role: nullable('string'), profile_company: nullable('string'),
+      profile_language: nullable('string'), profile_location: nullable('string'),
+      profile_preferences: { type: 'array', items: { type: 'string' } },
     }) } },
   { type: 'function', function: { name: 'hivemind_projects', strict: true,
     description: 'List or resolve only the projects authorized for this user and organization.',
@@ -67,7 +74,7 @@ const SYSTEM = `You are HIVE, an enterprise assistant. You MUST call exactly one
 Use respond_directly only for greetings, arithmetic, clarification, or safety refusal.
 Use hivemind_context for all internal knowledge: facts, named files, exact counts, relationships in every language, timelines and temporal questions.
 Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md or .html is HIVEMIND source context, never a connector request. Only use a connector when the user explicitly names the connected application or asks to act in it.
-Use hivemind_memory for remember/save/update/delete/rename requests in every language; never acknowledge a write without this tool.
+Use hivemind_memory for remember/save/update/delete/rename requests in every language; never acknowledge a write without this tool. Distinguish the two "name" operations: "change MY name / my role / my company / I prefer X" => operation=update_profile (the USER's own profile). "Call yourself X / rename the assistant" => operation=rename_assistant (the ASSISTANT). Ambiguous "change it" with no clear target => ask ONE clarification via respond_directly(reason=clarification), never guess.
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
 Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
@@ -173,7 +180,7 @@ export function adaptToDecision(tool, args, message, language) {
       }, usage: null };
     }
     case 'hivemind_memory': {
-      const op = ['save', 'update', 'delete', 'rename_assistant'].includes(args?.operation) ? args.operation : 'save';
+      const op = ['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(args?.operation) ? args.operation : 'save';
       return { decision: {
         ...base,
         operation: op,
@@ -184,6 +191,17 @@ export function adaptToDecision(tool, args, message, language) {
         update: op === 'update' ? { id: uuid(args?.memory_id), target_query: s(args?.target_query, 512), content: s(args?.content) } : null,
         delete: op === 'delete' ? { id: uuid(args?.memory_id), reason: null } : null,
         assistant_name: op === 'rename_assistant' ? s(args?.assistant_name, 80) : null,
+        // update_profile: the caller's own profile fields/preferences.
+        profile_update: op === 'update_profile'
+          ? {
+              fields: Object.fromEntries(Object.entries({
+                name: s(args?.profile_name, 200), role: s(args?.profile_role, 200),
+                company: s(args?.profile_company, 200), language: s(args?.profile_language, 60),
+                location: s(args?.profile_location, 200),
+              }).filter(([, v]) => v)),
+              preferences: Array.isArray(args?.profile_preferences) ? args.profile_preferences.filter((p) => typeof p === 'string' && p.trim()) : [],
+            }
+          : null,
         tool_groups: ['hivemind-memory-write'],
       }, usage: null };
     }

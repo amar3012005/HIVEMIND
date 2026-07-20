@@ -159,12 +159,17 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
 
 // ── STEP 1 — quick direct-answer for greetings / smalltalk / self-Q ───
 
-async function answerDirectly({ message, gateKind, language, assistantName, orgName, model, apiKey, signal, plannerDraft = null }) {
+async function answerDirectly({ message, gateKind, language, assistantName, orgName, model, apiKey, signal, plannerDraft = null, profileContext = '' }) {
   const lang = languageName(language);
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this HIVEMIND workspace' : orgName;
   const name = assistantName || 'HIVE';
 
   const LANG_BLOCK = `LANGUAGE: ALL OUTPUT MUST BE IN ${lang.toUpperCase()}. Even if the user wrote in another language, you reply ONLY in ${lang}. This is non-negotiable.`;
+  // Always-on profile context: even a `direct` answer or a mis-routed identity
+  // question ("Who am I?") gets the user's own facts, so it never answers blind.
+  const PROFILE_BLOCK = profileContext
+    ? `\n\nWHO YOU ARE TALKING TO (the authenticated user + their org — use directly for identity/personalization; never invent beyond it):\n${profileContext}`
+    : '';
 
   const prompts = {
     greeting: `${LANG_BLOCK}\n\nYou are ${name}. Reply with a warm one-line greeting + ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
@@ -184,7 +189,7 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: prompts[gateKind] },
+        { role: 'system', content: prompts[gateKind] + PROFILE_BLOCK },
         { role: 'user', content: message },
       ],
       max_completion_tokens: DIRECT_MAX_TOKENS,
@@ -927,7 +932,7 @@ function sourceUnavailableResponse({ evidence, language }) {
   return responses[lang] || responses.en;
 }
 
-export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false }) {
+export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
   const sys = answerPrompt({ language, assistantName, orgName });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
@@ -1226,26 +1231,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // lane (profile_<org> vector + Postgres profile fallback) and injects a compact
   // "who you're talking to" block. Flag-gated PERSONA_ROUTER_ENABLED → inert no-op
   // by default; intent-gated so non-persona queries skip it; never fatal.
-  let personaNote = '';
-  // Explicit path: the planner routed operation=profile and gatherEvidence
-  // already fetched the caller-scoped profile via get_user_profile. Prefer it.
-  if (evidence.profile_context) {
-    personaNote = `\n\nUSER + ORG PROFILE (who you're talking to and their organization — the authoritative answer to "what do you know about me/my company"; use it directly; never invent beyond it):\n${evidence.profile_context}`;
-  } else {
-    // Passive path: flag-gated persona router injects context on persona-ish
-    // queries even when the planner didn't pick operation=profile.
-    try {
-      const { routePersona, isPersonaRouterEnabled } = await import('../memory/persona-router.js');
-      if (isPersonaRouterEnabled()) {
-        const { getSharedProfileStore } = await import('../memory/profile-store.js');
-        const ps = ctx?.prisma ? getSharedProfileStore(ctx.prisma) : null;
-        const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, projectId: ctx?.projectId || null, profileStore: ps });
-        if (pr.routed && pr.context) {
-          personaNote = `\n\nUSER PERSONA (who you're talking to — use for personalization; never contradict; never invent beyond it):\n${pr.context}`;
-        }
-      }
-    } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
-  }
+  // Profile context, in priority order:
+  //  1. evidence.profile_context — operation=profile explicitly fetched it (the
+  //     authoritative answer for "what do you know about me").
+  //  2. preloadedProfileContext — the ALWAYS-ON preload (every turn), so even a
+  //     recall/source answer is personalized and identity questions that slipped
+  //     past routing still have the user's facts.
+  // The always-on preload supersedes the old flag-gated passive persona-router
+  // (which only fired on persona-ish queries and only when a flag was set).
+  const profileForAnswer = evidence.profile_context || preloadedProfileContext || '';
+  const personaNote = profileForAnswer
+    ? `\n\nUSER + ORG PROFILE (who you're talking to and their organization — authoritative for identity/personalization; the definitive answer to "what do you know about me/my company"; use it directly; never invent beyond it):\n${profileForAnswer}`
+    : '';
 
   // COVERAGE DISCLOSURE (multi-entity compare/relation). When the planner
   // asked about 2+ named entities, tell the model — from the packet's OWN
@@ -1823,6 +1820,21 @@ export async function runReactAgentV2({
         }).catch(() => [])
       : [];
     _ps = Date.now();
+    // ALWAYS-ON compact profile preload, IN PARALLEL with the planner. This is
+    // the cheap authoritative-context lane (2 indexed Postgres reads via the
+    // shared ProfileStore cache — NOT wide vector recall). It guarantees every
+    // turn — including a `direct` answer or a mis-routed "Who am I?" — has the
+    // user's name/role/company/preferences available, so a routing miss can
+    // never answer blind. Best-effort: a failure yields empty context, never
+    // breaks the turn.
+    const profilePreloadPromise = (async () => {
+      if (!ctx?.prisma) return '';
+      try {
+        const { getSharedProfileStore } = await import('../memory/profile-store.js');
+        const ps = getSharedProfileStore(ctx.prisma);
+        return (await ps.buildProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
+      } catch { return ''; }
+    })();
     // FLAG: CHAT_ROUTER=progressive swaps ONLY the intent-selection stage for
     // the 6-tool Cerebras-direct progressive router. The adapter returns the
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
@@ -1842,6 +1854,8 @@ export async function runReactAgentV2({
     _pt('intent_parse_ms', _ps);
     const intentDecision = intentParsed.decision;
     if (intentParsed.usage) usages.push(intentParsed.usage);
+    // Resolve the parallel profile preload (kicked off before the planner).
+    const preloadedProfileContext = await profilePreloadPromise;
     _ps = Date.now();
     const turnToolkit = await buildToolkitForUser({
       prisma: ctx.prisma,
@@ -1900,6 +1914,7 @@ export async function runReactAgentV2({
         message, gateKind: 'general', language, assistantName, orgName,
         model: answerModel, apiKey, signal: abortCtrl.signal,
         plannerDraft: plan._direct_answer,
+        profileContext: preloadedProfileContext,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
@@ -2095,6 +2110,7 @@ export async function runReactAgentV2({
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,
         model: answerModel, apiKey, signal: abortCtrl.signal,
+        profileContext: preloadedProfileContext,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
@@ -2142,6 +2158,7 @@ export async function runReactAgentV2({
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
       model: answerModel, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
+      preloadedProfileContext,
     });
     _pt('answer_step_ms', _ps);
     if (answer.usage) usages.push(answer.usage);

@@ -553,6 +553,22 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
   }
 }
 
+// Capability registry (Stage C step 4). The op-stage runs, in this fixed order,
+// every executor whose predicate matches the plan. Order is preserved verbatim
+// from the original top-to-bottom sequence:
+//   relation_between → aggregate → timeline → profile.
+// A plain registry[plan.operation] is INSUFFICIENT because timeline fires on
+// `operation==='timeline' OR needs_time_travel` (a non-timeline op can request
+// time-travel), so each entry carries an explicit predicate. relation/aggregate/
+// profile are mutually exclusive by operation; timeline may co-fire — matching
+// the original guards exactly. Each executor internally re-checks remaining().
+const OP_STAGE = [
+  { name: 'relation', predicate: (p) => p.operation === 'relation_between' && p.relation_intent?.entities?.length >= 2, exec: execRelationBetween, scalar: 'relationChecked' },
+  { name: 'aggregate', predicate: (p) => !!(p.aggregate?.parent && p.aggregate?.kind), exec: execAggregate, scalar: 'aggregateResult' },
+  { name: 'timeline', predicate: (p) => p.operation === 'timeline' || p.needs_time_travel, exec: execTimeline, scalar: null },
+  { name: 'profile', predicate: (p) => p.operation === 'profile', exec: execProfile, scalar: 'profileContext' },
+];
+
 // Exported for the characterization test (gather-evidence-characterization.test.js),
 // the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
 // fake dispatcher — no real recall/LLM. Not part of the public module surface.
@@ -637,16 +653,18 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     : [];
   await execBaseRecall(bus, plan, ctx, helpers, { recallQueries, recallMode, recallLimit, recallExtras });
 
-  const relationPatch = await execRelationBetween(bus, plan, ctx, helpers);
-  if (relationPatch?.relationChecked) relationChecked = true;
-
-  const aggregatePatch = await execAggregate(bus, plan, ctx, helpers);
-  let aggregateResult = aggregatePatch?.aggregateResult ?? null;
-
-  await execTimeline(bus, plan, ctx, helpers);
-
-  const profilePatch = await execProfile(bus, plan, ctx, helpers);
-  const profileContext = profilePatch?.profileContext || '';
+  // ── Op-stage: run each matching capability executor in the fixed registry
+  // order, collecting the scalar patches. Replaces the four sequential guarded
+  // blocks (relation/aggregate/timeline/profile) with one predicate-routed loop.
+  let aggregateResult = null;
+  let profileContext = '';
+  for (const cap of OP_STAGE) {
+    if (!cap.predicate(plan)) continue;
+    const patch = await cap.exec(bus, plan, ctx, helpers);
+    if (cap.scalar === 'relationChecked' && patch?.relationChecked) relationChecked = true;
+    else if (cap.scalar === 'aggregateResult') aggregateResult = patch?.aggregateResult ?? aggregateResult;
+    else if (cap.scalar === 'profileContext') profileContext = patch?.profileContext || profileContext;
+  }
 
   let coverage = assessRecallCoverage({
     plan,

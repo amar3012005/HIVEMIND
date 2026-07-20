@@ -388,31 +388,57 @@ export class EvidenceRetrievalService {
       }),
       new Promise((resolve) => setTimeout(() => resolve([]), 450)),
     ]);
-    const anchorIndexes = new Map();
+    // Group anchors per document, keeping BOTH the segment index and the
+    // anchor score. A single query can match relevant passages scattered
+    // across a document (e.g. a product named at segment 3 AND segment 47);
+    // ranking anchors by score lets each real hit seed its own window instead
+    // of collapsing to one contiguous run from the earliest index — which was
+    // dropping later passages and letting a lexically-dense but off-topic
+    // section (a different product) stand in for the queried one.
+    const anchorsByDoc = new Map();
     for (const anchor of anchors) {
       if (!Number.isInteger(anchor?.metadata?.segmentIndex)) continue;
-      const indexes = anchorIndexes.get(anchor.documentId) || [];
-      indexes.push(anchor.metadata.segmentIndex);
-      anchorIndexes.set(anchor.documentId, indexes);
+      const list = anchorsByDoc.get(anchor.documentId) || [];
+      list.push({ index: anchor.metadata.segmentIndex, score: anchor.score ?? 0 });
+      anchorsByDoc.set(anchor.documentId, list);
     }
 
+    // Build a set of segment indexes to fetch for one document: a ±radius
+    // window around each of the top-scoring anchors, merged where they
+    // overlap, capped at `budget` segments. Falls back to a lead window
+    // (0..budget) when the query produced no positional anchors.
+    const windowIndexes = (docAnchors, budget, radius = 1) => {
+      if (!docAnchors.length) {
+        return Array.from({ length: budget }, (_, i) => i);
+      }
+      const ranked = [...docAnchors].sort((a, b) => b.score - a.score);
+      const wanted = new Set();
+      for (const { index } of ranked) {
+        for (let i = Math.max(0, index - radius); i <= index + radius; i += 1) {
+          wanted.add(i);
+          if (wanted.size >= budget) break;
+        }
+        if (wanted.size >= budget) break;
+      }
+      return [...wanted].sort((a, b) => a - b);
+    };
+
     const rows = [];
+    const scoreById = new Map(anchors.map((anchor) => [anchor.segmentId, anchor.score]));
     for (const document of documents) {
-      const indexes = anchorIndexes.get(document.id) || [];
-      const center = indexes.length ? Math.min(...indexes) : 0;
-      const start = Math.max(0, center - 1);
+      const budget = Math.max(1, Math.min(perDocument, total - rows.length));
+      const indexes = windowIndexes(anchorsByDoc.get(document.id) || [], budget);
       const segments = await this.db.knowledgeSegment.findMany({
         where: {
           userId,
           orgId,
           documentId: document.id,
           document: { archivedAt: null },
-          segmentIndex: { gte: start },
+          segmentIndex: { in: indexes },
         },
         orderBy: { segmentIndex: 'asc' },
-        take: Math.max(1, Math.min(perDocument, total - rows.length)),
+        take: budget,
       });
-      const scoreById = new Map(anchors.map((anchor) => [anchor.segmentId, anchor.score]));
       for (const segment of segments) {
         rows.push({
           type: 'evidence_segment',

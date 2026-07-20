@@ -21329,7 +21329,8 @@ exit \$RC
                 } catch { /* metering never breaks the response */ }
 
                 // Saving is LLM-decided in the FIRST loop (the planner), not
-                // here. planStep emits `save_intent` (user explicitly said
+                // here. parseChatIntent / intentDecisionToPlan emit `save_intent`
+                // (user explicitly said
                 // "save/remember…") and `auto_save_intent` (proactive durable
                 // fact, confidence ≥ 0.70 fires) — both execute
                 // hivemind_save_memory inside the agent. There is intentionally

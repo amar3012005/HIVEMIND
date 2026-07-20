@@ -194,480 +194,6 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
   return { response: text.trim(), usage: data.usage };
 }
 
-// ── STEP 2 — Plan ──────────────────────────────────────────────────────
-
-function planPrompt({ language, assistantName, orgName, hasBrowserContext }) {
-  const lang = languageName(language);
-  const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'our HIVEMIND workspace' : orgName;
-  return `You are a query planner for ${assistantName || 'HIVE'}, the memory-engine assistant for ${orgLabel}.
-
-The user spoke in ${lang}. Decompose their request into recall sub-queries
-the orchestrator will execute against HIVEMIND memory.
-
-Today is ${new Date().toISOString().slice(0, 10)} (server clock). NEVER assume a year from your training data — use today's year for bare month/day phrases like "May 13". Date hallucination is the #1 cause of empty recall.
-
-Output STRICT JSON (no prose, no code fence):
-{
-  "intent_kind": "lookup",        // REQUIRED. Single label picked by reading the user's message:
-                                  //   'lookup'   — user wants info about something they already have/know
-                                  //                (default for any question, any bare noun/name/filename,
-                                  //                 any "tell me about X", any "what do you know about X")
-                                  //   'save'     — explicit imperative to remember/log/store/note new info
-                                  //                ("save this", "remember Y", "log decision Z", "store fact W")
-                                  //   'update'   — user corrects or revises a prior fact
-                                  //                ("actually it's X not Y", "no, the price changed to Z")
-                                  //   'recap'    — user asks for a summary of history / sessions / period
-                                  //                ("what did we do last week", "summarize my decisions")
-                                  //   'greeting' — pure greeting / smalltalk / self-question (quick-gate normally handles)
-                                  //   'general'  — public-knowledge / math / code question NOT about user's data
-                                  //
-                                  // STRICT RULE: a bare entity / filename / proper noun WITHOUT an explicit
-                                  // imperative verb is ALWAYS 'lookup'. Never 'save' just because the user
-                                  // dropped a filename — they want to RECALL it, not store it again.
-  "intents": ["..."],            // 1-3 short phrases describing what the user actually wants
-  "sub_queries": ["..."],        // 1-4 recall queries in the user's language, each focused on ONE entity/concept
-  "named_entities": ["..."],     // proper nouns the user mentioned (people, projects, files, brands)
-  "needs_traverse": false,        // true if recall should follow graph edges to find related memories
-  "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
-  "time_travel": { "transaction_time": null, "valid_time": null }, // ISO timestamps if needs_time_travel
-  "needs_web": false,             // true ONLY if user explicitly asks for current external info NOT in HIVEMIND
-  "action_intent": null,          // when user wants to PERFORM an action via a connector (not just recall),
-                                  //   set this to one of: 'slack' | 'notion' | 'gmail' | 'github' | 'linear'.
-                                  //   Triggers: 'post to slack', 'send a slack message', 'create notion page',
-                                  //   'email X', 'open github issue', 'add linear task'. Even when phrased
-                                  //   indirectly ('@channel let them know' → slack), the planner picks the
-                                  //   right provider. Leave null for pure recall / read.
-                                  //   CRITICAL: an imperative verb (send/schedule/post/draft/email/notify/
-                                  //   message/dm/ping/announce/broadcast/share/forward/compose) addressed
-                                  //   at a connector is ALWAYS action_intent. Ambiguity about channel /
-                                  //   recipient is NOT a reason to skip — the downstream sub-loop will ask
-                                  //   the user OR create a draft awaiting approval. Asking clarification
-                                  //   here is WRONG; emit action_intent and let the action path handle it.
-  "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
-  "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
-  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson", "confidence": 0.0-1.0}. Relationships are typed graph edges, never memory objects. Threshold confidence >= 0.70 fires the save.
-                                  // MOOD IS THE PRIMARY SIGNAL: an INTERROGATIVE ("what is X?", "who is Y?", "tell me about Z") → recall ONLY, never save. A DECLARATIVE assertion (a statement, no question mark, not a question word) that teaches a durable fact → recall to check existing AND emit auto_save_intent for the new fact. When the user TELLS you something true about their world, you SAVE it; when they ASK, you recall.
-                                  // THIRD-PERSON DECLARATIVES FIRE TOO — not just first-person "I" narration. Any statement asserting a NEW STATE or RELATIONSHIP about a company, product, project, org, or person the user works with MUST fire: "X is Y", "X is now Y", "X is the parent/owner/subsidiary of Y", "we renamed/rebranded X to Y", "X acquired/merged with Y", "X replaced Y", "X reports to Y", "X moved to Y". These are the user teaching the system durable structural facts and are the MOST important to capture.
-                                  // DO NOT fire on: pure questions ("What is X?"), recall requests ("tell me about Y"), hypotheticals ("what if I did X"), or opinions / general-knowledge about the OUTSIDE world ("AI is overhyped", "Paris is in France"). CRITICAL: a factual declaration about the USER's OWN company / org / products / projects / people is NEVER an "external topic" — it fires even when phrased encyclopedically ("Acme is now a subsidiary of Globex"). If in doubt whether a declarative is about the user's world, FIRE (over-saving is cheap; smart-ingest dedups).
-                                  // DO FIRE on: any first-person past-event narration, any future commitment, any preference, ANY declarative assertion of a new state/relationship/rename/restructure about the user's entities/company/people/products (even third-person). Title MUST be a short noun phrase extracting the fact (e.g. "Nbank sponsorship appointment 9:00-10:30" — NOT "user said Nbank"). Content MUST be third-person self-contained with entities + dates + duration + outcome. Tags MUST include entity:<Name> for each named entity + topic tag. Examples that MUST trigger auto_save_intent (illustrative):
-  // - "I just went for an Nbank sponsorship appointment from 9-10:30" → {title: "Nbank sponsorship appointment", content: "Amar attended an Nbank sponsorship appointment from 09:00 to 10:30 on YYYY-MM-DD to discuss startup sponsorship registration.", tags: ["entity:Nbank", "topic:sponsorship", "topic:startup-registration"], memory_type: "event", confidence: 0.9}
-  // - "I'll register the UG next week" → {title: "UG registration planned next week", content: "Amar plans to register the German UG within the next week.", tags: ["entity:UG", "topic:legal", "topic:germany"], memory_type: "goal", confidence: 0.85}
-  // - "Felix from Cherry Ventures said he wants a follow-up call" → {title: "Felix at Cherry Ventures requests follow-up", content: "Felix at Cherry Ventures asked for a follow-up call after the Berlin meeting.", tags: ["entity:Felix", "entity:Cherry_Ventures", "topic:investor-pipeline"], memory_type: "fact", confidence: 0.9}
-  // - (third-person structural fact — placeholder names) "Acme is now the parent company of Beta Corp and is the rebranded name of Gamma AI" → {title: "Acme parent of Beta Corp, rebrand of Gamma AI", content: "Acme is the parent company of Beta Corp and is the new rebranded name of the former Gamma AI.", tags: ["entity:Acme", "entity:Beta_Corp", "entity:Gamma_AI", "topic:org-structure"], memory_type: "fact", confidence: 0.9}
-  // Be liberal — missing an auto-save is worse than over-saving (smart-ingest NOOP detects duplicates). A declarative statement teaching a NEW fact about the user's world should almost always fire.
-  "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
-  "recall_mode": "quick",         // 'quick' (fast current facts), 'panorama' (temporal/history), or 'insight' (source-grounded explanation). Use 'insight' for questions about uploaded files, meetings, emails, knowledge-base material, decisions, relationships, cross-topic context, or when the answer must be supported by workspace evidence. Use 'panorama' for history/timelines. Use 'quick' only for a direct current lookup that does not need source reconstruction. Never choose full automatically; full is caller-explicit only.
-  "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
-}
-
-Rules:
-  - sub_queries MUST be in ENGLISH even if user wrote in another language.
-    Memory is stored cross-lingual; English queries hit best.
-  - **Cast a wide net**. Emit 3-4 sub_queries that vary in scope:
-       1) the BROADEST entity-only query (just "Dipesh", just "Dachmarke")
-       2) the entity + closest noun ("Dipesh pitch deck")
-       3) any related side-topic ("pitch deck slides", "Dipesh next steps")
-       4) optional filename-style query if the user mentioned a doc
-    Narrow phrases like "Dipesh pitch deck decision" miss because they
-    constrain on the rarest token. The broad entity query always recovers
-    the long tail. Better to over-recall (de-duped server-side) than
-    return zero.
-  - When the user mentions a filename (anything with .pdf/.docx/.png/etc),
-    INCLUDE the literal filename AS A SUB_QUERY verbatim — recall has a
-    tag-based exact-match path that needs the literal string.
-  - When the user mentions a CONNECTOR (slack, notion, gmail, github,
-    linear, jira, confluence, drive, calendar, outlook), put that
-    keyword in named_entities AND in at least one sub_query. The
-    orchestrator auto-injects tag filters for these so recall doesn't
-    drown in unrelated FTS hits. Example for "what slack msgs as of May":
-    sub_queries: ["Slack messages", "Slack channel content"], named_entities: ["slack"].
-  - When the user uses TEMPORAL language ("as of X", "before Y", "since",
-    "on date", "yesterday", "last week", any explicit date/month/year),
-    set needs_time_travel=true and put a real ISO timestamp in
-    time_travel.valid_time using TODAY'S YEAR for bare month/day.
-    "as of May 13" → time_travel.valid_time = "${new Date().getUTCFullYear()}-05-13T23:59:59Z".
-    "before March 2025" → valid_time = "2025-03-01T00:00:00Z".
-    The orchestrator validates and rejects dates that look hallucinated;
-    if unsure, leave valid_time=null and the deterministic extractor
-    will fill it.
-  - For "what was X before Y" / pronoun anaphora — resolve antecedent
-    using the user's literal entity name in sub_queries.
-  - Empty sub_queries = direct answer with no recall (greetings,
-    math, public-knowledge explainers). Quick-gate already caught
-    most of these but you may still emit [] here.
-  - For save / update intents: still emit recall sub_queries so the
-    save can verify there isn't a duplicate.
-${hasBrowserContext ? '  - User pinned a browser selection. Treat distinctive nouns/names inside <METADATA:...> as sub_queries.\n' : ''}`;
-}
-
-async function planStep({ message, history, language, assistantName, orgName, hasBrowserContext, model, apiKey, signal, onEvent }) {
-  onEvent?.({ type: 'plan_start' });
-  const sys = planPrompt({ language, assistantName, orgName, hasBrowserContext });
-  const tail = (history || []).slice(-4)
-    .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
-    .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
-  const { parsed, usage } = await callJsonLLM({
-    messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: message }],
-    model, apiKey, maxTokens: PLAN_MAX_TOKENS, signal,
-  });
-  // Defensive defaults + intent_kind invariant enforcement.
-  const VALID_INTENT_KINDS = ['lookup', 'save', 'update', 'recap', 'greeting', 'general'];
-  let intent_kind = typeof parsed.intent_kind === 'string' ? parsed.intent_kind.toLowerCase() : 'lookup';
-  if (!VALID_INTENT_KINDS.includes(intent_kind)) intent_kind = 'lookup';
-
-  // Invariant: save_intent / update_intent only valid when intent_kind matches.
-  // Prevents planner from emitting save_intent on a bare-filename lookup
-  // (e.g. user types "Branding Skizze1 (11).png" → must be lookup, never save).
-  const save_intent   = intent_kind === 'save'   ? (parsed.save_intent   || null) : null;
-  const update_intent = intent_kind === 'update' ? (parsed.update_intent || null) : null;
-
-  // Auto-save intent — can fire on ANY intent_kind. Planner decides if the
-  // user's message contains a durable fact worth memorizing unprompted.
-  // Guard: requires structured object + confidence >= 0.70 + non-empty
-  // title + content >= 30 chars. Filters out garbage like
-  // {"title": "X", "content": "X"}.
-  let auto_save_intent = null;
-  const rawAS = parsed.auto_save_intent;
-  if (rawAS && typeof rawAS === 'object'
-      && typeof rawAS.title === 'string' && rawAS.title.trim().length >= 5
-      && typeof rawAS.content === 'string' && rawAS.content.trim().length >= 30
-      && typeof rawAS.confidence === 'number' && rawAS.confidence >= 0.70) {
-    // Reject when content is just user's message verbatim (cheap dedup).
-    const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
-    if (norm(rawAS.content) !== norm(message)) {
-      auto_save_intent = {
-        title: rawAS.title.trim().slice(0, 200),
-        content: rawAS.content.trim().slice(0, 4000),
-        tags: Array.isArray(rawAS.tags) ? rawAS.tags.filter(t => typeof t === 'string').slice(0, 12) : [],
-        memory_type: ['fact','decision','preference','event','goal','lesson'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
-        confidence: rawAS.confidence,
-      };
-    }
-  }
-
-  // Defensive: reject planner-emitted dates whose year is >18 months
-  // older than today's year. Planner LLMs routinely default to 2024 from
-  // training data, returning empty recall on queries about current data.
-  // Deterministic extractor downstream will fill from server clock.
-  const sanitizeTimeTravel = (tt) => {
-    if (!tt) return null;
-    const nowYear = new Date().getUTCFullYear();
-    const guard = (iso) => {
-      if (!iso) return null;
-      const d = new Date(iso);
-      if (Number.isNaN(d.getTime())) return null;
-      // Allow dates from (nowYear - 18 months) to (nowYear + 1)
-      const minYear = nowYear - 2;
-      const maxYear = nowYear + 1;
-      const y = d.getUTCFullYear();
-      if (y < minYear || y > maxYear) return null;
-      return d.toISOString();
-    };
-    return {
-      valid_time: guard(tt.valid_time),
-      transaction_time: guard(tt.transaction_time),
-    };
-  };
-
-  const VALID_ACTION_PROVIDERS = ['slack', 'notion', 'gmail', 'github', 'linear'];
-  const rawActionIntent = typeof parsed.action_intent === 'string' ? parsed.action_intent.toLowerCase() : null;
-  const action_intent = VALID_ACTION_PROVIDERS.includes(rawActionIntent) ? rawActionIntent : null;
-
-  const plan = {
-    intent_kind,
-    user_message:          message,
-    action_intent,
-    intents:               Array.isArray(parsed.intents) ? parsed.intents.slice(0, 4) : [],
-    sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()) : [],
-    named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
-    needs_traverse:        !!parsed.needs_traverse,
-    needs_time_travel:     !!parsed.needs_time_travel,
-    time_travel:           sanitizeTimeTravel(parsed.time_travel),
-    needs_web:             !!parsed.needs_web,
-    save_intent,
-    auto_save_intent,
-    ask_for_project:       intent_kind === 'save' ? !!parsed.ask_for_project : false,
-    update_intent,
-    // Recall mode — insight expands synthesis chains, panorama gives
-    // temporal browse, quick is default fast semantic. Validated to one
-    // of the three; bad input falls to 'quick'.
-    recall_mode:           ['quick','panorama','insight'].includes(parsed.recall_mode) ? parsed.recall_mode : 'quick',
-    expected_evidence_types: Array.isArray(parsed.expected_evidence_types) ? parsed.expected_evidence_types : [],
-  };
-
-  // Deterministic relation-query detection — overrides planner choice
-  // when patterns are unambiguous. LLM planners on smaller models miss
-  // these consistently. Forces mode=insight so synthesis chains + edge
-  // expansion fire.
-  const ml = (message || '').toLowerCase();
-  const RELATION_PATTERNS = [
-    /\b(relation|relationship|connection)\s+between\b/,
-    /\bhow\s+(?:is|are)\s+\w+(?:\s+\w+){0,4}\s+(?:connect|relat|link|tie)/,
-    /\bwhat\s+(?:links?|connects?|ties?)\b/,
-    /\bfull\s+story\s+(?:on|about|of)\b/,
-    /\bgive\s+me\s+(?:the\s+)?(?:full|whole|complete)\s+(?:context|picture|story)\b/,
-  ];
-  if (RELATION_PATTERNS.some(re => re.test(ml))) {
-    plan.recall_mode = 'insight';
-  }
-
-  // Sub-query budget by intent — narrows wide-net recall when the question
-  // is unambiguous. Bloat reduction: 4 parallel recalls → 2 for direct
-  // single-entity lookups halves prompt-token cost without losing recall
-  // (server-side dedup handles overlap anyway). Heuristic:
-  //   single named entity + intent_kind=lookup → 2 queries
-  //   relation queries (insight mode) → 3 queries
-  //   recap / panorama → 4 queries
-  //   default → 3 queries
-  // T1-5: date-anchored, no-entity queries ("what did we do around 2026-06-06")
-  // need ONE windowed recall — the date_range/valid_at filter already narrows
-  // it. Capping to 1 stops the planner emitting paraphrase duplicates.
-  const msgLower = (plan.user_message || '').toLowerCase();
-  const dateAnchored = /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(msgLower)
-    || /\b(today|yesterday|this week|last week|this month|last month|around|earlier)\b/.test(msgLower);
-  const subQueryCap =
-    plan.named_entities.length === 0 && dateAnchored && plan.recall_mode !== 'insight' ? 1 :
-    plan.recall_mode === 'panorama' ? 4 :
-    plan.recall_mode === 'insight'  ? 3 :
-    plan.intent_kind === 'lookup' && plan.named_entities.length <= 1 ? 2 :
-    3;
-  plan.sub_queries = plan.sub_queries.slice(0, subQueryCap);
-
-  // T1-1: dedup near-identical sub_queries BEFORE gather. The planner often
-  // emits paraphrases of one intent ("activities on 2026-06-06" vs
-  // "2026-06-06 work") which fire two full recall passes over the same rows —
-  // wasted round-trips + duplicate evidence downstream. Normalize to a sorted
-  // content-token key (tiny entity-free stopword list so genuinely distinct
-  // queries never collapse) and keep the first of each key.
-  {
-    const SQ_STOP = new Set(['work', 'activities', 'activity', 'did', 'do', 'done', 'stuff', 'things', 'thing', 'on', 'around', 'about', 'the', 'a', 'an', 'of', 'for', 'our', 'we', 'us', 'my']);
-    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w && !SQ_STOP.has(w)).sort().join(' ');
-    const seen = new Set();
-    plan.sub_queries = plan.sub_queries.filter((q) => {
-      const k = norm(q);
-      if (!k || seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-  }
-
-  onEvent?.({ type: 'plan_done', plan });
-  return { plan, usage };
-}
-
-// ── STEP 2 (ALT) — Tool-decision router (CHAT_ROUTER=tool) ──────────────
-// Language-agnostic replacement for the regex gate + the big JSON planStep.
-// ONE cheap LLM call with a TINY tool set decides what to do:
-//   • recall(queries, mode) → memory lookup (the common path)
-//   • act(provider)         → connector action (delegated to the existing
-//                             action_intent flow downstream)
-//   • no tool call          → direct answer (greeting / smalltalk / general),
-//                             already produced in the user's language → carried
-//                             on plan._direct_answer so the caller short-circuits.
-// Returns the SAME { plan, usage } contract as planStep so every downstream
-// step (gather/reflect/answer/confidence-retry/save/return) is reused verbatim.
-// Connector tool schemas are NOT loaded here — only when act() is chosen does
-// the downstream action sub-loop load them (lazy, token-cheap).
-const ROUTER_TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'recall',
-      description: 'Search the organisation memory. Use for ANY question about specific facts, the org, its people, products, projects, documents, history, numbers, or the world. When in doubt, recall — never answer specific questions from your own knowledge.',
-      parameters: {
-        type: 'object',
-        properties: {
-          queries: { type: 'array', items: { type: 'string' }, description: 'EXACTLY 1-3 semantic search queries. Preserve names and meaning in the user\'s language; multilingual retrieval handles them directly.' },
-          mode: { type: 'string', enum: ['fact', 'explain', 'full'], description: 'fact = cheap current answer; explain = evidence and typed relations; full = explicit source reconstruction only when the user asks for complete context.' },
-          entities: { type: 'array', items: { type: 'string' }, description: 'Exact named entities explicitly present in the request.' },
-          source_title: { type: 'string', description: 'Exact filename/title explicitly named by the user, if any.' },
-          valid_at: { type: 'string', description: 'ISO timestamp when the fact was true, only when the request explicitly supplies a date.' },
-          known_at: { type: 'string', description: 'ISO timestamp for what the workspace knew by then, only when explicitly requested.' },
-        },
-        required: ['queries'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'act',
-      description: 'Perform an action through a connector (send / create / schedule / draft a message). Use ONLY when the user explicitly asks to perform such an action.',
-      parameters: {
-        type: 'object',
-        properties: {
-          provider: { type: 'string', enum: ['slack', 'notion', 'gmail', 'github', 'linear'] },
-        },
-        required: ['provider'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'live_lookup',
-      description: 'Pull FRESH/LIVE data straight from the user\'s connected apps (email, chat, docs, notes) to answer about recent or real-time things — "my latest emails", "what was said in the #channel", "today\'s calendar", "the latest Notion page". Use when the answer needs current connector data rather than (or in addition to) stored memory. Only connected apps are queried; pick the relevant ones. You may ALSO let recall run by including a query.',
-      parameters: {
-        type: 'object',
-        properties: {
-          providers: { type: 'array', items: { type: 'string', enum: ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'] }, description: 'Which connected app(s) to pull live data from' },
-          query: { type: 'string', description: 'ENGLISH search query / what to look for in those apps' },
-        },
-        required: ['providers'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remember',
-      description: 'Save a durable fact to memory. Call this when the user (a) explicitly asks to save/remember/note something, OR (b) STATES a durable fact about their own world — their org, people, products, projects, decisions, plans ("X is now Y", "we decided Z", "the launch is March 2026"). Do NOT call for questions, opinions, or general world knowledge. The fact is also recalled to check for existing/conflicting memory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          title: { type: 'string', description: 'Short title for the fact' },
-          content: { type: 'string', description: 'The fact as a clear, self-contained statement (3rd person, ENGLISH)' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'optional entity:/topic: tags' },
-        },
-        required: ['content'],
-      },
-    },
-  },
-];
-
-async function routerPlan({ message, history, language, assistantName, orgName, model, apiKey, signal, onEvent }) {
-  const basePlan = {
-    intent_kind: 'lookup', user_message: message, action_intent: null, intents: [],
-    sub_queries: [], named_entities: [], needs_traverse: false, needs_time_travel: false,
-    time_travel: null, needs_web: false, save_intent: null, auto_save_intent: null,
-    ask_for_project: false, update_intent: null, recall_mode: 'fact', expected_evidence_types: [],
-  };
-
-  const name = assistantName || 'HIVE';
-  const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this workspace' : orgName;
-  const sys = `You are ${name}, the persistent memory of ${orgLabel}. For the user's latest message, choose ONE:
-- Call recall(queries) for ANY question seeking specific information — about ${orgLabel}, its people, products, projects, documents, history, numbers, or the outside world. Bias strongly toward recall: if the message asks anything specific, recall.
-- Call remember(content) when the user asks to save/remember something OR STATES a durable fact about their own world (org/people/products/projects/decisions/plans — "X is now Y", "we decided Z", "launch is March 2026"). NOT for questions, opinions, or general world knowledge.
-- Call live_lookup(providers, query) when the answer needs FRESH/CURRENT data from the user's connected apps — latest emails, recent chat messages, today's calendar, a current doc/note. Pick the relevant connected app(s). Only connected apps are queried.
-- Call act(provider) ONLY when the user explicitly asks to send/create/schedule/draft something via a connector.
-- Call NO tool, and instead write a short direct reply, ONLY for greetings, small talk, thanks, or trivial general knowledge you are fully certain of.
-CRITICAL: preserve the user's wording, names, filenames, and language in recall queries. Multilingual retrieval handles semantic matching; never replace exact source or entity names with translated guesses.
-Whenever you reply DIRECTLY (no tool), reply in the SAME language the user wrote in.`;
-
-  const histMsgs = Array.isArray(history)
-    ? history.slice(-4).filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
-        .map(h => ({ role: h.role, content: String(h.content).slice(0, 1500) }))
-    : [];
-
-  const routerModel = process.env.CHAT_ROUTER_MODEL || model || INTERNAL_MODEL;
-  const body = {
-    model: routerModel,
-    messages: [{ role: 'system', content: sys }, ...histMsgs, { role: 'user', content: message }],
-    tools: ROUTER_TOOLS,
-    tool_choice: 'auto',
-    max_tokens: 500,
-    temperature: 0,
-  };
-
-  let data = null;
-  try {
-    const resp = await chatCompletionFetch(routerModel, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-      signal,
-    }, { fallbackApiKey: apiKey });
-    if (!resp.ok) {
-      const t = (await resp.text().catch(() => '')).slice(0, 200);
-      throw new Error(`router ${resp.status}: ${t}`);
-    }
-    data = await resp.json();
-  } catch (err) {
-    // Router call failed → safe default: recall the raw message (never strand the user).
-    onEvent?.({ type: 'plan', routed: 'recall_fallback', reason: err.message });
-    return { plan: { ...basePlan, sub_queries: [message] }, usage: null };
-  }
-
-  const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
-  const usage = data.usage || null;
-  const tc = Array.isArray(msg.tool_calls) ? msg.tool_calls[0] : null;
-
-  if (!tc) {
-    // No tool → direct answer already written in the user's language.
-    const direct = (msg.content || '').trim();
-    onEvent?.({ type: 'plan', routed: 'direct' });
-    // Empty content (model emitted nothing) → fall back to recall so the user
-    // still gets a grounded answer rather than silence.
-    if (!direct) return { plan: { ...basePlan, sub_queries: [message] }, usage };
-    return { plan: { ...basePlan, sub_queries: [], _direct_answer: direct }, usage };
-  }
-
-  let args = {};
-  try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { args = {}; }
-  const fn = tc.function?.name;
-
-  if (fn === 'act') {
-    const VALID = ['slack', 'notion', 'gmail', 'github', 'linear'];
-    const provider = VALID.includes(String(args.provider || '').toLowerCase()) ? String(args.provider).toLowerCase() : null;
-    onEvent?.({ type: 'plan', routed: 'act', provider });
-    return { plan: { ...basePlan, intent_kind: 'action', action_intent: provider }, usage };
-  }
-
-  if (fn === 'remember') {
-    const content = (typeof args.content === 'string' && args.content.trim()) ? args.content.trim() : message;
-    const title = (typeof args.title === 'string' && args.title.trim()) ? args.title.trim() : content.slice(0, 60);
-    const tags = Array.isArray(args.tags) ? args.tags.filter(t => typeof t === 'string' && t.trim()).slice(0, 8) : [];
-    onEvent?.({ type: 'plan', routed: 'remember' });
-    // Save the fact AND recall to surface existing/conflicting memory (mirrors
-    // v2's save+recall). intent_kind 'save' + save_intent → maybeSaveOrUpdate fires.
-    return {
-      plan: {
-        ...basePlan,
-        intent_kind: 'save',
-        save_intent: { title, content, tags },
-        sub_queries: [content.slice(0, 120)],
-        recall_mode: 'fact',
-      },
-      usage,
-    };
-  }
-
-  if (fn === 'live_lookup') {
-    const VALID = ['gmail', 'slack', 'notion', 'google-drive', 'google-calendar', 'google-docs'];
-    const providers = (Array.isArray(args.providers) ? args.providers : [])
-      .map(p => String(p || '').toLowerCase()).filter(p => VALID.includes(p));
-    const q = (typeof args.query === 'string' && args.query.trim()) ? args.query.trim() : message;
-    onEvent?.({ type: 'plan', routed: 'live_lookup', providers });
-    // Run memory recall on the query AND fetch live from the chosen connected
-    // apps (gatherEvidence honours plan.live_providers). Combined evidence.
-    return { plan: { ...basePlan, sub_queries: [q], recall_mode: 'fact', live_providers: providers }, usage };
-  }
-
-  // Default: recall (also the safe catch-all for an unknown tool name).
-  const queries = (Array.isArray(args.queries) ? args.queries : [])
-    .filter(q => typeof q === 'string' && q.trim()).slice(0, 3);
-  const mode = ['fact', 'explain'].includes(args.mode) ? args.mode : 'fact';
-  onEvent?.({ type: 'plan', routed: 'recall', queries });
-  return {
-    plan: {
-      ...basePlan,
-      sub_queries: queries.length ? queries : [message],
-      recall_mode: mode,
-      named_entities: Array.isArray(args.entities)
-        ? args.entities.filter((entity) => typeof entity === 'string' && entity.trim()).slice(0, 8)
-        : [],
-      needs_traverse: args.mode === 'explain',
-      source: typeof args.source_title === 'string' && args.source_title.trim()
-        ? { title: args.source_title.trim().slice(0, 512) }
-        : null,
-      time: {
-        ...(typeof args.valid_at === 'string' ? { valid_at: args.valid_at } : {}),
-        ...(typeof args.known_at === 'string' ? { known_at: args.known_at } : {}),
-      },
-    },
-    usage,
-  };
-}
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
@@ -1156,7 +682,16 @@ CORE RULES:
     smart-ingest actually wrote into the Relationship table; everything
     else is content co-occurrence, which is suggestive but not a
     relation. Misreporting this is the #1 source of hallucinated
-    history. When in doubt, default to the literal absence of the edge.`;
+    history. When in doubt, default to the literal absence of the edge.
+12. **NEVER CONTRADICT THE DELIVERED EVIDENCE.** If a name, product,
+    entity, date, or fact literally appears in the EVIDENCE / DOCUMENT
+    SEGMENTS / LIVE blocks above, you may NOT state that it is absent,
+    unknown, or unmentioned. Answer per-entity: describe each entity the
+    blocks DO cover, and only for an entity with genuinely zero rows say
+    the evidence does not cover it. A COVERAGE DISCLOSURE line, when
+    present, is authoritative about which requested entities are and are
+    not covered — obey it exactly. Asserting blanket absence while
+    matching rows are listed is a hard failure.`;
 }
 
 export function buildChatCitationPacket(recallPackets = []) {
@@ -1592,21 +1127,77 @@ export async function answerStep({ message, history, evidence, plan, language, a
     }
   } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
 
+  // COVERAGE DISCLOSURE (multi-entity compare/relation). When the planner
+  // asked about 2+ named entities, tell the model — from the packet's OWN
+  // delivered evidence — which requested entities have supporting rows and
+  // which do not. Without this the model, seeing evidence for only one side
+  // of a compare, over-generalises to "neither is present" and contradicts
+  // the packet. This is descriptive metadata, not a new instruction to the
+  // planner: it never fabricates coverage, it names what the delivered block
+  // already contains. Absent entities are reported as an honest gap, present
+  // entities MUST be used.
+  let coverageNote = '';
+  const requestedEntities = Array.isArray(plan.named_entities)
+    ? [...new Set(plan.named_entities.filter((e) => typeof e === 'string' && e.trim()))]
+    : [];
+  if (requestedEntities.length >= 2) {
+    const deliveredText = [...evidence.memories.slice(0, evidenceTopK), ...(evidence.evidence || []).slice(0, 8)]
+      .map((item) => [item?.title, item?.document_title, item?.content, item?.snippet, ...(Array.isArray(item?.tags) ? item.tags : [])]
+        .filter(Boolean).join(' ').toLowerCase())
+      .join(' ␟ ');
+    // Word-boundary match, NOT a raw substring: a short entity like "Pia"
+    // must not be reported "present" because it appears inside "Utopia" or
+    // "Sophia". Boundaries are Unicode letter/number aware (names may be
+    // non-ASCII); the entity is a real match only when flanked by a
+    // non-alphanumeric char or a string edge. Escape regex metachars in the
+    // entity — product names can contain '.', '+', etc.
+    const entityMatches = (entity) => {
+      const esc = entity.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      try {
+        return new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'u').test(deliveredText);
+      } catch {
+        // Defensive: if the built pattern is somehow invalid, fall back to a
+        // conservative substring test rather than throwing in the answer path.
+        return deliveredText.includes(entity.toLowerCase());
+      }
+    };
+    const present = requestedEntities.filter(entityMatches);
+    const missing = requestedEntities.filter((e) => !present.includes(e));
+    if (present.length && missing.length) {
+      coverageNote = `\n\nCOVERAGE DISCLOSURE: the evidence above DOES contain material on ${present.join(', ')}. It does NOT contain material on ${missing.join(', ')}. You MUST describe what the evidence establishes for ${present.join(', ')}, then state plainly that no evidence was found for ${missing.join(', ')} and invite the user to add a source. NEVER claim the evidence lacks ALL of them while rows about ${present.join(', ')} are present — that contradicts the packet and is a hard failure.`;
+    }
+  }
+
   const sourceFirst = evidence.coverage?.source_requested === true;
   const groundedEvidence = sourceFirst
     ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
     : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` : ''}${coMentionLines ? `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` : ''}${coMentionLines ? `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
 USER MESSAGE:
 ${message}`;
 
+  // Mode-aware answer-token cap. GPT-OSS is a reasoning model — it spends
+  // hidden reasoning_tokens up toward the ceiling regardless of how short
+  // the final prose is, so a flat 8000-token cap makes a 3-sentence fact
+  // answer as slow as a full document reconstruction. A fact answer is 2-5
+  // sentences (see answerPrompt rule 7); explain/full genuinely need room
+  // for multi-source synthesis. Cap per mode to hit the per-family latency
+  // targets (fact ≤1.5s, explain/full ≤3s) without truncating real answers.
+  // Env override (HIVEMIND_ANSWER_MAX_TOKENS) still wins for A/B.
+  const answerMode = plan.explicit_recall_mode
+    || ({ quick: 'fact', panorama: 'explain', insight: 'explain' }[plan.recall_mode])
+    || plan.recall_mode || 'fact';
+  const answerCap = process.env.HIVEMIND_ANSWER_MAX_TOKENS
+    ? ANSWER_MAX_TOKENS
+    : (answerMode === 'full' ? 8000 : answerMode === 'explain' ? 4000 : 2000);
+
   const { parsed, usage } = await callJsonLLM({
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
-    model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
+    model, apiKey, maxTokens: answerCap, signal,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1624,7 +1215,7 @@ ${message}`;
     const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
     const repaired = await callJsonLLM({
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
-      model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
+      model, apiKey, maxTokens: answerCap, signal,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;
@@ -2315,7 +1906,8 @@ export async function runReactAgentV2({
     }
 
     // Pure save intent (no recall needed) — write the memory then ack.
-    // Requires intent_kind === 'save' (enforced upstream in planStep) AND
+    // Requires intent_kind === 'save' (enforced upstream in parseChatIntent /
+    // intentDecisionToPlan) AND
     // a populated save_intent payload. Pure-noun / filename-only inputs
     // never reach this branch because intent_kind is forced to 'lookup'
     // and save_intent stripped during plan post-processing.

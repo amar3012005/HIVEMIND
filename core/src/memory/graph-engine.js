@@ -668,7 +668,7 @@ export class MemoryGraphEngine {
         // capped. Fires ONLY on a proven values-agree verdict, so it never drops a
         // changed claim; anything uncertain falls through to normal creation (safe
         // default for every tenant/language). Flag V5_CORROBORATION_DEDUP.
-        if ((process.env.V5_CORROBORATION_DEDUP || 'true').toLowerCase() !== 'false'
+        if ((process.env.V5_CORROBORATION_DEDUP || 'false').toLowerCase() === 'true'
             && !input.relationship_explicit && !input.skip_fact_extraction) {
           try {
             const baseTags = [...new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')))];
@@ -815,7 +815,7 @@ export class MemoryGraphEngine {
                 // verdict, so it can never drop a genuinely-changed claim.
                 const targetMatch = candidates.find(m => m.id === targetId) || topMatch;
                 let corroborates = false;
-                if ((process.env.V5_CORROBORATION_DEDUP || 'true').toLowerCase() !== 'false') {
+                if ((process.env.V5_CORROBORATION_DEDUP || 'false').toLowerCase() === 'true') {
                   try {
                     const v = validateSupersedingEdge(baseMemory, targetMatch, { requireChangeEvidence: true });
                     corroborates = !v.ok && typeof v.reason === 'string' && v.reason.includes('values-agree');

@@ -49,3 +49,14 @@ entity slug). Root fixes that got here: (1) spelled-out+SI unit parsing; (2) mov
 check from Qdrant-lagged smart-ingest to Postgres pre-check; (3) candidate lookup
 by entity tag not scope-filtered listLatestMemories. Still needs subject extraction
 for BARE atomic content with no entity anchor.
+
+
+## CORRECTION — corroboration guard DISABLED by default (data-loss risk)
+Real-cURL found a data-loss path: a CHANGED value in an UNRECOGNIZED unit ("48
+ports" → "96 ports"; "ports" not in the unit table) cannot be told from equal by
+value slots → falls to token-Jaccard → reads as "no change" → drops the changed
+claim. The guard is only safe when values use recognized units — too brittle/
+vocabulary-dependent to be safe for arbitrary tenant/language content. Flag
+V5_CORROBORATION_DEDUP now defaults OFF (opt-in only). Exact-duplicate skip
+(content-hash, already safe) remains. Robust reworded/semantic dedup requires the
+proper multilingual LLM claim extractor (subject/predicate/qualifiers) — deferred.

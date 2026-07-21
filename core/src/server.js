@@ -6897,8 +6897,17 @@ exit \$RC
               ...(savePrimaryTeamId ? { primaryTeamId: savePrimaryTeamId } : {}),
             };
 
-            // Facts envelope — distilled into fact memories + canonical entities
-            // (participants/orgs carried as entity: tags) + relationships.
+            // Facts envelope — V5: ONE KB-like meeting memory. The insights step
+            // (POST /insights) ALREADY structured the meaning (decisions / action
+            // items / quotes / participants), so we do NOT re-distill it with a
+            // second LLM curator pass (which fragmented one meeting into 4-6 rows
+            // and re-derived meaning we already have). atomic + skip_fact_extraction
+            // stores the whole structured note as a SINGLE recall-visible memory,
+            // meaning preserved verbatim. Entity extraction + cross-HIVEMIND linking
+            // still runs (it is gated by defer_entity_linking, NOT by
+            // skip_fact_extraction) so participants / orgs / products in the note
+            // become canonical entities + graph edges to prior memories. Claim
+            // structuring (subject/predicate/qualifiers) still runs async.
             let factIds = [];
             if (hasFacts) {
               const factsResult = await documentFirstIngestion.ingestSource({
@@ -6906,10 +6915,16 @@ exit \$RC
                 content: factsMarkdown,
                 source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title },
                 occurredAt: meetingDate || undefined,
-                mode: 'document',
+                mode: 'atomic',
                 ...scopeEnvelope,
                 tags: ['meeting', 'meeting-insight', 'unverified', meetingTag, ...entityTags, ...topics].filter(Boolean),
-                metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
+                // smartIngest:false — a meeting note is a single cohesive event
+                // snapshot: bypass the smart-router so it is NOT (a) chunked into a
+                // Document+Section tree, nor (b) smart-merged/superseded against
+                // prior facts. It lands as ONE recall-visible memory. Entity
+                // extraction + canonical linking are independent (defer_entity_linking
+                // gated) and still fire, so cross-HIVEMIND connection is preserved.
+                metadata: { ...baseMeta, memory_type: 'event', skip_fact_extraction: true, smartIngest: false, force_entity_linking: true, participant_count: people.length, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
               });
               factIds = factsResult?.memoryIds || [];
             }

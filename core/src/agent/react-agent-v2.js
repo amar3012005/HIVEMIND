@@ -1318,10 +1318,20 @@ export async function answerStep({ message, history, evidence, plan, language, a
     .slice(evidenceTopK)
     .filter((m) => m && (m._superseded_predecessor || m._diff_removed))
     .slice(0, 6);
+  // Adaptive per-memory content budget. A flat 240-char slice was too small
+  // for any rich single memory (a KB chunk, a long note, a one-memory meeting
+  // record): everything past char 240 became invisible to synthesis, so the
+  // model answered "the record doesn't include that" about content that WAS
+  // retrieved. When the result set is small (the common case for a specific
+  // question) the whole memory fits with room to spare; when it is large we
+  // tighten per-memory so the total prompt stays bounded (worst case ~5-6k
+  // chars either way). Language/tenant-neutral — pure length policy.
+  const _evCount = _topSlice.length + _flaggedMissed.length;
+  const _contentBudget = _evCount <= 4 ? 1400 : (_evCount <= 8 ? 700 : 300);
   const evidenceLines = [..._topSlice, ..._flaggedMissed].map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
-    const content = (m.content || '').replace(/\n/g, ' ').slice(0, 240);
+    const content = (m.content || '').replace(/\n/g, ' ').slice(0, _contentBudget);
     const tags = (m.tags || []).slice(0, 3).join(', ');
     // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
     const srcType = m.source_metadata?.source_type || null;

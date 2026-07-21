@@ -336,11 +336,11 @@ export class KbIngestQueue {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
         this.tracker?.updateJob(trackerJobId, {
           status: 'indexed', progress: 100, memoryId: result.documentId,
-          metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount },
+          metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null },
         });
       } catch { /* noop */ }
       try { this.recordUsage?.(orgId, result); } catch { /* quota accounting best-effort */ }
-      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, filename });
+      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null, filename });
       this._counters.processed++;
       this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}`);
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };

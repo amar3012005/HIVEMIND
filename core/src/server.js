@@ -15271,7 +15271,7 @@ exit \$RC
                     // Ingest parent schema memory
                     const parentPayload = { ...result.parent, skip_fact_extraction: true };
                     const [routedParent] = await buildRoutedIngestPayloads(parentPayload, { smartIngestRouter });
-                    const parentResult = await persistentMemoryEngine.ingestMemory(routedParent);
+                    const parentResult = await ingestRoutedPayloadCanonical(routedParent, persistentMemoryEngine);
                     const parentId = parentResult?.memoryId;
                     console.log(`[enterprise] Parent ingested: id=${parentId} operation=${parentResult?.operation}`);
 
@@ -15304,7 +15304,7 @@ exit \$RC
                           routedChunk.relationship = 'Extends';
                           routedChunk.related_to = parentId;
                         }
-                        const chunkResult = await persistentMemoryEngine.ingestMemory(routedChunk);
+                        const chunkResult = await ingestRoutedPayloadCanonical(routedChunk, persistentMemoryEngine);
                         const chunkMemoryId = chunkResult?.memoryId;
                         // Deterministic previous-chunk edge
                         if (prevChunkId && chunkMemoryId) {

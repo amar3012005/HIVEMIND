@@ -28,6 +28,7 @@ import { ClusterIndex } from './cluster-index.js';
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { buildEvidencePacket } from './recall-packet.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
@@ -1091,80 +1092,6 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
   };
 }
 
-export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], plan, trace, cutoffReason = null }) {
-  const full = plan?.mode === 'full';
-  const totalCap = full ? 12 : 8;
-  const perDocCap = full ? 8 : 3;
-  const perDoc = new Map();
-  const sourceSections = [];
-  for (const item of evidence) {
-    const documentId = item.documentId || item.document_id || item.document?.id || null;
-    const key = documentId || 'unknown';
-    if ((perDoc.get(key) || 0) >= perDocCap || sourceSections.length >= totalCap) continue;
-    perDoc.set(key, (perDoc.get(key) || 0) + 1);
-    sourceSections.push({
-      segment_id: item.segmentId || item.segment_id || null,
-      document_id: documentId,
-      document_title: item.document?.title || item.document_title || null,
-      source_platform: item.document?.sourcePlatform || item.source_platform || null,
-      // Snippets are query-centred by EvidenceRetrievalService. They are the
-      // precision payload; raw segment prefixes are only a fallback.
-      content: String(item.snippet || item.content || item.excerpt || '').slice(0, full ? 2400 : 900),
-      score: item.score ?? null,
-      page: item.metadata?.startPage || item.page || null,
-      segment_index: item.metadata?.segmentIndex ?? null,
-    });
-  }
-  const citations = [];
-  const seen = new Set();
-  for (const section of sourceSections) {
-    const key = section.segment_id || `${section.document_id}:${section.page || ''}`;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    citations.push({ id: `C${citations.length + 1}`, segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
-  }
-  for (const memory of citations.length === 0 ? memories.slice(0, 5) : []) {
-    if (!memory?.id) continue;
-    citations.push({
-      id: `C${citations.length + 1}`,
-      memory_id: memory.id,
-      segment_id: null,
-      document_id: memory.document_id || memory.documentId || null,
-      title: memory.title || null,
-      page: null,
-      source_label: memory.title || 'Workspace memory',
-    });
-  }
-  const conflicts = graph.filter((edge) => String(edge.type).toLowerCase() === 'contradicts');
-  return {
-    mode: plan?.mode || 'fact',
-    anchors: memories.slice(0, 5).map((m) => ({ id: m.id, title: m.title || null, score: m.score ?? null })),
-    facts: memories.slice(0, 5),
-    source_sections: sourceSections,
-    sourceSections,
-    graph_evidence: graph,
-    graphEvidence: graph,
-    conflicts,
-    live_evidence: live,
-    liveEvidence: live,
-    citations,
-    source_coverage: {
-      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
-      segments: sourceSections.length,
-      graph_edges: graph.length,
-      live_items: live.length,
-    },
-    coverage: {
-      facts: Math.min(memories.length, 5),
-      documents: new Set(sourceSections.map((s) => s.document_id).filter(Boolean)).size,
-      source_sections: sourceSections.length,
-      graph_edges: graph.length,
-      live_items: live.length,
-    },
-    cutoff_reason: cutoffReason,
-    trace,
-  };
-}
 
 // ── Public entry ───────────────────────────────────────────────────────────
 
@@ -1633,3 +1560,7 @@ export class RecallRouter {
     };
   }
 }
+
+// V5 Phase 8: buildEvidencePacket moved to recall-packet.js (one module owns the
+// evidence contract). Re-exported here for backward compatibility.
+export { buildEvidencePacket };

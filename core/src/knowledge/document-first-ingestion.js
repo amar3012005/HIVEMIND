@@ -2347,6 +2347,11 @@ Every item must include a non-empty content field and one or more valid support_
       project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
       code_metadata: envelope.metadata?.code_metadata || undefined,
+      // V5: bounded engine processing-flag passthrough (see legacyPayloadToEnvelope).
+      skip_fact_extraction: envelope.metadata?.skip_fact_extraction === true || undefined,
+      skipPredictCalibrate: envelope.metadata?.skipPredictCalibrate === true || undefined,
+      skipProcessing: envelope.metadata?.skipProcessing === true || undefined,
+      smartIngest: envelope.metadata?.smartIngest === false ? false : undefined,
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)

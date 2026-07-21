@@ -17,3 +17,11 @@ delete + restart + latency + managed/.amr/BYOD parity green on one immutable rel
 Done: deleted dead external/ingestion mirror. REMAINS: the bypass sweep depends on Phase 5
 caller migrations completing first (route /api/memories + enterprise + Tara through envelope),
 then delete the legacy routed path. Risky hot-path — own cycle.
+
+## SWEEP PROGRESS 2026-07-21
+Deleted the provably-dead legacy KB ingest path (132 lines: chunker + direct
+ingestMemory + direct qdrant storeMemory) from routes/knowledge.js — every branch
+above it returns. KB upload + coverage verified green after removal. REMAINING in
+sweep: legacy routed path (ingestRoutedPayload) stays as the TREE path + loud-logged
+fallback until telemetry confirms zero fallback use over time; Tara raw-store
+fallback likewise.

@@ -21,3 +21,9 @@ PG row GONE (count 0) + vector PURGED (0 points, both collections) + orphaned-
 cognition cascade prune + .amr mirrorDelete hook. Soft delete (default) sets
 deleted_at (recall filters it). REMAINING: full .amr/BYOD parity suite needs
 disposable targets (infra cycle).
+
+## RESIDUAL (honest): .amr/BYOD parity suite
+Deletion mirror (mirrorDelete → .amr shards) + amr driver exist and are hooked.
+A full parity run (same fixtures vs managed PG/Qdrant vs disposable .amr vs BYOD
+agent) requires a mneme-enabled org + disposable BYOD target not present in this
+environment — the one V5 item that genuinely needs infra provisioning.

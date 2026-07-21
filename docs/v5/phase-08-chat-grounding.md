@@ -32,3 +32,12 @@ The substantive Phase 8 requirements (valid citation ids, claim entailment, hone
 coverage, no invented sources/relations) are enforced on the chat lane. The dual
 packet builders remain as documented internal debt (both function; unification is a
 non-behavioral refactor deferred to its own characterized cycle).
+
+## COMPLETED 2026-07-21 — one evidence-contract module
+buildEvidencePacket physically moved into recall-packet.js (single module owns the
+typed evidence contract), re-exported from recall-router for compatibility. Zero
+behavior change (no external deps; import graph verified; chat regression green —
+all families answer + cite on the response field). NOTE: probe false-alarm during
+verification (checked `answer` instead of `response`) caused one unnecessary
+rollback; chat was healthy throughout. Progressive router + Cerebras tool-calling
+UNTOUCHED per user instruction.

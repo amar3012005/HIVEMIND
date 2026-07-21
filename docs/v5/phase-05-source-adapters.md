@@ -56,3 +56,12 @@ corroboration change already caused a data-loss near-miss this session).
   envelope atomic path does NOT forward skip_fact_extraction, so enveloping enterprise
   chunks would silently enable fact extraction (behavior+latency change). Needs an
   envelope contract extension + a real enterprise fixture test. Own cycle.
+
+## COMPLETED 2026-07-21 — enterprise-upload on canonical (real fixture verified)
+Envelope contract extended: legacyPayloadToEnvelope lifts the BOUNDED flag set
+(skip_fact_extraction/skipPredictCalibrate/skipProcessing/smartIngest:false) into
+metadata; ingestSource atomic forwards exactly those four to the engine — the
+skip-flag hazard is closed. Enterprise parent+chunk persistence routes through
+ingestRoutedPayloadCanonical. REAL FIXTURE: contract .txt → detect (contract, 0.95)
+→ ingest completed (document_first, doc+segments+memories, claim_key populated,
+ZERO fallbacks). All 5A-5E sources now on canonical machinery.

@@ -21,6 +21,37 @@ import { normalizeEntity } from './entity-normalize.js';
 const MAX_ENTITIES_PER_MEMORY = 8;
 const MAX_UNIQUE_ENTITIES_PER_BATCH = 64;
 
+// Canonical V5 entity taxonomy — the code-enforced allow-list (previously the
+// type set lived only in the extractor prompt, so entityKind was free-form and
+// defaulted to the meaningless 'entity'). Unknown/synonym kinds normalize into
+// the taxonomy; anything unrecognized falls back to 'concept'.
+export const ENTITY_TAXONOMY = new Set([
+  'person', 'organization', 'product', 'project', 'document',
+  'location', 'system', 'technology', 'standard', 'concept',
+]);
+// Synonym → taxonomy map. NOTE: 'entity' (the legacy default) is deliberately
+// NOT remapped — the existing registry is full of entityKind='entity' rows, and
+// remapping the lookup key would strand them and create duplicates. Migration-safe
+// rule: map recognized synonyms into the taxonomy; leave 'entity' + unknown kinds
+// UNCHANGED (strict bucketing of legacy 'entity' rows needs a registry backfill,
+// out of scope for this additive phase).
+const ENTITY_KIND_SYNONYMS = {
+  company: 'organization', org: 'organization', business: 'organization', corporation: 'organization',
+  people: 'person', individual: 'person', user: 'person', contact: 'person',
+  place: 'location', geo: 'location', city: 'location', country: 'location',
+  tech: 'technology', tool: 'technology',
+  software: 'system', service: 'system', app: 'system', platform: 'system',
+  file: 'document', doc: 'document', spec: 'standard', specification: 'standard',
+  protocol: 'standard', good: 'product', sku: 'product', initiative: 'project',
+};
+export function normalizeEntityKind(kind) {
+  const k = String(kind || '').trim().toLowerCase();
+  if (!k) return 'entity';
+  if (ENTITY_TAXONOMY.has(k)) return k;
+  if (ENTITY_KIND_SYNONYMS[k]) return ENTITY_KIND_SYNONYMS[k];
+  return k; // legacy 'entity' + unrecognized kinds pass through unchanged (no fragmentation)
+}
+
 /**
  * @param {object} opts
  * @param {object} opts.prisma          Prisma client (needs canonicalEntity/memoryEntityLink)
@@ -39,6 +70,10 @@ export async function persistCanonicalLinks({
 } = {}) {
   const out = { linked: 0, created: 0, review: 0, skipped: 0 };
   if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !organizationId || !items.length) return out;
+  // V5: lock entityKind to the canonical taxonomy (was free-form; 'entity'/synonyms
+  // fragmented the registry). All registry lookups + creates below use the
+  // normalized kind so a re-encounter under a synonym reuses the same entity.
+  entityKind = normalizeEntityKind(entityKind);
   if ((process.env.CANONICAL_ENTITY_PERSIST || 'true').toLowerCase() === 'false') return out;
 
   try {

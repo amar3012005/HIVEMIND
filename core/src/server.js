@@ -6897,36 +6897,70 @@ exit \$RC
               ...(savePrimaryTeamId ? { primaryTeamId: savePrimaryTeamId } : {}),
             };
 
-            // Facts envelope — V5: ONE KB-like meeting memory. The insights step
-            // (POST /insights) ALREADY structured the meaning (decisions / action
-            // items / quotes / participants), so we do NOT re-distill it with a
-            // second LLM curator pass (which fragmented one meeting into 4-6 rows
-            // and re-derived meaning we already have). atomic + skip_fact_extraction
-            // stores the whole structured note as a SINGLE recall-visible memory,
-            // meaning preserved verbatim. Entity extraction + cross-HIVEMIND linking
-            // still runs (it is gated by defer_entity_linking, NOT by
-            // skip_fact_extraction) so participants / orgs / products in the note
-            // become canonical entities + graph edges to prior memories. Claim
-            // structuring (subject/predicate/qualifiers) still runs async.
+            // ── V5: meeting → typed PartOf section-tree ────────────────────
+            // The insights step (POST /insights) ALREADY structured the meaning,
+            // so we do NOT re-distill with a second LLM curator pass (that
+            // fragmented one meeting into re-generated claims AND dropped the
+            // quotes). Instead every non-empty section becomes its OWN
+            // deterministically-typed memory (decision / goal / fact / event)
+            // PartOf-linked to a parent meeting memory. This makes each
+            // section-specific question ("what did we decide", "action items",
+            // "notable quotes") answerable from the RIGHT memory — recall surfaces
+            // the matching section, and each section fits the synthesis budget.
+            // Section TYPES come from the insight STRUCTURE, never from heading
+            // text, so it is language-neutral. Each memory goes through the atomic
+            // path (skip_fact_extraction:true = verbatim, no re-gen; smartIngest:
+            // false = not re-chunked/superseded) which still runs entity extraction
+            // + canonical linking (defer_entity_linking-gated) so participants /
+            // orgs / products link across HIVEMIND.
             let factIds = [];
             if (hasFacts) {
-              const factsResult = await documentFirstIngestion.ingestSource({
-                userId: mUser, orgId: mOrg,
-                content: factsMarkdown,
-                source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title },
-                occurredAt: meetingDate || undefined,
-                mode: 'atomic',
-                ...scopeEnvelope,
-                tags: ['meeting', 'meeting-insight', 'unverified', meetingTag, ...entityTags, ...topics].filter(Boolean),
-                // smartIngest:false — a meeting note is a single cohesive event
-                // snapshot: bypass the smart-router so it is NOT (a) chunked into a
-                // Document+Section tree, nor (b) smart-merged/superseded against
-                // prior facts. It lands as ONE recall-visible memory. Entity
-                // extraction + canonical linking are independent (defer_entity_linking
-                // gated) and still fire, so cross-HIVEMIND connection is preserved.
-                metadata: { ...baseMeta, memory_type: 'event', skip_fact_extraction: true, smartIngest: false, force_entity_linking: true, participant_count: people.length, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
-              });
-              factIds = factsResult?.memoryIds || [];
+              const baseChildMeta = { ...baseMeta, skip_fact_extraction: true, smartIngest: false, force_entity_linking: true };
+              const ingestOne = async (content, memory_type, sectionKey, extraTags = []) => {
+                const r = await documentFirstIngestion.ingestSource({
+                  userId: mUser, orgId: mOrg, content,
+                  source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title },
+                  occurredAt: meetingDate || undefined, mode: 'atomic', ...scopeEnvelope,
+                  tags: ['meeting', 'unverified', meetingTag, `section:${sectionKey}`, ...extraTags, ...entityTags, ...topics].filter(Boolean),
+                  metadata: { ...baseChildMeta, memory_type, section: sectionKey, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
+                });
+                return r?.memoryIds?.[0] || null;
+              };
+
+              // Parent — meeting identity + participants (+ 1-line summary for
+              // doc-level recall). Answers "who was in / what was the meeting".
+              const summaryLine = (typeof ins.summary === 'string' && ins.summary.trim()) ? `\n${ins.summary.trim()}` : '';
+              const parentContent =
+                `# Meeting: ${title} — ${stamp}\n`
+                + `Participants: ${people.join(', ') || '—'}   Organizations: ${orgs.join(', ') || '—'}`
+                + summaryLine;
+              const parentId = await ingestOne(parentContent, 'event', 'overview', ['meeting-insight']);
+              if (parentId) factIds.push(parentId);
+
+              // Typed section children, each PartOf → parent. Type from structure.
+              const sectionSpecs = [
+                { key: 'decisions', label: 'Decisions', type: 'decision', lines: decisionLines },
+                { key: 'action_items', label: 'Action items', type: 'goal', lines: actionLines },
+                { key: 'next_steps', label: 'Next steps', type: 'goal', lines: nextStepLines },
+                { key: 'open_questions', label: 'Open questions', type: 'fact', lines: questionLines },
+                { key: 'notable_quotes', label: 'Notable quotes', type: 'event', lines: quoteLines },
+              ];
+              for (const sec of sectionSpecs) {
+                if (!sec.lines.length) continue;
+                const content = `Meeting: ${title} — ${sec.label}\n` + sec.lines.map((l) => `- ${l}`).join('\n');
+                const childId = await ingestOne(content, sec.type, sec.key);
+                if (!childId) continue;
+                factIds.push(childId);
+                if (parentId) {
+                  try {
+                    await documentFirstIngestion.memoryGraphEngine.store.createRelationship({
+                      id: crypto.randomUUID(), from_id: childId, to_id: parentId,
+                      type: 'PartOf', confidence: 1.0, org_id: mOrg,
+                      metadata: { source: 'meeting', section: sec.key },
+                    });
+                  } catch (edgeErr) { console.warn('[meeting-ingest] PartOf edge failed:', edgeErr.message); }
+                }
+              }
             }
 
             // Transcript → evidence-layer envelope: recall-excluded, never

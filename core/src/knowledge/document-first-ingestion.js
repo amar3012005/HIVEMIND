@@ -1808,12 +1808,26 @@ Every item must include a non-empty content field and one or more valid support_
       timings_ms: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: _msPromote },
     });
 
+    // Canonical V5 result: coverage ledger + timings (additive — existing keys kept).
+    // merged/rejected are not yet separately tracked (Phase 4 curator ledger will
+    // populate them); omitted is the honest candidate→promoted shortfall for now.
+    const _promotedOk = promoted.memories.filter(m => m?.id).length;
+    const _cands = promoted.candidates.length;
     return {
       documentId: knowledgeDoc.id,
       segmentCount: segments.length,
-      candidateCount: promoted.candidates.length,
+      candidateCount: _cands,
       promotedCount: promoted.memories.length,
-      promotedMemoryIds: promoted.memories.map(m => m.id)
+      promotedMemoryIds: promoted.memories.map(m => m.id),
+      coverage: {
+        candidates: _cands,
+        promoted: _promotedOk,
+        merged: 0,
+        omitted: Math.max(0, _cands - _promotedOk),
+        rejected: 0,
+        highValueCoverage: _cands > 0 ? Number((_promotedOk / _cands).toFixed(3)) : 1,
+      },
+      timings: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: _msPromote },
     };
   }
 
@@ -2265,7 +2279,17 @@ Every item must include a non-empty content field and one or more valid support_
         if (items.length) await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
       }
     } catch (e) { this.logger.warn?.(`[canonical-entities][atomic] ${e.message}`); }
-    return { ok: true, mode, source: sourceType, memoryIds, promotedCount: memoryIds.length, memoryId: memoryIds[0] || null, operation: res?.operation || null };
+    return {
+      ok: true, mode, source: sourceType, memoryIds,
+      promotedCount: memoryIds.length, memoryId: memoryIds[0] || null,
+      operation: res?.operation || null,
+      // Atomic = at most one claim; coverage reflects promoted vs the single candidate.
+      coverage: {
+        candidates: 1, promoted: memoryIds.length, merged: 0,
+        omitted: memoryIds.length ? 0 : 1, rejected: 0,
+        highValueCoverage: memoryIds.length ? 1 : 0,
+      },
+    };
   }
 
   /**

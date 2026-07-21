@@ -588,6 +588,17 @@ model Memory {
   //   NULL       = ordinary evidence/memory tier (default)
   cognitiveLayerRole String? @map("cognitive_layer_role")
 
+  // Canonical Memory Engine V5: structured claim identity. A claim is
+  // subject+predicate(+qualifiers); claimKey is a stable hash used for dedup and
+  // contradiction/history clustering (NOT unique — historical + contradictory
+  // claims for the same key must coexist). extractionConfidence is the
+  // per-claim extractor confidence (distinct from synthesisConfidence).
+  claimKey             String?  @map("claim_key") @db.VarChar(128)
+  claimSubject         String?  @map("claim_subject") @db.VarChar(500)
+  claimPredicate       String?  @map("claim_predicate") @db.VarChar(500)
+  claimQualifiers      Json?    @map("claim_qualifiers")
+  extractionConfidence Float?   @map("extraction_confidence") @db.Real
+
   @@index([userId])
   @@index([orgId])
   @@index([project])
@@ -614,6 +625,9 @@ model Memory {
   @@index([tier], map: "memories_tier_idx")
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")
+  // V5: claim clustering + dedup lookups. Non-unique (contradictory/historical
+  // claims coexist); the isLatest+deletedAt tail keeps the live-claim scan tight.
+  @@index([orgId, claimKey, isLatest, deletedAt], map: "memories_org_claim_latest_idx")
   // PHASE-A: a partial index `memories_principle_role_idx` on (org_id, updated_at DESC)
   // WHERE cognitive_layer_role = 'principle' exists in the DB (migration
   // 20260606000000_l2_principles_tier). The WHERE filter is not expressible in
@@ -767,6 +781,17 @@ model KnowledgeDocument {
   parseEngine        String?              @map("parse_engine") @db.VarChar(50) // 'docling' | 'pdf.js' | 'mammoth' | 'markdown'
   parseMetadata      Json                 @default("{}") @map("parse_metadata")
   structureExtracted Boolean              @default(false) @map("structure_extracted")
+  // Canonical Memory Engine V5: canonical source identity. canonicalIngestKey is
+  // a globally-unique hash of (org, source type, provider, external id, version,
+  // content hash) — the idempotency key for a source version. contentHash is the
+  // document-level content hash (segment-level hash already lives on
+  // KnowledgeSegment). processingVersion gates re-processing when the pipeline
+  // changes. These are additive + backward-compatible (all nullable).
+  canonicalIngestKey String?              @map("canonical_ingest_key") @db.VarChar(128)
+  sourceExternalId   String?              @map("source_external_id") @db.VarChar(500)
+  sourceVersion      String?              @map("source_version") @db.VarChar(100)
+  contentHash        String?              @map("content_hash") @db.VarChar(128)
+  processingVersion  Int?                 @map("processing_version")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?            @map("archived_at") @db.Timestamptz(6)
@@ -788,6 +813,9 @@ model KnowledgeDocument {
   @@index([parseStatus])
   @@index([tags], type: Gin)
   @@index([createdAt(sort: Desc)])
+  // V5: idempotent source-version lookup. Unique per org so a re-ingest of the
+  // same source version dedups to one document (nullable → legacy rows unaffected).
+  @@unique([orgId, canonicalIngestKey], map: "knowledge_documents_org_canonical_key_uq")
   @@map("knowledge_documents")
 }
 

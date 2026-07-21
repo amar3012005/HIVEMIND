@@ -2248,6 +2248,27 @@ async function ingestRoutedPayload(routedPayload, engine) {
   return engine.ingestMemory(cleanPayload);
 }
 
+// V5 Phase 5B — /api/memories via the canonical envelope. Routes each routed
+// (non-tree) payload through ingestCanonicalPayload (scope-resolve → envelope →
+// ingestSource) so the highest-traffic write path gains provenance tags, canonical
+// entity persistence, async claim structuring and the coverage ledger, while the
+// engine-internal smart routing (same flags) keeps behavior identical. Trees keep
+// the engine path (ingestSource has no tree mode). Fallback to the engine path is
+// LOUD (warn log) — kept during migration for enterprise robustness; the legacy
+// path is deleted in the Phase 11 sweep once telemetry shows zero fallbacks.
+async function ingestRoutedPayloadCanonical(routedPayload, engine) {
+  const v5 = (process.env.V5_MEMORIES_CANONICAL || 'true').toLowerCase() !== 'false';
+  if (!v5 || routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
+  try {
+    const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
+    if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
+    return { ...r, operation: r.operation || 'created' };
+  } catch (e) {
+    console.warn('[v5-memories-canonical] envelope path failed, using engine path:', e.message);
+    return ingestRoutedPayload(routedPayload, engine);
+  }
+}
+
 async function ingestCanonicalPayload(payload, options = {}) {
   const scoped = await resolveScopedIngestPayload(payload);
   const envelope = legacyPayloadToEnvelope(scoped, options);
@@ -17513,7 +17534,7 @@ exit \$RC
                         if (p.tree.parent) p.tree.parent.defer_entity_linking = true;
                         if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => { c.defer_entity_linking = true; });
                       }
-                      const result = await ingestRoutedPayload(p, persistentMemoryEngine);
+                      const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);
 
                       // Handle predict-calibrate skipped memories
                       if (result.operation === 'skipped_redundant') {
@@ -17647,7 +17668,7 @@ exit \$RC
               });
               const syncResults = [];
               for (const p of ingestPayloads) {
-                const result = await ingestRoutedPayload(p, persistentMemoryEngine);
+                const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);
 
                 // Handle predict-calibrate skipped memories
                 if (result.operation === 'skipped_redundant') {

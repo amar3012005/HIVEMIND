@@ -2308,6 +2308,9 @@ Every item must include a non-empty content field and one or more valid support_
         skip_contradiction_detection: true,
       });
       const evId = evRes?.memoryId || evRes?.id || null;
+      // V5: evidence rows also get async claim structuring so meeting/transcript
+      // sources carry the same subject/predicate/qualifiers identity for clustering.
+      if (evId) this._structureClaimsAsync({ memories: [{ id: evId, content: envelope.content }], orgId });
       return { ok: true, mode, source: sourceType, memoryIds: evId ? [evId] : [], promotedCount: evId ? 1 : 0, memoryId: evId };
     }
 

@@ -415,7 +415,7 @@ subject+predicate identify the claim across paraphrases and languages (normalize
           const m = targets[idx];
           try {
             const parsed = await chatCompletion({
-              model, temperature: 0, max_tokens: 200, json_mode: true, feature: 'v5-claim-structuring',
+              model, temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
               messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
             });
             const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';

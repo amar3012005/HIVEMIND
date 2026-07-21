@@ -569,6 +569,11 @@ export class PrismaGraphStore {
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
+    // V5 Phase 3: async claim-structuring enrichment may backfill semantic claim fields.
+    if (patch.claimSubject !== undefined) data.claimSubject = patch.claimSubject;
+    if (patch.claimPredicate !== undefined) data.claimPredicate = patch.claimPredicate;
+    if (patch.claimQualifiers !== undefined) data.claimQualifiers = patch.claimQualifiers;
+    if (patch.claimKey !== undefined) data.claimKey = patch.claimKey;
     const validToVal = patch.validTo ?? patch.valid_to;
     if (validToVal !== undefined) data.validTo = validToVal ? new Date(validToVal) : null;
 

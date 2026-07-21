@@ -382,6 +382,60 @@ export class DocumentFirstIngestionService {
       }));
     this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
   }
+  /**
+   * V5 Phase 3 — async claim structuring (OFF the save hot path → zero added
+   * latency). For committed memories, extract normalized {subject, predicate,
+   * qualifiers} with a multilingual LLM and backfill the claim_* columns so
+   * dreaming / clustering / graph intelligence have structured claim identity.
+   * Language-agnostic (the model reads any language; we store canonical English
+   * subject/predicate for cross-language clustering). Robust: fire-and-forget,
+   * bounded concurrency, per-memory failure isolation, never blocks or fails a
+   * save. Flag V5_CLAIM_STRUCTURING (default on). NOT wired to destructive dedup
+   * (safe — enrichment only).
+   */
+  _structureClaimsAsync({ memories, orgId }) {
+    if ((process.env.V5_CLAIM_STRUCTURING || 'true').toLowerCase() === 'false') return;
+    const store = this.memoryGraphEngine?.store;
+    if (!store?.updateMemory) return;
+    const targets = (Array.isArray(memories) ? memories : [])
+      .filter((m) => m?.id && typeof m.content === 'string' && m.content.trim().length >= 12)
+      .slice(0, 24);
+    if (!targets.length) return;
+    const model = process.env.CLAIM_STRUCTURING_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
+    const system = `Extract the core CLAIM structure from one memory sentence, in ANY language.
+Return ONLY JSON: {"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}.
+subject+predicate identify the claim across paraphrases and languages (normalize to English + lowercase). qualifiers holds scope/conditions/owner/time as key-value. Keep values short. If nothing durable, return {"subject":"","predicate":"","qualifiers":{}}.`;
+    (async () => {
+      let i = 0;
+      const workers = Array.from({ length: Math.min(CONC, targets.length) }, async () => {
+        while (true) {
+          const idx = i++;
+          if (idx >= targets.length) return;
+          const m = targets[idx];
+          try {
+            const parsed = await chatCompletion({
+              model, temperature: 0, max_tokens: 200, json_mode: true, feature: 'v5-claim-structuring',
+              messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
+            });
+            const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';
+            const pred = typeof parsed?.predicate === 'string' ? parsed.predicate.trim().toLowerCase().slice(0, 500) : '';
+            if (!subj && !pred) continue;
+            const quals = (parsed && typeof parsed.qualifiers === 'object' && !Array.isArray(parsed.qualifiers)) ? parsed.qualifiers : undefined;
+            const patch = {};
+            if (subj) patch.claimSubject = subj;
+            if (pred) patch.claimPredicate = pred;
+            if (quals && Object.keys(quals).length) patch.claimQualifiers = quals;
+            if (Object.keys(patch).length) await store.updateMemory(m.id, patch);
+          } catch (err) {
+            this.logger.warn?.(`[v5-claim-structuring] ${String(m.id).slice(0, 8)}: ${err.message}`);
+          }
+        }
+      });
+      await Promise.all(workers);
+    })().catch((err) => this.logger.warn?.(`[v5-claim-structuring] batch: ${err.message}`));
+  }
+
 
   /**
    * Deferred KB fact-distillation (P6). Big documents (>=30 segments) used to
@@ -1834,6 +1888,7 @@ Every item must include a non-empty content field and one or more valid support_
       },
     });
     this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
+    this._structureClaimsAsync({ memories: promoted.memories, orgId });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to
@@ -2115,6 +2170,7 @@ Every item must include a non-empty content field and one or more valid support_
       promotionStrategy: `connector_${providerKey}`,
     });
     this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
+    this._structureClaimsAsync({ memories: promoted.memories, orgId });
 
     return {
       documentId: knowledgeDoc.id,
@@ -2318,6 +2374,8 @@ Every item must include a non-empty content field and one or more valid support_
         if (items.length) await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
       }
     } catch (e) { this.logger.warn?.(`[canonical-entities][atomic] ${e.message}`); }
+    // V5 Phase 3: async claim structuring for the committed atomic memory (off hot path).
+    if (memoryIds.length) this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
     return {
       ok: true, mode, source: sourceType, memoryIds,
       promotedCount: memoryIds.length, memoryId: memoryIds[0] || null,

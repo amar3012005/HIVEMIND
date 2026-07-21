@@ -60,3 +60,14 @@ vocabulary-dependent to be safe for arbitrary tenant/language content. Flag
 V5_CORROBORATION_DEDUP now defaults OFF (opt-in only). Exact-duplicate skip
 (content-hash, already safe) remains. Robust reworded/semantic dedup requires the
 proper multilingual LLM claim extractor (subject/predicate/qualifiers) — deferred.
+
+
+## SHIPPED — async claim structuring (multilingual, off hot path)
+_structureClaimsAsync: post-commit, non-blocking (ZERO save latency), extracts
+normalized {subject, predicate, qualifiers} via a multilingual LLM (reads any
+language → stores canonical English subject/predicate for cross-language
+clustering) and backfills claim_* columns. Bounded concurrency, per-memory failure
+isolation, flag V5_CLAIM_STRUCTURING (default on). Wired on atomic + KB doc commit
+paths. NOT wired to destructive dedup (enrichment only → safe). Feeds dreaming/
+clustering/graph. This is the robust replacement for the unsafe regex value-slot
+corroboration.

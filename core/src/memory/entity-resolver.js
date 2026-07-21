@@ -187,6 +187,27 @@ export class EntityResolver {
 
       // Create new canonical entity.
       const _canonName = cand.name || cand.email || 'Unknown';
+      // V5 dedup guard: reuse an existing entity with the SAME normalized name in
+      // this org REGARDLESS of entityKind, before minting a new row. _bestMatch
+      // scopes by kind, so the same real-world entity classified under different
+      // kinds by different ingestion paths (e.g. "SolvisMax" as product vs
+      // "solvismax" as company) would otherwise create case/kind variants. The
+      // normalized name is a unicode-aware lowercase key (language-neutral), and
+      // Postgres is immediately consistent so near-simultaneous saves can't race a
+      // duplicate. Only reuse a specific (non-empty) normalized key.
+      const _normKey = normalizeName(_canonName);
+      if (_normKey && _normKey.length >= 2) {
+        const existing = await this.prisma.canonicalEntity.findFirst({
+          where: { organizationId, normalizedName: _normKey },
+          orderBy: { createdAt: 'asc' }, // oldest wins — the canonical original
+        }).catch(() => null);
+        if (existing) {
+          await this._link({ memoryId, entityId: existing.id, role, confidence: 0.9 });
+          await this._enrichEntity(existing.id, { name: cand.name, email: cand.email, domain, externalRefs });
+          results.push({ entityId: existing.id, role, confidence: 0.9, action: 'linked', reason: 'normalized_name_reuse' });
+          continue;
+        }
+      }
       const created = await this.prisma.canonicalEntity.create({
         data: {
           organizationId,

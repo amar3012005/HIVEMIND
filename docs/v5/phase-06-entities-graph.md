@@ -21,3 +21,14 @@ Derives ≥0.75 hard gate + full operator centralization not verified/finished.
 ## Acceptance (real cURL)
 Ingest KB+email+meeting+chat about the same product → one canonical entity, valid
 cross-source links, no false destructive edges, tenant isolation intact.
+
+
+## Increment (entity dedup at create — user ask)
+Before minting a canonical entity, reuse any existing one with the SAME
+normalizedName in the org REGARDLESS of entityKind (oldest wins). _bestMatch
+scopes by kind, so the same real entity classified under different kinds by
+different paths (SolvisMax=product vs solvismax=company) created case/kind
+variants; live registry had SolvisMax/solvismax + VIESSMANN/viessmann. Fix is
+language-neutral (unicode-aware lowercase normalizedName) + immediately-consistent
+(Postgres, no race). PREVENTS new variants; a one-time merge of the 2 existing
+dupes is a separate destructive step (deferred).

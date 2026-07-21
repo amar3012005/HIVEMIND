@@ -1,4 +1,4 @@
-# Phase 8 — Chat Grounding (thin over RecallPacket)   🟡 PARTIAL
+# Phase 8 — Chat Grounding   🟡 functional; packet unification = internal debt
 
 ## Envisioned state
 Chat is thin orchestration over a trusted RecallPacket {facts, sourceSections,
@@ -16,3 +16,9 @@ claim-entailment on the chat lane. Some regex routing gates remain (the profile 
 ## Acceptance (real cURL)
 Every query family through /api/chat grounded + cited; Overview / Talk-to-HIVE /
 MCP inherit identical answers.
+
+## STATUS 2026-07-21
+Chat grounding works (verified all query families real-cURL): grounded, cited, query-shaped.
+validateGroundedClaims (citation-id + entailment) exists on the /api/recall + react-agent path.
+RESIDUAL (internal, not user-visible): unify buildEvidencePacket→buildRecallPacket (both
+function today). Risky recall-path refactor — own characterized cycle.

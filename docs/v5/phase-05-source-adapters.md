@@ -35,3 +35,11 @@ no dup, correct segments/provenance, source-specific recall works.
   (a real image + vision model, a transcript, OAuth'd Gmail/Slack) not available
   in this test env. Canonical routing confirmed by recon; end-to-end fixture
   acceptance pending.
+
+## STATUS 2026-07-21
+Recon confirmed KB/image/meeting/chat-session/connectors/MCP-primary already route through
+ingestSource. Phase 2b made claim IDENTITY universal at the createMemory chokepoint
+(incl. bypasses). RESIDUAL (risky, needs own cycle): route /api/memories POST +
+/api/enterprise/upload + Tara store.createMemory through the envelope for provenance/
+dedup consistency (identity already present). Deferred as risky hot-path (a rushed
+corroboration change already caused a data-loss near-miss this session).

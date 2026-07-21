@@ -1,4 +1,4 @@
-# Phase 11 — Final Legacy Removal   🟡 PARTIAL
+# Phase 11 — Final Legacy Removal   🟡 dead-mirror removed; bypass sweep REMAINS
 ## Envisioned state
 Zero: direct ingestMemory from source routes, direct Qdrant writes from adapters,
 duplicate DocumentFirstIngestionService, source-specific entity/relationship
@@ -12,3 +12,8 @@ The bypass sweep (depends on Phase 5/7/8 migrations completing first).
 ## Acceptance
 Repo-wide checks show zero of the above; all source cURLs + graph + recall/chat +
 delete + restart + latency + managed/.amr/BYOD parity green on one immutable release.
+
+## STATUS 2026-07-21
+Done: deleted dead external/ingestion mirror. REMAINS: the bypass sweep depends on Phase 5
+caller migrations completing first (route /api/memories + enterprise + Tara through envelope),
+then delete the legacy routed path. Risky hot-path — own cycle.

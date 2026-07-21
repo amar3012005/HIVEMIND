@@ -128,6 +128,39 @@ export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null)
   return exact?.id || fallbackId;
 }
 
+// Canonical V5 Phase 4 — coverage-aware curation ledger. Attaches (non-breaking,
+// as an array property) which source candidates were PROMOTED vs OMITTED and why,
+// so a high-importance claim can never silently vanish: every omitted candidate is
+// recorded with a reason + its importance. Callers surface this in
+// CanonicalIngestResult.coverage. Deterministic, language-neutral (segment-id set
+// membership, no content parsing).
+export function attachCoverageLedger(curatedOutput, pool) {
+  try {
+    const promotedSegIds = new Set();
+    for (const m of (curatedOutput || [])) for (const sid of (m?.support_segment_ids || [])) promotedSegIds.add(sid);
+    const omitted = [];
+    let highValueOmitted = 0;
+    for (const c of (pool || [])) {
+      if (!promotedSegIds.has(c.segmentId)) {
+        const imp = Number(c.importance || 0);
+        if (imp >= 0.7) highValueOmitted += 1;
+        omitted.push({ candidate_id: c.segmentId, reason: imp >= 0.7 ? 'high_value_omitted_by_curator' : 'low_salience_or_merged', importance: imp });
+      }
+    }
+    const candidates = (pool || []).length;
+    const promoted = candidates - omitted.length;
+    Object.defineProperty(curatedOutput, '_coverage', {
+      value: {
+        candidates, promoted, merged: 0, omitted, rejected: [],
+        highValueCoverage: candidates > 0 ? Number((promoted / candidates).toFixed(3)) : 1,
+        highValueOmitted,
+      },
+      enumerable: false, writable: true, configurable: true,
+    });
+  } catch { /* ledger is best-effort observability — never block ingestion */ }
+  return curatedOutput;
+}
+
 export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8) {
   const pool = Array.isArray(candidates) ? candidates : [];
   const cap = Math.max(1, Math.min(30, Number(maxMemories) || 8));
@@ -1245,10 +1278,14 @@ Every item must include a non-empty content field and one or more valid support_
         ],
       });
       const output = normalizeCuratedClaims(parsed.memories, pool, cap);
-      return output.length ? output : fallback();
+      const result = output.length ? output : fallback();
+      attachCoverageLedger(result, pool);
+      return result;
     } catch (error) {
       this.logger.warn?.(`[kb-curator] ${String(docTitle).slice(0, 80)}: ${error.message}; using salience fallback`);
-      return fallback();
+      const fb = fallback();
+      attachCoverageLedger(fb, pool);
+      return fb;
     }
   }
 
@@ -1809,24 +1846,26 @@ Every item must include a non-empty content field and one or more valid support_
     });
 
     // Canonical V5 result: coverage ledger + timings (additive — existing keys kept).
-    // merged/rejected are not yet separately tracked (Phase 4 curator ledger will
-    // populate them); omitted is the honest candidate→promoted shortfall for now.
+    // Prefer the CURATOR ledger (Phase 4: real omitted[{candidate_id,reason,importance}]
+    // + highValueOmitted, so a high-value claim can't silently vanish); fall back to
+    // the coarse candidate→promoted shortfall when the curator path didn't run.
     const _promotedOk = promoted.memories.filter(m => m?.id).length;
     const _cands = promoted.candidates.length;
+    const coverage = promoted.coverage || {
+      candidates: _cands,
+      promoted: _promotedOk,
+      merged: 0,
+      omitted: Math.max(0, _cands - _promotedOk),
+      rejected: 0,
+      highValueCoverage: _cands > 0 ? Number((_promotedOk / _cands).toFixed(3)) : 1,
+    };
     return {
       documentId: knowledgeDoc.id,
       segmentCount: segments.length,
       candidateCount: _cands,
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id),
-      coverage: {
-        candidates: _cands,
-        promoted: _promotedOk,
-        merged: 0,
-        omitted: Math.max(0, _cands - _promotedOk),
-        rejected: 0,
-        highValueCoverage: _cands > 0 ? Number((_promotedOk / _cands).toFixed(3)) : 1,
-      },
+      coverage,
       timings: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: _msPromote },
     };
   }
@@ -2914,7 +2953,7 @@ Every item must include a non-empty content field and one or more valid support_
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
         const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
         this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${extractedCandidates.length} candidates → ${uFacts.length} curated memories + parent=${uDocParent ? 'y' : 'n'}`);
-        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent };
+        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: curated._coverage || null };
       }
 
       let factObjs = [];

@@ -28,7 +28,14 @@ Before minting a canonical entity, reuse any existing one with the SAME
 normalizedName in the org REGARDLESS of entityKind (oldest wins). _bestMatch
 scopes by kind, so the same real entity classified under different kinds by
 different paths (SolvisMax=product vs solvismax=company) created case/kind
-variants; live registry had SolvisMax/solvismax + VIESSMANN/viessmann. Fix is
+variants; fix is
 language-neutral (unicode-aware lowercase normalizedName) + immediately-consistent
 (Postgres, no race). PREVENTS new variants; a one-time merge of the 2 existing
 dupes is a separate destructive step (deferred).
+
+## Correction (tenant isolation)
+The SolvisMax/solvismax + VIESSMANN/viessmann pairs are in DIFFERENT ORGS
+(1380251c vs 807ebb88) — correctly tenant-isolated, NOT duplicates. Merging them
+would violate isolation, so NO merge done. The dedup fix scopes by organizationId
+(intra-org only). Zero real intra-org dupes. Verified: 3 case variants of one
+name in one org → 1 canonical entity.

@@ -676,22 +676,20 @@ export class MemoryGraphEngine {
             // Query directly by tag (is_latest + org) so we don't depend on the
             // caller's scope-tier — listLatestMemories is scope-filtered and can
             // exclude an org-scoped prior (why the earlier pass found pool=0).
+            // ENTITY-ANCHORED ONLY. A broad recent-org fallback (no shared-tag
+            // anchor) was tried and REVERTED: it over-merged — assessClaimRelation
+            // false-positived 'values-agree' against unrelated recent memories and
+            // dropped brand-new claims (data loss, incl. the first save of a topic).
+            // Requiring a shared entity: tag is what makes corroboration safe. Bare
+            // content without an entity anchor is NOT deduped here (safe default);
+            // that needs reliable structured subject extraction first (deferred).
             let pool = [];
             const _pc = (store && store.client) || this.store?.client;
-            if (baseMemory.org_id && _pc?.memory?.findMany) {
-              // Entity-anchored: candidates sharing a tag (precise, cheap). Bare
-              // content (no entity tag): fall back to the most-recent org latest
-              // memories so a shared model-id / value+subject in the CONTENT can
-              // still dedup — assessClaimRelation abstains when there is no shared
-              // subject, so this never over-merges unrelated prose (safe default).
-              const where = baseTags.length > 0
-                ? { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, tags: { hasSome: baseTags }, id: { not: baseMemory.id } }
-                : { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, id: { not: baseMemory.id } };
+            if (baseTags.length > 0 && baseMemory.org_id && _pc?.memory?.findMany) {
               pool = await _pc.memory.findMany({
-                where,
+                where: { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, tags: { hasSome: baseTags }, id: { not: baseMemory.id } },
                 select: { id: true, content: true, tags: true },
-                orderBy: { createdAt: 'desc' },
-                take: baseTags.length > 0 ? 25 : 40,
+                take: 25,
               }).catch(() => []);
             }
             for (const cand of pool) {

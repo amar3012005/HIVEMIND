@@ -13,3 +13,11 @@ recall+graph; restart each backend → identical results.
 Infra-verification phase. Managed PG/Qdrant path is the strongest + exercised all session.
 .amr + BYOD parity needs disposable test targets not available in this env; deferred to an
 infra cycle with those targets. Qdrant-as-candidate-only + hard-delete purge are the code items.
+
+## VERIFIED 2026-07-21 — deletion guarantee (real E2E)
+create → vector present in per-tenant collection (org_<id>, 1 point; none in
+HIVEMIND_PERSONAL → single-vector-per-memory holds) → DELETE ?hard=true →
+PG row GONE (count 0) + vector PURGED (0 points, both collections) + orphaned-
+cognition cascade prune + .amr mirrorDelete hook. Soft delete (default) sets
+deleted_at (recall filters it). REMAINING: full .amr/BYOD parity suite needs
+disposable targets (infra cycle).

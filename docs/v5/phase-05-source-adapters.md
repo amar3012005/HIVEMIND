@@ -43,3 +43,16 @@ ingestSource. Phase 2b made claim IDENTITY universal at the createMemory chokepo
 /api/enterprise/upload + Tara store.createMemory through the envelope for provenance/
 dedup consistency (identity already present). Deferred as risky hot-path (a rushed
 corroboration change already caused a data-loss near-miss this session).
+
+## SHIPPED 2026-07-21 — 5B + 5C bypasses CLOSED (real-cURL verified)
+- 5B /api/memories (highest-traffic write): routed through ingestCanonicalPayload
+  (envelope) via ingestRoutedPayloadCanonical — provenance tags + claim identity on
+  rows VERIFIED, response shape byte-compatible, zero fallbacks. Trees keep engine path.
+  Flag V5_MEMORIES_CANONICAL.
+- 5C Tara voice: all 4 raw store.createMemory sites (transcript/call-log/outreach/
+  session-summary) → canonical EVIDENCE mode (one row, no fact-splitting). saved.id
+  shape preserved for PartOf edges. Loud fallback during migration.
+- REMAINING: /api/enterprise/upload/ingest — swap blocked by a REAL hazard: the
+  envelope atomic path does NOT forward skip_fact_extraction, so enveloping enterprise
+  chunks would silently enable fact extraction (behavior+latency change). Needs an
+  envelope contract extension + a real enterprise fixture test. Own cycle.

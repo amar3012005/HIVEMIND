@@ -18179,8 +18179,35 @@ exit \$RC
 
         case '/api/relationships':
           if (req.method === 'POST') {
-            const rel = engine.createRelationship(body);
-            jsonResponse(res, { success: true, relationship: rel });
+            // V5 Phase 11: close the raw-edge bypass. Was engine.createRelationship(body)
+            // — unawaited, unvalidated, and UNSCOPED (arbitrary HTTP body could edge
+            // memory ids across tenants). Now: require from/to/type, validate the type,
+            // and verify BOTH endpoints belong to the caller's org before creating.
+            const _from = body.from_id || body.fromId;
+            const _to = body.to_id || body.toId;
+            const _type = body.type;
+            const _VALID_EDGE = new Set(['Updates', 'Extends', 'Contradicts', 'Derives', 'PartOf', 'Mentions', 'RelatedTo']);
+            if (!_from || !_to || !_type) {
+              return jsonResponse(res, { error: 'from_id, to_id and type are required' }, 400);
+            }
+            if (!_VALID_EDGE.has(_type)) {
+              return jsonResponse(res, { error: `type must be one of ${[..._VALID_EDGE].join('|')}` }, 400);
+            }
+            try {
+              const [mf, mt] = await Promise.all([
+                persistentMemoryStore.getMemory(_from).catch(() => null),
+                persistentMemoryStore.getMemory(_to).catch(() => null),
+              ]);
+              if (!mf || !mt) return jsonResponse(res, { error: 'from_id or to_id not found' }, 404);
+              // Tenant isolation: both memories must be in the caller's org.
+              if ((mf.org_id && mf.org_id !== orgId) || (mt.org_id && mt.org_id !== orgId)) {
+                return jsonResponse(res, { error: 'cross-tenant relationship refused' }, 403);
+              }
+              const rel = await engine.createRelationship({ from_id: _from, to_id: _to, type: _type, confidence: body.confidence, metadata: body.metadata });
+              return jsonResponse(res, { success: true, relationship: rel });
+            } catch (relErr) {
+              return jsonResponse(res, { error: relErr.message }, 500);
+            }
           }
           break;
 

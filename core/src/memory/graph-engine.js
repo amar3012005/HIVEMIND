@@ -758,6 +758,33 @@ export class MemoryGraphEngine {
               if (result.relationship.action === 'UPDATE') {
                 // Use LLM's targetId if available (more accurate), fall back to topMatch
                 const targetId = result.relationship.targetId || topMatch.id;
+                // V5 corroboration guard (vision: "exact duplicate → attach evidence,
+                // do not create another memory"). The LLM MemoryProcessor sometimes
+                // labels a differently-WORDED but same-VALUE claim as UPDATE. The
+                // structured claim signature (validateSupersedingEdge → assessClaimRelation)
+                // is deterministic: same subject + values AGREE ⇒ corroboration, not a
+                // change. When structure proves values agree, treat as redundant
+                // (skip + attach evidence) instead of minting a paraphrase duplicate.
+                // Flag-gated for instant rollback; only fires on a proven values-agree
+                // verdict, so it can never drop a genuinely-changed claim.
+                const targetMatch = candidates.find(m => m.id === targetId) || topMatch;
+                let corroborates = false;
+                if ((process.env.V5_CORROBORATION_DEDUP || 'true').toLowerCase() !== 'false') {
+                  try {
+                    const v = validateSupersedingEdge(baseMemory, targetMatch, { requireChangeEvidence: true });
+                    corroborates = !v.ok && typeof v.reason === 'string' && v.reason.includes('values-agree');
+                  } catch { /* structure indecisive → fall through to UPDATE */ }
+                }
+                if (corroborates) {
+                  return {
+                    memoryId: targetMatch.id,
+                    operation: 'corroborated',
+                    reason: 'values_agree_no_change',
+                    matchedMemoryId: targetMatch.id,
+                    similarity: topMatch.score,
+                    processingMs: Date.now() - startedAt,
+                  };
+                }
                 input.relationship = {
                   type: 'Updates',
                   target_id: targetId,

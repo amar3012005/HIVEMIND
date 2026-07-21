@@ -671,10 +671,20 @@ export class MemoryGraphEngine {
         if ((process.env.V5_CORROBORATION_DEDUP || 'true').toLowerCase() !== 'false'
             && !input.relationship_explicit && !input.skip_fact_extraction) {
           try {
-            const baseTags = new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
-            const pool = (baseTags.size > 0
-              ? latestMemories.filter(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:') && baseTags.has(t)))
-              : []).slice(0, 25);
+            const baseTags = [...new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')))];
+            // Candidate pool: latest memories in the org that SHARE an entity tag.
+            // Query directly by tag (is_latest + org) so we don't depend on the
+            // caller's scope-tier — listLatestMemories is scope-filtered and can
+            // exclude an org-scoped prior (why the earlier pass found pool=0).
+            let pool = [];
+            const _pc = (store && store.client) || this.store?.client;
+            if (baseTags.length > 0 && baseMemory.org_id && _pc?.memory?.findMany) {
+              pool = await _pc.memory.findMany({
+                where: { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, tags: { hasSome: baseTags }, id: { not: baseMemory.id } },
+                select: { id: true, content: true, tags: true },
+                take: 25,
+              }).catch(() => []);
+            }
             for (const cand of pool) {
               if (!cand?.id || cand.id === baseMemory.id) continue;
               const v = validateSupersedingEdge(baseMemory, cand, { requireChangeEvidence: true });

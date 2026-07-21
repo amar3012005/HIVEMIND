@@ -1,4 +1,4 @@
-# Phase 3 — Contextual Claim Extraction   🟡 STARTED (corroboration guard on smart-ingest paths; atomic path NOT yet) ← THE UNLOCK
+# Phase 3 — Contextual Claim Extraction   🟡 corroboration-dedup WORKING on entity-anchored claims ← THE UNLOCK
 
 ## Envisioned state (north-star Memory-Quality)
 Extractor emits STRUCTURED CanonicalClaim: {title, memoryType, content, subject,
@@ -38,3 +38,14 @@ paths. To close atomic paraphrase-dedup: enable a semantic dedup pass on the ato
 dispatch (or run the structured claim signature pre-create there). DEFERRED.
 FOLLOW-UP: evidence-attach on skip; full subject/predicate/qualifier extraction for
 KB claim bundles; enable on atomic path.
+
+
+## VERIFIED WORKING (fa9dcecb3, live, real-cURL, real user)
+Entity-anchored atomic claims now dedup paraphrase-equivalents: A "40 liters per
+minute" → B reworded-equal → op=corroborated (NO new memory); C "55 L/min" changed
+→ new memory. DB = 2 rows, not 3. No data loss on the changed value. Postgres tag
+query (immediately consistent, scope-tier-robust), language-neutral (value slots +
+entity slug). Root fixes that got here: (1) spelled-out+SI unit parsing; (2) move
+check from Qdrant-lagged smart-ingest to Postgres pre-check; (3) candidate lookup
+by entity tag not scope-filtered listLatestMemories. Still needs subject extraction
+for BARE atomic content with no entity anchor.

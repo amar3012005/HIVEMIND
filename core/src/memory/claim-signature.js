@@ -26,12 +26,21 @@
 const UNIT_ALIASES = new Map([
   // volume
   ['l', 'l'], ['liter', 'l'], ['liters', 'l'], ['litre', 'l'], ['litres', 'l'],
-  // energy/power
-  ['kw', 'kw'], ['kwh', 'kwh'], ['w', 'w'], ['mw', 'mw'],
+  // energy/power (abbrev + spelled-out — prose claims use words, e.g. "12 megawatts")
+  ['kw', 'kw'], ['kwh', 'kwh'], ['w', 'w'], ['mw', 'mw'], ['gw', 'gw'],
+  ['watt', 'w'], ['watts', 'w'], ['kilowatt', 'kw'], ['kilowatts', 'kw'],
+  ['megawatt', 'mw'], ['megawatts', 'mw'], ['gigawatt', 'gw'], ['gigawatts', 'gw'],
+  ['kilowatthour', 'kwh'], ['kilowatthours', 'kwh'],
   // temperature
   ['°c', 'c'], ['c', 'c'], ['celsius', 'c'], ['k', 'k'],
-  // dimensions/weight
+  // dimensions/weight (abbrev + spelled-out)
   ['mm', 'mm'], ['cm', 'cm'], ['m', 'm'], ['km', 'km'], ['kg', 'kg'], ['g', 'g'], ['t', 't'],
+  ['millimeter', 'mm'], ['millimeters', 'mm'], ['millimetre', 'mm'], ['millimetres', 'mm'],
+  ['centimeter', 'cm'], ['centimeters', 'cm'], ['centimetre', 'cm'], ['centimetres', 'cm'],
+  ['meter', 'm'], ['meters', 'm'], ['metre', 'm'], ['metres', 'm'],
+  ['kilometer', 'km'], ['kilometers', 'km'], ['kilometre', 'km'], ['kilometres', 'km'],
+  ['kilogram', 'kg'], ['kilograms', 'kg'], ['gram', 'g'], ['grams', 'g'],
+  ['tonne', 't'], ['tonnes', 't'], ['ton', 't'], ['tons', 't'],
   // area
   ['m2', 'm2'], ['m²', 'm2'], ['qm', 'm2'],
   // pressure / flow

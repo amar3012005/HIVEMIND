@@ -11,6 +11,31 @@ import { currentOrg } from '../db/prisma.js';
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
  * Common in web-scraped content from DuckDuckGo, PDF extracts, and LLM outputs.
  */
+// Canonical V5 claim identity. claim_key is a STABLE, deterministic signature of
+// what a claim is about — a normalized content signature (lowercased,
+// punctuation-stripped, whitespace-collapsed) optionally prefixed by the subject.
+// Trivially-reworded duplicates of the same claim share a key, so it clusters
+// history + contradictions (claim_key is NOT unique — those must coexist). No LLM:
+// subject/predicate refinement can layer on later via the extractor.
+function normalizeClaimText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function computeClaimKey(subject, content) {
+  const sig = `${normalizeClaimText(subject)}|${normalizeClaimText(content)}`.slice(0, 2000);
+  if (!sig.replace('|', '').trim()) return null;
+  return crypto.createHash('sha256').update(sig).digest('hex').slice(0, 64);
+}
+// Best-effort claim subject: the memory title, else the first `entity:<name>` tag.
+function deriveClaimSubject(memory) {
+  if (memory.title && String(memory.title).trim()) return String(memory.title).slice(0, 500);
+  const entityTag = (memory.tags || []).find((t) => typeof t === 'string' && t.startsWith('entity:'));
+  return entityTag ? entityTag.slice('entity:'.length).slice(0, 500) : null;
+}
+
 function stripNullBytes(val) {
   if (typeof val === 'string') {
     // Strip null bytes AND other invalid UTF-8 sequences (cause 22021 Postgres errors + garbled streaming)
@@ -451,6 +476,15 @@ export class PrismaGraphStore {
         processingBasis: memory.processing_basis || 'consent',
         sharedWithOrgs: memory.shared_with_orgs || [],
         cognitiveLayerRole: memory.cognitive_layer_role || null,
+        // Canonical V5 claim identity (universal chokepoint → every source path).
+        // claim_key: explicit caller value wins; else deterministic content
+        // signature. claim_subject/predicate/qualifiers/extraction_confidence are
+        // best-effort passthrough (extractor refines subject/predicate later).
+        claimKey: memory.claim_key || computeClaimKey(memory.claim_subject || deriveClaimSubject(memory), content),
+        claimSubject: memory.claim_subject || deriveClaimSubject(memory),
+        claimPredicate: memory.claim_predicate || null,
+        claimQualifiers: memory.claim_qualifiers || undefined,
+        extractionConfidence: Number.isFinite(memory.extraction_confidence) ? memory.extraction_confidence : null,
       },
     });
 

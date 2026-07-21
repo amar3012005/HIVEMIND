@@ -2681,3 +2681,18 @@ model MemoryOutbox {
   @@index([recordId, seq], map: "memory_outbox_record_seq_idx")
   @@map("memory_outbox")
 }
+
+/// Canonical V5 Phase 10 — per-organization ontology (opt-in). Extends the default
+/// pipeline: approved entity types, vocabulary/aliases, required metadata, relationship
+/// validation rules. Absence = default behavior; never forks canonical ingestion.
+model OrgOntology {
+  orgId                String   @id @map("org_id") @db.Uuid
+  approvedEntityTypes  String[] @default([]) @map("approved_entity_types")
+  vocabulary           Json     @default("{}")
+  requiredMetadata     String[] @default([]) @map("required_metadata")
+  relationshipRules    Json     @default("{}") @map("relationship_rules")
+  enabled              Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@map("org_ontologies")
+}

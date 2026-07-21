@@ -18,6 +18,20 @@
 import { EntityResolver } from './entity-resolver.js';
 import { normalizeEntity } from './entity-normalize.js';
 
+// V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
+const _ontoCache = new Map(); // orgId → { value, expiresAt }
+async function _loadOrgOntology(prisma, orgId) {
+  if (!prisma?.orgOntology || !orgId) return null;
+  const hit = _ontoCache.get(orgId);
+  const now = Date.now();
+  if (hit && hit.expiresAt > now) return hit.value;
+  let value = null;
+  try { value = await prisma.orgOntology.findUnique({ where: { orgId } }); } catch { value = null; }
+  _ontoCache.set(orgId, { value, expiresAt: now + 300000 });
+  return value;
+}
+
+
 const MAX_ENTITIES_PER_MEMORY = 8;
 const MAX_UNIQUE_ENTITIES_PER_BATCH = 64;
 
@@ -74,6 +88,16 @@ export async function persistCanonicalLinks({
   // fragmented the registry). All registry lookups + creates below use the
   // normalized kind so a re-encounter under a synonym reuses the same entity.
   entityKind = normalizeEntityKind(entityKind);
+  // V5 Phase 10: opt-in org ontology. When the org configured approved entity types,
+  // constrain the (already-taxonomy-normalized) kind to that allow-list; unknown →
+  // 'concept'. Absent/disabled ontology = default behavior (no change). Cached 5 min.
+  try {
+    const onto = await _loadOrgOntology(prisma, organizationId);
+    if (onto?.enabled && Array.isArray(onto.approvedEntityTypes) && onto.approvedEntityTypes.length) {
+      const allow = new Set(onto.approvedEntityTypes.map((t) => String(t).toLowerCase()));
+      if (!allow.has(entityKind)) entityKind = allow.has('concept') ? 'concept' : [...allow][0];
+    }
+  } catch { /* ontology is best-effort; never block entity persistence */ }
   if ((process.env.CANONICAL_ENTITY_PERSIST || 'true').toLowerCase() === 'false') return out;
 
   try {

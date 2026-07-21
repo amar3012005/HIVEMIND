@@ -678,11 +678,20 @@ export class MemoryGraphEngine {
             // exclude an org-scoped prior (why the earlier pass found pool=0).
             let pool = [];
             const _pc = (store && store.client) || this.store?.client;
-            if (baseTags.length > 0 && baseMemory.org_id && _pc?.memory?.findMany) {
+            if (baseMemory.org_id && _pc?.memory?.findMany) {
+              // Entity-anchored: candidates sharing a tag (precise, cheap). Bare
+              // content (no entity tag): fall back to the most-recent org latest
+              // memories so a shared model-id / value+subject in the CONTENT can
+              // still dedup — assessClaimRelation abstains when there is no shared
+              // subject, so this never over-merges unrelated prose (safe default).
+              const where = baseTags.length > 0
+                ? { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, tags: { hasSome: baseTags }, id: { not: baseMemory.id } }
+                : { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, id: { not: baseMemory.id } };
               pool = await _pc.memory.findMany({
-                where: { orgId: baseMemory.org_id, isLatest: true, deletedAt: null, tags: { hasSome: baseTags }, id: { not: baseMemory.id } },
+                where,
                 select: { id: true, content: true, tags: true },
-                take: 25,
+                orderBy: { createdAt: 'desc' },
+                take: baseTags.length > 0 ? 25 : 40,
               }).catch(() => []);
             }
             for (const cand of pool) {

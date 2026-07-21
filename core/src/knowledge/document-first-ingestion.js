@@ -1594,6 +1594,15 @@ Every item must include a non-empty content field and one or more valid support_
     const _scopeTag = `scope-key:${_scopeKey}`;
     const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag, documentTypeTag]));
 
+    // Canonical V5 identity: content_hash = the file checksum (sha256 of bytes);
+    // canonical_ingest_key = a globally-unique hash of (org, source type, provider,
+    // external id, version, content hash) — the idempotency key for this source
+    // VERSION. Same bytes + same scope re-upload → identical key → the partial
+    // UNIQUE (org_id, canonical_ingest_key) collapses to one document row.
+    const _canonicalIngestKey = crypto.createHash('sha256')
+      .update([orgId, 'knowledge_base', 'knowledge_upload', _scopedSourceId, '1', checksum].join(' '))
+      .digest('hex').slice(0, 64);
+
     // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
     // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
     // windows, no consolidation, no entity linking). Re-uploading the same file used to re-run the
@@ -1705,11 +1714,21 @@ Every item must include a non-empty content field and one or more valid support_
           parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           structureExtracted: parseResult.success,
           tags: _docTags,
+          // Canonical V5 identity
+          canonicalIngestKey: _canonicalIngestKey,
+          sourceExternalId: _scopedSourceId,
+          sourceVersion: '1',
+          contentHash: checksum,
+          processingVersion: 1,
         },
         update: {
           // Backfill provenance on pre-existing rows so document filters and
           // memory citations expose the same classification after re-upload.
           documentType,
+          // Backfill canonical identity on legacy rows (idempotent).
+          canonicalIngestKey: _canonicalIngestKey,
+          sourceExternalId: _scopedSourceId,
+          contentHash: checksum,
           parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           tags: _docTags,
         }

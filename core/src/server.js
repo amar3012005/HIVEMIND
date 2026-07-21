@@ -2269,6 +2269,21 @@ async function ingestRoutedPayloadCanonical(routedPayload, engine) {
   }
 }
 
+// V5 Phase 5C — Tara voice saves via the canonical envelope (evidence mode:
+// ONE row, no fact-splitting — transcripts/logs are deliberate raw evidence).
+// Adds provenance + claim identity + the engine chokepoint; loud fallback to the
+// raw store write during migration (removed in the Phase 11 sweep).
+async function taraCanonicalSave(payload) {
+  try {
+    const r = await ingestCanonicalPayload(payload, { sourceType: 'meeting', mode: 'evidence' });
+    if (r?.memoryId || r?.id) return r;
+    throw new Error('canonical evidence save returned no id');
+  } catch (e) {
+    console.warn('[v5-tara-canonical] envelope path failed, raw store fallback:', e.message);
+    return persistentMemoryStore.createMemory({ id: crypto.randomUUID(), ...payload });
+  }
+}
+
 async function ingestCanonicalPayload(payload, options = {}) {
   const scoped = await resolveScopedIngestPayload(payload);
   const envelope = legacyPayloadToEnvelope(scoped, options);
@@ -7176,7 +7191,7 @@ exit \$RC
                   if (persistentMemoryStore) {
                     try {
                       const pid = await ensureTaraMemoryProject(tOrg, tUser);
-                      await persistentMemoryStore.createMemory({
+                      await taraCanonicalSave({
                         id: crypto.randomUUID(), user_id: tUser, org_id: tOrg,
                         project: 'tara-memory', project_ids: pid ? [pid] : [],
                         scope: 'project',
@@ -7267,7 +7282,7 @@ exit \$RC
                         ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
                       const pid = await ensureTaraMemoryProject(tOrg, tUser);
                       const fullTranscript = turns.map(t => `You: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
-                      await persistentMemoryStore.createMemory({
+                      await taraCanonicalSave({
                         id: crypto.randomUUID(),
                         user_id: tUser,
                         org_id: tOrg,
@@ -7319,7 +7334,7 @@ exit \$RC
                             + (lead.next_step ? ` — next: ${lead.next_step}` : ''));
                         }
                         if (parsed.sentiment) bits.push(`Sentiment: ${parsed.sentiment}`);
-                        await persistentMemoryStore.createMemory({
+                        await taraCanonicalSave({
                           id: crypto.randomUUID(),
                           user_id: tUser,
                           org_id: tOrg,
@@ -20979,7 +20994,7 @@ exit \$RC
                 ? `Voice session — ${topicSnippet}${topicSnippet.length === 80 ? '…' : ''}`
                 : `Voice session ${session_id.slice(0, 8)}`;
 
-              const saved = await persistentMemoryStore.createMemory({
+              const saved = await taraCanonicalSave({
                 user_id: sUserId,
                 org_id: sOrgId,
                 title: summaryTitle,

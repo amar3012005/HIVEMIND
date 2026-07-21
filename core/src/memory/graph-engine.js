@@ -659,6 +659,35 @@ export class MemoryGraphEngine {
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
 
+        // V5 corroboration pre-check (Postgres, immediately consistent — unlike the
+        // Qdrant/FTS smart-ingest search below which lags on just-created rows, so
+        // near-simultaneous re-saves would slip through). Language-neutral: reuses
+        // the structured claim signature (validateSupersedingEdge → assessClaimRelation:
+        // shared canonical subject + typed value slots / SI units / model-ids — no
+        // language-specific words). Bounded: only candidates sharing an entity: tag,
+        // capped. Fires ONLY on a proven values-agree verdict, so it never drops a
+        // changed claim; anything uncertain falls through to normal creation (safe
+        // default for every tenant/language). Flag V5_CORROBORATION_DEDUP.
+        if ((process.env.V5_CORROBORATION_DEDUP || 'true').toLowerCase() !== 'false'
+            && !input.relationship_explicit && !input.skip_fact_extraction) {
+          try {
+            const baseTags = new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
+            const pool = (baseTags.size > 0
+              ? latestMemories.filter(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:') && baseTags.has(t)))
+              : []).slice(0, 25);
+            for (const cand of pool) {
+              if (!cand?.id || cand.id === baseMemory.id) continue;
+              const v = validateSupersedingEdge(baseMemory, cand, { requireChangeEvidence: true });
+              if (!v.ok && typeof v.reason === 'string' && v.reason.includes('values-agree')) {
+                // Same subject + values AGREE ⇒ paraphrase duplicate. Attach the new
+                // source as evidence to the kept memory; do NOT mint a duplicate.
+                try { await store.updateMemory(cand.id, { last_confirmed_at: new Date().toISOString() }); } catch { /* best-effort */ }
+                return { memoryId: cand.id, operation: 'corroborated', reason: 'values_agree_no_change', matchedMemoryId: cand.id };
+              }
+            }
+          } catch (e) { /* structure indecisive / fetch issue → normal creation */ }
+        }
+
         // Hoisted so the post-save entity-link LLM step can re-use the
         // recall set instead of re-querying. Populated inside the
         // smart-ingest block below.

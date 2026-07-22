@@ -651,6 +651,25 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
     bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
     bus.mergeEdges(r?.relationships, { overwrite: false });
     bus.addPacket(r?.evidence_packet);
+    // KB-answer fix: base recall returns evidence[] but NO evidence_packet, so
+    // its segments were shown to synthesis yet were NOT citable — a claim
+    // grounded in a KB segment failed citation validation → 0 claims →
+    // "nothing directly answers", even though the answer (e.g. a spec value) was
+    // right there in the retrieved evidence. Build a citable packet from the
+    // segments (relation/temporal paths already do this; only base recall
+    // didn't) so synthesis can ground a KB answer in evidence. Bounded to 8.
+    if (Array.isArray(r?.evidence) && r.evidence.length) {
+      bus.addPacket({
+        citations: r.evidence.slice(0, 8).map((e, i) => ({
+          id: `E${i + 1}`,
+          source_type: 'evidence',
+          source_label: e.document_title || 'Document',
+          title: e.document_title || 'Document',
+          snippet: String(e.content || e.snippet || '').replace(/\s+/g, ' ').slice(0, 600),
+          document_id: e.document_id || null,
+        })),
+      });
+    }
     bus.mergeSynthesisChains(r?.synthesis_evidence_chains);
   }
 }

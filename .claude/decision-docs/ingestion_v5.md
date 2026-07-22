@@ -126,7 +126,7 @@ rerank that cannot fix the retrieval miss.
      tenant-safe by construction. Guarantees a type-matching candidate exists.
   3. Soft rerank boost (never a hard filter — a mis-classification must never hide
      the answer).
-**Status:** designed here; not built (would rush a P0 + tenant-isolation change).
+**Status:** BUILT + LIVE (`prod-20260722-abf1dfb87`, flag `V5_TYPE_AWARE_RECALL=true`). The planner classifies answer_type by meaning in any language (verified in German); the flag-gated type-scoped lane made the decision memory rank #1 for the pricing-decision query. Fix required declaring answer_type in the hivemind_recall tool schema (validateAndSanitize strips undeclared keys) + a strong nullable-enum classification rule in the Cerebras prompt.
 
 ---
 

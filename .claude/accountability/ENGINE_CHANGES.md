@@ -13,6 +13,35 @@ Engine scope = `core/src/memory/*`, `core/src/knowledge/*`, `core/src/agent/*`,
 
 ---
 
+## 2026-07-22 (c) — D5 type-aware recall LIVE (language-neutral answer_type)
+**Release:** `prod-20260722-abf1dfb87` (live, flag `V5_TYPE_AWARE_RECALL=true`) · **Rollback:** `prod-20260721-011721c9a` (`:stable`) + flag off
+**Status:** LIVE + verified (8/8 company Q&A incl. the failing decision query; 6/6 meeting set; German verified).
+
+**Files:** `chat-progressive-router.js` (answer_type nullable-enum param + ALWAYS-classify rule + 2 examples), `chat-intent-decision.js` (plan.answer_type), `react-agent-v2.js` (args.answer_type), `tool-registry.js` (schema declaration + boost_memory_type option), `recall-router.js` (flag-gated type-scoped lane + soft boost).
+
+**What it does.** The Cerebras planner now classifies, on every hivemind_context
+call and in any language BY MEANING, the expected memory KIND (`answer_type`:
+decision/goal/preference/lesson/event/relationship/fact/null). When set and the
+flag is on, recall adds a TYPE-SCOPED candidate lane (anchored on the resolved
+canonical entities via memoryEntityLink, hydrated through store.getMemories —
+tenant-safe, cross-org guarded) so a type-matching memory is guaranteed to be a
+candidate, then soft-boosts matching rows (never a hard filter). Retires the need
+for the English-keyword detectMemoryTypeBoost path for these intents.
+
+**Two live-integration root causes fixed:** (1) `answer_type` was not declared in
+the hivemind_recall tool schema and validateAndSanitize STRIPS undeclared keys —
+the signal was silently dropped; (2) the planner emitted null because the field
+was a bare nullable string with weak guidance — now a nullable ENUM with a strong
+required-classification description + system-prompt rule.
+
+**Verified:** "What did we decide about SolvisPia 13 pricing?" → "We decided to
+set the SolvisPia 13 list price at 4,500 EUR per unit" (was returning the margin
+fact). German equivalent works. Aggregate/products, people, cross-source
+synthesis, full meeting set — all green. Lane log: `type-scoped lane: +1
+type=decision candidates`, `memory-type-boost: boosted=1/9`.
+
+---
+
 ## 2026-07-22 (b) — Pure-insert hardening for meeting sections (fixes intermittent content loss)
 **Release:** `prod-20260721-df34a73e3` (live) · **Rollback:** `:stable` = `prod-20260721-ac333045e` · **singulance-main** @ `df34a73e3`
 **Status:** LIVE + verified (3x integrity + recall re-measure).

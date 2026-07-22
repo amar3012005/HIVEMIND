@@ -601,15 +601,22 @@ def _register_connector_tools(
     if os.getenv("CONNECTOR_RUNTIME_HYPER", "").lower() in ("1", "true", "yes", "on"):
         try:
             from ..connectors.mcp_projection import register_runtime_connectors
-            registered = register_runtime_connectors(
+            handled = register_runtime_connectors(
                 tk, api_key=api_key, user_id=user_id, org_id=org_id,
                 connectors=connectors, read_only=read_only,
             )
-            if registered:
-                return  # runtime path handled all granted connectors
-            # empty → fall through to legacy registration
+            if handled:
+                # Runtime handled ONLY the connectors it knows (gmail/gdocs/…).
+                # Any remaining connectors (e.g. notion/github/linear not yet in
+                # the runtime registry) MUST still be registered by the legacy
+                # path — never drop a room's connector. Narrow the list and fall
+                # through; return only if the runtime covered everything.
+                remaining = [c for c in connectors if c not in set(handled)]
+                if not remaining:
+                    return
+                connectors = remaining
         except Exception:
-            pass  # any error → legacy path
+            pass  # any error → full legacy path (connectors unchanged)
 
     def _register_google(kind: str, read_only: bool = False):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:

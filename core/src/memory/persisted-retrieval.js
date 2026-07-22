@@ -1308,6 +1308,7 @@ async function _recallPersistedMemoriesImpl(store, {
   include_superseded,  // boolean — include older update-chain versions via traverseUpdateChain
   raw_query = null,     // original user phrasing (pre-rewrite) for time-travel intent detection
   access_context = null, // { projectIds, teamIds } for V2 multi-tier scope filter
+  structured_intent = false, // progressive router provides an LLM plan → skip English-keyword heuristics (e.g. detectMemoryTypeBoost); the planner-driven, language-neutral type boost is authoritative.
   scope_filter = null,   // optional MemoryScope filter: 'personal'|'project'|'team'|'organization'
                          // limits to memories whose scope === this value (in addition to access_context)
   entity_filter_mode = null, // per-call override of ENTITY_FILTER_MODE env (off|should|must)
@@ -1937,8 +1938,12 @@ async function _recallPersistedMemoriesImpl(store, {
 
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0).sort((a, b) => b.score - a.score);
 
-  // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting)
-  const typeBoosts = detectMemoryTypeBoost(query_context);
+  // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting).
+  // GATED: only in the legacy non-structured path. Under the progressive router
+  // (structured_intent=true) this English-keyword detector is skipped — it double-boosted
+  // against the planner-driven, language-neutral boost_memory_type (≈×2.56, English-only)
+  // and produced different rankings per language. The planner signal is authoritative there.
+  const typeBoosts = structured_intent ? {} : detectMemoryTypeBoost(query_context);
   if (Object.keys(typeBoosts).length > 0) {
     for (const item of ranked) {
       const memType = item.memory?.memory_type || '';

@@ -2435,6 +2435,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // so the Cohere reranker never fired on chat/recall/MCP despite the flag).
   // A per-call cross_rerank still overrides (true/false).
   const _crossRerank = cross_rerank != null ? !!cross_rerank : (process.env.RERANK_ENABLED === 'true');
+  let _crossReranked = false;
   if (_crossRerank && top.length > 1) {
     try {
       const crq = typeof query_context === 'string'
@@ -2445,11 +2446,21 @@ async function _recallPersistedMemoriesImpl(store, {
         top.map((item) => ({ ...item, title: item.memory?.title ?? item.title, content: item.memory?.content ?? item.content })),
         { topN: top.length },
       );
-      if (Array.isArray(reranked) && reranked.length) top = reranked;
+      // The reranker returns the prior order on failure/disabled; only treat it
+      // as authoritative when it actually scored rows (rerank_score present).
+      if (Array.isArray(reranked) && reranked.length && reranked.some((r) => r.rerank_score != null)) {
+        top = reranked;
+        _crossReranked = true;
+      }
     } catch (e) { /* graceful degrade — keep current order */ }
   }
 
-  if (sort !== 'date_asc' && sort !== 'date_desc') {
+  // NULLIFICATION BUG (fixed): this tiebreaker's first step is a FULL re-sort by
+  // the old `.score`, which silently discarded the cross-encoder's ordering on
+  // every call — the Cohere rerank ran, paid its latency, and had zero effect.
+  // The cross-encoder order IS the final relevance order when it returns; the
+  // importance tiebreaker applies only when the cross-encoder didn't run.
+  if (!_crossReranked && sort !== 'date_asc' && sort !== 'date_desc') {
     top = sortWithImportanceTiebreaker(top);
   }
 

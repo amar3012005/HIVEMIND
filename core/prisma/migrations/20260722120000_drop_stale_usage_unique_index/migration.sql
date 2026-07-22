@@ -1,0 +1,16 @@
+-- phase-rosemary Bug B: drop the stale 4-column unique index on api_key_usage.
+--
+-- Migration 20260710120000 replaced the 4-col uniqueness key
+-- (org_id, api_key_id, month, model) with the 5-col
+-- (org_id, api_key_id, month, model, feature), and schema.prisma declares ONLY
+-- the 5-col index. But in production the DROP from 20260710 never took effect
+-- (migration-ledger drift: neither 20260628 nor 20260710 is recorded in
+-- _prisma_migrations, yet both index objects exist). The leftover 4-col index
+-- causes recordKeyUsage() — which does `ON CONFLICT (org_id, api_key_id, month,
+-- model, feature)` — to raise 23505 whenever the same (org,key,month,model)
+-- recurs with a different/empty feature, because a violation of a DIFFERENT
+-- unique index is not handled by the ON CONFLICT target.
+--
+-- Dropping the stronger (fewer-column) index only RELAXES a constraint that
+-- should not exist; it is non-destructive to data and reversible. Idempotent.
+DROP INDEX IF EXISTS hivemind.uq_api_key_usage_org_key_month_model;

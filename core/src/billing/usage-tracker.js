@@ -105,8 +105,8 @@ export class UsageTracker {
   /**
    * Record one LLM call against the org's HIVEMIND API key — the per-key / per-model / per-feature
    * monthly rollup that powers per-key spend attribution. orgId is required; apiKeyId is NULL for
-   * system / background / master-key calls (they fold into one sentinel row per org/month/model via
-   * the COALESCE unique index uq_api_key_usage_org_key_month_model). Best-effort: a failure here must
+   * system / background / master-key calls (they fold into one sentinel row per org/month/model/feature
+   * via the unique index uq_api_key_usage_org_key_month_model_feature). Best-effort: a failure here must
    * never affect the completion (called fire-and-forget through meterTokens).
    */
   async recordKeyUsage(orgId, tokenCount, apiKeyId = null, model = null, feature = null, parts = null) {

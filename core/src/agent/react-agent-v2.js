@@ -1142,11 +1142,19 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const kind = evidence.aggregate.entity_kind || plan.aggregate?.kind || 'entities';
     const parent = evidence.aggregate.parent || plan.aggregate?.parent || '';
     const lang = String(language || 'en').slice(0, 2).toLowerCase();
+    // rosemary A1: LIST the actual entity names, not just the count. A "list all
+    // X" question must answer with the names. Cap at 20 to match the aggregate
+    // citation packet's name cap, so every listed name is present in the packet
+    // snippet and validateChatAnswer keeps the claim grounded.
+    const _names = (evidence.aggregate.entities || []).map((e) => e && e.name).filter(Boolean);
+    const _shown = _names.slice(0, 20);
+    const _more = _names.length > _shown.length ? ` (+${_names.length - _shown.length} more)` : '';
+    const _tail = _shown.length ? `: ${_shown.join(', ')}${_more}` : '';
     const responses = {
-      de: `Das kanonische Register enthält ${count} für ${parent} als ${kind} klassifizierte Einträge.`,
-      fr: `Le registre canonique contient ${count} entités associées à ${parent} classées comme ${kind}.`,
-      es: `El registro canónico contiene ${count} entidades asociadas a ${parent} clasificadas como ${kind}.`,
-      en: `The canonical registry contains ${count} entities associated with ${parent} classified as ${kind}${count === 1 ? '' : 's'}.`,
+      de: `Das kanonische Register enthält ${count} für ${parent} als ${kind} klassifizierte Einträge${_tail}.`,
+      fr: `Le registre canonique contient ${count} entités associées à ${parent} classées comme ${kind}${_tail}.`,
+      es: `El registro canónico contiene ${count} entidades asociadas a ${parent} clasificadas como ${kind}${_tail}.`,
+      en: `The canonical registry contains ${count} entities associated with ${parent} classified as ${kind}${count === 1 ? '' : 's'}${_tail}.`,
     };
     const response = responses[lang] || responses.en;
     const aggregatePacket = aggregateCitationPacket(evidence.aggregate);

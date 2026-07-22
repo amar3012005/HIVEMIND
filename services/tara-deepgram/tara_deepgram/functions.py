@@ -103,7 +103,8 @@ class FunctionExecutor:
     def __init__(self, *, session_id: str, user_id: str | None, org_id: str | None,
                  language: str, event_logger: Callable[[str, dict], None],
                  request_hangup: Callable[[], Coroutine[Any, Any, None]],
-                 get_history: Callable[[int], str] | None = None):
+                 get_history: Callable[[int], str] | None = None,
+                 connector_bridge: Any = None):
         self.session_id = session_id
         self.user_id = user_id
         self.org_id = org_id
@@ -112,6 +113,9 @@ class FunctionExecutor:
         self._request_hangup = request_hangup
         self._get_history = get_history
         self.hangup_requested = False
+        # Connector Runtime V1 (plan §5 TARA) — voice-safe connector projection.
+        # Flag-gated + built by the session; None when CONNECTOR_RUNTIME_TARA off.
+        self._connector_bridge = connector_bridge
 
     async def execute(self, name: str, arguments: str) -> str:
         try:
@@ -119,6 +123,11 @@ class FunctionExecutor:
         except json.JSONDecodeError:
             args = {}
         self._log_event("function_call", {"name": name, "args": args})
+
+        # Connector Runtime tools (canonical <connector>__<operation>) route to
+        # the voice-safe gateway bridge before the built-in dispatch.
+        if self._connector_bridge is not None and self._connector_bridge.handles(name):
+            return await self._connector_bridge.dispatch(name, args)
 
         if name == "search_memory":
             full = ""

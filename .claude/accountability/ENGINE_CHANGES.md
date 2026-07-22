@@ -13,6 +13,36 @@ Engine scope = `core/src/memory/*`, `core/src/knowledge/*`, `core/src/agent/*`,
 
 ---
 
+## 2026-07-22 (b) — Pure-insert hardening for meeting sections (fixes intermittent content loss)
+**Release:** `prod-20260721-df34a73e3` (live) · **Rollback:** `:stable` = `prod-20260721-ac333045e` · **singulance-main** @ `df34a73e3`
+**Status:** LIVE + verified (3x integrity + recall re-measure).
+
+**Files:** `core/src/server.js` (meeting `baseChildMeta`), `core/src/knowledge/document-first-ingestion.js` (atomic passthrough).
+
+**Bug:** the section-tree ingested each section via the atomic path with only
+`skip_fact_extraction` + `smartIngest:false`. Under the concurrent 5-section
+ingest, post-commit processing (contradiction detection / advisory-lock window)
+INTERMITTENTLY mangled section content — quotes collapsed to one line (lost
+header + timestamp stamp), sections dropped/superseded. Data-integrity regression.
+
+**Fix:** opt meeting sections into the engine's `_pureInsert` fast path
+(graph-engine.js:650) — requires ALL of `skipAdvisoryLock` + `skipPredictCalibrate`
++ (`smartIngest:false` | `skip_relationship_classification`) + `skip_contradiction_detection`.
+First attempt (54c712d47) omitted `skipPredictCalibrate` so the gate never engaged
+(3x test caught it — iteration 3 still failed); df34a73e3 added it. Forwarded the 3
+new flags through the atomic passthrough (additive; undefined for other callers =>
+no change to KB/chat/MCP/connector). Entity linking is `defer_entity_linking`-gated
+(untouched) => canonical entities + typed edges + PartOf still land.
+
+**Verified:** 3x meeting flow → all 5 sections present, `is_latest=t`, header+stamp
+intact, quotes=5 every run. Recall re-measure: content fix RESOLVED "Hannover install"
++ "who works on Hannover" (were failing). RESIDUAL: "what did we decide about pricing"
+still answers with the margin fact, not the `decision` memory (decision outranked by
+co-topic memories; needs a decision-type signal). Proposed next: language-neutral
+planner `memory_type` soft-boost hint (needs sign-off; borders Cerebras layer).
+
+---
+
 ## 2026-07-22 — Meeting typed PartOf section-tree + adaptive synthesis budget
 **Release:** `prod-20260721-ac333045e` (live, baked image, project `hivemind`)
 **Rollback:** `hivemind/core-api:stable` = `prod-20260721-933147017`

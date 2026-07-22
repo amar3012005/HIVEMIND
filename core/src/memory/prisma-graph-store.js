@@ -525,6 +525,9 @@ export class PrismaGraphStore {
     if (patch.updated_at) data.updatedAt = new Date(patch.updated_at);
     if (patch.project !== undefined) data.project = patch.project;
     if (patch.content !== undefined) data.content = patch.content;
+    // Title updates were silently dropped here — a rename/retitle via the API or
+    // the MCP hivemind_update_memory tool bumped updated_at but left title stale.
+    if (patch.title !== undefined) data.title = patch.title;
     if (patch.tags !== undefined) data.tags = normalizeTagsArray(patch.tags);
     if (patch.source_metadata?.source_platform) data.sourcePlatform = patch.source_metadata.source_platform;
     if (patch.source_metadata?.source_id) data.sourceMessageId = patch.source_metadata.source_id;

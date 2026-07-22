@@ -6920,7 +6920,7 @@ exit \$RC
               // Verbatim, no post-commit dedup/supersede/contradiction (which under the concurrent
               // multi-section ingest intermittently mangled section content). Entity linking is
               // defer_entity_linking-gated (NOT set here) so entities + typed edges still land.
-              const baseChildMeta = { ...baseMeta, skip_fact_extraction: true, smartIngest: false, skip_contradiction_detection: true, skip_relationship_classification: true, skipAdvisoryLock: true, force_entity_linking: true };
+              const baseChildMeta = { ...baseMeta, skip_fact_extraction: true, smartIngest: false, skipPredictCalibrate: true, skip_contradiction_detection: true, skip_relationship_classification: true, skipAdvisoryLock: true, force_entity_linking: true };
               const ingestOne = async (content, memory_type, sectionKey, extraTags = []) => {
                 const r = await documentFirstIngestion.ingestSource({
                   userId: mUser, orgId: mOrg, content,

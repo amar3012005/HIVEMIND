@@ -598,6 +598,7 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
         query_original: plan.query_original || plan.user_message || q,
         query_canonical_en: plan.query_canonical_en || q,
         entities: plan.named_entities || [],
+        answer_type: plan.answer_type || null,
         mode: recallMode,
         limit: recallLimit,
         _explicit_mode: !!plan.explicit_recall_mode,

@@ -36,6 +36,7 @@ export const HIGH_TOOLS = [
       mode: { type: 'string', enum: ['fact', 'explain', 'full'] }, entities: { type: 'array', items: { type: 'string' } },
       source_title: nullable('string'), valid_at: nullable('string'), known_at: nullable('string'),
       range_start: nullable('string'), range_end: nullable('string'), aggregate_kind: nullable('string'),
+      answer_type: nullable('string'),
     }) } },
   { type: 'function', function: { name: 'hivemind_memory', strict: true,
     description: 'Use for durable memory creation, versioned updates, deletion requests, decisions and assistant renaming. The server scopes, validates, confirms destructive actions and creates graph provenance.',
@@ -82,6 +83,7 @@ Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
 - "List every X and exact count" (exhaustive enumeration of a category) => hivemind_context operation=aggregate.
+- answer_type: when the question asks for a specific KIND of memory, set it (any language, by meaning): "what did we decide/agree" => decision; "what are our goals/targets/action items" => goal; "what do I prefer" => preference; "what did we learn / lessons" => lesson; "what happened / meetings / events" => event; "how are X and Y related" => relationship. Omit when the question is a generic fact lookup.
 - "Which files/sources/documents mention X", "In which file is X described", "where is X mentioned" (SOURCE DISCOVERY — find which sources reference a named entity, NOT an exhaustive count) => hivemind_context operation=recall with mode=explain. Keep only the real entity name in named_entities; do NOT add words like file, source, document. This is NOT aggregate (aggregate is for counting members of a category, not locating an entity's sources).
 - "Remember X" or "Recuerda X" => hivemind_memory operation=save.
 - "Update X to Y" => hivemind_memory operation=update.
@@ -194,6 +196,7 @@ export function adaptToDecision(tool, args, message, language) {
         operation: op,
         queries: [base.query_canonical_en],
         recall_mode: ['fact', 'explain', 'full'].includes(args?.mode) ? args.mode : 'fact',
+        answer_type: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'].includes(String(args?.answer_type || '').toLowerCase()) ? String(args.answer_type).toLowerCase() : null,
         source: s(args?.source_title, 512) ? { title: s(args.source_title, 512) } : null,
         aggregate: args?.operation === 'aggregate'
           ? { parent: s(base.named_entities[0] || base.query_canonical_en, 256), kind: s(args?.aggregate_kind, 128) || 'entity', requires_complete_coverage: true }

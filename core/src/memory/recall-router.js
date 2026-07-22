@@ -294,6 +294,72 @@ function applyEventTimeBoost(memories, query) {
   return out;
 }
 
+// ── V5 D5: type-aware recall (flag-gated, default off) ──────────────────────
+// When the multilingual planner signals the question asks for a specific KIND of
+// memory (answer_type -> options.boost_memory_type), we (1) add a type-scoped
+// retrieval LANE so a type-matching memory is guaranteed to be a candidate even
+// when the base lexical/vector/entity lanes miss it (root cause of the residual
+// "what did we decide" gap: entity-hop0 matched 0 entities, so the decision was
+// never generated), and (2) soft-boost matching rows. Language-neutral (the type
+// comes from the planner, not keywords) and tenant-safe (the lane anchors on the
+// caller's already-resolved canonical entities via memoryEntityLink and hydrates
+// through store.getMemories, which applies the same visibility rules).
+const TYPE_AWARE_RECALL = (process.env.V5_TYPE_AWARE_RECALL || 'false').toLowerCase() === 'true';
+const MEMORY_TYPE_BOOST_ALPHA = Number(process.env.MEMORY_TYPE_BOOST_ALPHA || 0.6);
+function applyMemoryTypeBoost(memories, boostType) {
+  if (!boostType || !memories?.length) return memories;
+  const bt = String(boostType).toLowerCase();
+  let boosted = 0;
+  const out = memories.map((m) => {
+    const mt = String(m.memory_type || m.memoryType || '').toLowerCase();
+    if (mt !== bt) return m;
+    boosted++;
+    const base = Number(m._rank_score) || Number(m.score) || 0;
+    return { ...m, _rank_score: base * (1 + MEMORY_TYPE_BOOST_ALPHA), score: (Number(m.score)||0) * (1 + MEMORY_TYPE_BOOST_ALPHA), _memory_type_boosted: true };
+  }).sort((a, b) => (Number(b._rank_score) || Number(b.score) || 0) - (Number(a._rank_score) || Number(a.score) || 0));
+  if (boosted > 0) console.log(`[recall-router] memory-type-boost: type=${bt}, boosted=${boosted}/${memories.length}`);
+  return out;
+}
+
+// Type-scoped candidate lane. Returns hydrated memories of `boostType` linked to
+// any of `entityNames` in this org, bounded. Tenant-safe: memoryEntityLink is
+// org-scoped via the entity ids, and hydration goes through store.getMemories.
+async function fetchTypeScopedCandidates({ prisma, store, orgId, boostType, entityNames }) {
+  try {
+    if (!prisma?.canonicalEntity?.findMany || !prisma?.memoryEntityLink?.findMany || !store?.getMemories) return [];
+    const names = (entityNames || []).map((n) => String(n || '').trim()).filter(Boolean).slice(0, 12);
+    if (!names.length) return [];
+    const norm = names.map((n) => n.toLowerCase());
+    const ents = await prisma.canonicalEntity.findMany({
+      where: { organizationId: orgId, OR: [
+        { canonicalName: { in: names, mode: 'insensitive' } },
+        { normalizedName: { in: norm } },
+      ] },
+      select: { id: true }, take: 24,
+    }).catch(() => []);
+    if (!ents.length) return [];
+    const links = await prisma.memoryEntityLink.findMany({
+      where: { entityId: { in: ents.map((e) => e.id) } },
+      select: { memoryId: true }, take: 60,
+    }).catch(() => []);
+    const ids = [...new Set(links.map((l) => l.memoryId))];
+    if (!ids.length) return [];
+    const memMap = await store.getMemories(ids).catch(() => new Map());
+    const bt = String(boostType).toLowerCase();
+    const out = [];
+    for (const id of ids) {
+      const m = memMap.get ? memMap.get(id) : null;
+      if (!m) continue;
+      const mt = String(m.memory_type || m.memoryType || '').toLowerCase();
+      if (mt !== bt) continue;
+      if (m.org_id && m.org_id !== orgId) continue; // cross-org safety net
+      out.push({ ...m, memory_type: m.memory_type || m.memoryType, score: Number(m.score) || 0.55, _type_scoped_lane: true });
+      if (out.length >= 8) break;
+    }
+    return out;
+  } catch { return []; }
+}
+
 const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
 const HOP3_TIMEOUT_MS          = 4000;
@@ -1386,6 +1452,24 @@ export class RecallRouter {
     }
     rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
+    // V5 D5 (flag-gated): type-aware recall — merge a type-scoped lane so a
+    // type-matching memory is a candidate even when base lanes missed it, then
+    // soft-boost. Runs BEFORE the floor so merged rows are ranked, not pruned.
+    if (TYPE_AWARE_RECALL && options.boost_memory_type) {
+      try {
+        const extra = await fetchTypeScopedCandidates({
+          prisma: this.prisma, store: this.store,
+          orgId: ctx.orgId, boostType: options.boost_memory_type,
+          entityNames: (recallPlan.entities?.length ? recallPlan.entities : (options.named_entities?.length ? options.named_entities : [])),
+        });
+        if (extra.length) {
+          const seen = new Set(rankedMemories.map((m) => m.id));
+          for (const e of extra) if (!seen.has(e.id)) { rankedMemories.push(e); seen.add(e.id); }
+          console.log(`[recall-router] type-scoped lane: +${extra.filter((e) => !new Set(rankedMemories.slice(0, rankedMemories.length - extra.length).map((m) => m.id)).has(e.id)).length} type=${options.boost_memory_type} candidates`);
+        }
+        rankedMemories = applyMemoryTypeBoost(rankedMemories, options.boost_memory_type);
+      } catch (e) { console.warn('[recall-router] type-aware recall failed:', e.message); }
+    }
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
     if (options.structured_intent !== true) rankedMemories = applyEventTimeBoost(rankedMemories, query);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);

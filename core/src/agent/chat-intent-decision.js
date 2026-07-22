@@ -419,6 +419,7 @@ export function intentDecisionToPlan(decision, message) {
     intents: [operation],
     sub_queries: ['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(operation) ? [] : decision.queries,
     named_entities: decision.named_entities,
+    answer_type: decision.answer_type || null,
     query_original: decision.query_original,
     query_canonical_en: decision.query_canonical_en,
     recall_mode: decision.source || decision.aggregate ? 'explain' : decision.recall_mode,

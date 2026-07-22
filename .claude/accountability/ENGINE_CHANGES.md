@@ -13,6 +13,38 @@ Engine scope = `core/src/memory/*`, `core/src/knowledge/*`, `core/src/agent/*`,
 
 ---
 
+## 2026-07-22 (d) — Final recon + double-boost fix (declare-done gate)
+**Release:** `prod-20260722-6339cc321` (live, flag on) · **Rollback:** `:stable` = `prod-20260722-abf1dfb87`
+**Status:** LIVE + verified. Pushed singulance-main.
+
+Two parallel recon agents (flags matrix; language/tenant-neutrality sweep) + a
+direct RRF/scoring review. Results:
+- **Flags:** all critical V5 flags correct (type-aware ON, corroboration-dedup OFF,
+  canonical ON, entity-persist ON, rerank ON/cohere, entity-hop0 ON, progressive
+  router, claim-structuring ON). MEMORY_FACT_CHILDREN_ENABLED OFF is intentional
+  (V5 uses distill/section-tree). NOTE: RERANK_API_KEY is a live secret in plaintext
+  /root/hivemind/.env:301 — rotate / move to secret store.
+- **RRF:** reciprocalRankFusionMemories uses `1/(RRF_K + rank + 1)`, k=60, 1-based
+  rank — canonical. Multi-retriever fusion is a documented max-score merge (not RRF)
+  upstream. Boosts compose on `score` (what floor/MMR use); type-scoped injected
+  candidates at score 0.55 are on the base scale; cohere rerank is the final arbiter.
+- **BLOCKER FIXED:** detectMemoryTypeBoost (English-keyword) ran ungated and
+  double-boosted (~×2.56, English-only) against the planner-driven boost. Gated
+  behind !structured_intent → under the progressive router the language-neutral
+  planner signal is the sole type mechanism. Verified: EN and DE "what did we decide"
+  now return the same decision answer.
+
+**Known non-blocking limitations (graceful degradation, English-specific, ungated —
+future multilingual-hardening pass, NOT corruption):** temporal-intent detectors
+(isTemporalComparisonQuery/detectTimeTravelIntent, persisted-retrieval), relative/
+month date parsing on LLM-extracted content (graph-engine parseEventDates), and the
+English stopword set in entity-normalize (isJunkEntity). Each under-fires for
+non-English (missing time-travel lane / event tags / bare-English-word entity drop)
+without corrupting data. PROFILE_RE is 4-language but a gated accept-only fast path
+with LLM fallthrough (acceptable).
+
+---
+
 ## 2026-07-22 (c) — D5 type-aware recall LIVE (language-neutral answer_type)
 **Release:** `prod-20260722-abf1dfb87` (live, flag `V5_TYPE_AWARE_RECALL=true`) · **Rollback:** `prod-20260721-011721c9a` (`:stable`) + flag off
 **Status:** LIVE + verified (8/8 company Q&A incl. the failing decision query; 6/6 meeting set; German verified).

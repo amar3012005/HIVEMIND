@@ -26,8 +26,20 @@ const READ_MAP = Object.freeze({
   gmail__list_labels: 'gmail_list_labels',
   gmail__list_drafts: 'gmail_list_drafts',
 });
+// Phase 3: write ops. gmail__create_draft creates a provider draft;
+// gmail__send_draft sends an existing draft; gmail__send composes+sends. All
+// require approval (plan §4 "Writes return approval_required").
+const WRITE_MAP = Object.freeze({
+  gmail__create_draft: 'gmail_create_draft',
+  gmail__send_draft: 'gmail_send_draft',
+  gmail__send: 'gmail_send',
+});
+const TOOL_MAP = Object.freeze({ ...READ_MAP, ...WRITE_MAP });
 
 const READ_SURFACES = ['chat', 'hyperagents', 'tara', 'mcp', 'admin'];
+// Writes are not offered on the voice (tara) surface by default; drafts only via
+// approval on interactive surfaces (plan §5 TARA "outbound communication draft-only").
+const WRITE_SURFACES = ['chat', 'hyperagents', 'mcp', 'admin'];
 
 function tool(name, description, inputSchema, extra = {}) {
   return {
@@ -46,6 +58,16 @@ function tool(name, description, inputSchema, extra = {}) {
     allowedSurfaces: READ_SURFACES,
     legacyName: READ_MAP[name],
     ...extra,
+  };
+}
+
+function writeTool(name, description, inputSchema, { destructive = true } = {}) {
+  return {
+    name, title: name, description, inputSchema,
+    access: 'write', approval: 'required',
+    concurrencySafe: false, idempotent: false, destructive, openWorld: false,
+    timeoutMs: 15000, maxResultBytes: 8 * 1024,
+    allowedSurfaces: WRITE_SURFACES, legacyName: WRITE_MAP[name],
   };
 }
 
@@ -96,6 +118,45 @@ export const GMAIL_MANIFEST = {
         additionalProperties: false,
         properties: { max: { type: 'integer', minimum: 1, maximum: 30, default: 10 } },
       }),
+    // ── writes (approval:required) ──────────────────────────────────────
+    writeTool('gmail__create_draft',
+      'Save an email as a Gmail DRAFT (not sent). Requires approval.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          to: { type: 'string' },
+          subject: { type: 'string' },
+          body: { type: 'string' },
+          cc: { type: 'string' },
+          threadId: { type: 'string', description: 'reply target thread' },
+          markdown: { type: 'boolean', default: false },
+        },
+        required: ['subject', 'body'],
+      }, { destructive: false }), // a draft is reversible
+    writeTool('gmail__send_draft',
+      'Send an existing Gmail draft. Requires approval.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: { draftId: { type: 'string' } },
+        required: ['draftId'],
+      }),
+    writeTool('gmail__send',
+      'Compose and send an email directly. Requires approval.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          to: { type: 'string' },
+          subject: { type: 'string' },
+          body: { type: 'string' },
+          cc: { type: 'string' },
+          threadId: { type: 'string' },
+          markdown: { type: 'boolean', default: false },
+        },
+        required: ['to', 'subject', 'body'],
+      }),
   ],
 };
 
@@ -120,10 +181,9 @@ export class GmailPlugin extends ConnectorPlugin {
   }
 
   async executeTool(toolName, input, context) {
-    const legacy = READ_MAP[toolName];
+    const legacy = TOOL_MAP[toolName];
     if (!legacy) {
-      // Phase 2 is reads-only; writes land in Phase 3.
-      throw new NotConnectedError(`gmail tool "${toolName}" not available in this runtime phase`);
+      throw new NotConnectedError(`gmail tool "${toolName}" is not implemented`);
     }
     const scope = { user_id: context.userId, org_id: context.orgId };
     let payload;

@@ -112,6 +112,8 @@ export class ConnectorRuntime {
       gateWrite: hooks.gateWrite || (async () => null),
       // (step 13) tenant concurrency slot; return a release fn or void
       acquireSlot: hooks.acquireSlot || (async () => () => {}),
+      // approved-write executor (approvalStore.executeApproved); null = not installed
+      executeApproved: hooks.executeApproved || null,
       // (step 17) audit; fire-and-safe
       audit: hooks.audit || (async () => {}),
       // (step 18) metrics; fire-and-safe
@@ -186,29 +188,19 @@ export class ConnectorRuntime {
       // 9. validate + coerce input against the tool schema — Phase 3 (no-op now)
       const coerced = await this.hooks.validateInput(tool, input, context);
 
-      // 10-12. approval + idempotency for writes — Phase 3 (no-op now → reads proceed)
-      const gated = await this.hooks.gateWrite({ plugin, tool, context, input: coerced, connection });
-      if (gated) return this._finalize(gated, tool, startedAt, connectorId, canonicalName);
-
-      // 13. tenant concurrency slot — Phase 3 (no-op now)
-      const release = await this.hooks.acquireSlot({ tool, context });
-      let result;
-      try {
-        // 14. execute with deadline (never hangs)
-        result = await withDeadline(
-          Promise.resolve(plugin.executeTool(canonicalName, coerced, { ...context, connection, db: this.db })),
-          tool.timeoutMs,
-          `${canonicalName}`,
-        );
-      } finally {
-        try { if (typeof release === 'function') release(); } catch { /* ignore */ }
+      // 10-12. approval + idempotency for writes (Phase 3). Reads → null → proceed.
+      const gated = await this.hooks.gateWrite({ plugin, tool, context, input: coerced, connection, connectorId });
+      if (gated) {
+        const g = this._finalize(gated, tool, startedAt, connectorId, canonicalName);
+        await this._observe({ tool, context, result: g, connectorId });
+        return g;
       }
 
-      // 15. normalize provider response into a CanonicalConnectorResult
-      result = this._coerceResult(result);
-      // 16-18. truncate + audit + metrics
+      // 13-16. concurrency slot + deadline-bounded execute + normalize
+      const result = await this._invokeProvider(plugin, tool, canonicalName, coerced, context, connection);
+      // 16-18. truncate + audit + metrics (audit may fail-close a completed write)
       const finalized = this._finalize(result, tool, startedAt, connectorId, canonicalName);
-      this._observe({ tool, context, result: finalized, connectorId });
+      await this._observe({ tool, context, result: finalized, connectorId });
       return finalized;
     } catch (err) {
       const ce = classifyError(err);
@@ -218,8 +210,63 @@ export class ConnectorRuntime {
         approval: ce.approval || null,
         metadata: meta(),
       });
-      this._observe({ tool: null, context, result, connectorId, error: ce });
+      // already rendering an error — never let an audit throw escape here
+      await this._observe({ tool: null, context, result, connectorId, error: ce }).catch(() => {});
       return result;
+    }
+  }
+
+  // Steps 13-15: acquire tenant slot, execute with deadline, normalize.
+  async _invokeProvider(plugin, tool, canonicalName, coerced, context, connection) {
+    const release = await this.hooks.acquireSlot({ tool, context });
+    let result;
+    try {
+      result = await withDeadline(
+        Promise.resolve(plugin.executeTool(canonicalName, coerced, { ...context, connection, db: this.db })),
+        tool.timeoutMs,
+        `${canonicalName}`,
+      );
+    } finally {
+      try { if (typeof release === 'function') release(); } catch { /* ignore */ }
+    }
+    return this._coerceResult(result);
+  }
+
+  /**
+   * Execute a previously-approved write EXACTLY ONCE (called by the approve
+   * endpoint / surface adapter). Delegates the claim/replay-guard to the
+   * approvalStore hook; the provider runs with the STORED validated args only.
+   */
+  async executeApproved(draftId, toolName, context) {
+    const startedAt = now();
+    let connectorId = null; let canonicalName = toolName;
+    try {
+      validateContext(context);
+      const resolved = this.registry.resolveTool(toolName);
+      if (!resolved) throw new InvalidInputError(`unknown tool "${toolName}"`);
+      const { plugin, tool } = resolved;
+      canonicalName = resolved.canonicalName; connectorId = resolved.connectorId;
+      if (this.config && !this._allowed(context.surface, connectorId)) {
+        throw new ForbiddenError(`connector "${connectorId}" not enabled for surface "${context.surface}"`);
+      }
+      if (!this.hooks.executeApproved) throw new ConnectorError('approval store not installed', { status: 'failed' });
+      const connection = await plugin.getConnection(context);
+      const result = await this.hooks.executeApproved(draftId, {
+        tool,
+        context,
+        invoke: async (storedArgs) => this._coerceResult(
+          await withDeadline(
+            Promise.resolve(plugin.executeTool(canonicalName, storedArgs, { ...context, connection, db: this.db })),
+            tool.timeoutMs, `${canonicalName}`,
+          ),
+        ),
+      });
+      const finalized = this._finalize(result, tool, startedAt, connectorId, canonicalName);
+      await this._observe({ tool, context, result: finalized, connectorId });
+      return finalized;
+    } catch (err) {
+      const ce = classifyError(err);
+      return makeResult({ status: ce.status, content: textContent(redactSecrets(ce.message)), metadata: { requestId: context?.requestId || null, connector: connectorId, tool: canonicalName, durationMs: now() - startedAt } });
     }
   }
 
@@ -243,10 +290,11 @@ export class ConnectorRuntime {
     return truncateResult(result, tool?.maxResultBytes);
   }
 
-  _observe({ tool, context, result, connectorId, error }) {
-    try {
-      this.hooks.audit({ tool, context, result, connectorId, error });
-    } catch (e) { this.log.warn('audit hook threw', e?.message); }
+  // Awaited: audit may fail-close a completed write (the hook throws) — that
+  // throw MUST propagate to the caller's catch so the result renders failed
+  // rather than reporting success without an audit trail. Metrics never throw.
+  async _observe({ tool, context, result, connectorId, error }) {
+    await this.hooks.audit({ tool, context, result, connectorId, error });
     try {
       this.hooks.metrics({
         connector: connectorId,

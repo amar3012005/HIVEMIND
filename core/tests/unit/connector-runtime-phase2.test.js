@@ -71,9 +71,15 @@ test('canonical tool-name regex accepts <connector>__<operation>, rejects bad na
 test('validateManifest accepts the Gmail manifest and freezes tools', () => {
   const m = validateManifest(GMAIL_MANIFEST);
   assert.equal(m.id, 'gmail');
-  assert.equal(m.tools.length, 5);
+  // 5 reads (Phase 2) + 3 writes (Phase 3)
+  assert.equal(m.tools.length, 8);
   assert.ok(Object.isFrozen(m.tools));
-  assert.ok(m.tools.every((t) => t.access === 'read' && t.approval === 'never'));
+  const reads = m.tools.filter((t) => t.access === 'read');
+  assert.equal(reads.length, 5);
+  assert.ok(reads.every((t) => t.approval === 'never'));
+  const writes = m.tools.filter((t) => t.access === 'write');
+  assert.equal(writes.length, 3);
+  assert.ok(writes.every((t) => t.approval === 'required'));
 });
 
 test('validateToolContract rejects destructive tool without approval', () => {

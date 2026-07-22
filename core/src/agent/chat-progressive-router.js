@@ -36,7 +36,7 @@ export const HIGH_TOOLS = [
       mode: { type: 'string', enum: ['fact', 'explain', 'full'] }, entities: { type: 'array', items: { type: 'string' } },
       source_title: nullable('string'), valid_at: nullable('string'), known_at: nullable('string'),
       range_start: nullable('string'), range_end: nullable('string'), aggregate_kind: nullable('string'),
-      answer_type: nullable('string'),
+      answer_type: { type: ['string', 'null'], enum: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact', null], description: 'REQUIRED CLASSIFICATION: the KIND of memory the user is asking for, judged by MEANING in any language. decision=what was decided/agreed/chosen; goal=goals/targets/action items/next steps; preference=likes/dislikes/priorities; lesson=learnings/takeaways/postmortems; event=what happened/meetings/quotes; relationship=how entities relate; fact=objective attribute. null ONLY for generic lookups that fit none.' },
     }) } },
   { type: 'function', function: { name: 'hivemind_memory', strict: true,
     description: 'Use for durable memory creation, versioned updates, deletion requests, decisions and assistant renaming. The server scopes, validates, confirms destructive actions and creates graph provenance.',
@@ -77,13 +77,15 @@ Use hivemind_context for all internal knowledge: facts, named files, exact count
 Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md or .html is HIVEMIND source context, never a connector request. Only use a connector when the user explicitly names the connected application or asks to act in it.
 Use hivemind_memory for remember/save/update/delete/rename requests in every language; never acknowledge a write without this tool. Distinguish the two "name" operations: "change MY name / my role / my company / I prefer X" => operation=update_profile (the USER's own profile). "Call yourself X / rename the assistant" => operation=rename_assistant (the ASSISTANT). Ambiguous "change it" with no clear target => ask ONE clarification via respond_directly(reason=clarification), never guess.
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
+ALWAYS classify answer_type on every hivemind_context call, by MEANING in the user's language: decisions/agreements/choices => decision; goals/targets/action items/next steps => goal; likes/preferences => preference; learnings/takeaways => lesson; things that happened, meetings, quotes => event; how entities relate => relationship; plain attribute lookups => fact or null. Asking WHAT WAS DECIDED is answer_type=decision even when the topic is pricing, dates, or vendors.
 Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
 - "List every X and exact count" (exhaustive enumeration of a category) => hivemind_context operation=aggregate.
-- answer_type: when the question asks for a specific KIND of memory, set it (any language, by meaning): "what did we decide/agree" => decision; "what are our goals/targets/action items" => goal; "what do I prefer" => preference; "what did we learn / lessons" => lesson; "what happened / meetings / events" => event; "how are X and Y related" => relationship. Omit when the question is a generic fact lookup.
+- "What did we decide about X?" / "Was haben wir entschieden?" => hivemind_context operation=recall answer_type=decision.
+- "What are the action items / next steps from the meeting?" => hivemind_context operation=recall answer_type=goal.
 - "Which files/sources/documents mention X", "In which file is X described", "where is X mentioned" (SOURCE DISCOVERY — find which sources reference a named entity, NOT an exhaustive count) => hivemind_context operation=recall with mode=explain. Keep only the real entity name in named_entities; do NOT add words like file, source, document. This is NOT aggregate (aggregate is for counting members of a category, not locating an entity's sources).
 - "Remember X" or "Recuerda X" => hivemind_memory operation=save.
 - "Update X to Y" => hivemind_memory operation=update.

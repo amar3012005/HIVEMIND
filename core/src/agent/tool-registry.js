@@ -64,6 +64,9 @@ export const TOOL_SCHEMAS = [
           },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
           scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Server-owned scope restriction for typed requests such as self-profile recall.' },
+          // V5 D5: planner-signalled expected memory KIND ("what did we decide" => decision).
+          // Must be declared here — validateAndSanitize strips undeclared keys.
+          answer_type: { type: 'string', enum: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'], description: 'Expected memory type of the answer, inferred from user intent (language-neutral). Enables the type-aware recall lane.' },
         },
         required: ['query'],
       },

@@ -2435,9 +2435,13 @@ export async function runReactAgentV2({
     }
 
     // STEP 2.5 — Optimise the recall queries: search with a short, English,
-    // keyword query instead of the raw conversational prompt. Only on recall
-    // turns; the answer LLM still receives the user's original message.
-    if (Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+    // keyword query instead of the raw conversational prompt. Only on blended
+    // recall turns — dedicated lanes (aggregate/connector_read/relation_between/
+    // profile) run no sub_query recall, so optimising is a wasted model call.
+    // The answer LLM still receives the user's original message.
+    const _dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read'
+      || plan.operation === 'relation_between' || plan.operation === 'profile';
+    if (!_dedicatedLane && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
       try {
         const optimized = await optimizeRecallQueries({
           message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,

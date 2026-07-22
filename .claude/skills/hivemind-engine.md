@@ -13,6 +13,13 @@ every engine task so the next session starts from everything already learned.
 Read the whole skill, do the work via the loop, then **add a dated ledger
 entry** before you finish.
 
+**Scope discipline — HIVEMIND engine ONLY.** Use THIS skill (not ad-hoc file
+exploration) for every HIVEMIND recall/chat/memory/graph/ingestion task, and do
+NOT apply it to non-engine work. All engine changes are driven through the live
+engine + the PROBE TECHNIQUE below, and every shipped change is registered in
+`.claude/accountability/ENGINE_CHANGES.md` (the concise what-changed-and-is-it-live
+audit trail) in addition to this ledger.
+
 ## When this skill applies
 
 Any task touching: `core/src/memory/*` (recall-router, persisted-retrieval,
@@ -139,6 +146,57 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 ---
 
 ## LEARNINGS LEDGER (append-only — newest first)
+
+### 2026-07-22 — meeting typed PartOf section-tree + adaptive synthesis budget (release prod-20260721-ac333045e; singulance-main @ ac333045e; rollback :stable = prod-20260721-933147017)
+
+**Task:** meeting notes made bad memories — chat could not answer section-specific
+questions ("who was in the meeting", "notable quotes", "what did we decide").
+
+**Root causes (two, both proven by live probe):**
+1. `/api/meetings/:id/ingest` used `mode:'document'` → the KB curator (`_promoteMemories`)
+   ran a SECOND LLM pass over the already-structured insights, re-generating meaning,
+   fragmenting into distilled claims, and DROPPING the Notable-quotes section entirely.
+2. Synthesis (`react-agent-v2.js` ~1321) formatted every retrieved memory at
+   `content.slice(0,240)`. Any rich single memory was invisible past char 240 — the
+   model answered "the record doesn't include that" about content it HAD retrieved.
+   (This is WHY the engine distills into tiny memories; 240 is too small for rich rows.)
+
+**Fix:**
+- Meeting facts → **typed PartOf section-tree**: parent (identity+participants, `event`)
+  + one deterministically-typed child per non-empty insight section (Decisions→`decision`,
+  Action items/Next steps→`goal`, Open questions→`fact`, Notable quotes→`event`), each
+  PartOf→parent, verbatim (no re-gen). Ingested via the ATOMIC path
+  (`skip_fact_extraction:true` + `smartIngest:false`) which — unlike the atomic→smart-router
+  TREE path — DOES run entity extraction + `persistCanonicalLinks` (5-7 entities/section).
+  Section types come from insight STRUCTURE not heading text → language/tenant-neutral.
+- Synthesis budget → adaptive `_evCount<=4?1400:<=8?700:300` (bounded ~5-6k chars).
+
+**Gotchas learned:**
+- `mode:'atomic'` alone still routes through the smart-router → Document+Section tree
+  (chunks multi-heading content). Use `smartIngest:false` to get ONE memory / bypass chunking.
+- The atomic→smart-router TREE path (`ingestMemoryTree`) links ZERO canonical entities
+  (the atomic caller extracts only the parent id; `persistCanonicalLinks` never runs on
+  children). The plain atomic path (smartIngest:false) DOES link entities. Real KB uploads
+  use `mode:'document'`→`_promoteMemories`→`persistCanonicalLinks`, so they are fine.
+- `MemoryType` enum = {fact,preference,decision,lesson,goal,event,relationship,synthesis,
+  summary,conversation}. No `task`/`quote`/`question` — map action-items→goal, quotes→event.
+- Live deploy is a BAKED IMAGE on project `hivemind` (NOT quick-deploy / `hivemind-next`):
+  build `-f Dockerfile.production` in `/root/builds/v5-canonical`, tag current live →`:stable`,
+  bump `VERSION=` in `/root/hivemind/.env` (back up first), `docker compose -f
+  infra/docker-compose.hetzner.yml --env-file .env up -d --no-deps --force-recreate core`,
+  health-gate. `.quickdeploy-last-sha` is irrelevant to the live stack.
+
+**Verified live** — 5 memories + PartOf + entities per section; multi-source company test
+(KB/chat/slack/mcp/meeting) shows cross-source entity linking + cross-source synthesis;
+meeting who/decide/action-items/quotes/next-steps answered.
+
+**OPEN — recall precision (next task, RISK tier):** when many memories share the dominant
+entity (e.g. SolvisPia 13), base vector scores flatten (~0.52) and the specifically-relevant
+memory falls OUT of top-K — "what did we decide about pricing?" misses the `decision` memory;
+"when is the Hannover install?" misses the slack memory. `recall-router.js:224` allows only
+`max_graph_hops: mode==='fact'?0:1`, so 1-hop PartOf/co-mention expansion is available for
+non-fact modes but does not reliably rescue these. Proposed fix: query-intent→memory_type
+affinity boost (decide→decision) in the RecallRouter ranking (NOT the Cerebras intent layer).
 
 ### 2026-07-20g — progressive 6-tool router (flag-gated) + live A/B (release prod-20260720-bc40fcaa)
 

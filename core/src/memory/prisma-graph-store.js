@@ -1017,6 +1017,20 @@ export class PrismaGraphStore {
           .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
           .filter(w => w.length > 1)
           .map(w => w + ':*').join(' & ');
+        // Hybrid lexical recall (rosemary, flag-gated): collapsed distinctive
+        // query forms for a pg_trgm word_similarity lane. FTS prefix-matching
+        // (tim:*) can't match INSIDE a concatenated token ("SolvisTim" → one
+        // token "solvistim"), so a query "solvis tim" never retrieves it. The
+        // collapsed bigram "solvistim" + trigram word_similarity does. Default
+        // OFF → _trgmForms=[] → the query below is byte-identical to before.
+        const _trgmForms = (process.env.HYBRID_LEXICAL_RECALL === 'true') ? (() => {
+          const toks = query.trim().split(/\s+/)
+            .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(w => w.length >= 2);
+          const forms = new Set();
+          for (let i = 0; i + 1 < toks.length; i += 1) { const j = toks[i] + toks[i + 1]; if (j.length >= 6) forms.add(j); }
+          for (const t of toks) if (t.length >= 6) forms.add(t); // already-concatenated names
+          return [...forms].slice(0, 8);
+        })() : [];
         if (tsQuery) {
           // Scope predicate: V2 multi-tier OR when access_context provided,
           // else legacy personal/org single-scope. Skips FTS only if neither
@@ -1111,19 +1125,30 @@ export class PrismaGraphStore {
             ? (ftsParams.push(new Date(known_at).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
             : '';
 
+          // Trigram lane fragments (flag-gated; empty when _trgmForms=[] → query
+          // identical to before). Reuses the SAME scope params above → tenant-safe.
+          const _txt = "(COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))";
+          let trgmWhere = '';
+          let trgmScoreExpr = '0';
+          if (_trgmForms.length) {
+            const ors = []; const sims = [];
+            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`${p} <% ${_txt}`); sims.push(`word_similarity(${p}, ${_txt})`); }
+            trgmWhere = ` OR (${ors.join(' OR ')})`;
+            trgmScoreExpr = `GREATEST(${sims.join(', ')})`;
+          }
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
-                   ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
-                           to_tsquery('english', $1)) as fts_score
+                   GREATEST(ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
+                           to_tsquery('english', $1)), 0) + (${trgmScoreExpr}) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
-              AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
-                  @@ to_tsquery('english', $1)
+              AND (to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
+                  @@ to_tsquery('english', $1)${trgmWhere})
             ORDER BY fts_score DESC
             LIMIT $2
           `, ...ftsParams);

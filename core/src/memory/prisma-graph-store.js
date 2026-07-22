@@ -1141,7 +1141,11 @@ export class PrismaGraphStore {
             // (rare-token boost + rerank + importance/RRF) ranks it. Org-scoped
             // WHERE already bounds the row set, so seq word_similarity is cheap.
             const ors = []; const sims = [];
-            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`word_similarity(${p}, ${_txt}) > 0.4`); sims.push(`word_similarity(${p}, ${_txt})`); }
+            // public.-qualified: pg_trgm lives in schema `public`, but Prisma's
+            // connection search_path is `hivemind` only — unqualified
+            // word_similarity threw 42883, the catch swallowed it, and the whole
+            // FTS+trigram lane silently degraded to token-similarity in prod.
+            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`public.word_similarity(${p}, ${_txt}) > 0.4`); sims.push(`public.word_similarity(${p}, ${_txt})`); }
             trgmWhere = ` OR (${ors.join(' OR ')})`;
             trgmScoreExpr = `GREATEST(${sims.join(', ')})`;
           }
@@ -1194,7 +1198,10 @@ export class PrismaGraphStore {
           }
         }
       } catch (ftsErr) {
-        // FTS failed (query syntax, missing extension, etc.) — fall through to token similarity
+        // FTS failed — fall through to token similarity, but NEVER silently:
+        // a swallowed 42883 (search_path missing pg_trgm's schema) degraded the
+        // whole lexical lane invisibly for days. One warn per failure mode.
+        console.warn('[recall] FTS/trigram lane failed — degraded to token similarity:', ftsErr?.message?.slice(0, 160));
       }
     }
 

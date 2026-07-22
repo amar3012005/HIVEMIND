@@ -20,15 +20,17 @@ from typing import List, Optional, Dict, Any
 from agentscope.tool import Toolkit
 from agentscope.mcp import HttpStatelessClient
 
-from ..config import settings
+from ..config import get_settings
 from .runtime_client import fetch_capability
 
 log = logging.getLogger("connector-runtime.mcp_projection")
 
-# streamable-HTTP MCP endpoints live at <core>/mcp/connectors/<id>. AgentScope's
-# HttpStatelessClient opens+closes a session per call (stateless) — matches the
-# gateway's design and horizontally-scaled room workers.
-_MCP_BASE = f"{settings.hivemind_core_url.rstrip('/')}/mcp/connectors"
+
+def _mcp_base() -> str:
+    # streamable-HTTP MCP endpoints live at <core>/mcp/connectors/<id>. AgentScope's
+    # HttpStatelessClient opens+closes a session per call (stateless) — matches the
+    # gateway's design and horizontally-scaled room workers.
+    return f"{get_settings().hivemind_core_url.rstrip('/')}/mcp/connectors"
 
 
 async def _register_async(
@@ -55,7 +57,7 @@ async def _register_async(
             client = HttpStatelessClient(
                 name=cid,
                 transport="streamable_http",
-                url=f"{_MCP_BASE}/{cid}",
+                url=f"{_mcp_base()}/{cid}",
                 headers=headers,
             )
             await tk.register_mcp_client(

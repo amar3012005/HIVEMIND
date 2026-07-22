@@ -14,7 +14,7 @@ from typing import List, Optional, Dict, Any
 
 import httpx
 
-from ..config import settings
+from ..config import get_settings
 
 
 def _headers(api_key: str, user_id: Optional[str], org_id: Optional[str]) -> Dict[str, str]:
@@ -57,7 +57,7 @@ def fetch_capability(
     if room_id:
         body["room_id"] = room_id
     try:
-        with httpx.Client(base_url=settings.hivemind_core_url, timeout=timeout,
+        with httpx.Client(base_url=get_settings().hivemind_core_url, timeout=timeout,
                           headers=_headers(api_key, user_id, org_id)) as c:
             r = c.post("/api/connectors/runtime/capabilities", json=body)
             if r.status_code != 200:

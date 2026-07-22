@@ -591,6 +591,26 @@ def _register_connector_tools(
     connector when its task actually needs it. All calls POST the core bridge,
     which resolves the room owner's Nango token server-side.
     """
+    # ── Connector Runtime V1 cutover (plan Phase 6) ──────────────────────
+    # When CONNECTOR_RUNTIME_HYPER=true, register connectors through the Core
+    # canonical runtime via the stateless MCP gateway (one capability token,
+    # native AgentScope HttpStatelessClient — NO per-provider Python). Flag-off
+    # (default) → the legacy per-provider path below runs unchanged. On any
+    # runtime failure we fall through to the legacy path so a room never loses
+    # its connectors.
+    if os.getenv("CONNECTOR_RUNTIME_HYPER", "").lower() in ("1", "true", "yes", "on"):
+        try:
+            from ..connectors.mcp_projection import register_runtime_connectors
+            registered = register_runtime_connectors(
+                tk, api_key=api_key, user_id=user_id, org_id=org_id,
+                connectors=connectors, read_only=read_only,
+            )
+            if registered:
+                return  # runtime path handled all granted connectors
+            # empty → fall through to legacy registration
+        except Exception:
+            pass  # any error → legacy path
+
     def _register_google(kind: str, read_only: bool = False):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
             return _tool_response(_google_json(tool_name, arguments))

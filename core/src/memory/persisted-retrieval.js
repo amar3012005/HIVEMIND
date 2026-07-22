@@ -1938,6 +1938,33 @@ async function _recallPersistedMemoriesImpl(store, {
 
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0).sort((a, b) => b.score - a.score);
 
+  // Rarity-weighted distinctive-token boost (hybrid lexical recall, flag-gated).
+  // ts_rank + vector similarity both reward the COMMON brand token (e.g. every
+  // "solvis" memory), drowning the RARE decisive token ("pia", "tim") that
+  // actually answers an entity-specific query — so "launch date of solvis pia"
+  // buried the PIA event under generic brand facts. This boosts candidates that
+  // carry the query's rare tokens, using in-set inverse doc-frequency (no extra
+  // DB query) + substring match (catches concatenated names like SolvisTim).
+  // Default OFF → no change.
+  if (process.env.HYBRID_LEXICAL_RECALL === 'true' && ranked.length > 1) {
+    const qToks = [...new Set(String(query_context || '').toLowerCase().split(/\s+/)
+      .map((w) => w.replace(/[^a-z0-9]/g, '')).filter((w) => w.length >= 3))];
+    if (qToks.length) {
+      const N = ranked.length;
+      const texts = ranked.map((c) => `${c.memory?.title || ''} ${c.memory?.content || ''}`.toLowerCase());
+      const df = {};
+      for (const t of qToks) df[t] = texts.filter((x) => x.includes(t)).length;
+      const weight = (t) => (df[t] > 0 ? Math.max(0, 1 - df[t] / N) : 0); // in every candidate → 0; rare → ~1
+      const ALPHA = Number(process.env.HYBRID_RARE_ALPHA || 0.6);
+      for (let i = 0; i < ranked.length; i += 1) {
+        let boost = 0;
+        for (const t of qToks) if (texts[i].includes(t)) boost += weight(t);
+        if (boost > 0) ranked[i].score = (Number(ranked[i].score) || 0) * (1 + ALPHA * boost);
+      }
+      ranked.sort((a, b) => b.score - a.score);
+    }
+  }
+
   // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting).
   // GATED: only in the legacy non-structured path. Under the progressive router
   // (structured_intent=true) this English-keyword detector is skipped — it double-boosted

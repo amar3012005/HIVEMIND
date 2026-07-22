@@ -134,8 +134,30 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
       const activeProviders = new Set(connections.map(c => c.providerKey));
       const pool = getPool(prisma);
 
+      // Connector Runtime V1 (plan Phase 8 Chat cutover) — flag-gated, default
+      // OFF → the legacy registration below runs UNCHANGED. When on, connectors
+      // the runtime knows are registered in-process via the runtime adapter;
+      // the rest fall through to the legacy path (per-connector, no drops).
+      const _runtimeHandled = new Set();
+      if (process.env.CONNECTOR_RUNTIME_CHAT === 'true' && globalThis.__hivemindConnectorRuntime) {
+        try {
+          const { registerRuntimeConnectorGroups } = await import('./runtime-toolkit-adapter.js');
+          const handled = registerRuntimeConnectorGroups({
+            tk, runtime: globalThis.__hivemindConnectorRuntime, prisma,
+            userId, orgId, projectId: (typeof projectId !== 'undefined' ? projectId : null),
+            selected, activeProviders,
+          });
+          for (const id of handled) _runtimeHandled.add(id);
+        } catch (err) {
+          console.warn(`[toolkit] runtime connector registration failed: ${err.message}`);
+        }
+      }
+      // legacy provider key → runtime connector id (to skip handled ones)
+      const _RT_MAP = { gmail: 'gmail', 'google-docs': 'google_docs', 'google-sheets': 'google_sheets', slack: 'slack' };
+
       // (a) MCP groups.
       for (const provider of MCP_CONNECTOR_GROUPS) {
+        if (_runtimeHandled.has(_RT_MAP[provider] || provider)) continue;
         if (!selected.has(provider)) continue;
         if (!activeProviders.has(provider)) continue;
         tk.createToolGroup({
@@ -155,6 +177,7 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
 
       // (b) Nango-REST groups (gmail / google-docs / google-gemini).
       for (const cfg of NANGO_REST_GROUPS) {
+        if (_runtimeHandled.has(_RT_MAP[cfg.provider] || cfg.provider)) continue;
         if (!selected.has(cfg.groupName)) continue;
         if (!activeProviders.has(cfg.provider)) continue;
         try {

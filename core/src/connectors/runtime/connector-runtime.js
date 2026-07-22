@@ -189,7 +189,13 @@ export class ConnectorRuntime {
       const coerced = await this.hooks.validateInput(tool, input, context);
 
       // 10-12. approval + idempotency for writes (Phase 3). Reads → null → proceed.
-      const gated = await this.hooks.gateWrite({ plugin, tool, context, input: coerced, connection, connectorId });
+      // A surface whose own middleware owns approval (Chat's draft-approval —
+      // the frozen draft_created contract) sets approvalOwnedBySurface so the
+      // runtime does NOT double-gate: the surface has already created + approved
+      // the draft, and calls in to execute the approved write once.
+      const gated = context.approvalOwnedBySurface
+        ? null
+        : await this.hooks.gateWrite({ plugin, tool, context, input: coerced, connection, connectorId });
       if (gated) {
         const g = this._finalize(gated, tool, startedAt, connectorId, canonicalName);
         await this._observe({ tool, context, result: g, connectorId });

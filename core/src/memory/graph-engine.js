@@ -2459,7 +2459,15 @@ OUTPUT JSON only.`;
 
   1. extract the salient NAMED entities from the new memory — specific people, organizations / brands, products / models, and named projects or initiatives. Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing. See EXCLUDE below for what is NOT an entity.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
-  3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
+  3. classify the new memory's TYPE. Read the memory in ANY language and pick the SINGLE best-fit type by MEANING (not keywords), using these definitions:
+       • decision     — a choice made or a commitment to a course of action ("we will ship X", "chose vendor Y", "agreed to Z"). Prefer over 'fact' whenever a resolution/commitment is expressed.
+       • goal          — a desired future outcome / target / objective still to be achieved ("reach 30% margin", "launch by Q3", an action item to complete).
+       • preference    — a person's subjective like / dislike / priority ("prefers dark mode", "favourite vendor is X").
+       • lesson        — a learning, insight, takeaway, or postmortem conclusion ("we learned that…", "root cause was…").
+       • event         — something that happened at a point in time (a meeting, a launch, a call, a quote said in a meeting, an incident).
+       • relationship  — a durable connection BETWEEN entities (reports-to, works-with, partner-of, owns, located-in).
+       • fact          — an objective, verifiable state or attribute that fits none of the above ("SolvisPia 13 uses R290", "warranty is 5 years"). This is the DEFAULT only when no more-specific type applies.
+     Choose the most specific type the content genuinely supports; do not force-fit.
   4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
      Multiple candidates can each get DIFFERENT edge types simultaneously
      (e.g. Updates A, Extends B, Mentions C in the same save).

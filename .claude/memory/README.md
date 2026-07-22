@@ -1,0 +1,21 @@
+# .claude/memory — new-session context
+
+Read this folder FIRST in any new Claude Code session in this repo. It is the
+durable handoff so a fresh session rehydrates instead of restarting. It
+complements (does not replace) HIVEMIND recall and the auto-memory index at
+`/root/.claude/projects/-root-hivemind/memory/MEMORY.md`.
+
+| File | What it holds |
+|---|---|
+| [session-context.md](session-context.md) | Current state of recall, chat, ingestion, connectors + deploy topology + Solvis test data |
+| [recall-pipeline.md](recall-pipeline.md) | How hybrid recall actually works today + the fixes that shipped + what's still open |
+| [connectors.md](connectors.md) | Pointer to the full connector decision-doc + one-para state |
+| [deploy-topology.md](deploy-topology.md) | Containers, images, git remotes, how to deploy/rollback |
+
+Standing rules (from the user, do not violate):
+- **No patchwork, no rebuild** — production-level upgrades only; reuse over rebuild.
+- **Test what actually works first** before building anything.
+- **Never spoil** working chat / recall / ingestion. Keep FE-facing API endpoints unchanged.
+- **LLM providers: Cerebras or OpenRouter ONLY** (no Groq/llama — those are legacy, being removed).
+- Push verified work to `singulance-main` (backend) / `main` (FE). No overwrites, no stale codes.
+- Recall is for **millions of docs, enterprise scale** — right context, low latency, high accuracy.

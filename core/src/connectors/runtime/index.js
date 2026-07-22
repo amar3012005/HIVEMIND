@@ -16,6 +16,8 @@ import { makePolicyEngine } from './policy-engine.js';
 import { ApprovalStore } from './approval-store.js';
 import { makeAuditHook, makeMetricsHook } from './runtime-audit.js';
 import { createGmailPlugin } from './plugins/gmail/index.js';
+import { createGoogleDocsPlugin } from './plugins/google_docs/index.js';
+import { createGoogleSheetsPlugin } from './plugins/google_sheets/index.js';
 
 export { ConnectorRegistry } from './connector-registry.js';
 export { ConnectorRuntime } from './connector-runtime.js';
@@ -31,8 +33,10 @@ export { loadRuntimeConfig, isRuntimeAllowed } from './config.js';
 export function buildRegistry(deps = {}) {
   const registry = new ConnectorRegistry();
   registry.register(createGmailPlugin(deps.gmail));
-  // Phase 4 appends: google_docs, google_sheets, google_calendar, slack,
-  // notion, github, linear, remaining Nango, external MCP — one line each.
+  registry.register(createGoogleDocsPlugin(deps.google_docs));
+  registry.register(createGoogleSheetsPlugin(deps.google_sheets));
+  // Phase 4 continues: slack, notion, github, linear, remaining Nango,
+  // external MCP — one registry.register line each (connector-wise scripts).
   return registry;
 }
 

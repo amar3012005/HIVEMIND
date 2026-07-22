@@ -1,7 +1,7 @@
 # Session context — as of 2026-07-22 (late session)
 
 ## What is live right now
-- **core-api image:** `prod-20260722-c96ff778b` (LLM canonical router + update fix) — the
+- **core-api image:** `prod-20260722-2b29cf144` (recall query optimiser + LLM canonical + update fix) — the
   deploy of this tag; prior live was `prod-20260722-dd0fcf9a4` (update fix), before that
   `rmye01367541`. Backend `singulance-main` @ `c96ff778b`.
 - **FE:** `main` @ `1ab5f62`; both `singulancelabs.com` and `next.singulancelabs.com` serve it.

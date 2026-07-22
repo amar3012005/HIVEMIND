@@ -57,6 +57,27 @@
   (default OFF, timeline-exempt). A/B showed no rank win + added latency → left OFF. Don't
   turn it on without a fresh A/B.
 
+## Query optimisation (chat → recall) — SHIPPED 2026-07-22 (2b29cf144)
+Chat used to SEARCH memory with the raw conversational message: `gatherEvidence`
+led the recall packet with `plan.user_message` (joined onto sub_queries via
+`'\nRelated focus: '`), so recall ran on stopword-laden text and — for non-English
+input — a query in a language the store isn't in. Both tank retrieval.
+- `optimizeRecallQueries` (react-agent-v2.js) rewrites the message into 1-3 short
+  English keyword queries (entity + attribute), translating non-English input,
+  and sets `plan.query_canonical_en`. The main recall packet AND the escalation
+  path now lead with `query_canonical_en` instead of `user_message`. The answer
+  LLM still receives the user's ORIGINAL wording.
+- Gated to blended-recall turns only — dedicated lanes (aggregate / connector_read
+  / relation_between / profile) skip it (they run no sub_query recall; running it
+  broke the "aggregate = one parser call" contract test → 21/21 restored).
+- Filename queries (dot-extension) are preserved for the tag exact-match path.
+- Deterministic entity+keyword fallback if the rewrite call fails.
+- Verified live: "when is the launch day for solvis pia?" → searches "Solvis PIA" /
+  "Solvis PIA launch date"; "was ist der Umsatz von Solvis?" → "Solvis" / "Solvis revenue".
+- COST: +1 fast LLM call (canonical gpt-oss-120b, reasoning_effort low) per blended
+  recall turn. Note `plan.query_canonical_en` was a pre-existing but never-populated
+  field — this finally wires it.
+
 ## When you touch recall
 - `hivemind_recall_bugs` + `hivemind_why_code` FIRST.
 - Never report green without a live cold test. Match on normalized whitespace, not literal spaces.

@@ -448,6 +448,49 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   return { plan, usage };
 }
 
+// ── Query optimisation ─────────────────────────────────────────────────────
+// Recall ranks best on SHORT, ENGLISH, keyword queries (entity + attribute).
+// The raw chat message is conversational ("when is the launch day for solvis
+// pia?") and may be non-English ("was ist der Umsatz von Solvis?") — both hurt
+// retrieval: stopwords/question-words dilute the embedding, and a foreign-
+// language query barely overlaps English-stored memory. This rewrites the
+// recall queries into optimised form right before recall fires, so the SEARCH
+// uses the optimised version instead of the raw prompt (the answer LLM still
+// sees the user's original wording). Deterministic fallback keeps it safe if
+// the tiny rewrite call fails — recall never runs on nothing.
+const _QOPT_STOP = new Set(['what','whats','when','where','who','whom','which','why','how','is','are','was','were','the','a','an','of','for','to','do','does','did','tell','me','about','please','can','you','our','my','we','us','on','in','at','and','ist','der','die','das','von','und','wie','wann','wo','wer','warum','was','ein','eine','mir','uns','über','ich']);
+function _deterministicOptimize(message, plan) {
+  const ents = Array.isArray(plan?.named_entities) ? plan.named_entities.filter(e => typeof e === 'string' && e.trim()) : [];
+  const keywords = String(message || '')
+    .replace(/[?!.,;:]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w && !_QOPT_STOP.has(w.toLowerCase()));
+  const base = [...new Set([...ents, ...keywords])].join(' ').trim();
+  const out = [];
+  if (ents.length) out.push(ents.join(' '));            // broadest entity-only query
+  if (base && base !== out[0]) out.push(base);          // entity + attribute keywords
+  return out.length ? out.slice(0, 3) : [String(message || '').trim()].filter(Boolean);
+}
+
+async function optimizeRecallQueries({ message, plan, model, apiKey, signal }) {
+  const fallback = _deterministicOptimize(message, plan);
+  try {
+    const { parsed } = await callJsonLLM({
+      messages: [
+        { role: 'system', content: 'You rewrite a user message into search queries for an ENGLISH memory store. Output STRICT JSON {"queries":[...]} with 1-3 queries. Rules: ALWAYS English (translate any other language, including technical nouns); DROP question words and filler ("when is", "what is the", "tell me about"); each query = the entity/proper-noun + the specific attribute asked; 2-6 words; no punctuation; broadest entity-only query first. Examples: "when is the launch day for solvis pia?" -> {"queries":["Solvis PIA","Solvis PIA launch date"]}; "was ist der Umsatz von Solvis 2021?" -> {"queries":["Solvis","Solvis revenue 2021"]}.' },
+        { role: 'user', content: String(message || '').slice(0, 800) },
+      ],
+      model, apiKey, maxTokens: 160, temperature: 0, signal,
+    });
+    const qs = Array.isArray(parsed?.queries)
+      ? parsed.queries.filter(q => typeof q === 'string' && q.trim()).map(q => q.trim().slice(0, 120))
+      : [];
+    return qs.length ? [...new Set(qs)].slice(0, 3) : fallback;
+  } catch {
+    return fallback; // never strand recall on a rewrite failure
+  }
+}
+
 // ── STEP 2 (ALT) — Tool-decision router (CHAT_ROUTER=tool) ──────────────
 // Language-agnostic replacement for the regex gate + the big JSON planStep.
 // ONE cheap LLM call with a TINY tool set decides what to do:
@@ -2400,6 +2443,27 @@ export async function runReactAgentV2({
         trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
       };
+    }
+
+    // STEP 2.5 — Optimise the recall queries. The chat SEARCHES with an
+    // optimised (short, English, keyword) query instead of the raw prompt so
+    // retrieval hit-rate is maximised; the answer LLM still sees the original
+    // wording. Only when recall will actually run (sub_queries present).
+    if (Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+      try {
+        const optimized = await optimizeRecallQueries({
+          message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
+        });
+        if (optimized.length) {
+          // Lead with the optimised queries, but PRESERVE any planner query that
+          // carries a filename (dot-extension) — recall has a tag-based
+          // exact-match path that needs the literal string, which a keyword
+          // rewrite would drop.
+          const fileQueries = plan.sub_queries.filter((q) => /\.\w{2,4}\b/.test(q));
+          plan.sub_queries = [...new Set([...optimized, ...fileQueries])].slice(0, 3);
+          onEvent?.({ type: 'plan', routed: 'query_optimized', queries: plan.sub_queries });
+        }
+      } catch { /* keep planner queries on any failure */ }
     }
 
     // STEP 3 — Evidence

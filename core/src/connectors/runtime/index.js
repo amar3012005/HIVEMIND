@@ -18,6 +18,7 @@ import { makeAuditHook, makeMetricsHook } from './runtime-audit.js';
 import { createGmailPlugin } from './plugins/gmail/index.js';
 import { createGoogleDocsPlugin } from './plugins/google_docs/index.js';
 import { createGoogleSheetsPlugin } from './plugins/google_sheets/index.js';
+import { createSlackPlugin } from './plugins/slack/index.js';
 
 export { ConnectorRegistry } from './connector-registry.js';
 export { ConnectorRuntime } from './connector-runtime.js';
@@ -35,8 +36,10 @@ export function buildRegistry(deps = {}) {
   registry.register(createGmailPlugin(deps.gmail));
   registry.register(createGoogleDocsPlugin(deps.google_docs));
   registry.register(createGoogleSheetsPlugin(deps.google_sheets));
-  // Phase 4 continues: slack, notion, github, linear, remaining Nango,
-  // external MCP — one registry.register line each (connector-wise scripts).
+  registry.register(createSlackPlugin(deps.slack));
+  // notion / github / linear: registered at cutover from a LIVE MCP inspect
+  // (their tool schemas are discovered from the external MCP servers, not
+  // hardcoded here). The McpBackedPlugin mechanism they use is unit-verified.
   return registry;
 }
 

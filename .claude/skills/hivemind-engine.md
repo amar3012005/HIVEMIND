@@ -145,6 +145,30 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ---
 
+## Connector Runtime V1 (canonical connector toolkit — plan in docs/connector-runtime/)
+
+One canonical runtime is the single authority for every connector call across
+Chat / HyperAgents / TARA / sync. Built phase-by-phase; **additive + flag-gated**
+(default off) so it never disturbs the V5 ingestion/recall/chat stack.
+
+**Code (`core/src/connectors/runtime/`, connector-wise — NOT a monolith):**
+- `contracts.js` (validators, `TOOL_NAME_RE` = `<connector>__<operation>`), `errors.js` (typed → result status, `classifyError` HTTP-status-based, `redactSecrets`), `connector-plugin.js`, `connector-registry.js` (one catalog + inbound legacy aliases), `connector-runtime.js` (18-step pipeline; `approvalOwnedBySurface` skips gateWrite when a surface's own middleware owns approval), `config.js` (`CONNECTOR_RUNTIME_*` flags), `capability-token.js` (Ed25519 5-min, Redis JTI), `mcp-gateway.js` (JSON-RPC, proto **2025-11-25**), `mcp-routes.js`, `input-validator.js` (ajv), `policy-engine.js`, `approval-store.js` + `approval-hash.js` (reuse `pending_writes` + draft-approval formulas verbatim), `runtime-audit.js`.
+- `plugins/`: `gmail/`, `google_docs/`, `google_sheets/` (wrap legacy `runGoogleTool` via `google-base.js`), `slack/` + `mcp-backed-base.js` (wrap `MCPIngestionService.executeTool`). notion/github/linear = live MCP inspect at their cutover (never hardcode dynamic schemas).
+- Chat adapter: `core/src/agent/runtime-toolkit-adapter.js` (in-process, preserves `markGroupExternal` + `ToolResponse` + draft-approval). HyperAgents adapter: `employees-service/src/hivemind_employees/connectors/{runtime_client,mcp_projection}.py` (native `HttpStatelessClient` + `register_mcp_client` — NO per-provider Python; AgentScope 1.0.21 already has native MCP, the plan's 2.x fear was void).
+- server.js mount: one flag-gated block after `pathname` → `/api/connectors/runtime/capabilities` + `/mcp/connectors/:id`.
+
+**Flags (per-surface + per-connector; all default off):** `CONNECTOR_RUNTIME_ENABLED` (master), `_CHAT`, `_HYPER`, `_TARA`, `_MCP`, `_SYNC`, `_CONNECTORS` (allow-list). Wiring is **per-connector fallback everywhere**: runtime handles connectors it knows; the rest keep the legacy path (never drop a room/chat connector).
+
+**Tests:** 77 unit/wire (P2 21, P3 13, P4 6+5, P5 14+10, HTTP-wire 3, chat-adapter 5) + Phase-1 AgentScope spike 8/8 in `hm-employees`. Run in-container: `docker cp` the runtime dir + test into `hm-core:/app`, `node --test`, then rm.
+
+**LIVE state (prod, direct-docker-build deploy — user authorized bypassing quick-deploy):** gateway + HyperAgents + Chat flags ON, verified live (capability→initialize→tools/list→tools/call; HyperAgents `register_mcp_client` gmail(5)+gdocs(2); chat/recall regression-green). Deploy = build `hivemind/core-api:<VERSION>` from v5-canonical `-f Dockerfile.production`, bump `VERSION` in `/root/hivemind/.env`, `docker compose … up -d --no-deps --no-build core`. Employees similarly (`./employees-service` context, VERSION-tagged). Rollback: VERSION→`prod-20260722-6339cc321` or set the flag false.
+
+**Remaining:** TARA (voice-safe MCP group via gateway — same pattern as HyperAgents), sync (`plugin.sync()` + Postgres `ConnectorSyncJob`, fold the file-backed `MCPConnectorJobStore`), P11 legacy removal. notion/github/linear runtime plugins (live-inspect). Full connected-org Chat draft-approval canary (Solvis test org has no connected connectors).
+
+**Gotchas:** AgentScope has native MCP in 1.0.21 (no per-provider wrappers). Chat writes are gated by draft-approval middleware — the runtime must NOT double-gate (`approvalOwnedBySurface:true`). Slack chat stays native (connection-source mismatch: platformIntegration vs nango). Migration dir names containing `api_key` hit `.gitignore *api_key*` — rename. A giant source file can read as binary to grep (NUL bytes) — use `grep -a`.
+
+---
+
 ## LEARNINGS LEDGER (append-only — newest first)
 
 ### 2026-07-22b — D5 type-aware recall live (release prod-20260722-abf1dfb87; singulance-main c6bf8b5f3)

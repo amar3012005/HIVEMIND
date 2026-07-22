@@ -22747,6 +22747,28 @@ if (shouldStartHttpServer()) {
 `);
 
   ensureQdrantSearchIndexes();
+
+  // Connector Runtime durable-sync worker loop (Phase 10). Gated by
+  // CONNECTOR_RUNTIME_SYNC (default OFF → inert). Leases + drains one
+  // ConnectorSyncJob batch per tick via the runtime's drainSyncOnce, which runs
+  // plugin.sync() → canonical ingestSource. try/catch so a sync error never
+  // touches the request path. Closes the "drainSyncOnce had no caller" gap.
+  if (process.env.CONNECTOR_RUNTIME_ENABLED === 'true' && process.env.CONNECTOR_RUNTIME_SYNC === 'true') {
+    const _syncEveryMs = Math.max(5000, Number(process.env.CONNECTOR_SYNC_INTERVAL_MS || 30000));
+    const _syncLease = `core-${process.pid}`;
+    let _syncBusy = false;
+    setInterval(async () => {
+      if (_syncBusy) return; // no overlap — a long batch skips the next tick
+      _syncBusy = true;
+      try {
+        const { getConnectorRuntime } = await import('./connectors/runtime/index.js');
+        await getConnectorRuntime({ db: prisma, prisma }).drainSyncOnce(_syncLease);
+      } catch (e) {
+        console.warn('[connector-sync] drain tick failed:', e?.message?.slice(0, 160));
+      } finally { _syncBusy = false; }
+    }, _syncEveryMs).unref();
+    console.log(`[connector-sync] durable-sync worker mounted (every ${_syncEveryMs}ms)`);
+  }
   });
 } else {
   console.log(`[runtime] HTTP server disabled for role=${RUNTIME_ROLE}`);

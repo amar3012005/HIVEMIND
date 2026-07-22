@@ -2355,6 +2355,17 @@ Every item must include a non-empty content field and one or more valid support_
       skipPredictCalibrate: envelope.metadata?.skipPredictCalibrate === true || undefined,
       skipProcessing: envelope.metadata?.skipProcessing === true || undefined,
       smartIngest: envelope.metadata?.smartIngest === false ? false : undefined,
+      // V5: pure-insert flags — forwarded so a caller can request the engine's
+      // "nothing to serialize" fast path (graph-engine _pureInsert). Together with
+      // skipPredictCalibrate + smartIngest:false these skip contradiction detection,
+      // the legacy relationship classifier, and the per-user advisory lock, so
+      // verbatim snapshots (e.g. meeting sections) are NOT mangled by post-commit
+      // dedup/supersede under concurrency. Entity linking (defer_entity_linking-gated)
+      // is untouched -> entities + typed graph edges still land. Undefined for every
+      // caller that does not set them -> no behavior change for existing paths.
+      skip_contradiction_detection: envelope.metadata?.skip_contradiction_detection === true || undefined,
+      skip_relationship_classification: envelope.metadata?.skip_relationship_classification === true || undefined,
+      skipAdvisoryLock: envelope.metadata?.skipAdvisoryLock === true || undefined,
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)

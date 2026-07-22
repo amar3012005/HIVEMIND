@@ -693,6 +693,45 @@ const OP_STAGE = [
 // Exported for the characterization test (gather-evidence-characterization.test.js),
 // the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
 // fake dispatcher — no real recall/LLM. Not part of the public module surface.
+// ── Query optimisation ─────────────────────────────────────────────────────
+// Recall ranks best on SHORT, ENGLISH, keyword queries (entity + attribute).
+// The raw chat message is conversational ("when is the launch day for solvis
+// pia?") and may be non-English ("was ist der Umsatz von Solvis?") — both hurt
+// retrieval: stopwords/question-words dilute the embedding and a foreign query
+// barely overlaps English-stored memory. optimizeRecallQueries rewrites the
+// message into optimised queries used AS the recall search (the answer LLM
+// still sees the user's original wording). Populates plan.query_canonical_en,
+// which gatherEvidence then leads the recall packet with instead of the raw
+// message. Deterministic fallback keeps recall from ever running on nothing.
+const _QOPT_STOP = new Set(['what','whats','when','where','who','whom','which','why','how','is','are','was','were','the','a','an','of','for','to','do','does','did','tell','me','about','please','can','you','our','my','we','us','on','in','at','and','ist','der','die','das','von','und','wie','wann','wo','wer','warum','ein','eine','mir','uns','über','ich']);
+function _deterministicOptimize(message, plan) {
+  const ents = Array.isArray(plan?.named_entities) ? plan.named_entities.filter((e) => typeof e === 'string' && e.trim()) : [];
+  const keywords = String(message || '').replace(/[?!.,;:]/g, ' ').split(/\s+/).filter((w) => w && !_QOPT_STOP.has(w.toLowerCase()));
+  const out = [];
+  if (ents.length) out.push(ents.join(' '));
+  const base = [...new Set([...ents, ...keywords])].join(' ').trim();
+  if (base && base !== out[0]) out.push(base);
+  return out.length ? out.slice(0, 3) : [String(message || '').trim()].filter(Boolean);
+}
+async function optimizeRecallQueries({ message, plan, model, apiKey, signal }) {
+  const fallback = _deterministicOptimize(message, plan);
+  try {
+    const { parsed } = await callJsonLLM({
+      messages: [
+        { role: 'system', content: 'You rewrite a user message into search queries for an ENGLISH memory store. Output STRICT JSON {"queries":[...]} with 1-3 queries. Rules: ALWAYS English (translate any other language, including technical nouns); DROP question words and filler ("when is", "what is the", "tell me about"); each query = the entity/proper-noun + the specific attribute asked; 2-6 words; no punctuation; broadest entity-only query first. Examples: "when is the launch day for solvis pia?" -> {"queries":["Solvis PIA","Solvis PIA launch date"]}; "was ist der Umsatz von Solvis 2021?" -> {"queries":["Solvis","Solvis revenue 2021"]}.' },
+        { role: 'user', content: String(message || '').slice(0, 800) },
+      ],
+      model, apiKey, maxTokens: 160, temperature: 0, signal, reasoningEffort: 'low',
+    });
+    const qs = Array.isArray(parsed?.queries)
+      ? parsed.queries.filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim().slice(0, 120))
+      : [];
+    return qs.length ? [...new Set(qs)].slice(0, 3) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const steps = [];
   const bus = createEvidenceBus();
@@ -756,8 +795,11 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     : recallMode === 'explain' || recallMode === 'insight'
       ? 12
       : 8;
+  // Lead with the optimised canonical-English query (set upstream by
+  // optimizeRecallQueries) instead of the raw conversational message, so the
+  // SEARCH uses the optimised version. Falls back to user_message if unset.
   const plannedQueries = [...new Set([
-    plan.user_message,
+    plan.query_canonical_en || plan.user_message,
     ...(Array.isArray(plan.sub_queries) ? plan.sub_queries : []),
   ].filter((query) => typeof query === 'string' && query.trim()).map((query) => query.trim()))].slice(0, 3);
   // Compile the planner's decomposition into one deterministic recall packet.
@@ -809,7 +851,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     const escalation = chooseRecallEscalation({
       plan,
       coverage,
-      query: plan.user_message || recallQueries[0],
+      query: plan.query_canonical_en || plan.user_message || recallQueries[0],
     });
     if (escalation) {
       escalationCount = 1;
@@ -2390,6 +2432,23 @@ export async function runReactAgentV2({
         trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
       };
+    }
+
+    // STEP 2.5 — Optimise the recall queries: search with a short, English,
+    // keyword query instead of the raw conversational prompt. Only on recall
+    // turns; the answer LLM still receives the user's original message.
+    if (Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+      try {
+        const optimized = await optimizeRecallQueries({
+          message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
+        });
+        if (optimized.length) {
+          plan.query_canonical_en = optimized[0];
+          const fileQueries = plan.sub_queries.filter((q) => typeof q === 'string' && /\.\w{2,4}\b/.test(q));
+          plan.sub_queries = [...new Set([...optimized, ...fileQueries])].slice(0, 3);
+          onEvent?.({ type: 'query_optimized', queries: plan.sub_queries });
+        }
+      } catch { /* keep planner queries on any failure */ }
     }
 
     // STEP 3 — Evidence

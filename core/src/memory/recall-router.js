@@ -426,6 +426,70 @@ function withTimeout(promise, ms, fallback) {
   });
 }
 
+// ── RECALL_UNIFIED_V2 — one relevance authority over memories + evidence ──
+// The inventory proved the old tail computed ~20 boosts + RRF + MMR then threw
+// them away (ResultReranker overwrote .score, RRF wrote a dead _rank_score).
+// V2 replaces that churn with a single coherent stage: RRF-fuse the two ranked
+// lists (rank-only → memory & evidence become COMPARABLE, the fix for "only
+// memories reach top-5"), cross-encoder rerank the unified window (the relevance
+// authority, wide 0-1 scale), then apply a SMALL set of SURVIVING amplitude
+// boosts (>1) that actually matter for right-context — recency/event-time
+// (temporal), working-set (chat continuity), synthesis-canonical — minus
+// correctness penalties (superseded/contradicted). Comparable unified scores are
+// written back so the agent's synthesis picks across memory+evidence fairly.
+// Flag-gated (default OFF). Backend-agnostic: operates on candidates, so it
+// works identically for central Qdrant/PG and for `.amr` (dense + agent-PG lexical).
+const V2_RRF_K = 60;
+async function deliverUnifiedV2({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs, structuredIntent }) {
+  const tag = (x, kind, rank, title, content) => ({
+    _row: x, _kind: kind, _rrf: 1 / (V2_RRF_K + rank + 1), _title: title || '', _content: content || '',
+  });
+  const mems = memories.map((m, i) => tag(m, 'memory', i, m.title, typeof m.content === 'string' ? m.content : ''));
+  const evs = evidence.map((e, i) => tag(e, 'evidence', i, e.document?.title || e.document_title || '', e.content || e.snippet || ''));
+  const pool = [...mems, ...evs].sort((a, b) => b._rrf - a._rrf).slice(0, 24);
+  if (pool.length <= 1) return null;
+
+  // Cross-encoder over the unified window (graceful: keep RRF order on failure).
+  let ordered = pool;
+  try {
+    const rr = await withTimeout(
+      rerank(query, pool.map((p) => ({ title: p._title, content: p._content, _u: p })), { topN: pool.length }),
+      Math.min(Math.max(budgetMs || 0, 300), 1600),
+      null,
+    );
+    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
+      ordered = rr.map((x) => ({ ...x._u, _rel: x.rerank_score != null ? x.rerank_score : 0 }));
+    } else {
+      ordered = pool.map((p) => ({ ...p, _rel: p._rrf }));
+    }
+  } catch { ordered = pool.map((p) => ({ ...p, _rel: p._rrf })); }
+
+  // Surviving amplitude (>1) from fields present on the candidate.
+  const nowT = Date.now();
+  const amp = (p) => {
+    const x = p._row || {}; const tags = Array.isArray(x.tags) ? x.tags : [];
+    let a = 1;
+    if (tags.includes('pinned')) a *= 2.0; else if (tags.some((t) => typeof t === 'string' && t.startsWith('thread:'))) a *= 1.25;
+    if (x.memory_type === 'synthesis' && x.synthesis_cluster_hash) a *= 1.3;
+    // event/temporal recency: a dated memory whose event is near-future/recent
+    const evd = Array.isArray(x.event_dates) && x.event_dates.length ? x.event_dates[0] : (x.valid_from || x.document_date);
+    if (evd) { const dt = new Date(evd).getTime(); if (Number.isFinite(dt) && Math.abs(dt - nowT) < 1000 * 60 * 60 * 24 * 120) a *= 1.4; }
+    if (x.is_latest === false || x.supersedes_id) a *= 0.5;      // superseded
+    if (x.memory_type === 'summary' && p._kind === 'memory') a *= 0.85; // weak summaries
+    return a;
+  };
+  const scored = ordered
+    .map((p) => ({ ...p, _unified: (Number(p._rel) || 0) * amp(p) }))
+    .sort((a, b) => b._unified - a._unified);
+
+  const outMem = []; const outEv = [];
+  for (const p of scored) {
+    const row = { ...(p._row || {}), score: Number((p._unified).toFixed(4)) };
+    if (p._kind === 'evidence') outEv.push(row); else outMem.push(row);
+  }
+  return { memories: outMem.slice(0, deliverN), evidence: outEv.slice(0, evidenceN) };
+}
+
 // ── Hop 1 — Memory layer ────────────────────────────────────────────────────
 
 async function hop1Memory({ store, query, options, ctx }) {
@@ -1574,6 +1638,28 @@ export class RecallRouter {
     }
     if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
 
+    // RECALL_UNIFIED_V2: replace the delivered memory/evidence order with one
+    // coherent relevance authority (RRF-fuse → cross-encoder → surviving
+    // amplitude) over BOTH sources, so evidence competes fairly and boosts
+    // survive. Default OFF → byte-identical delivery. Falls back to the existing
+    // order on any failure/timeout.
+    let finalEvidence = evidenceWithLineage;
+    if (process.env.RECALL_UNIFIED_V2 === 'true' && recallPlan.operation !== 'timeline') {
+      const v2 = await deliverUnifiedV2({
+        query,
+        memories: rankedMemories,          // wide pre-slice pool (rerank window)
+        evidence: evidenceWithLineage,
+        deliverN,
+        evidenceN: HOP2_DOC_LIMIT,
+        budgetMs: remainingBudget(),
+        structuredIntent: options.structured_intent === true,
+      }).catch(() => null);
+      if (v2 && Array.isArray(v2.memories)) {
+        deliverMemories = dedupeMemoriesById(v2.memories).slice(0, deliverN);
+        finalEvidence = v2.evidence || evidenceWithLineage;
+      }
+    }
+
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
       orgId: ctx.orgId, userId: ctx.userId, query,
@@ -1610,7 +1696,7 @@ export class RecallRouter {
         // Phase B tier surfaced for hydration tap + UI ("hot"/"thin"/"live")
         ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
       })),
-      evidence: evidenceWithLineage.slice(0, HOP2_DOC_LIMIT).map((e) => ({
+      evidence: finalEvidence.slice(0, HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,
         document_id:      e.documentId,
         document_title:   e.document?.title || null,

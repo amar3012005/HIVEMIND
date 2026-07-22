@@ -1127,7 +1127,10 @@ export class PrismaGraphStore {
 
           // Trigram lane fragments (flag-gated; empty when _trgmForms=[] → query
           // identical to before). Reuses the SAME scope params above → tenant-safe.
-          const _txt = "(COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))";
+          // title-first to EXACTLY match idx_memories_trgm_title_content's
+          // indexed expression (title || ' ' || content) → the pg_trgm GIN index
+          // is used instead of a seq scan (critical at millions of rows).
+          const _txt = "(COALESCE(m.title, '') || ' ' || COALESCE(m.content, ''))";
           let trgmWhere = '';
           let trgmScoreExpr = '0';
           if (_trgmForms.length) {
@@ -1155,13 +1158,13 @@ export class PrismaGraphStore {
                    m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
-                   GREATEST(ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
-                           to_tsquery('english', $1)), 0) + (${trgmScoreExpr}) as fts_score
+                   GREATEST(ts_rank(to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, '')),
+                           to_tsquery('simple', $1)), 0) + (${trgmScoreExpr}) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
-              AND (to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
-                  @@ to_tsquery('english', $1)${trgmWhere})
+              AND (to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, ''))
+                  @@ to_tsquery('simple', $1)${trgmWhere})
             ORDER BY fts_score DESC
             LIMIT $2
           `, ...ftsParams);

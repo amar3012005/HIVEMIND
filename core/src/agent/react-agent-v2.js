@@ -901,11 +901,6 @@ CORE RULES:
    Only say that a matching source is absent when the EVIDENCE / LIVE /
    DOC blocks are truly empty for that question. Every sentence in the
    synthesis still needs a valid citation.
-   **Direct-answer memories (when/date/who/how-many/what-is):** if a memory's
-   content directly contains the value the user asked for — a launch or
-   effective DATE, a name, a number, a definition — STATE that value plainly
-   and cite that memory's ID. NEVER return "nothing directly answers" while a
-   memory whose content holds the asked fact is present in EVIDENCE.
    **Hard rule for connector queries (slack/notion/gmail/github/linear):**
    if the user asked about that connector AND the EVIDENCE block
    contains AT LEAST ONE memory carrying the connector tag (slack,

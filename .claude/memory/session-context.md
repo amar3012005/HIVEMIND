@@ -1,9 +1,20 @@
-# Session context — as of 2026-07-22
+# Session context — as of 2026-07-22 (late session)
 
 ## What is live right now
-- **core-api image:** `prod-20260722-rmye01367541` (healthy). Backend HEAD on `singulance-main` @ `e01367541`.
-- **FE:** `main` @ `1ab5f62`; both `singulancelabs.com` and `next.singulancelabs.com` serve it (recreated).
+- **core-api image:** `prod-20260722-c96ff778b` (LLM canonical router + update fix) — the
+  deploy of this tag; prior live was `prod-20260722-dd0fcf9a4` (update fix), before that
+  `rmye01367541`. Backend `singulance-main` @ `c96ff778b`.
+- **FE:** `main` @ `1ab5f62`; both `singulancelabs.com` and `next.singulancelabs.com` serve it.
 - Containers healthy: `hm-core`, `hm-fe`, `hivemind-next-frontend-1`, `tara-deepgram`, `hm-employees`, `hm-caddy`, `hm-control`.
+- **Stable rollback snapshots** for every container at `:stable-20260722` — see [rollback-manifest.md](rollback-manifest.md).
+
+## Two fixes shipped this session (on top of the docs/connectors work)
+1. **`hivemind_update_memory` resilience** (`dd0fcf9a4`): the claude.ai MCP update tool was a
+   blunt PUT-by-id that threw `operation_failed` (unlogged) on a missing/stale/non-owned id.
+   Now resolves the target by recalling the caller's own memories, persists `title`, and logs
+   every MCP tool failure. Retry "change launch day to same day next year" — it resolves + edits now.
+2. **Canonical LLM router** (`c96ff778b`): Cerebras→OpenRouter, single `gpt-oss-120b`, no
+   Groq/llama, one source of truth (`core/src/llm/llm-config.js`). See [llm-provider-config.md](llm-provider-config.md).
 
 ## Recall / chat / ingestion — state
 Working. Chat answers correctly across fact/source/full/compare/relation/temporal/profile/save/update

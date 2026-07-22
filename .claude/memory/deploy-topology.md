@@ -19,11 +19,24 @@
 
 ## Deploy (RISK tier — human gate, rollback tag first)
 - The current path is a **baked-image compose recreate** (NOT `quick-deploy.sh`): build the
-  core-api image tagged `prod-<date>-<sha>`, then `docker compose … up -d` recreate hm-core.
-- Before deploy: write a rollback marker (the `.last-*-rollback` files in repo root are this
-  pattern) with the last-known-good image tag so a bad deploy can be reverted fast.
-- After deploy: live cold verification (the `hivemind-prod-verifier` agent / `deploy-verify`
-  workflow) — advance gate-by-gate, RED → rollback to last-known-good.
+  core-api image `hivemind/core-api:prod-<date>-<sha>` from a **singulance-main checkout**
+  (a git worktree — NOT the `feat/mneme-foundation` working dir, which is diverged and lacks
+  the recall/timeline prod fixes), bump `VERSION` in `/root/hivemind/.env`, then recreate.
+- **Build:** `docker build -f Dockerfile.production --build-arg CACHE_BUST=$(date +%s) -t hivemind/core-api:<tag> <worktree>`
+  (Dockerfile has a `CACHE_BUST` ARG before the src COPY — pass it or the src layer is stale).
+- **Recreate — CRITICAL gotcha:** `docker compose -f infra/docker-compose.hetzner.yml up -d core`
+  ALONE FAILS with `required variable BROKER_DATABASE_URL is missing` (+ blank-string warnings
+  for POSTGRES_PASSWORD/OPENROUTER_API_KEY/…). Compose resolves `${VAR}` **interpolation** from
+  its project dir (defaults to `infra/`, which has no `.env`), NOT from the per-service
+  `env_file: [../.env]` (that only sets in-container env). **Always pass `--env-file` explicitly**
+  and use the SERVICE name `core` (not container name `hm-core`):
+  ```bash
+  docker compose --env-file /root/hivemind/.env -f infra/docker-compose.hetzner.yml up -d core
+  ```
+- Before deploy: write a rollback marker (`.last-core-*-rollback` files) with the last-known-good
+  image tag. Stable image snapshots for ALL containers live at `:stable-20260722` — see
+  [rollback-manifest.md](rollback-manifest.md).
+- After deploy: verify `docker logs hm-core --since 2m | grep "Recall warm-up complete"` + healthy.
 
 ## FE → core wiring (verified 2026-07-22)
 FE (browser) → Caddy → `hm-control` (`HIVEMIND_CORE_URL=http://hm-core:3000`) → `hm-core`.

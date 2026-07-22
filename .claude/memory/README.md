@@ -10,7 +10,9 @@ complements (does not replace) HIVEMIND recall and the auto-memory index at
 | [session-context.md](session-context.md) | Current state of recall, chat, ingestion, connectors + deploy topology + Solvis test data |
 | [recall-pipeline.md](recall-pipeline.md) | How hybrid recall actually works today + the fixes that shipped + what's still open |
 | [connectors.md](connectors.md) | Pointer to the full connector decision-doc + one-para state |
-| [deploy-topology.md](deploy-topology.md) | Containers, images, git remotes, how to deploy/rollback |
+| [deploy-topology.md](deploy-topology.md) | Containers, images, git remotes, how to deploy/rollback (incl. the compose `--env-file` gotcha) |
+| [llm-provider-config.md](llm-provider-config.md) | THE canonical LLM config — Cerebras→OpenRouter, gpt-oss-120b, no Groq/llama, the chokepoint |
+| [rollback-manifest.md](rollback-manifest.md) | Stable `:stable-20260722` image snapshots for every container + how to roll back |
 
 Standing rules (from the user, do not violate):
 - **No patchwork, no rebuild** — production-level upgrades only; reuse over rebuild.

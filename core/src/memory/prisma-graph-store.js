@@ -1131,8 +1131,17 @@ export class PrismaGraphStore {
           let trgmWhere = '';
           let trgmScoreExpr = '0';
           if (_trgmForms.length) {
+            // WIDE retrieval (rosemary): explicit word_similarity > 0.4 instead of
+            // the `<%` operator's default 0.6 threshold. A collapsed query form
+            // like "solvispia" scores ~0.6 against the SPACED memory "Solvis PIA"
+            // — right at the default cutoff, so verbose phrasings ("when is the
+            // LAUNCHDAY for solvis pia", where FTS-AND already fails on the
+            // compound token) missed it entirely. 0.4 makes the collapsed-name
+            // lane reliably RETRIEVE the memory; the narrow scoring below
+            // (rare-token boost + rerank + importance/RRF) ranks it. Org-scoped
+            // WHERE already bounds the row set, so seq word_similarity is cheap.
             const ors = []; const sims = [];
-            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`${p} <% ${_txt}`); sims.push(`word_similarity(${p}, ${_txt})`); }
+            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`word_similarity(${p}, ${_txt}) > 0.4`); sims.push(`word_similarity(${p}, ${_txt})`); }
             trgmWhere = ` OR (${ors.join(' OR ')})`;
             trgmScoreExpr = `GREATEST(${sims.join(', ')})`;
           }

@@ -147,6 +147,21 @@ docker run --rm --network hivemind_default --env-file /root/hivemind/.env \
 
 ## LEARNINGS LEDGER (append-only — newest first)
 
+### 2026-07-22b — D5 type-aware recall live (release prod-20260722-abf1dfb87; singulance-main c6bf8b5f3)
+
+Planner-signalled `answer_type` (nullable enum on hivemind_context, strict mode ⇒
+always emitted) + flag-gated (`V5_TYPE_AWARE_RECALL`) type-scoped candidate lane in
+recall-router + soft boost. KEY GOTCHAS: (1) `validateAndSanitize` in tool-registry
+STRIPS any arg not declared in TOOL_SCHEMAS — a new planner→recall field MUST be
+declared in the hivemind_recall schema or it silently vanishes; (2) a bare
+`nullable('string')` field gets null from Cerebras — use a nullable ENUM + an
+ALWAYS-classify system-prompt rule to get reliable emission; (3) `recallPlan.entities
+|| options.named_entities` — empty array is truthy, use `.length` checks; (4) the
+router's store is `this.store`, NOT `this.persistentMemoryStore`. Verified: pricing-
+decision query fixed (decision absent→#1), German classification works, full
+regression green. detectMemoryTypeBoost (English keywords) superseded for these
+intents.
+
 ### 2026-07-22 — meeting typed PartOf section-tree + adaptive synthesis budget (release prod-20260721-ac333045e; singulance-main @ ac333045e; rollback :stable = prod-20260721-933147017)
 
 **Task:** meeting notes made bad memories — chat could not answer section-specific

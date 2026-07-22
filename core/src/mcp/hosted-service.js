@@ -280,6 +280,10 @@ function formatToolContent(data) {
 }
 
 function formatToolError(name, error) {
+  // Loud server-side log so MCP tool failures are diagnosable from container logs.
+  // Previously a thrown tool error surfaced ONLY to the MCP client as a generic
+  // "operation_failed", leaving nothing in `docker logs hm-core` to root-cause from.
+  try { console.warn(`[mcp] tool ${name} failed: ${error?.message || error}`); } catch { /* noop */ }
   return {
     isError: true,
     content: [{
@@ -2988,16 +2992,64 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
       }
 
       case 'hivemind_update_memory': {
-        const updRes = await apiClient.put(`/api/memories/${args.memory_id}`, {
-          title: args.title,
-          content: args.content,
-          tags: args.tags,
-          user_id: userId,
-          org_id: orgId
+        // Only send fields the caller actually provided (an undefined field must
+        // not overwrite the stored value with null on the partial-update schema).
+        const patchFields = {};
+        if (args.title !== undefined) patchFields.title = args.title;
+        if (args.content !== undefined) patchFields.content = args.content;
+        if (args.tags !== undefined) patchFields.tags = args.tags;
+
+        const putTo = (id) => apiClient.put(`/api/memories/${id}`, {
+          ...patchFields, user_id: userId, org_id: orgId,
         });
+
+        // A natural-language edit ("change the launch day to next year") frequently
+        // reaches us with a missing or stale memory_id — the model never had it, or
+        // recall handed back an id the caller can SEE but does not OWN (PUT is
+        // owner-scoped, recall is org/shared-scoped). Instead of throwing a bare
+        // operation_failed, resolve the target by recalling the caller's own
+        // memories with the edit text as the query, then update that.
+        const resolveTargetId = async () => {
+          const q = args.match || args.query || args.content || args.title;
+          if (!q) return null;
+          try {
+            const r = await apiClient.post('/api/recall', {
+              query_context: String(q), max_memories: 5, mode: 'quick',
+            });
+            return (r?.memories || []).find((m) => m && m.id)?.id || null;
+          } catch { return null; }
+        };
+
+        let targetId = args.memory_id || null;
+        let resolvedBy = targetId ? 'id' : null;
+        let updRes = null;
+        if (targetId) {
+          try {
+            updRes = await putTo(targetId);
+          } catch (e) {
+            // 403/404 on the supplied id → not found or not owned; fall through to
+            // resolve-by-search. Any other error is genuine → let it surface + log.
+            if (!/failed with 40[34]/.test(e?.message || '')) throw e;
+            targetId = null;
+          }
+        }
+        if (!updRes) {
+          const resolved = await resolveTargetId();
+          if (!resolved) {
+            return formatToolContent({
+              success: false,
+              error: 'Could not determine which memory to update. Pass memory_id, or describe the memory (its subject) so it can be found among your memories.',
+            });
+          }
+          targetId = resolved;
+          resolvedBy = 'search';
+          updRes = await putTo(targetId); // genuine failure here logs + surfaces
+        }
         return formatToolContent({
           success: updRes?.success !== false,
-          memory: updRes?.memory ? polishMemory(updRes.memory) : undefined
+          resolved_by: resolvedBy,
+          memory_id: targetId,
+          memory: updRes?.memory ? polishMemory(updRes.memory) : undefined,
         });
       }
 

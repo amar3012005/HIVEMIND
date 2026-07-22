@@ -1323,9 +1323,19 @@ Omit slogans, generic descriptions, contact-directory trivia, repeated examples,
 Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
 {"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","support_indices":[0,1]}]}
 Every item must include a non-empty content field and one or more valid support_indices from the supplied candidate list.`;
+    // Model fallback + headroom (rosemary Bug C): the curator previously used a
+    // bare chatCompletion with max_tokens:1400, so a single provider hiccup
+    // (finish=error) or a truncated long-document response (finish=length) dumped
+    // the ENTIRE document to the low-quality salience fallback (importance-sort +
+    // top-N slice, no merge/dedup/rels). Mirror the extractor's hardening: a
+    // cross-family model fallback list + ample tokens. Configurable via
+    // KB_CURATOR_FALLBACK_MODELS (defaults to the extractor's chain).
+    const _curatorFallbacks = (process.env.KB_CURATOR_FALLBACK_MODELS
+      || process.env.KB_UNIFIED_FALLBACK_MODELS
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean);
     try {
-      const parsed = await chatCompletion({
-        model, temperature: 0, max_tokens: 1400, json_mode: true, feature: 'kb-document-curator',
+      const parsed = await chatCompletionWithFallback({
+        models: [model, ..._curatorFallbacks], temperature: 0, max_tokens: 4000, json_mode: true, feature: 'kb-document-curator',
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },

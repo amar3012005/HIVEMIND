@@ -23,7 +23,7 @@ const { scoreAndRank } = scorer;
 const CONFIG = {
   // LLM configuration
   llm: {
-    model: 'llama-3.3-70b-versatile',
+    model: 'cerebras/gpt-oss-120b',
     temperature: 0.3,
     maxTokens: 2048,
     subQueryTemperature: 0.5

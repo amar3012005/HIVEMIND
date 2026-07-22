@@ -41,7 +41,7 @@ import { withGovernanceLock } from '../resident/advisory-lock.js';
 // text writing over already-grounded clusters → cheap model (llama-3.1-8b-instant,
 // ~30-60x cheaper than gpt-oss-120b). Reserve expert models for rare verify steps.
 // SYNTHESIS_MODEL env kept for back-compat override.
-const PRIMARY_SYNTHESIS_MODEL   = process.env.COGNITION_WRITER_MODEL || process.env.SYNTHESIS_MODEL || 'llama-3.1-8b-instant';
+const PRIMARY_SYNTHESIS_MODEL   = process.env.COGNITION_WRITER_MODEL || process.env.SYNTHESIS_MODEL || 'cerebras/gpt-oss-120b';
 // Fallback fires on primary EXCEPTION (gateway down), so escalate to a sturdier model.
 const FALLBACK_SYNTHESIS_MODEL  = process.env.SYNTHESIS_FALLBACK_MODEL || 'openai/gpt-oss-20b';
 

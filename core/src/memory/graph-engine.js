@@ -2554,7 +2554,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // edgeless MCP saves, e.g. the GTM/B&B memory, despite 13 valid
     // candidates). Up to 3 attempts with exponential backoff; only a
     // genuine 4xx (bad request / auth) or exhausted retries gives up.
-    const LINK_MODEL = process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile';
+    const LINK_MODEL = process.env.ENTITY_LINKER_MODEL || 'cerebras/gpt-oss-120b';
     const LINK_TIMEOUT_MS = Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000);
     const LINK_MAX_ATTEMPTS = Number(process.env.ENTITY_LINK_MAX_ATTEMPTS || 3);
     let parsed;

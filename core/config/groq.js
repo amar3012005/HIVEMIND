@@ -53,7 +53,7 @@ export const GROQ_MODELS = {
 export const DEFAULT_CONFIG = {
   apiKey: process.env.GROQ_API_KEY || 'your-groq-api-key-here',
   embeddingModel: process.env.GROQ_EMBEDDING_MODEL || 'nomic-embed-text',
-  inferenceModel: process.env.GROQ_INFERENCE_MODEL || 'llama-3-3-70b-versatile',
+  inferenceModel: process.env.GROQ_INFERENCE_MODEL || 'cerebras/gpt-oss-120b',
   timeout: parseInt(process.env.GROQ_TIMEOUT || '30000', 10),
   maxRetries: parseInt(process.env.GROQ_MAX_RETRIES || '3', 10),
 };

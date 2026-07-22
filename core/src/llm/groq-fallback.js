@@ -25,6 +25,7 @@ import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { readFileSync } from 'fs';
 import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
+import { chatCompletionFetch } from './chat-provider.js';
 
 // Meter an LLM completion against the org's HIVEMIND API key. These helpers turn the already-routed
 // Groq/OpenRouter funnel (groqFetch / memoryChatFetch — used by the memory pipeline + the server's
@@ -229,6 +230,39 @@ export async function groqFetch(url, options = {}, cfg = {}) {
     reqBody = options && options.body ? JSON.parse(options.body) : null;
   } catch {
     reqBody = null; // un-parseable body → cannot build a fallback; behave as plain fetch
+  }
+
+  // Canonical-provider delegation (rosemary Bug D): a caller asking for a
+  // `cerebras/…` or `google/…` model is explicitly requesting the canonical
+  // Cerebras/OpenRouter gateway — route it through chat-provider (Cerebras-first)
+  // and NEVER Groq. This is inert for legacy model ids (which carry no such
+  // prefix) until callsite defaults are migrated, so it adds zero behaviour
+  // change to existing traffic. fetchImpl=_fetch: the cerebras/openrouter URLs
+  // are not api.groq.com, so the global monkeypatch passes them straight through
+  // (no recursion). RESILIENCE: chat-provider's cerebras route has no built-in
+  // failover, but these callsites (situationalizer/entity-linker/cognition) run
+  // on every ingest and previously had OpenRouter failover via this funnel — so
+  // on a Cerebras error we replay to OpenRouter (gpt-oss on openai/*) rather than
+  // let a Cerebras hiccup break ingestion.
+  if (reqBody && typeof reqBody.model === 'string'
+      && (reqBody.model.startsWith('cerebras/') || reqBody.model.startsWith('google/'))) {
+    const _canonModel = reqBody.model;
+    const _streaming = reqBody.stream === true;
+    try {
+      const r = await chatCompletionFetch(_canonModel, options, { fetchImpl: _fetch });
+      if (r && r.ok) return r;
+      if (!_streaming) {
+        const fb = await openrouterReplay({ ...reqBody, model: _canonModel.replace(/^cerebras\//, 'openai/') }, timeoutMs).catch(() => null);
+        if (fb) { logFallback(_canonModel, 'cerebras non-ok → openrouter'); return fb; }
+      }
+      return r;
+    } catch (err) {
+      if (!_streaming) {
+        const fb = await openrouterReplay({ ...reqBody, model: _canonModel.replace(/^cerebras\//, 'openai/') }, timeoutMs).catch(() => null);
+        if (fb) { logFallback(_canonModel, `cerebras error → openrouter (${err && err.message ? err.message : 'err'})`); return fb; }
+      }
+      throw err;
+    }
   }
 
   // A streaming request cannot be faithfully replayed as a buffered fallback, so

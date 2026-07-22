@@ -359,14 +359,26 @@ async function execAggregate(bus, plan, ctx, { beforeDeadline, remaining, startT
   try {
     startTool('hivemind_aggregate_entities', aggregateArgs);
     const aggregateResult = await beforeDeadline(dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx));
-    recordTool(
-      'hivemind_aggregate_entities',
-      aggregateArgs,
-      aggregateResult?.coverage?.complete
-        ? `${aggregateResult.count} distinct ${aggregateResult.entity_kind || plan.aggregate.kind}`
-        : `incomplete aggregate (${aggregateResult?.coverage?.reason || 'unknown'})`,
-      aggregateResult,
-    );
+    // rosemary Root Cause A1: surface the actual entity NAMES to synthesis, not
+    // just a count. The tool already returns entities:[{name,aliases}]; the old
+    // summary dropped them, so "list all X products" answered "12 distinct
+    // products" with no names. recordTool stores only result_summary for
+    // synthesis, so the names must live in the summary string. Bounded to 80
+    // names to stay within the synthesis budget; cutoff marked with '+'.
+    const _kind = aggregateResult?.entity_kind || plan.aggregate.kind;
+    const _names = (aggregateResult?.entities || []).map((e) => e && e.name).filter(Boolean);
+    let _summary;
+    if (_names.length) {
+      const _shown = _names.slice(0, 80).join(', ');
+      const _more = _names.length > 80 ? `, …(+${_names.length - 80} more)` : '';
+      const _plus = aggregateResult?.coverage?.cutoff ? '+' : '';
+      _summary = `${_names.length}${_plus} ${_kind}: ${_shown}${_more}`;
+    } else if (aggregateResult?.coverage?.complete) {
+      _summary = `0 ${_kind} found`;
+    } else {
+      _summary = `incomplete aggregate (${aggregateResult?.coverage?.reason || 'unknown'})`;
+    }
+    recordTool('hivemind_aggregate_entities', aggregateArgs, _summary, aggregateResult);
     return { aggregateResult };
   } catch (error) {
     recordTool('hivemind_aggregate_entities', aggregateArgs, `error: ${error.message}`, null);

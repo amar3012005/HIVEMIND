@@ -1360,7 +1360,7 @@ const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   qdrantClient: null, // Set after qdrantClient init
   llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
   llmApiKey: process.env.GROQ_API_KEY || '',
-  defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  defaultModel: process.env.GROQ_MODEL || 'cerebras/gpt-oss-120b',
 }) : null;
 // TARA Skills store — named prompt presets; select copies prompts into config.
 if (taraHandler) {
@@ -11571,7 +11571,7 @@ exit \$RC
               cluster_min: Number(process.env.SYNTHESIS_CLUSTER_MIN || 4),
               cluster_max: Number(process.env.SYNTHESIS_CLUSTER_MAX || 30),
               drift_threshold: Number(process.env.DRIFT_COMPACT_THRESHOLD || 12),
-              model: process.env.SYNTHESIS_MODEL || 'llama-3.3-70b-versatile',
+              model: process.env.SYNTHESIS_MODEL || 'cerebras/gpt-oss-120b',
               ...st,
               caller_org: callerOrg,
               per_org_recent: perOrg,
@@ -21981,7 +21981,7 @@ ${injectionText}`;
               ];
 
               const modelMap = {
-                'llama-3.3-70b-versatile': 'llama-3.3-70b-versatile',
+                'llama-3.3-70b-versatile': 'cerebras/gpt-oss-120b',
                 'gpt-oss-120b': 'openai/gpt-oss-120b',
                 'gpt-oss-20b': 'openai/gpt-oss-20b',
               };

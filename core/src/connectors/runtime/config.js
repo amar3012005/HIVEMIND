@@ -15,26 +15,32 @@
 
 const truthy = (v) => v === '1' || v === 'true' || v === 'yes' || v === 'on';
 
-function readEnv(name, env) {
+// When an explicit env object is passed (tests, sandboxes), it is AUTHORITATIVE
+// — no silent process.env fallback (which made loadRuntimeConfig({}) inherit
+// ambient CONNECTOR_RUNTIME_* flags). The default caller passes process.env.
+function readEnv(name, env, explicit) {
+  if (explicit) return (env[name] != null ? env[name] : '') || '';
   return (env && env[name] != null ? env[name] : process.env[name]) || '';
 }
 
 export function loadRuntimeConfig(env = process.env) {
-  const connectorsRaw = readEnv('CONNECTOR_RUNTIME_CONNECTORS', env);
+  const explicit = env !== process.env;
+  const rd = (name) => readEnv(name, env, explicit);
+  const connectorsRaw = rd('CONNECTOR_RUNTIME_CONNECTORS');
   const connectors = connectorsRaw
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   return {
-    enabled: truthy(readEnv('CONNECTOR_RUNTIME_ENABLED', env)),
+    enabled: truthy(rd('CONNECTOR_RUNTIME_ENABLED')),
     surfaces: {
-      chat: truthy(readEnv('CONNECTOR_RUNTIME_CHAT', env)),
-      hyperagents: truthy(readEnv('CONNECTOR_RUNTIME_HYPER', env)),
-      tara: truthy(readEnv('CONNECTOR_RUNTIME_TARA', env)),
-      mcp: truthy(readEnv('CONNECTOR_RUNTIME_MCP', env)),
-      sync: truthy(readEnv('CONNECTOR_RUNTIME_SYNC', env)),
+      chat: truthy(rd('CONNECTOR_RUNTIME_CHAT')),
+      hyperagents: truthy(rd('CONNECTOR_RUNTIME_HYPER')),
+      tara: truthy(rd('CONNECTOR_RUNTIME_TARA')),
+      mcp: truthy(rd('CONNECTOR_RUNTIME_MCP')),
+      sync: truthy(rd('CONNECTOR_RUNTIME_SYNC')),
       // admin/diagnostic access follows the master switch only
-      admin: truthy(readEnv('CONNECTOR_RUNTIME_ENABLED', env)),
+      admin: truthy(rd('CONNECTOR_RUNTIME_ENABLED')),
     },
     // empty set = every registered connector is allowed
     connectors: new Set(connectors),

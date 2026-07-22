@@ -20,6 +20,9 @@ import { createGmailPlugin } from './plugins/gmail/index.js';
 import { createGoogleDocsPlugin } from './plugins/google_docs/index.js';
 import { createGoogleSheetsPlugin } from './plugins/google_sheets/index.js';
 import { createSlackPlugin } from './plugins/slack/index.js';
+import { createNotionPlugin } from './plugins/notion/index.js';
+import { createGithubPlugin } from './plugins/github/index.js';
+import { createLinearPlugin } from './plugins/linear/index.js';
 
 export { ConnectorRegistry } from './connector-registry.js';
 export { ConnectorRuntime } from './connector-runtime.js';
@@ -38,9 +41,13 @@ export function buildRegistry(deps = {}) {
   registry.register(createGoogleDocsPlugin(deps.google_docs));
   registry.register(createGoogleSheetsPlugin(deps.google_sheets));
   registry.register(createSlackPlugin(deps.slack));
-  // notion / github / linear: registered at cutover from a LIVE MCP inspect
-  // (their tool schemas are discovered from the external MCP servers, not
-  // hardcoded here). The McpBackedPlugin mechanism they use is unit-verified.
+  // MCP-backed connectors — canonical manifests with best-known tool names;
+  // provider names resolve through the MCP runner and are refined at the first
+  // live tools/list inspect (a wrong name returns a structured result, never a
+  // crash; unknown connectors fall through to legacy). Additive + flag-gated.
+  registry.register(createNotionPlugin(deps.notion));
+  registry.register(createGithubPlugin(deps.github));
+  registry.register(createLinearPlugin(deps.linear));
   return registry;
 }
 

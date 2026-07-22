@@ -3451,6 +3451,46 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
+  // ─── Connector Runtime V1 — capability endpoint + stateless MCP gateway ───
+  // Flag-gated (CONNECTOR_RUNTIME_ENABLED). Default OFF → this block is skipped
+  // entirely and has ZERO effect on any existing route. When on, it serves only
+  // the two new paths. The gateway self-authenticates via the capability token
+  // (Bearer); the capability endpoint uses the normal API-key principal. The
+  // ConnectorExecutionContext is derived server-side only. See
+  // docs/connector-runtime/. Additive — Chat/HyperAgents/TARA are untouched
+  // until their own surface flags + adapters are cut over.
+  if (process.env.CONNECTOR_RUNTIME_ENABLED === 'true'
+      && (pathname === '/api/connectors/runtime/capabilities' || pathname.startsWith('/mcp/connectors/'))) {
+    try {
+      const [{ getConnectorRuntime }, { handleCapabilityRequest, handleGatewayRequest }, { makeRevocationStore }] = await Promise.all([
+        import('./connectors/runtime/index.js'),
+        import('./connectors/runtime/mcp-routes.js'),
+        import('./connectors/runtime/capability-token.js'),
+      ]);
+      const runtime = getConnectorRuntime({ db: prisma, prisma, auditLogger });
+      if (pathname === '/api/connectors/runtime/capabilities') {
+        if (req.method !== 'POST') return jsonResponse(res, { error: 'method not allowed' }, 405);
+        const auth = await authenticateApiKey(req);
+        if (!auth.ok) return jsonResponse(res, { error: auth.error || 'unauthorized' }, auth.status || 401);
+        const capBody = await parseBody(req).catch(() => ({}));
+        const r = handleCapabilityRequest({ body: capBody, principal: auth.principal, runtime });
+        return jsonResponse(res, r.body, r.status);
+      }
+      const gm = /^\/mcp\/connectors\/([^/?]+)/.exec(pathname);
+      if (gm && req.method === 'POST') {
+        const gwBody = await parseBody(req).catch(() => ({}));
+        const redis = (typeof qdrantClient !== 'undefined' && qdrantClient?.redis) || null;
+        const rev = redis ? makeRevocationStore(redis) : null;
+        const r = await handleGatewayRequest({ connectorId: gm[1], authHeader: req.headers.authorization, request: gwBody, runtime, isRevoked: rev ? rev.isRevoked : undefined });
+        if (r.body === null) { res.writeHead(r.status); res.end(); return; }
+        return jsonResponse(res, r.body, r.status);
+      }
+      return jsonResponse(res, { error: 'not found' }, 404);
+    } catch (err) {
+      return jsonResponse(res, { error: 'connector_runtime_error', detail: err.message }, 500);
+    }
+  }
+
   // ─── ChatGPT Connector adapter (one-click integration layer) ─
   // Public spec at /v1/chatgpt/openapi.yaml; tool endpoints under
   // /v1/chatgpt/* authed via existing Bearer / API key pipeline.

@@ -195,10 +195,20 @@ export class EvidenceRetrievalService {
         // A hard document filter makes a bounded lexical pass safe and cheap.
         // Use every query token there so lowercase details work in any language;
         // retain the narrower legacy lane for an unscoped corpus search.
-        const lexTokens = (docIdSet
+        const _baseTokens = (docIdSet
           ? allQueryTokens
-          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))))
-          .slice(0, 12);
+          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))));
+        // Hybrid lexical (flag-gated, parallel with vector): add collapsed
+        // adjacent-token forms so concatenated product names ("solvis tim" →
+        // "solvistim") match as a WHOLE substring in evidence too — the same
+        // wide-retrieve lane the memory path uses. Coverage scoring below is the
+        // narrow score. Default off → token set unchanged.
+        const _collapsed = [];
+        if (process.env.HYBRID_LEXICAL_RECALL === 'true') {
+          const t = allQueryTokens.map(x => x.toLowerCase());
+          for (let i = 0; i + 1 < t.length; i += 1) { const j = t[i] + t[i + 1]; if (j.length >= 6) _collapsed.push(j); }
+        }
+        const lexTokens = [...new Set([..._baseTokens, ..._collapsed])].slice(0, 16);
         if (lexTokens.length) {
           try {
             // Scope the lexical pass to the SAME docs as the vector pass when a

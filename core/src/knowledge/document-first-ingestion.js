@@ -761,7 +761,25 @@ Output the JSON object and nothing else.`;
           // co-mention linker never re-tags them, and they do NOT reach the
           // createMemory chokepoint's tag-normalize — so writing raw here left
           // entity:SOLVIS / entity:WP_storage un-canonicalized in the DB.
-          const rawEntityNames = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim()).slice(0, 8);
+          // Deterministic guard (belt-and-suspenders with the prompt rule): drop
+          // "entities" that are actually source/file/artifact references — filenames,
+          // extensions, article/part numbers, fonts, colours, format sizes, URLs.
+          // These polluted the product registry ("SOLVIS_RG_4C.eps", "Art.-Nr.
+          // 27770", "Calibri Regular", "DIN A5") and must never become entity tags.
+          const _isArtifactRef = (name) => {
+            const s = String(name || '').trim();
+            if (!s) return true;
+            if (/\.(pdf|eps|png|jpe?g|docx?|xlsx?|pptx?|csv|svg|ai|psd|zip|gif|webp|tiff?)\b/i.test(s)) return true; // filenames/extensions
+            if (/\bart[.\-\s]*nr\b|\bartikel[- ]?nr\b|\border[- ]?nr\b|^\d[\d.\-\/ ]{3,}$/i.test(s)) return true;   // article/part/order numbers
+            if (/\bDIN\s?[A-Z]?\d|\bA[3-6]\b|\b\d{2,4}\s?(x|×)\s?\d{2,4}\b/i.test(s)) return true;                  // paper/format sizes
+            if (/\b(regular|bold|italic|light|medium|thin|black|condensed|extended|oblique)\b/i.test(s) && /^[A-Z][a-z]+(\s[A-Z]?[a-z]+)*$/.test(s)) return true; // font faces
+            if (/^https?:\/\//i.test(s) || /\bwww\./i.test(s)) return true;                                        // URLs
+            if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (SOLVIS_RG_4C)
+            return false;
+          };
+          const rawEntityNames = (ex.entities || [])
+            .filter((e) => typeof e === 'string' && e.trim() && !_isArtifactRef(e))
+            .slice(0, 8);
           const entityTags = rawEntityNames
             .map((e) => { const slug = normalizeEntity(e); return slug ? `entity:${slug}` : null; })
             .filter(Boolean);
@@ -860,7 +878,7 @@ Output the JSON object and nothing else.`;
 
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only. Do not add relationships; they are derived from verified facts after promotion.`;
+Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (e.g. "…White Paper…20251106 (1).pdf"), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (e.g. "Art.-Nr. 27770"), fonts or typefaces (e.g. "Calibri Regular", "Antenna Medium"), colours (e.g. "Solvis-Grau"), paper/format sizes (e.g. "DIN A5"), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.`;
     // Model fallback: if the primary extraction model fails (provider error,
     // finish=error, unparseable), fall through to a DIFFERENT family so a
     // section's facts are never lost to one model/provider hiccup. Configurable

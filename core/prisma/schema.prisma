@@ -396,6 +396,43 @@ model PendingWrite {
   @@map("pending_writes")
 }
 
+/// Connector Runtime V1 — durable background sync job (plan §7). Postgres is the
+/// job source of truth, replacing the file-backed MCPConnectorJobStore. Leased
+/// via SKIP LOCKED by the sync worker, which delegates to the canonical
+/// SyncEngine (→ ingestSource).
+model ConnectorSyncJob {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                    String    @map("org_id") @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  connectorId              String    @map("connector_id") @db.VarChar(120)
+  connectionId             String?   @map("connection_id") @db.VarChar(160)
+  mode                     String    @default("incremental") @db.VarChar(20)
+  status                   String    @default("queued") @db.VarChar(20)
+  cursor                   String?   @db.Text
+  requestedScope           String?   @map("requested_scope") @db.VarChar(20)
+  projectIds               String[]  @default([]) @map("project_ids") @db.Uuid
+  processed                Int       @default(0)
+  imported                 Int       @default(0)
+  skipped                  Int       @default(0)
+  failed                   Int       @default(0)
+  attempt                  Int       @default(0)
+  maxAttempts              Int       @default(5) @map("max_attempts")
+  leaseOwner               String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt           DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  idempotencyKey           String?   @unique @map("idempotency_key") @db.VarChar(200)
+  startedAt                DateTime? @map("started_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt              DateTime? @map("completed_at") @db.Timestamptz(6)
+  cancellationRequestedAt  DateTime? @map("cancellation_requested_at") @db.Timestamptz(6)
+  lastError                String?   @map("last_error") @db.Text
+  config                   Json?     @db.JsonB
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([status, leaseExpiresAt], map: "idx_connector_sync_jobs_lease")
+  @@index([orgId, connectorId, createdAt], map: "idx_connector_sync_jobs_org")
+  @@map("connector_sync_jobs")
+}
+
 /// Durable ledger of outbound VALUE ACTIONS that actually left the platform
 /// (HyperAgents closed loop): an approved email send or an outbound TARA call.
 /// One row per exit; `outcome` is filled later by the tracking side (Gmail

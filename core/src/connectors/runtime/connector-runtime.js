@@ -114,6 +114,8 @@ export class ConnectorRuntime {
       acquireSlot: hooks.acquireSlot || (async () => () => {}),
       // approved-write executor (approvalStore.executeApproved); null = not installed
       executeApproved: hooks.executeApproved || null,
+      // durable sync job store (plan §7); null = not installed
+      syncStore: hooks.syncStore || null,
       // (step 17) audit; fire-and-safe
       audit: hooks.audit || (async () => {}),
       // (step 18) metrics; fire-and-safe
@@ -274,6 +276,26 @@ export class ConnectorRuntime {
       const ce = classifyError(err);
       return makeResult({ status: ce.status, content: textContent(redactSecrets(ce.message)), metadata: { requestId: context?.requestId || null, connector: connectorId, tool: canonicalName, durationMs: now() - startedAt } });
     }
+  }
+
+  /**
+   * Enqueue a durable background sync for a connector (plan §7 Ingestion). The
+   * job is the Postgres source of truth; a worker leases it and delegates to
+   * the canonical SyncEngine (→ ingestSource). Does not run the fetch inline.
+   * @returns {Promise<{jobId:string,status:string}|{error:string}>}
+   */
+  async startSync(connectorId, opts = {}) {
+    if (!this.hooks.syncStore) return { error: 'sync store not installed' };
+    if (this.config && !this._allowed('sync', connectorId)) return { error: `sync not enabled for connector "${connectorId}"` };
+    if (!this.registry.hasConnector(connectorId)) return { error: `unknown connector "${connectorId}"` };
+    if (!opts.orgId || !opts.userId) return { error: 'orgId + userId required' };
+    const job = await this.hooks.syncStore.enqueue({
+      orgId: opts.orgId, userId: opts.userId, connectorId,
+      connectionId: opts.connectionId || null, mode: opts.mode || 'incremental',
+      requestedScope: opts.requestedScope || null, projectIds: opts.projectIds || [],
+      config: opts.config || null, key: opts.key || null,
+    });
+    return { jobId: job.id, status: job.status };
   }
 
   // Accept either a well-formed CanonicalConnectorResult (from a plugin that

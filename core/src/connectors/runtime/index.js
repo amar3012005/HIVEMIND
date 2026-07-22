@@ -14,6 +14,7 @@ import { loadRuntimeConfig } from './config.js';
 import { validateInput } from './input-validator.js';
 import { makePolicyEngine } from './policy-engine.js';
 import { ApprovalStore } from './approval-store.js';
+import { SyncJobStore } from './sync-job-store.js';
 import { makeAuditHook, makeMetricsHook } from './runtime-audit.js';
 import { createGmailPlugin } from './plugins/gmail/index.js';
 import { createGoogleDocsPlugin } from './plugins/google_docs/index.js';
@@ -61,6 +62,9 @@ export function buildDefaultHooks(opts = {}) {
     const store = new ApprovalStore({ prisma, logger });
     hooks.gateWrite = (args) => store.gateWrite(args);
     hooks.executeApproved = (draftId, ctx) => store.executeApproved(draftId, ctx);
+  }
+  if (prisma && typeof prisma.connectorSyncJob?.create === 'function') {
+    hooks.syncStore = new SyncJobStore({ prisma, logger });
   }
   return hooks;
 }

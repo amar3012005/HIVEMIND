@@ -116,6 +116,8 @@ export class ConnectorRuntime {
       executeApproved: hooks.executeApproved || null,
       // durable sync job store (plan §7); null = not installed
       syncStore: hooks.syncStore || null,
+      // canonical ingestion front door for the sync worker; null = not installed
+      ingestSource: hooks.ingestSource || null,
       // (step 17) audit; fire-and-safe
       audit: hooks.audit || (async () => {}),
       // (step 18) metrics; fire-and-safe
@@ -296,6 +298,54 @@ export class ConnectorRuntime {
       config: opts.config || null, key: opts.key || null,
     });
     return { jobId: job.id, status: job.status };
+  }
+
+  /**
+   * Worker tick (Phase 10): lease ONE due sync job and run it. Returns
+   * { drained: 0|1, jobId? }. A server-side loop calls this on an interval when
+   * CONNECTOR_RUNTIME_SYNC is on. Safe when idle (no jobs → returns 0) and safe
+   * when a plugin has no sync() (job fails gracefully, never throws).
+   */
+  async drainSyncOnce(leaseOwner = 'core') {
+    if (!this.hooks.syncStore) return { drained: 0 };
+    const job = await this.hooks.syncStore.leaseNext(leaseOwner).catch(() => null);
+    if (!job) return { drained: 0 };
+    await this._runSyncJob(job);
+    return { drained: 1, jobId: job.id };
+  }
+
+  async _runSyncJob(job) {
+    const plugin = this.registry.getPlugin(job.connectorId);
+    if (!plugin || typeof plugin.sync !== 'function') {
+      await this.hooks.syncStore.fail(job.id, `connector "${job.connectorId}" has no sync()`).catch(() => {});
+      return;
+    }
+    await this.hooks.syncStore.markRunning(job.id).catch(() => {});
+    const ctx = {
+      requestId: `sync-${job.id}`, userId: job.userId, orgId: job.orgId, role: 'system',
+      surface: 'sync', projectIds: job.projectIds || [], connectionId: job.connectionId || null, db: this.db,
+    };
+    let processed = 0; let imported = 0; let failed = 0; let cursor = job.cursor || null;
+    try {
+      const connection = await plugin.getConnection(ctx);
+      if (connection && connection.connected === false) throw new ConnectorError('connector not connected', { status: 'not_connected' });
+      const request = { mode: job.mode, cursor, requestedScope: job.requestedScope, projectIds: job.projectIds || [], config: job.config };
+      for await (const batch of plugin.sync(request, { ...ctx, connection })) {
+        for (const envelope of (batch?.records || [])) {
+          processed += 1;
+          try {
+            if (this.hooks.ingestSource) { await this.hooks.ingestSource(envelope); imported += 1; }
+          } catch (e) { failed += 1; this.log.warn(`[connector-sync] ingest failed for ${job.connectorId}:`, e?.message); }
+        }
+        if (batch && batch.cursor != null) cursor = batch.cursor;
+        // renew lease + checkpoint after each committed batch (resume from cursor on restart)
+        await this.hooks.syncStore.markRunning(job.id, { cursor }).catch(() => {});
+      }
+      await this.hooks.syncStore.complete(job.id, { processed, imported, failed, cursor }).catch(() => {});
+    } catch (err) {
+      const ce = classifyError(err);
+      await this.hooks.syncStore.fail(job.id, redactSecrets(ce.message), { reauth: ce.status === 'reauth_required' }).catch(() => {});
+    }
   }
 
   // Accept either a well-formed CanonicalConnectorResult (from a plugin that

@@ -66,6 +66,20 @@ export function buildDefaultHooks(opts = {}) {
   if (prisma && typeof prisma.connectorSyncJob?.create === 'function') {
     hooks.syncStore = new SyncJobStore({ prisma, logger });
   }
+  // Canonical ingestion front door for the sync worker: plugin.sync() batches
+  // land through the SAME V5 path (documentFirstIngestion.ingestSource) the
+  // SyncEngine uses — one ingestion path, not a divergent one (plan §7).
+  if (opts.ingestSource) {
+    hooks.ingestSource = opts.ingestSource;
+  } else {
+    hooks.ingestSource = async (envelope) => {
+      const dfi = globalThis.__hivemindDocumentFirstIngestion;
+      if (!dfi || typeof dfi.ingestSource !== 'function') throw new Error('canonical ingestion not available');
+      const r = await dfi.ingestSource(envelope);
+      if (!r?.ok) throw new Error(r?.error || 'canonical ingest failed');
+      return r;
+    };
+  }
   return hooks;
 }
 

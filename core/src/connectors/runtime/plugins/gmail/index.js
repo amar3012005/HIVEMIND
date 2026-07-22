@@ -79,7 +79,7 @@ export const GMAIL_MANIFEST = {
   authProvider: 'gmail',
   connectionAliases: ['gmail', 'google', 'googlemail'],
   supportedSurfaces: READ_SURFACES,
-  syncMode: 'none',
+  syncMode: 'poll',
   tools: [
     tool('gmail__search',
       'Search the connected Gmail account. Returns id/subject/from/to/date/snippet per message.',
@@ -202,6 +202,49 @@ export class GmailPlugin extends ConnectorPlugin {
       content: jsonContent(payload),
       metadata: { sourceIds: extractSourceIds(toolName, payload || {}) },
     });
+  }
+
+  /**
+   * Bulk sync (Phase 10): paginate a Gmail search and yield ingestion-envelope
+   * batches through the SAME canonical front door (ingestSource) the SyncEngine
+   * uses — one ingestion path. Wraps the existing runGoogleTool reads; no new
+   * provider logic. AsyncIterable<{records, cursor}>.
+   */
+  async *sync(request, context) {
+    const scope = { user_id: context.userId, org_id: context.orgId };
+    const max = Math.min(Math.max(parseInt(request?.config?.max, 10) || 50, 1), 100);
+    // incremental → bounded recency window; initial → caller-supplied query or all.
+    const query = request?.config?.query != null
+      ? request.config.query
+      : (request?.mode === 'incremental' ? 'newer_than:30d' : '');
+    const list = await this._exec('gmail_search', { query, max }, scope, context.db);
+    const messages = (list && list.messages) || [];
+    const records = [];
+    for (const m of messages) {
+      let full = m;
+      try { full = await this._exec('gmail_get', { id: m.id }, scope, context.db); } catch { /* metadata fallback */ }
+      const subject = full.subject || m.subject || '(no subject)';
+      const body = full.body || m.snippet || '';
+      const fromName = String(full.from || m.from || '').split('<')[0].trim();
+      records.push({
+        userId: context.userId,
+        orgId: context.orgId,
+        content: `${subject}\n\n${body}`.trim(),
+        title: subject,
+        // Email canonical contract: PURE-INSERT one memory per email (never
+        // chunk a long email into many facts) with rich entity extraction. The
+        // atomic path = engine.ingestMemory → single memory + smart-router +
+        // entity co-mention linking. mode:'atomic' forces it regardless of length.
+        mode: 'atomic',
+        occurredAt: full.date || m.date || null,
+        projectId: (request?.projectIds && request.projectIds[0]) || null,
+        tags: ['source:gmail', ...(fromName ? [`entity:${fromName}`] : [])],
+        metadata: { memory_type: 'event', from: full.from || m.from || null, to: full.to || null },
+        source: { type: 'connector', provider: 'gmail', sourceId: m.id, url: null, title: subject },
+      });
+    }
+    // Single bounded page for v1 (cursor reserved for pagination-token support).
+    yield { records, cursor: null };
   }
 }
 

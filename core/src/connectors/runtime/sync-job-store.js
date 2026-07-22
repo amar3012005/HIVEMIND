@@ -68,8 +68,13 @@ export class SyncJobStore {
     return rows && rows[0] ? rows[0] : null;
   }
 
-  async markRunning(id) {
-    return this.prisma.connectorSyncJob.update({ where: { id }, data: { status: 'running', updatedAt: new Date() } }).catch(() => null);
+  async markRunning(id, { cursor } = {}) {
+    // Renews the lease AND checkpoints the cursor after a committed batch so a
+    // worker restart resumes from the last committed position (plan §7).
+    return this.prisma.connectorSyncJob.update({
+      where: { id },
+      data: { status: 'running', updatedAt: new Date(), cursor: cursor ?? undefined },
+    }).catch(() => null);
   }
 
   async complete(id, telemetry = {}) {

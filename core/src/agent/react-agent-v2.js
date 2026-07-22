@@ -1548,8 +1548,12 @@ ${message}`;
     || (answerMode === 'full' ? 'medium' : 'low');
 
   const { parsed, usage } = await callJsonLLM({
+    // temperature:0 — grounded synthesis over already-ranked evidence must be
+    // DETERMINISTIC. At 0.1 the model occasionally picked a competing memory
+    // (e.g. the Feb "Kommunikation" phase over the 18-Aug "Launch PIA" event)
+    // for the same query on different turns — the flakiness users saw.
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
-    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
+    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning, temperature: 0,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1567,7 +1571,7 @@ ${message}`;
     const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
     const repaired = await callJsonLLM({
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
-      model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
+      model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning, temperature: 0,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

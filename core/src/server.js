@@ -17807,6 +17807,30 @@ exit \$RC
 
                 syncResults.push(result);
 
+                // P0 first-class provenance: populate the queryable columns from the ORIGINAL
+                // payload. The canonical ingest normalizer strips produced_by/turn from
+                // source_metadata before the create, so set them here (post-create) from the
+                // pre-normalization body.source_metadata. Guarded to hyperagents-agent saves +
+                // a strict uuid on produced_by_turn; best-effort (never breaks the save).
+                if (prisma && result.memoryId && body.source_metadata?.produced_by === 'hyperagents-agent') {
+                  try {
+                    const _sm = body.source_metadata;
+                    const _turn = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+                      .test(String(_sm.source_session_id || '')) ? _sm.source_session_id : null;
+                    await prisma.memory.update({
+                      where: { id: result.memoryId },
+                      data: {
+                        producedByTurn: _turn,
+                        producedByAgent: _sm.produced_by,
+                        actionable: typeof _sm.actionable === 'boolean' ? _sm.actionable : null,
+                        provenance: _sm,
+                      },
+                    });
+                  } catch (provErr) {
+                    console.warn('[p0-provenance] column update failed:', provErr.message);
+                  }
+                }
+
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
                   await qdrantClient.storeMemory(memory, {

@@ -180,10 +180,15 @@ async def think(request: Request):
             # matters; "recall" → the router added zero latency.
             extra: Dict[str, Any] = {}
             if use_router:
-                extra["skip_clinical"] = True
-                vd = " ".join(x for x in (prev_directive, brief) if x)
-                if vd:
-                    extra["voice_directive"] = vd[:300]
+                # CLINICAL_LIVE: let core's clinical hypothesis engine own the
+                # directive — do NOT skip clinical and do NOT send the router's
+                # one-line voice_directive (which would override clinical). The
+                # fast spoken-answer model/provider below still apply.
+                if not config.CLINICAL_LIVE:
+                    extra["skip_clinical"] = True
+                    vd = " ".join(x for x in (prev_directive, brief) if x)
+                    if vd:
+                        extra["voice_directive"] = vd[:300]
                 # Speed the spoken recall answer: force the fast model/provider.
                 if config.RECALL_MODEL:
                     extra["voice_model"] = config.RECALL_MODEL
@@ -203,6 +208,11 @@ async def think(request: Request):
             # still runs in parallel for goal/facts/directive.
             filler_emitted = False
             forced_recall = False
+            # CLINICAL_LIVE: every turn must reach core so recall + the clinical
+            # hypothesis engine run (clinical is one turn behind by design). This
+            # skips the router's "direct" short-circuit that would cancel core.
+            if use_router and config.CLINICAL_LIVE:
+                forced_recall = True
             if use_router and _likely_recall(query):
                 forced_recall = True
                 filler = _next_filler(state, language) if config.FILLER_ENABLED else None

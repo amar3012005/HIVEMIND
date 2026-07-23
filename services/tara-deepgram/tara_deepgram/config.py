@@ -87,6 +87,13 @@ DIRECT_REASONING_EFFORT = os.getenv("TARA_DG_DIRECT_REASONING", "low")
 # Model core uses for spoken recall answers (voice_model override). Same fast
 # Cerebras gpt-oss-120b; empty = leave core's default.
 RECALL_MODEL = os.getenv("TARA_DG_RECALL_MODEL", "openai/gpt-oss-120b")
+# CLINICAL_LIVE: hand the per-turn directive to core's clinical hypothesis engine
+# instead of the router's one-line directive. When true the shim (a) stops sending
+# skip_clinical/voice_directive so core's accumulating weighted-hypothesis engine
+# owns the words, and (b) forces every turn through core (no "direct" short-circuit)
+# so recall + clinical run each turn. Router stays the fast recall/schedule gate.
+# false = instant revert to the router-directive path.
+CLINICAL_LIVE = os.getenv("TARA_DG_CLINICAL_LIVE", "false").lower() == "true"
 # Speak a filler if the grounded recall answer hasn't started within this many ms.
 FILLER_AFTER_MS = int(os.getenv("TARA_DG_FILLER_AFTER_MS", "400"))
 # Fillers off by default now — Cerebras + warm recall make them unnecessary and

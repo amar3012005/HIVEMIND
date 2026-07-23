@@ -17,6 +17,43 @@ Entry format:
 
 ---
 
+## 2026-07-23 — AI Company OS foundations: P1 seam contracts · P0 provenance+gate · P2 Governor · P6 Outreach Contract
+- **commits:** `8167ce651` (P1) · `0b9cd8105` (P0) · `4770a8c87` (P2) · `c3fe566bb` (P6), all singulance-main.
+- **images LIVE:** `hivemind/employees:prod-20260723-c3fe566bb` (P0+P2+P1-pydantic) ·
+  `hivemind/control-plane:prod-20260723-c3fe566bb` (P1-js+P6-js). **hm-core NOT redeployed**
+  (server.js uses none of these modules) → chat/recall untouched, verified healthy after.
+- **P1 — version-tolerant seam contracts.** `core/src/contracts/hyper-seams.js` (single
+  source of truth: buildRoomTurnPayload + normalizeTurnEvent, drop-undefined / default-missing /
+  ignore-unknown / stamp schema_version) + dispatchHyperRoomTurn stamps it; pydantic
+  RoomTurn/Chat/CreateTeamTask/ApprovalDecision get explicit `extra='ignore'` + optional
+  schema_version. 5 JS asserts + pydantic tolerance green; **live smoke: endpoint accepted
+  schema_version + an unknown field with HTTP 200 (no 422)**.
+- **P0 — provenance + actionable-gate (shadow).** _TURN_PROVENANCE contextvar armed at
+  room-turn start; save_memory stamps source_platform='hyperagents' + source_metadata
+  {turn/room/produced_by/actionable} (NO schema migration — uses existing columns). Gate
+  `HYPER_PROVENANCE_GATE` off|log|**enforce**, DEFAULT 'log' (shadow — logs would-rejects,
+  never blocks). Verified: enforce+junk → not posted; good fact → posted w/ full provenance.
+  Optional first-class columns authored as a GATED artifact (decision-docs/p0-provenance-optional-migration.md).
+- **P2 — Governor.** governor.py: kill switch (HYPER_KILL_SWITCH, refuses turn instantly +
+  seals 'disabled') + per-turn token cap (HYPER_TURN_TOKEN_CAP → cost_capped) + outbound cap
+  (HYPER_OUTBOUND_CAP). All DEFAULT off/0 = behavior-neutral. Kill-switch functional path green
+  (orchestrate NOT called). Complements the existing per-org pause-all.
+- **P6 — Outreach Contract.** outreach-contract.js + guard at campaigns.js executeTarget (the
+  send choke point for FE + drain worker): kill switch (global/outreach-specific) + per-org
+  daily cap, skip-not-throw, DEFAULT-neutral, stacks on the existing hard cross-campaign dedup.
+  Autonomous ORIGINATION intentionally NOT built — human-gated (decision-docs/p6-outreach-autonomy-gate.md).
+- **verified:** each phase unit/integration-tested in-container BEFORE deploy; both images
+  deployed with `--no-deps` (the P4-incident lesson — core never recreated); post-deploy: both
+  new containers healthy, no boot errors, P1 tolerance live, hm-core recall OK.
+- **OPEN human gates (owner decision):** (1) flip P0 `HYPER_PROVENANCE_GATE=enforce` after
+  reviewing shadow logs; (2) optionally apply the P0 first-class-column migration; (3) authorize
+  P6 autonomous origination (needs P0 live + per-org opt-in + first-contact HITL + caps + consent).
+- **scorecard:** recon held (cartographer map verified against grep/Read; only 1 caller of the
+  toolkit builder + an existing contextvar mechanism made P0 cheap); feature-recon caught prior art
+  everywhere (existing pydantic models, per-org pause-all, outreach dedup/pacing) → extended not
+  rebuilt; RISK phases (P0/P6) shipped SAFE (shadow / default-neutral / gated) not rushed; deploy
+  used --no-deps so no repeat of the P4 core-recreate incident. → harness unchanged (rules held).
+
 ## 2026-07-23 — P4: Cerebras-direct synth path + HYPER_SYNTH_MODEL seam (synth kept = gpt-oss-120b)
 - **commits:** `c0150cf17` (singulance-main, pushed) · image `hivemind/employees:prod-20260723-c0150cf17` (LIVE)
 - **what:** made the final-report synth writer model-selectable via `HYPER_SYNTH_MODEL`, and added

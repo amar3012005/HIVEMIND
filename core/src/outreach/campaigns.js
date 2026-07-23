@@ -17,7 +17,7 @@
 //
 // Spec: docs/superpowers/specs/2026-07-16-outreach-campaign-runner-design.md
 
-import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed } from './outreach-contract.js';
+import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed, outreachAutoProposeEnabled } from './outreach-contract.js';
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
@@ -355,6 +355,58 @@ export function createOutreachModule(deps) {
 
   // ── HTTP handler — returns true when the request was handled ───────────────
   async function handle(req, res, pathname) {
+    // POST /internal/hyper/outreach/propose { room_id, turn_id, channel } — P6 human-approved
+    // auto-generation. The OS assembles a QUEUED (proposed) campaign from a turn's eligible
+    // prospects; it is NEVER auto-started — a human must Start it (first-contact HITL), and the
+    // drain only ever sends 'running'. Internal-auth + flag-gated (HYPER_OUTREACH_AUTO_PROPOSE).
+    if (pathname === '/internal/hyper/outreach/propose' && req.method === 'POST') {
+      if (!outreachAutoProposeEnabled()) {
+        return jsonResponse(res, { error: 'outreach auto-propose is disabled', code: 'autopropose_disabled' }, 403), true;
+      }
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const channel = String(body.channel || '').trim();
+      const roomId = String(body.room_id || '').trim();
+      const turnId = String(body.turn_id || '').trim();
+      if (!['email', 'call'].includes(channel) || !/^[0-9a-f-]{36}$/.test(roomId) || !/^[0-9a-f-]{36}$/.test(turnId)) {
+        return jsonResponse(res, { error: 'room_id, turn_id and channel(email|call) are required' }, 400), true;
+      }
+      const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, archivedAt: null } });
+      if (!room) return jsonResponse(res, { error: 'room not found' }, 404), true;
+      const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId: room.id } });
+      if (!turn) return jsonResponse(res, { error: 'turn not found' }, 404), true;
+      const all = prospectsFromTurn(turn.lines);
+      const eligible = all.filter((p) => (channel === 'email'
+        ? p.email && EMAIL_RE.test(p.email)
+        : p.phone && E164_RE.test(String(p.phone).replace(/[\s()/-]/g, '')))).slice(0, MAX_TARGETS);
+      if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospects on this turn` }, 400), true;
+      const senderEmail = channel === 'email' ? await connectedGmail(room.userId) : null;
+      const campaign = await prisma.outreachCampaign.create({
+        data: {
+          roomId: room.id, turnId, userId: room.userId, orgId: room.orgId,
+          channel, senderEmail,
+          status: 'queued',       // PROPOSED — a human must Start it (first-contact HITL)
+          lastTickAt: null,       // not live; drain ignores non-'running' anyway
+          targets: {
+            create: eligible.map((p, i) => ({
+              position: i,
+              company: String(p.company || '').slice(0, 300),
+              email: p.email ? String(p.email).slice(0, 320) : null,
+              phone: p.phone ? String(p.phone).slice(0, 40) : null,
+              website: p.website ? String(p.website).slice(0, 500) : null,
+              address: p.address ? String(p.address).slice(0, 500) : null,
+            })),
+          },
+        },
+        include: { targets: { orderBy: { position: 'asc' } } },
+      });
+      return jsonResponse(res, {
+        campaign, proposed: true,
+        note: 'Proposed (queued). Requires a human Start before any send — first-contact HITL.',
+      }, 200), true;
+    }
+
     // POST /v1/hyper-rooms/:roomId/outreach-campaigns — create (snapshot)
     let m = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/outreach-campaigns$/);
     if (m && req.method === 'POST') {

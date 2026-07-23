@@ -46,6 +46,17 @@ export function outreachDailyCap() {
  * (first-contact HITL). There is deliberately NO code path for the OS to build a
  * target list and send with no human approval (consent / deliverability / legal).
  */
+/**
+ * Auto-propose switch (HYPER_OUTREACH_AUTO_PROPOSE, default off). When on, the OS may
+ * auto-GENERATE a campaign from a room turn's eligible prospects — but ALWAYS in the
+ * 'queued' (proposed) state. It is NEVER auto-started: a human must Start it (first-contact
+ * HITL), and the drain only ever sends 'running' campaigns. So enabling this lets the OS
+ * do the tedious target-assembly while the human keeps the go/no-go on every first contact.
+ */
+export function outreachAutoProposeEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.HYPER_OUTREACH_AUTO_PROPOSE || '').trim().toLowerCase());
+}
+
 export function outreachAutonomyEnabled() {
   return String(process.env.HYPER_OUTREACH_AUTONOMY || 'on').trim().toLowerCase() !== 'off'
     && !['0', 'false', 'no'].includes(String(process.env.HYPER_OUTREACH_AUTONOMY || '').trim().toLowerCase());

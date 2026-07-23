@@ -7659,15 +7659,19 @@ Write the persona now.`;
                 { t: 'Program / Delivery Manager', a: 'coordinator', b: 'plans, risk, cross-team delivery' },
               ],
             };
+            // Show the archetype [in brackets] so the picker can BALANCE the debate lenses.
             const catalogText = Object.entries(MARKETPLACE)
-              .map(([f, ps]) => `${f}: ${ps.map((p) => p.t).join(' | ')}`).join('\n');
+              .map(([f, ps]) => `${f}: ${ps.map((p) => `${p.t} [${p.a}]`).join(' | ')}`).join('\n');
             say('Choosing your specialists from the marketplace');
             // LLM picks the top 3 professions for THIS company + a human first
             // name each — no generic Nova/Atlas defaults, no bare archetypes.
+            // CRITICAL for robust round-tables: the trio must span COMPLEMENTARY debate lenses
+            // (a challenger + an evidence-hound + a direction-setter), not three of one archetype
+            // (which debate as yes-men). Archetypes are shown in [brackets] in the catalog.
             let picks = [];
             try {
               const pj = JSON.parse(await llm(
-                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim, chosen for what this company most needs first. No duplicates.',
+                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) choose the field(s) MOST RELEVANT to this company\'s category/industry; (2) the three MUST span complementary lenses for a robust team — include at least ONE [skeptic] (challenges assumptions/risk), ONE [investigator] (evidence/data/metrics), and ONE [strategist] or [generalist] or [coordinator] (direction/execution); (3) no duplicate titles.',
                 `CATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
                 { json: true, maxTokens: 500 },
               ));
@@ -7682,12 +7686,47 @@ Write the persona now.`;
                 .slice(0, 3);
             } catch { /* fallback below */ }
             if (picks.length < 3 - specialistCount) {
-              // Deterministic fallback: a sane cross-functional trio.
+              // Deterministic fallback: a lens-BALANCED cross-functional trio —
+              // direction (strategist) + evidence (investigator) + challenge (skeptic).
               picks = [
                 { name: 'Lena', title: 'Brand Strategist', archetype: 'strategist', blurb: 'positioning, narrative, brand architecture', focus: 'positioning and narrative', field: 'Marketing' },
-                { name: 'Omar', title: 'Content Lead', archetype: 'generalist', blurb: 'editorial, SEO content, narrative at scale', focus: 'content engine', field: 'Marketing' },
-                { name: 'Priya', title: 'Operations Lead (COO-style)', archetype: 'coordinator', blurb: 'process, throughput, accountability', focus: 'execution cadence', field: 'Operations' },
+                { name: 'Omar', title: 'Performance Marketer', archetype: 'investigator', blurb: 'paid acquisition, CAC, funnels, ROAS', focus: 'growth + unit economics', field: 'Marketing' },
+                { name: 'Priya', title: 'Risk Analyst', archetype: 'skeptic', blurb: 'credit/fraud risk, exposure, models', focus: 'challenge assumptions + risk', field: 'Fintech' },
               ];
+            }
+            // Deterministic robustness guarantee: the trio must cover a CHALLENGER [skeptic],
+            // an EVIDENCE lens [investigator], and a DIRECTION lens [strategist|generalist|
+            // coordinator]. If the picks collapsed onto fewer lenses (LLM variance), re-cast the
+            // REDUNDANT pick(s) to the missing archetype — keeping the human name, preferring a
+            // field the picker already chose (category fit). This makes skepticism + character
+            // distribution UNIFORM across every founding team → robust round-tables.
+            if (picks.length === 3) {
+              const LEADER = new Set(['strategist', 'generalist', 'coordinator']);
+              const laneOf = (a) => (LEADER.has(a) ? 'leader' : a); // skeptic | investigator | leader
+              const flat = Object.entries(MARKETPLACE).flatMap(([field, ps]) => ps.map((p) => ({ ...p, field })));
+              const preferred = [...new Set(picks.map((p) => p.field).filter(Boolean))];
+              const findFor = (lane, used) => {
+                const pool = flat.filter((p) => laneOf(p.a) === lane && !used.has(p.t));
+                return pool.find((p) => preferred.includes(p.field)) || pool[0] || null;
+              };
+              const have = new Set(picks.map((p) => laneOf(p.archetype)));
+              const missing = ['skeptic', 'investigator', 'leader'].filter((w) => !have.has(w));
+              if (missing.length) {
+                const used = new Set(picks.map((p) => p.title));
+                const laneCount = {};
+                picks.forEach((p) => { const l = laneOf(p.archetype); laneCount[l] = (laneCount[l] || 0) + 1; });
+                for (const miss of missing) {
+                  const idx = picks.findIndex((p) => laneCount[laneOf(p.archetype)] > 1);
+                  if (idx === -1) break;
+                  const prof = findFor(miss, used);
+                  if (!prof) continue;
+                  laneCount[laneOf(picks[idx].archetype)] -= 1;
+                  used.delete(picks[idx].title); used.add(prof.t);
+                  picks[idx] = { name: picks[idx].name, title: prof.t, archetype: prof.a, blurb: prof.b, focus: picks[idx].focus || prof.b, field: prof.field };
+                  laneCount[laneOf(prof.a)] = (laneCount[laneOf(prof.a)] || 0) + 1;
+                }
+                say('Balancing the team so your round-table has a challenger, an analyst, and a lead');
+              }
             }
             const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r) => {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
@@ -8830,7 +8869,7 @@ Write the persona now.`;
 
     // Outreach campaign runner — /v1/hyper-rooms/:id/outreach-campaigns +
     // /v1/outreach-campaigns/* (create/get/start/stop/patch/generate/execute).
-    if (pathname.includes('outreach-campaigns')) {
+    if (pathname.includes('outreach-campaigns') || pathname === '/internal/hyper/outreach/propose') {
       if (await outreachModule().handle(req, res, pathname)) return true;
     }
 

@@ -1,4 +1,7 @@
-# HyperAgents — Ship Journal
+# HyperAgents Historical Ship Journal
+
+> Historical evidence only. Read `CONTEXT.md` first. An entry is not current
+> architecture or production proof unless its SHA and release remain verified.
 
 Append-only. **Newest first.** One entry per shipped feature/fix. Written by the
 `hyperagents-builder` skill immediately after a ship (commit pushed + verified).

@@ -37,6 +37,21 @@ or uncommitted changes as completed work.
 
 ## Current Git Baseline
 
+## 2026-07-23 UTC - Claude instruction system refresh
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/claude-instructions-v2`
+- Base / commit: `b457c4f2a32b921924ed7e4f3eefc14fcce95946` -> `pending`
+- Scope: `.claude` instruction entrypoints, decision records, HyperAgents
+  context, executable workflows, and release/branch guidance.
+- Verification: JSON, shell, relative-link, secret, stale-reference, graph, and
+  diff checks; no product runtime or production mutation.
+- Production: not deployed
+- Rollback: not applicable
+- Next: finish rebase, validate the combined current HyperAgents context, then
+  push the task branch for review.
+
 ## 2026-07-19 UTC - SINGULANCE deployment governor started
 
 - State: Started

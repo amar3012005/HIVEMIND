@@ -41,10 +41,10 @@
   ],
   "autoMode": {
     "allow": [
-      "Reading/writing project code in /opt/HIVEMIND",
+      "Reading/writing project code in the current isolated HIVEMIND worktree",
       "Running npm/pnpm/yarn scripts and builds",
-      "Running git commands for normal workflows (commit, push, pull)",
-      "Running docker commands for container management",
+      "Running non-destructive git commands on task branches",
+      "Running read-only Docker inspection commands",
       "Running curl/wget for API testing",
       "Running node/python for development/testing",
       "File operations within project directory",
@@ -58,10 +58,10 @@
       "Disk operations that could affect system health"
     ],
     "environment": [
-      "Working directory: /opt/HIVEMIND",
+      "Working directory: current repository worktree",
       "Node version: via node --version",
       "Git branch: via git rev-parse --abbrev-ref HEAD",
-      "Environment: development (safe to modify code)",
+      "Environment: isolated task branch; production mutations require the release protocol",
       "Database: accessible via HIVEMIND_*_URL env vars",
       "API: production endpoints available"
     ]
@@ -77,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"/Users/amar/HIVE-MIND\" || true",
+            "command": "git rev-parse --show-toplevel >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"$(git rev-parse --show-toplevel)\" || true",
             "timeout": 30
           }
         ]
@@ -89,12 +89,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph status --repo \"/Users/amar/HIVE-MIND\" || echo 'Not a git repo, skipping'",
+            "command": "git rev-parse --show-toplevel >/dev/null 2>&1 && code-review-graph status --repo \"$(git rev-parse --show-toplevel)\" || echo 'Not a git repo, skipping'",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "echo 'HIVEMIND fast-dev: recon BEFORE building (feature-recon skill/workflow) -> reuse over rebuild. review-changes workflow on the diff before commit. ship skill to deploy (commit/push/pull/migrate/restart/smoke/recall-eval). deploy-verify workflow after. See .claude/ONBOARDING.md.'",
+            "command": "echo 'HIVEMIND: read .claude/ONBOARDING.md; use an isolated task branch; graph-first recon; extend canonical paths; push before handoff; release only via docs/PRODUCTION_RELEASE_PROTOCOL.md.'",
             "timeout": 5
           }
         ]
@@ -106,7 +106,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/amar/HIVE-MIND/.claude/hooks/goal-loop-stop.py",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/goal-loop-stop.py\"",
             "timeout": 15
           }
         ]

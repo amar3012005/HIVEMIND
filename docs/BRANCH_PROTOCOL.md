@@ -5,13 +5,13 @@ HIVEMIND. It prevents sessions from overwriting each other while keeping the
 production deploy path fast.
 
 If another document conflicts with this file about branch ownership, this file
-wins. Production deployment is still governed by
-`SINGULANCE-ONBOARD/DEPLOYMENT.md` and `docs/PRODUCTION_RELEASE_PROTOCOL.md`.
+wins. Production deployment is governed by
+`docs/PRODUCTION_RELEASE_PROTOCOL.md`.
 
 ## Core Model
 
 ```text
-work branch   -> review/rebase -> singulance-main -> quick-deploy -> production
+work branch -> review/rebase -> singulance-main -> release protocol -> production
 ```
 
 - `singulance-main` is the only deploy branch.
@@ -19,7 +19,7 @@ work branch   -> review/rebase -> singulance-main -> quick-deploy -> production
 - Every session works on its own branch or worktree.
 - Integration happens by rebasing on latest `origin/singulance-main`, resolving
   conflicts locally, then merging or fast-forwarding into `singulance-main`.
-- Production only pulls `singulance-main` and runs `/root/quick-deploy.sh`.
+- Production releases only complete commits integrated into `singulance-main`.
 
 ## Why This Exists
 
@@ -69,21 +69,10 @@ branch.
 
 ## Production Deploy Rule
 
-Day-to-day deploys use the fast path:
-
-```bash
-ssh singulance 'cd /root/hivemind-next && git fetch origin singulance-main -q \
-  && git show FETCH_HEAD:scripts/quick-deploy.sh > /root/quick-deploy.sh \
-  && chmod +x /root/quick-deploy.sh && bash /root/quick-deploy.sh singulance-main'
-```
-
-Hard requirements:
-
-- run in the foreground and wait;
-- one deploy at a time;
-- verify the affected route or UI, not only `/health`;
-- rollback with `bash /root/quick-deploy.sh --rollback <service>`;
-- never deploy central SINGULANCE services from `myserver`.
+Do not embed a mutable deploy command in branch guidance. The release owner
+must read and execute `docs/PRODUCTION_RELEASE_PROTOCOL.md`, using the current
+release ledger and live topology. One deploy runs at a time; the affected
+tenant-scoped feature must be accepted, not merely healthy.
 
 ## Session Start Checklist
 
@@ -127,16 +116,10 @@ Then run the focused checks for the changed area:
 - Do not use `git reset --hard` to clean another session's work.
 - Do not deploy from a dirty shared checkout.
 - Do not hot-patch a running container and call it deployed.
-- Do not run manual container surgery when `quick-deploy.sh` can handle the
-  service.
+- Do not run manual container surgery or blend incompatible release procedures.
 
-## Lightweight Exception
+## Emergency Fixes
 
-For emergency production fixes, a human may authorize direct work on
-`singulance-main`. The session must still:
-
-- fetch first;
-- verify no conflicting session owns the same files;
-- commit and push before deploy;
-- deploy through `/root/quick-deploy.sh`;
-- write the release evidence after verification.
+Emergency work still uses an isolated branch, pushed commits, explicit review,
+and the production release protocol. Urgency does not authorize history
+rewrites, dirty builds, hot patches, or skipped rollback evidence.

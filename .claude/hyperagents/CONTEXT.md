@@ -16,7 +16,7 @@ any device, reads this to get oriented. Pair with [JOURNAL.md](./JOURNAL.md)
 ## Two halves of Singulance
 - **Brain** (separate track, already hardened 2026-07): memory / recall / chat —
   `recallPersistedMemories`, one engine, deterministic, drift-guarded. See
-  `.claude/decision-docs/recall_final.md`. HyperAgents SITS ON this substrate.
+  `.claude/decision_docs/MEMORY_ENGINE.md`. HyperAgents SITS ON this substrate.
 - **OS** (this subsystem): agents that run the company — onboard → strategize →
   act (outreach) → learn, all over the SAME HIVEMIND memory. The compounding loop.
 
@@ -92,24 +92,17 @@ FE reads SSE /turns/:id/stream (250ms poll) + GET fallback. Caddy flush_interval
 | `frontend/Da-vinci/src/components/hivemind/app/pages/HyperAgents.jsx` | Vercel | Room + company-dashboard UI. |
 | `frontend/Da-vinci/src/components/hivemind/app/hyperagents/*` | Vercel | `CompanyDashboard`, `HyperOnboarding`, `OnboardingTerminal`, `CampaignPanel`, `LeadsView`, `AgentAvatar`, `rooms/`, `elements/`. |
 
-**Two git repos:** core+sidecar = root `HIVEMIND` → push **`singulance-main`** (= PROD;
-NOT `main`, NOT the stale `feat/mneme-foundation` checkout). FE = `Da-vinci`
-submodule (own repo `main`→Vercel); commit in submodule then bump the parent
-gitlink. Commit author ALWAYS `amarsai3012005 <amarsai3012005@users.noreply.github.com>`.
+**Two git repositories:** Core/sidecar live in the parent `HIVEMIND` repository;
+the frontend is the `Da-vinci` submodule. Work on isolated task branches. Push
+the frontend commit first, then update the parent gitlink. Integrate complete
+work into `singulance-main` through `docs/BRANCH_PROTOCOL.md`.
 
-## Deploy (THIS box — local docker, not ssh)
-Everything is local docker on this host; `/root/hivemind` is the repo.
-- **sidecar (Python) fast dev:** `docker cp <file> hm-employees:/app/src/hivemind_employees/<path> && docker restart hm-employees` (ephemeral — lost on recreate).
-- **durable ship:** build the image from the **`/root/hivemind-main` singulance-main** worktree
-  (NOT `/root/hivemind`, which is the dirty feat tree) →
-  `docker build -f /root/hivemind-main/employees-service/Dockerfile -t hivemind/employees:prod-<date>-<sha> /root/hivemind-main/employees-service` →
-  `VERSION=prod-<date>-<sha> docker compose --env-file /root/hivemind/.env -f infra/docker-compose.hetzner.yml up -d --no-deps employees`.
-  **`--env-file` is MANDATORY** (compose interpolates `${VAR}` from the project dir, not the
-  per-service `env_file`; omitting it fails on `BROKER_DATABASE_URL`).
-  **`--no-deps` is MANDATORY** and **pass VERSION on the command line, do NOT bump `.env`
-  VERSION** — see the deploy lesson below. `.env VERSION` tracks CORE.
-- **core** (control-plane / server / campaigns): rebuild `hivemind/core-api`, recreate `hm-core` (see recall_final.md deploy ledger).
-- Write a rollback marker (`.last-*-rollback`, gitignored) before each deploy.
+## Release
+
+Source work does not hot-patch containers. Release only the integrated pushed
+commit through `docs/PRODUCTION_RELEASE_PROTOCOL.md`, with one release owner,
+rollback, service-specific acceptance, and journal evidence. Never infer the
+current box layout or commands from this context file.
 
 ## LLM policy (canonical — enforce on BOTH runtimes)
 Owner rule: **Cerebras (primary) → OpenRouter (failover), model `gpt-oss-120b`, NO
@@ -140,15 +133,12 @@ Test email recipient is ALWAYS `amarsai2005@gmail.com` (user-controlled, safe re
 - Tool NAME ≠ gate key ("recall" is the fn; "hivemind_recall" is the gate key).
 - Two core replicas historically shared a queue — on this box confirm replica count before assuming.
 - Email is NEVER "sent" in-turn — draft + approval card only.
-- `docker compose up` needs `--env-file /root/hivemind/.env` or it fails on interpolation.
-- **DEPLOY TRAP (bit us 2026-07-23):** `VERSION=<tag> docker compose … up -d employees` WITHOUT
-  `--no-deps` also recreates **hm-core** (core is employees' `depends_on`), and because all services
-  share one `${VERSION}` it rebuilds core from compose context `..` = the **dirty `/root/hivemind`
-  feat tree**, silently running unintended core code. ALWAYS `--no-deps` for a sidecar-only deploy;
-  pass VERSION as a shell override (never bump `.env` VERSION — that's core's). Recover a mis-recreated
-  core with `VERSION=<core-.env-tag> docker compose … up -d --no-deps core` + verify recall warm-up.
+- Do not run ad-hoc Compose or container-copy commands from a feature session.
+  The release protocol owns dependency isolation, environment rendering,
+  immutable images, rollback, and acceptance.
 
-## Key IDs (active test org on THIS box)
-- org **MANDI** `807ebb88-94a3-447b-8d84-727479cdd979` · user `c8876290-8836-472c-94b0-231fa1843ee9`.
-- (Historical/other-box org `f5e2418b…` / leonardo@bundb.de — not this env.)
-- Deep code map (may be partially stale): `core/HYPERAGENTS_CODEBASE_GUIDE.md`.
+## Test Fixtures
+
+Resolve authorized disposable tenant/user/room fixtures at test time. Do not
+encode customer or production identifiers in persistent agent instructions.
+Deep code map (verify before use): `core/HYPERAGENTS_CODEBASE_GUIDE.md`.

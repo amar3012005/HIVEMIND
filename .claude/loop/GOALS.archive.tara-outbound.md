@@ -1,4 +1,7 @@
-# Autonomous Goal Queue — TARA Outbound Voice Campaigns
+# Archived Goal Queue — TARA Outbound Voice Campaigns
+
+> Historical record only. Do not execute commands or revive services below.
+> Current TARA authority is `.claude/decision_docs/TARA.md`.
 
 The loop works these **top-to-bottom, one at a time**. While any `[ ]`/`[~]` goal
 remains, the Stop hook (`.claude/hooks/goal-loop-stop.py`) blocks the session from

@@ -1,4 +1,7 @@
-# Governance Changelog — the accountability ledger
+# Historical Governance Changelog
+
+> Commands, hosts, branches, and topology below may be obsolete. Current
+> authority is `.claude/INSTRUCTIONS.md` and the production release protocol.
 
 One dated entry per turn. Quotes commits + the verifier's verdict. Records RED turns too. Newest first.
 

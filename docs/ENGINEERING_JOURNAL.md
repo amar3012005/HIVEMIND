@@ -52,6 +52,24 @@ or uncommitted changes as completed work.
 - Next: finish rebase, validate the combined current HyperAgents context, then
   push the task branch for review.
 
+## 2026-07-23 UTC - Claude instruction system refresh committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/claude-instructions-v2`
+- Base / commit: `b457c4f2a32b921924ed7e4f3eefc14fcce95946` ->
+  `2fda7d9fe8298d836fc95e23e03abfe639c37680`
+- Scope: replaced legacy auto-loaded Claude instructions and mutating host
+  helpers; added current decision records; preserved and reconciled the newer
+  HyperAgents closed-loop program; fixed branch/release authority links.
+- Verification: `jq` validation, shell syntax, 74-file relative-link audit,
+  secret-pattern scan, code-review-graph change audit, and `git diff --check`
+  passed. No product code or frontend gitlink changed.
+- Production: not deployed
+- Rollback: revert `2fda7d9fe8298d836fc95e23e03abfe639c37680`
+- Next: review and merge the branch into `singulance-main`; no service rebuild
+  is required because this is agent/documentation configuration only.
+
 ## 2026-07-19 UTC - SINGULANCE deployment governor started
 
 - State: Started

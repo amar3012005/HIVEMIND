@@ -64,6 +64,15 @@
 | **P6** | Outreach Contract + human-approved auto-generation | ✅ live (**autonomy + auto-propose on**) |
 
 ### Cross-cutting, also live
+- **TARA call-contract (voice outbound with first-contact HITL popup):** when HyperAgents
+  proposes an outbound call, the contract auto-selects **language** (inferred from the prospect —
+  e.g. a German firm → `de`), a **conversation strategy**, and a **voice** (resolved to a concrete
+  Cartesia voice from TARA's live `/voices` catalog by language+tone). `propose` generates the
+  contract + pushes a live `call_contract` event; the FE `<CallContractModal>` shows goal/strategy/
+  language/voice with **Approve & call / Not now**. Approve → Start the campaign → TARA dials with
+  the contract (plans + speaks with intent). **Nothing dials without the popup approval** (hard
+  first-contact HITL). Files: `api_outreach.py`, `outreach/campaigns.js` (`resolveVoiceId`,
+  `executeCall`, `propose`), `components/CallContractModal.jsx`, `HyperAgents.jsx` (SSE dispatch).
 - **Plan-limit popup:** 402s emit `plan_limit_exceeded` → the FE `<PlanLimitModal>` fires
   (was a silent console 402). Backend `capacityErrorResponse` + project-limit paths.
 - **Service-error toast:** any 5xx / network failure → global `<ServiceErrorToast>` (was a silent

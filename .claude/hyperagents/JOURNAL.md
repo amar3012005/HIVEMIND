@@ -5,6 +5,30 @@ Append-only. **Newest first.** One entry per shipped feature/fix. Written by the
 
 Entry format:
 ```
+---
+
+## 2026-07-23 — TARA call-contract: auto voice/language/strategy + first-contact-HITL popup
+- **commits:** `ad8de6663` (BE: employees+control) · Da-vinci `7165961` + gitlink `f069846dd` (FE).
+- **images LIVE:** employees/control `prod-20260723-ad8de6663`, fe `latest` (both containers).
+- **what:** when HyperAgents proposes an outbound call, the contract now AUTO-CONFIGURES the voice
+  call + gates it behind a visible popup:
+  - `api_outreach.generate` (call) emits `language` (inferred from prospect), `strategy`
+    (conversation plan), `voice_style` (tone) alongside goal/opener/context.
+  - `campaigns.js`: persists them; `resolveVoiceId` picks a concrete Cartesia voice from TARA's
+    live `/voices` catalog by language+tone; `executeCall` passes language+voice_id + folds
+    strategy into TARA's directive. `propose` generates the first contract up front + returns it +
+    pushes a live `call_contract` event to the room callback_url.
+  - FE `<CallContractModal>` (AppShell, global `hm:call-contract` from the SSE handler): shows
+    goal/strategy/language/voice + Approve&call / Not now. Approve → startOutreachCampaign (dial);
+    reject → stopOutreachCampaign. Nothing dials without it (first-contact HITL made visible).
+- **verified:** sidecar generate live returns {language:de, voice_style:'warm professional',
+  German strategy} for a German firm; propose endpoint auth/flag/validation green; FE compiles +
+  `hm:call-contract` in the shipped bundle; both FE containers 200; hm-core untouched (--no-deps).
+- **NOT exercised:** a real dial to a real phone — correctly HITL-gated; never auto-placed a call.
+- **scorecard:** reused the modal/global-event + approval + propose patterns (no rebuild); TARA
+  DialRequest already accepted voice_id/language (pure connection); verified the enrichment live
+  via a safe LLM-only call (no side effect). --no-deps everywhere.
+
 ## YYYY-MM-DD — <title>
 - **commits:** <parent sha(s)> (+ Da-vinci <sha> if FE)
 - **what:** one line

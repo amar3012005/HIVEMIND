@@ -1985,7 +1985,17 @@ async function _recallPersistedMemoriesImpl(store, {
     ranked.sort((a, b) => b.score - a.score);
   }
 
-  const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
+  let filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
+
+  // SCOPE ENFORCEMENT (universal, post-merge): the chat scope selector (personal/project/team)
+  // must actually restrict the delivered set. The per-lane checks (786/1618) run before some
+  // candidates carry .scope and are bypassed by the merge/rerank path, so enforce it once here
+  // on the fully-merged, scope-hydrated pool. Mirrors the per-lane rule (drop only a present,
+  // mismatched scope; keep scope-less rows). 'organization'/none is passed as null → no filter
+  // (everything the access_context already allows in the org).
+  if (scope_filter) {
+    filtered = filtered.filter((m) => !(m && m.scope && m.scope !== scope_filter));
+  }
 
   // Filter out meta-facts from LLM extraction that describe the extraction process, not actual user facts
   const META_FACT_RE = /\b(the user (did not|provided|shared|mentioned|gave|is discussing|discussed|started a new topic|gave a|uploaded))\b/i;

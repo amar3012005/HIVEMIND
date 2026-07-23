@@ -60,3 +60,18 @@ ALTER TABLE hivemind.memories
 ## Rollback
 Run down.sql (drops index first, then columns). No data loss beyond the provenance columns
 themselves (source_metadata JSON copy remains intact).
+
+---
+## UPDATE 2026-07-23 — APPLIED (columns live) + population caveat
+- Columns + index APPLIED to prod hivemind.memories (verified), added to schema.prisma +
+  migration 20260723090000, Prisma client regenerated, core deployed (prod-20260723-3e878fb5b),
+  recall verified healthy. The MIGRATION is done.
+- prisma-graph-store.createMemory populates the columns for hyperagents-agent saves (uuid-guarded,
+  additive) — verified SAFE (non-HyperAgents saves unaffected).
+- CAVEAT (scoped follow-up): the primary /api/memories path is the canonical V5 ingest, whose LLM
+  normalizer REPLACES source_metadata with its extractor output (_normalized/factSentences/…),
+  dropping produced_by/source_session_id BEFORE the create — so the columns do NOT auto-populate
+  via that path yet. Provenance data still lives on the memory (source_platform='hyperagents').
+  To auto-populate: preserve {produced_by, source_session_id, room_id, actionable} through the
+  canonical normalizer → engine.ingestMemory → store.createMemory. Delicate hot-path change —
+  intentionally NOT rushed. Columns/wiring are ready for when it's threaded.

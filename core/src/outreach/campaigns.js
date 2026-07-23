@@ -71,6 +71,31 @@ export function createOutreachModule(deps) {
     where: { id }, data: { lastTickAt: new Date() },
   }).catch(() => {});
 
+  // Resolve a concrete Cartesia voice_id from the contract's language + tone. Fetches
+  // TARA's live voice catalog (GET /voices?language=), cached 1h. Prefers a feminine voice
+  // (TARA's persona) for warm/friendly tones, else the first for that language. Returns null
+  // on any failure → TARA resolves a language-appropriate default itself (never blocks a call).
+  const _voiceCache = { at: 0, byLang: {} };
+  async function resolveVoiceId(language, voiceStyle) {
+    try {
+      const lang = String(language || 'en').slice(0, 8);
+      if (Date.now() - _voiceCache.at > 3600000) { _voiceCache.byLang = {}; _voiceCache.at = Date.now(); }
+      if (!_voiceCache.byLang[lang]) {
+        const r = await fetch(`${CONFIG.taraDeepgramBaseUrl}/voices?language=${encodeURIComponent(lang)}`,
+          { signal: AbortSignal.timeout(6000) }).catch(() => null);
+        const j = r && r.ok ? await r.json().catch(() => null) : null;
+        _voiceCache.byLang[lang] = Array.isArray(j) ? j : (Array.isArray(j?.voices) ? j.voices : []);
+      }
+      const voices = _voiceCache.byLang[lang] || [];
+      if (!voices.length) return null;
+      const style = String(voiceStyle || '').toLowerCase();
+      const wantFem = !/formal|crisp|authorit|deep/.test(style); // default to TARA's feminine persona
+      const pick = voices.find((v) => wantFem && String(v.gender || '').toLowerCase().startsWith('fem'))
+        || voices[0];
+      return pick?.id || null;
+    } catch { return null; }
+  }
+
   // ── per-target generation (proxies to the employees sidecar LLM) ───────────
   async function generateTarget(campaign, target) {
     await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'generating' } });
@@ -99,6 +124,12 @@ export function createOutreachModule(deps) {
             // Prospect brief (firm + why-fit + prior-call learnings) — rides the
             // dial as TARA's [PROSPECT CONTEXT] so the strategist isn't blind.
             ...(j.context ? { context: String(j.context).slice(0, 800) } : {}),
+            // Auto-selected call contract (P: TARA-from-contract): language + conversation
+            // strategy + voice tone — chosen by the contract generator, resolved to a concrete
+            // Cartesia voice at dial time. Drives voice/language/strategy automatically.
+            language: String(j.language || 'en').slice(0, 8),
+            ...(j.strategy ? { strategy: String(j.strategy).slice(0, 200) } : {}),
+            ...(j.voice_style ? { voice_style: String(j.voice_style).slice(0, 40) } : {}),
           };
       if (campaign.channel === 'email' && (!payload.subject || !payload.body)) throw new Error('empty email payload');
       if (campaign.channel === 'call' && !payload.goal) throw new Error('empty call goal');
@@ -208,7 +239,16 @@ export function createOutreachModule(deps) {
     await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'sending' } });
     const to = String(target.phone).replace(/[\s()/-]/g, '');
     const sessionId = `outreach-${target.id.slice(0, 8)}-${Date.now()}`;
-    const directive = payload.opener ? `${payload.goal}. Open with: ${payload.opener}` : payload.goal;
+    // Directive folds goal + opener + the auto-selected conversation strategy so TARA's
+    // strategist plans with intent.
+    const directive = [
+      payload.goal,
+      payload.opener ? `Open with: ${payload.opener}` : null,
+      payload.strategy ? `Strategy: ${payload.strategy}` : null,
+    ].filter(Boolean).join('. ');
+    // Auto-select voice from the contract (language + tone). Best-effort; null → TARA default.
+    const language = String(payload.language || 'en').slice(0, 8);
+    const voiceId = await resolveVoiceId(language, payload.voice_style);
     const r = await fetch(`${CONFIG.taraDeepgramBaseUrl}/calls/outbound`, {
       method: 'POST',
       headers: {
@@ -218,6 +258,10 @@ export function createOutreachModule(deps) {
       body: JSON.stringify({
         to, session_id: sessionId, user_id: campaign.userId, org_id: campaign.orgId,
         goal: String(directive).slice(0, 600),
+        // Auto-selected call contract: language + concrete Cartesia voice (TARA resolves a
+        // language default when voice_id is null).
+        language,
+        voice_id: voiceId || undefined,
         // Full prospect metadata contract — TARA plans + speaks around WHO it's
         // calling (firm brief + why-fit + prior-call learnings from generate).
         context: payload.context ? String(payload.context).slice(0, 800) : undefined,
@@ -401,8 +445,42 @@ export function createOutreachModule(deps) {
         },
         include: { targets: { orderBy: { position: 'asc' } } },
       });
+      // Generate the first target's CONTRACT up front (goal + strategy + auto voice/language)
+      // so the approval popup shows the real plan the moment the OS decides. Best-effort —
+      // the campaign stands even if generation is slow/failed (targets generate on Start too).
+      let contract = null;
+      try {
+        const t0 = campaign.targets[0];
+        if (t0) {
+          const gen = await generateTarget(campaign, t0);
+          const pl = gen?.payload || {};
+          const voiceId = channel === 'call' ? await resolveVoiceId(pl.language, pl.voice_style) : null;
+          contract = {
+            prospect: t0.company || t0.email || t0.phone || null,
+            channel,
+            goal: pl.goal || null,
+            strategy: pl.strategy || null,
+            language: pl.language || 'en',
+            voice_style: pl.voice_style || null,
+            voice_id: voiceId,
+            targets: campaign.targets.length,
+          };
+        }
+      } catch (e) { console.warn('[outreach-propose] contract gen failed (non-fatal):', e.message); }
+      // Live popup hint: if the caller passed the room's callback_url, push a `call_contract`
+      // event so the FE can surface the approval popup immediately (card fallback = the queued
+      // campaign in the list). Approve = Start the campaign; Reject = stop/cancel.
+      const cbUrl = String(body.callback_url || '').trim();
+      if (cbUrl && contract) {
+        fetch(cbUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': getInternalApiKey() },
+          body: JSON.stringify({ turn_id: turnId, event: { t: 'call_contract', campaign_id: campaign.id, contract } }),
+          signal: AbortSignal.timeout(8000),
+        }).catch(() => {});
+      }
       return jsonResponse(res, {
-        campaign, proposed: true,
+        campaign, proposed: true, contract,
         note: 'Proposed (queued). Requires a human Start before any send — first-contact HITL.',
       }, 200), true;
     }

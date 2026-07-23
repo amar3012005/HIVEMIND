@@ -140,12 +140,20 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
         sys = (
             "You prepare ONE outbound phone call by an AI voice agent (TARA) to a specific "
             "prospect, grounded in the team report below. Respond with ONLY a JSON object: "
-            '{"goal": "...", "opener": "...", "context": "..."} — goal: one outcome-framed sentence for the call '
+            '{"goal": "...", "opener": "...", "context": "...", "language": "...", "strategy": "...", "voice_style": "..."} — '
+            "goal: one outcome-framed sentence for the call "
             "(e.g. 'Book a 15-minute intro about X with the office manager'); opener: the first "
             "spoken line, naming the firm and why we're calling, natural and brief; "
             "context: a compact prospect brief (max 500 chars) the voice agent keeps in working "
             "memory during the call — firm name, what they do / why they fit, and any prior-call "
-            "learnings worth applying. Never invent facts about the firm."
+            "learnings worth applying; "
+            "language: the BCP-47 code the call should be conducted in, inferred from the prospect "
+            "(company location / website TLD / market) — e.g. 'de' for a German firm, else 'en'; "
+            "strategy: <=200 chars — the conversation plan (how to open, what to probe, the ask, how "
+            "to handle the likely objection) so TARA speaks with intent; "
+            "voice_style: 2-3 words describing the ideal voice tone for THIS prospect + strategy "
+            "(e.g. 'warm professional', 'crisp formal', 'friendly energetic'). "
+            "Never invent facts about the firm."
         )
     user = (f"TEAM REPORT (grounding):\n{report or '(no report body — use the firm data only)'}\n\n"
             f"PROSPECT:\n{firm}{learnings_block}")
@@ -170,5 +178,14 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
     # facts so TARA is never blind even if the model skipped the field.
     context = str(obj.get("context") or "").strip() or (
         f"{p.company} — {p.website or ''}".strip(" —"))
+    # Auto-selected call parameters (the "contract" TARA dials with): language + a
+    # conversation strategy + the ideal voice tone. Control-plane resolves voice_style →
+    # a concrete Cartesia voice_id from TARA's catalog at dial time; language flows straight
+    # through (TARA resolves a language-appropriate voice when no explicit id is given).
+    _lang = str(obj.get("language") or "").strip().lower()[:8] or "en"
+    _strategy = str(obj.get("strategy") or "").strip()[:200]
+    _voice_style = str(obj.get("voice_style") or "").strip()[:40]
     return {"goal": goal[:300], "opener": opener[:400],
-            "context": context[:600], "tokens": usage.get("total", 0)}
+            "context": context[:600], "language": _lang,
+            "strategy": _strategy, "voice_style": _voice_style,
+            "tokens": usage.get("total", 0)}

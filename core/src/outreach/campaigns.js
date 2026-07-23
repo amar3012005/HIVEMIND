@@ -17,6 +17,8 @@
 //
 // Spec: docs/superpowers/specs/2026-07-16-outreach-campaign-runner-design.md
 
+import { outreachKillSwitchActive, outreachDailyCap } from './outreach-contract.js';
+
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
 const MAX_TARGETS = 50;
@@ -251,7 +253,34 @@ export function createOutreachModule(deps) {
     });
   }
 
-  const executeTarget = (c, t) => (c.channel === 'email' ? executeEmail(c, t) : executeCall(c, t));
+  // P6 Outreach Contract — the send choke point for BOTH the FE lane and the autonomous
+  // drain worker. Honors the kill switch (instant all-outreach stop) and a per-org daily cap.
+  // Skip-not-throw (mirrors the dedup path): a blocked target is marked 'skipped' with a reason
+  // so the campaign advances cleanly. Defaults (kill off, cap 0) are behavior-neutral.
+  async function executeTarget(c, t) {
+    if (outreachKillSwitchActive()) {
+      return prisma.outreachTarget.update({
+        where: { id: t.id },
+        data: { state: 'skipped', resultRef: { skipped: 'outreach kill switch engaged — not sent', blockedBy: 'kill_switch' } },
+      }).catch(() => t);
+    }
+    const cap = outreachDailyCap();
+    if (cap) {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT count(*)::int AS n FROM "hivemind"."outbound_actions"
+          WHERE org_id = $1::uuid AND status = 'sent' AND sent_at >= now() - interval '1 day'`,
+        c.orgId,
+      ).catch(() => [{ n: 0 }]);
+      const sentToday = rows?.[0]?.n || 0;
+      if (sentToday >= cap) {
+        return prisma.outreachTarget.update({
+          where: { id: t.id },
+          data: { state: 'skipped', resultRef: { skipped: `daily outreach cap reached (${cap})`, blockedBy: 'daily_cap' } },
+        }).catch(() => t);
+      }
+    }
+    return c.channel === 'email' ? executeEmail(c, t) : executeCall(c, t);
+  }
 
   // ── drain worker: finish campaigns whose FE went away ──────────────────────
   async function drainOnce() {

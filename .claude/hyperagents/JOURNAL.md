@@ -11,6 +11,24 @@ Entry format:
 
 ---
 
+---
+
+## 2026-07-23 — Lead/call tool-discipline (prompt-driven, not hardcoded) + tool-selection sandbox
+- **commits:** through `fe8b2f92f` (employees), singulance-main. Image LIVE.
+- **what:** replaced leave-it-to-chance triggering with explicit prompt guidance + a sandbox to
+  tune it. Agent persona (agentscope_factory) + director planner (engine.py) now say: SEE/REUSE
+  the shared lead book (list_prospects) before acting on/finding leads; discover NEW only when the
+  book lacks them or the user asks (discovery is room/Places, agents never invent firms);
+  save_prospect with a note when qualifying; propose_call when a live call beats an email (phone
+  given → propose_call directly, else list_prospects first).
+- **sandbox:** scripts/quality/tool_sandbox.py — feeds varied queries through one LLM tool-calling
+  round with the REAL tool schemas + guidance, prints which tools fire, NO side effects. Used it to
+  catch + fix two over/under-triggers (existing-lead action answered blind; phone-given routed to
+  list). Final verified triggers (deployed fe8b2f92f): our-leads→list_prospects; reach-out/email
+  existing→list_prospects; call X at +49→propose_call; add lead→save_prospect; pricing/decision→
+  recall; give-lead-a-call (no phone)→list_prospects (then propose_call).
+- hm-core/hm-control untouched; --no-deps.
+
 ## 2026-07-23 — Shared LEAD BOOK (list_prospects/save_prospect + notes) + popup diagnosis
 - **commits:** `58b02e2f6` (employees), singulance-main. Image LIVE.
 - **lead book:** every room shares one org-scoped, persistent prospect store (memories tagged

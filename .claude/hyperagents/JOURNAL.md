@@ -17,6 +17,27 @@ Entry format:
 
 ---
 
+## 2026-07-23 — F0b: web-intel on HIVEMIND tools (no groq); P3 eval harness found (not rebuilt)
+- **commits:** `d73ad4401` · image `hivemind/employees:prod-20260723-d73ad4401` (LIVE)
+- **F0b what:** the round-table web lane preferred `groq/compound` (HIVEMIND fallback). Flipped:
+  HIVEMIND web tools (hivemind_web_search via web_search_emulated → core /api/web/search, Tavily)
+  are now PRIMARY; groq/compound only if `HYPER_WEB_INTEL_PROVIDER=groq` (reversible). Nulled the
+  DEAD `self.web_model=groq/compound-mini` (never called; engine `_web_search` already uses HIVEMIND).
+  Closes the last groq residual from F0 — text + web both fully HIVEMIND/Cerebras/OpenRouter.
+- **verified:** hm-employees healthy on the baked image; gate live (`_HivemindWebPrimary` present).
+- **P3 (feature-recon HALT — did NOT rebuild):** `employees-service/scripts/quality/quality_eval.py`
+  ALREADY IS the eval baseline harness — runs real room turns (`run_director`), judges
+  grounded/specific/on_intent/useful_for_exec + is_generic ("be harsh"), averages QE_SAMPLES,
+  writes a dated JSON report, regression floor QE_FLOOR. Models already gpt-oss (director 20b, synth 120b).
+  Plan's "build evals/hyper_report_eval.py" would have duplicated it. Established a BASELINE run
+  against MANDI (807ebb88, has Solvis data) via QE_PROFILE_JSON — result captured to /tmp/quality_report.json.
+  FOLLOW-UP: quality_eval `_judge_groq` still tries GROQ first (OpenRouter fallback + gpt-oss judge,
+  so valid) — canonicalize to OpenRouter-only in a later pass (offline eval, low priority).
+- **remaining program (queued, phase-by-phase):** P7 round-table → P5 presence → P4 synth (uses the
+  synth_model seam) → P1 contracts → P0 provenance → P2 governor → P6 TARA. Each ships+verifies+journals.
+- **scorecard:** feature-recon EARNED ITS KEEP — caught quality_eval (would have rebuilt P3) + the
+  already-HIVEMIND engine._web_search (F0b was 1 gate, not a web rewrite). recon held via grep. → harness: none.
+
 ## 2026-07-23 — F0: sidecar LLM canonicalized (gpt-oss via Cerebras, no groq/llama) + git-workflow fix
 - **commits:** `d4331670c` (singulance-main) · image `hivemind/employees:prod-20260723-deafcccc9` (LIVE)
 - **what:** closed the Brain/OS LLM gap — the Python employees-service still used llama

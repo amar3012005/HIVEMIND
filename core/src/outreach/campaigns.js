@@ -17,7 +17,7 @@
 //
 // Spec: docs/superpowers/specs/2026-07-16-outreach-campaign-runner-design.md
 
-import { outreachKillSwitchActive, outreachDailyCap } from './outreach-contract.js';
+import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed } from './outreach-contract.js';
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
@@ -284,6 +284,9 @@ export function createOutreachModule(deps) {
 
   // ── drain worker: finish campaigns whose FE went away ──────────────────────
   async function drainOnce() {
+    // P6 — autonomous execution switch. When off, the FE must drive every send (no
+    // background autonomy). Default on. Kill switch also short-circuits all sending.
+    if (!outreachAutonomyEnabled() || outreachKillSwitchActive()) return;
     const stale = new Date(Date.now() - DRAIN_STALE_MS);
     const campaigns = await prisma.outreachCampaign.findMany({
       where: { status: 'running', lastTickAt: { lt: stale } },
@@ -291,6 +294,11 @@ export function createOutreachModule(deps) {
       take: 5,
     });
     for (const c of campaigns) {
+      // First-contact-HITL invariant: only auto-advance a human-authorized running
+      // campaign — never cold-originate. (Redundant with the query filter, but the
+      // contract is the single place the invariant is asserted + auditable.)
+      const gate = assertAutonomousSendAllowed({ campaign: c });
+      if (!gate.allowed) continue;
       try {
         // Un-stick: 'sending' older than SENDING_STUCK_MS → the ledger decides.
         for (const t of c.targets.filter((x) => x.state === 'sending'

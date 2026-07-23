@@ -1178,6 +1178,8 @@ export class PrismaGraphStore {
                    m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
+                   m.scope, m.user_id, m.org_id, m.primary_team_id, m.project_id,
+                   (SELECT array_agg(mp.project_id) FROM memory_projects mp WHERE mp.memory_id = m.id) AS project_ids,
                    GREATEST(ts_rank(to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, '')),
                            to_tsquery('simple', $1)), 0) + (${trgmScoreExpr}) as fts_score
             FROM memories m
@@ -1206,6 +1208,17 @@ export class PrismaGraphStore {
               valid_to: r.valid_to?.toISOString?.() || r.valid_to,
               source: r.source,
               visibility: r.visibility,
+              // Scope/ownership fields — REQUIRED for the chat scope selector
+              // (personal/all-org/project) and the access-context inference to
+              // work on FTS-sourced memories. Without these the lexical lane
+              // returned scope-less rows that leaked past matchesScopeFilter
+              // (a project fact answered a `personal` recall).
+              scope: r.scope || null,
+              user_id: r.user_id || null,
+              org_id: r.org_id || null,
+              primary_team_id: r.primary_team_id || null,
+              project_id: r.project_id || null,
+              project_ids: Array.isArray(r.project_ids) ? r.project_ids.filter(Boolean) : [],
               // Phase 1 synthesis columns — needed by recall-router boost + synthesized[] shape
               synthesis_confidence: r.synthesis_confidence != null ? Number(r.synthesis_confidence) : null,
               synthesis_cluster_hash: r.synthesis_cluster_hash || null,

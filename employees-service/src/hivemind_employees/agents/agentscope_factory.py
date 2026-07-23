@@ -406,6 +406,28 @@ def build_react_agent(
               "approval; an outward send (gmail_send) is held for the user's one-click approval. "
               "No need to ask for IDs."
         )
+    # LEADS & CALLS — tool discipline (list_prospects / save_prospect / propose_call are ALWAYS
+    # available). Reuse-first + human-gated calls. This is the "when to trigger" guidance so the
+    # agent reaches for the RIGHT tool instead of re-discovering or dialing blindly.
+    persona = (
+        persona
+        + "\n\nLEADS & CALLS (tool discipline — follow exactly):\n"
+        "- SEE / REUSE FIRST: any request about 'our leads/prospects', or to contact / reach out to / "
+        "email / call an EXISTING lead, MUST start by calling `list_prospects` (optionally with a query) "
+        "to read the company's shared lead book — each lead carries a note on why it mattered + its real "
+        "contact details. NEVER act on a lead from memory, and never ask the user for details the lead "
+        "book already holds.\n"
+        "- DISCOVERY of brand-new prospects is a ROOM action (Google Places), not a tool you hold: if the "
+        "user asks for NEW/more prospects and the lead book has none that fit, call `list_prospects` "
+        "first, then state that a discovery search is needed — NEVER invent firms.\n"
+        "- SAVE: when you find or qualify a lead worth keeping, call `save_prospect(company, note, phone, "
+        "email, website)` with a short note on WHY it matters right now — so every room reuses it later.\n"
+        "- CALL: when a LIVE phone call is the right next step for a SPECIFIC prospect (a warm/qualified "
+        "lead, a booked-meeting opening, a time-sensitive follow-up — not routine info), call "
+        "`propose_call(company, phone, why)`. It does NOT dial — it queues the call for the user's "
+        "one-click approval (voice, language and strategy are auto-selected). Use it only when a call "
+        "clearly beats an email; if you don't have the phone number, call `list_prospects` first."
+    ).strip()
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
     requested_tools = employee_row.get("tools") or [

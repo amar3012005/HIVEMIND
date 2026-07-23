@@ -277,10 +277,21 @@ export class QdrantClient {
         }
       }
       embedding = await this.generateEmbedding(embeddingInput);
+      // Retry transient embed-service blips before giving up — a memory with no
+      // real vector is invisible to semantic recall (the drift bug).
+      for (let _r = 0; _r < 2 && !embedding; _r++) {
+        await new Promise((r) => setTimeout(r, 300 * (_r + 1)));
+        try { embedding = await this.generateEmbedding(embeddingInput); } catch { /* keep null, retry */ }
+      }
     }
 
     if (!embedding) {
-      console.warn('⚠️  Storing memory without embedding');
+      // Do NOT upsert a placeholder vector: a garbage point looks "present" to
+      // the embed-reconciler and would never be re-embedded, permanently
+      // polluting recall. Skip the upsert + log LOUD; the reconciler (or the next
+      // save) will retry this id once embedding is available again.
+      console.error(`⚠️ [qdrant] LOUD: embedding unavailable for memory ${memory.id} (org ${memory.org_id || memory.orgId || 'n/a'}) — SKIPPING upsert; embed-reconciler will retry`);
+      return null;
     }
 
     const point = {

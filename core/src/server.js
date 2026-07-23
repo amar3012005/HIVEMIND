@@ -22769,6 +22769,35 @@ if (shouldStartHttpServer()) {
     }, _syncEveryMs).unref();
     console.log(`[connector-sync] durable-sync worker mounted (every ${_syncEveryMs}ms)`);
   }
+
+  // Embedding reconciler (drift guard). Every persisted memory MUST land in its
+  // org's Qdrant collection, but ~16 save paths write to PG and only some embed
+  // to Qdrant — so a fraction drifted and went invisible to semantic recall (the
+  // "highly-relevant memory never in top-5" bug; audit found up to 100% of an
+  // org un-embedded). This poll loop finds PG memories missing from Qdrant and
+  // embeds them via the same storeMemory pipeline (retry + loud log). Fast recent
+  // window each tick; a wider full sweep every ~20 ticks catches older backlog.
+  // Gated by EMBED_RECONCILE_ENABLED (default ON — this is a correctness guard).
+  if (process.env.EMBED_RECONCILE_ENABLED !== 'false' && prisma && qdrantClient) {
+    const _reconEveryMs = Math.max(60000, Number(process.env.EMBED_RECONCILE_INTERVAL_MS || 3 * 60 * 1000));
+    let _reconBusy = false;
+    let _reconTicks = 0;
+    const _runReconcile = async () => {
+      if (_reconBusy) return; // no overlap — a long sweep skips the next tick
+      _reconBusy = true;
+      try {
+        _reconTicks += 1;
+        const { reconcileEmbeddingsOnce } = await import('./memory/embed-reconciler.js');
+        const fullSweep = _reconTicks % 20 === 0; // ~hourly full sweep at 3min cadence
+        await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
+      } catch (e) {
+        console.warn('[embed-reconciler] tick failed:', e?.message?.slice(0, 160));
+      } finally { _reconBusy = false; }
+    };
+    setInterval(_runReconcile, _reconEveryMs).unref();
+    setTimeout(_runReconcile, 90000).unref(); // first pass ~90s post-boot (after warm-up)
+    console.log(`[embed-reconciler] drift-guard worker mounted (every ${_reconEveryMs / 60000}min, full sweep every 20 ticks)`);
+  }
   });
 } else {
   console.log(`[runtime] HTTP server disabled for role=${RUNTIME_ROLE}`);

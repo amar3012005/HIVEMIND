@@ -86,10 +86,12 @@ _TURN_PROVENANCE: "contextvars.ContextVar[Optional[dict]]" = contextvars.Context
 
 
 def set_turn_provenance(turn_id: Optional[str] = None, room_id: Optional[str] = None,
-                        org_id: Optional[str] = None) -> None:
-    """Arm per-turn provenance so save_memory can stamp a fact's origin. Safe with
-    partial info (a missing turn just yields null provenance fields)."""
-    _TURN_PROVENANCE.set({"turn_id": turn_id, "room_id": room_id, "org_id": org_id})
+                        org_id: Optional[str] = None, callback_url: Optional[str] = None) -> None:
+    """Arm per-turn provenance so save_memory can stamp a fact's origin AND so propose_call
+    can reach the control-plane (via callback_url's host) to propose a TARA call. Safe with
+    partial info (a missing turn just yields null fields)."""
+    _TURN_PROVENANCE.set({"turn_id": turn_id, "room_id": room_id, "org_id": org_id,
+                          "callback_url": callback_url})
 
 
 # P0 actionable-gate: only durable, actionable facts should enter the company brain.
@@ -1148,6 +1150,49 @@ def build_hivemind_toolkit(
     # tool-call 400 that breaks planning. Room agents get it via DEFAULT_HYPER_TOOLS.
     if "org_directory" in enabled_tool_names:
         tk.register_tool_function(org_directory)
+
+    # propose_call — the agent's decision to place a TARA outbound CALL. ALWAYS available:
+    # it is safe by construction (only QUEUES a call contract for the user's popup approval;
+    # flag-gated on the control side + first-contact HITL — it NEVER dials on its own).
+    def propose_call(company: str, phone: str, why: str = "") -> ToolResponse:
+        """Propose an outbound phone CALL to a prospect when a live voice call is the right next
+        move (a warm lead, a meeting opportunity, a time-sensitive follow-up) — NOT for routine
+        info. This does NOT dial: it queues a call CONTRACT (goal + conversation strategy +
+        auto-selected voice & language) that POPS UP for the user's one-click approval; TARA calls
+        only after they approve. Args: company (who to call), phone (E.164, e.g. '+49151234567'),
+        why (one line: why a call beats an email)."""
+        prov = _TURN_PROVENANCE.get() or {}
+        cb = str(prov.get("callback_url") or "")
+        room_id = prov.get("room_id")
+        turn_id = prov.get("turn_id")
+        if not (cb and room_id and turn_id):
+            return _tool_response_text("Cannot propose a call outside a live room turn.")
+        ph = str(phone or "").strip().replace(" ", "")
+        if not ph.startswith("+") or len(ph) < 8:
+            return _tool_response_text("A valid E.164 phone (e.g. +49151234567) is required to propose a call.")
+        # control-plane base = the callback host (…/internal/hyper/turn-event → base)
+        base = cb.split("/internal/")[0] if "/internal/" in cb else cb.rstrip("/")
+        mk = os.environ.get("HIVEMIND_MASTER_API_KEY", "")
+        try:
+            with httpx.Client(timeout=httpx.Timeout(90.0, connect=5.0)) as c:
+                r = c.post(
+                    f"{base}/internal/hyper/outreach/propose",
+                    headers={"X-API-Key": mk, "Content-Type": "application/json"},
+                    json={"room_id": room_id, "turn_id": turn_id, "channel": "call",
+                          "callback_url": cb, "prospect": {"company": company, "phone": ph}},
+                )
+            if r.status_code == 403:
+                return _tool_response_text("Call proposals are disabled for this deployment.")
+            r.raise_for_status()
+            ct = (r.json() or {}).get("contract") or {}
+            return _tool_response_text(
+                f"Queued a call to {company} for the user's approval — a popup will ask them to "
+                f"approve before TARA dials. Goal: {ct.get('goal') or 'set'}; "
+                f"language: {ct.get('language') or 'en'}; voice: {ct.get('voice_style') or 'auto'}.")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[propose_call] failed: %s", exc)
+            return _tool_response_text(f"Could not queue the call proposal ({str(exc)[:120]}).")
+    tk.register_tool_function(propose_call)
 
     if "hivemind_slack_post" in enabled_tool_names:
         def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:

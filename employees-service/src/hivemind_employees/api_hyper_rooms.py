@@ -3549,7 +3549,8 @@ async def post_room_turn(
     begin_turn_write_gate(policy)
     # P0 — arm per-turn provenance so any fact an agent saves this turn is stamped
     # with its origin (turn/room/org) for the company-brain audit trail.
-    set_turn_provenance(turn_id=req.turn_id, room_id=req.room_id, org_id=req.org_id)
+    set_turn_provenance(turn_id=req.turn_id, room_id=req.room_id, org_id=req.org_id,
+                        callback_url=req.callback_url)
 
     # Phase 6 — goalkeeper loop. Run the full round (plan → simulate → verify);
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back

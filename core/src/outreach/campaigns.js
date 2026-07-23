@@ -420,11 +420,15 @@ export function createOutreachModule(deps) {
       if (!room) return jsonResponse(res, { error: 'room not found' }, 404), true;
       const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId: room.id } });
       if (!turn) return jsonResponse(res, { error: 'turn not found' }, 404), true;
-      const all = prospectsFromTurn(turn.lines);
+      // Prospects: an EXPLICIT prospect (an agent's propose_call decision — "call THIS firm")
+      // takes precedence; otherwise derive the stack from the turn's discovered prospects.
+      const explicit = Array.isArray(body.prospects) ? body.prospects
+        : (body.prospect && typeof body.prospect === 'object' ? [body.prospect] : null);
+      const all = explicit || prospectsFromTurn(turn.lines);
       const eligible = all.filter((p) => (channel === 'email'
         ? p.email && EMAIL_RE.test(p.email)
         : p.phone && E164_RE.test(String(p.phone).replace(/[\s()/-]/g, '')))).slice(0, MAX_TARGETS);
-      if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospects on this turn` }, 400), true;
+      if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospect(s)` }, 400), true;
       const senderEmail = channel === 'email' ? await connectedGmail(room.userId) : null;
       const campaign = await prisma.outreachCampaign.create({
         data: {

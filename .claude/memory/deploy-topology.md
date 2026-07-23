@@ -49,3 +49,16 @@ fix "reflect in FE" you deploy hm-core — no FE rebuild needed unless the FE co
   MNEME_*, RERANK_*). Explicit env is authoritative in the connector config loader.
 - LLM providers: **Cerebras or OpenRouter only.** `groq-fallback.js` now funnels
   `cerebras/*`|`google/*` bodies to `chat-provider.js` with OpenRouter fallback.
+
+## Canonical dev tree — USE THIS, avoid the feat/singulance trap (added 2026-07-23)
+`/root/hivemind` is checked out on `feat/mneme-foundation` (dirty, DIVERGED from prod).
+PROD is `singulance-main`. Editing/building in `/root/hivemind` edits the WRONG branch
+(bit us: sidecar engine.py diverged; stale-ref push rejections).
+- **Edit / commit / build / push from `/root/hivemind-main`** — a permanent git worktree
+  on a real `singulance-main` branch tracking `origin/singulance-main`. Plain
+  `git pull` / `git commit` / `git push` just work (no worktree juggling, no stale ref).
+- The clone's fetch refspec was fixed to `+refs/heads/*:refs/remotes/origin/*` (was
+  feat-only → why `origin/singulance-main` went stale and pushes were rejected).
+- `/root/hivemind` stays ONLY for its `.env` + `infra/` compose deploy role. Deploy:
+  build image from `/root/hivemind-main`, then `docker compose --env-file /root/hivemind/.env
+  -f infra/docker-compose.hetzner.yml up -d <svc>`.

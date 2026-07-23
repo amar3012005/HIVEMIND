@@ -17,6 +17,65 @@ Entry format:
 
 ---
 
+## 2026-07-23 — F0: sidecar LLM canonicalized (gpt-oss via Cerebras, no groq/llama) + git-workflow fix
+- **commits:** `d4331670c` (singulance-main) · image `hivemind/employees:prod-20260723-deafcccc9` (LIVE)
+- **what:** closed the Brain/OS LLM gap — the Python employees-service still used llama
+  defaults + a Groq-first provider pin while JS core was canonical. Now: sim/digest/journal
+  defaults llama-3.1-8b-instant → openai/gpt-oss-20b; sim fallbacks drop llama-3.3; provider
+  pins drop Groq (120b→[Cerebras,Together], 20b→[Together,Cerebras]); OpenRouter body sets
+  `reasoning.effort=low` so gpt-oss emits clean content for the extractive digest/journal
+  tasks (the reason they were on llama).
+- **why:** owner rule "Cerebras or OpenRouter only, no Groq/llama" for text; the OS was
+  running strategy/debate on the banned providers.
+- **files:** `employees-service/src/hivemind_employees/hyper/engine.py`.
+- **verified:** baked image live — `engine._openrouter_chat('openai/gpt-oss-120b')` →
+  `provider=Cerebras, content='pong'`; hm-employees healthy; singulance-main features
+  (method-skills, maps-discovery) intact (I first mis-copied feat's older engine.py — caught
+  the divergence, re-applied edits to the singulance-main version).
+- **residual (flagged, NOT changed):** `HYPER_WEB_MODEL=groq/compound-mini` = agentic
+  web-search, no gpt-oss twin (same class as whisper/vision passthrough JS-side) — owner call.
+  `_OR_MODEL_MAP` llama entries are a dead safety map (no llama usage by default).
+- **git-workflow fix (root of recurring pain):** `/root/hivemind` is on `feat/mneme-foundation`
+  (dirty, diverged); PROD is `singulance-main`; the clone's fetch refspec was FEAT-ONLY
+  (`+refs/heads/feat/…`) → `origin/singulance-main` never updated → stale-ref push rejections +
+  editing the wrong branch's files. FIXED: refspec → `+refs/heads/*:refs/remotes/origin/*`, and
+  created a permanent clean worktree **`/root/hivemind-main`** on a real `singulance-main` branch
+  tracking origin. Edit/commit/build/push there; `/root/hivemind` stays for `.env`+compose only.
+- **gotchas:** sidecar engine.py DIVERGED between feat and singulance-main — always work from
+  `/root/hivemind-main` now. Deploy employees via shell `VERSION=<tag> docker compose --env-file
+  /root/hivemind/.env … up -d employees` (don't mutate the shared .env VERSION core uses).
+- **scorecard:** recon held (verified every model/route with grep + a live Cerebras smoke, no agent);
+  feature-recon caught the divergence + the existing synth_model seam; verify passed after 1 rework
+  (the feat-vs-singulance engine.py mis-copy — now permanently prevented by the worktree). → harness
+  change: added "Canonical dev tree" to CONTEXT/deploy-topology so no session repeats the branch trap.
+
+## 2026-07-23 — CONTEXT/TODO rewritten to live ground truth; Singulance-OS program set
+- **what:** the `.claude/hyperagents/` docs were a month stale and described a DIFFERENT box
+  (ssh 116.202.24.69 / /Users/amar / branch `main`). Rewrote CONTEXT.md + TODO.md from
+  verified current state on THIS box; opened the "AI Company OS" program in TODO.
+- **verified ground truth (grep/Read + `docker exec hm-employees env`, this session):**
+  - Deploy = local docker: compose service `employees` → `hivemind/employees:${VERSION}` →
+    container `hm-employees:8060`. Running `prod-20260722-rmyd4f127595`. Ship = build image +
+    `docker compose --env-file /root/hivemind/.env … up -d employees` (the `--env-file` is mandatory).
+  - PROD branch is **`singulance-main`** (not `main`; the working `/root/hivemind` checkout is a
+    dirty diverged `feat/mneme-foundation`). Deploys build from a singulance-main worktree.
+  - 3 sidecar surfaces: rooms (`api_hyper_rooms.py` `/room-turn`), round-table (`api_team_tasks.py`
+    → `hyper/engine.py` `room.run()`/`run_director`, `/{task_id}`), employee chat (`/{slug}/chat`).
+  - FE `/employees/mycompany` = `HyperAgents.jsx` hero = CompanyDashboard; components:
+    CompanyDashboard/HyperOnboarding/OnboardingTerminal/CampaignPanel/LeadsView/AgentAvatar.
+  - engine.py has the P4 seam live: `synth_model = synth_model or self.director_model` (~970),
+    `_debate` (~1441). `HYPER_SYNTH_MODEL` unused.
+  - **LLM inconsistency confirmed:** JS core is canonicalized (Cerebras→OpenRouter/gpt-oss-120b,
+    no groq/llama) but the Python sidecar is NOT — `GROQ_URL` + `_GROQ_DEAD` primary path, and
+    llama/groq defaults (`HYPER_WEB_MODEL=groq/compound-mini`; code `_SIM/_DIGEST/_JOURNAL=llama-3.1-8b-instant`;
+    env `MIND_READER/COGNITION_WRITER/GROQ_INFERENCE/HIVEMIND_LLM_MODEL`=llama). `HYPER_AUTO_*`=gpt-oss-120b already.
+  - Active test org on this box = MANDI `807ebb88…` / user `c8876290…`.
+- **next (owner priority):** F0 employees-service LLM canonicalization → P3 eval baseline → then the plan.
+- **gotchas:** don't trust the old box/paths; the parked 2026-06-19 "Agentic orchestrator" feature
+  (flag OFF) is NOT this program — left as-is.
+- **scorecard:** recon held (verified every claim with grep/env, no agent); feature-recon caught the
+  parked agentic feature + the existing synth_model seam (extend, don't rebuild); doc-only, no deploy. → harness change: none.
+
 ## 2026-06-19 — FULL VISION COMPLETE: real artifacts (Google re-auth) + email recipient
 - **commits:** `ec4ae0d2`
 - **what:** User re-authorized Google with write scopes. Verified docs_create + gmail_create_draft bridge probes → 200 with real URLs (was 403). Fixed the agentic email path to resolve recipients (`_resolve_recipients` → verified_contacts; the stash hardcoded []).

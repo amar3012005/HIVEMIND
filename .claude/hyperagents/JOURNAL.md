@@ -9,6 +9,24 @@ Entry format:
 
 ---
 
+---
+
+## 2026-07-23 — Shared LEAD BOOK (list_prospects/save_prospect + notes) + popup diagnosis
+- **commits:** `58b02e2f6` (employees), singulance-main. Image LIVE.
+- **lead book:** every room shares one org-scoped, persistent prospect store (memories tagged
+  'prospect') so agents REUSE leads instead of re-discovering. Tools (always-registered):
+  list_prospects(query) — see existing leads + note + when; save_prospect(company, note, phone,
+  email, website) — add a lead with a PERSONAL NOTE (createdAt = when). _places_search
+  auto-persists ≤15 contactable discoveries with a note; claim-key dedups re-discovery.
+  save_prospect_emulated async client helper (master emulation).
+- **verified E2E (live):** save_prospect → memory created; list_prospects('Solvis Test') → count:1
+  with the note + phone/website + timestamp. Test lead cleaned up. recall healthy; --no-deps.
+- **popup diagnosis:** delivery is SOUND — propose emits call_contract → turn-event handler appends
+  it → SSE flush pushes EVERY event type unfiltered → FE onAny dispatches hm:call-contract →
+  <CallContractModal>. "No popup" = no agent invoked propose_call in that room (fires only when an
+  agent decides a call is warranted — the intended 'only when needed'). To see it: run a room with
+  a task where calling a named prospect (name + phone) is the obvious next step.
+
 ## 2026-07-23 — propose_call: the OS decides to call in-room → contract popup fires
 - **commits:** `020e5875d` (employees + control), singulance-main. Images LIVE at that tag.
 - **what:** the last link — an agent/director calls `propose_call(company, phone, why)` when a live

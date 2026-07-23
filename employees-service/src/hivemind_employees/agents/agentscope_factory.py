@@ -425,8 +425,10 @@ def build_react_agent(
         "- CALL: when a LIVE phone call is the right next step for a SPECIFIC prospect (a warm/qualified "
         "lead, a booked-meeting opening, a time-sensitive follow-up — not routine info), call "
         "`propose_call(company, phone, why)`. It does NOT dial — it queues the call for the user's "
-        "one-click approval (voice, language and strategy are auto-selected). Use it only when a call "
-        "clearly beats an email; if you don't have the phone number, call `list_prospects` first."
+        "one-click approval (voice, language and strategy are auto-selected). If the user GIVES a phone "
+        "number (or you already have it), call `propose_call` DIRECTLY — do NOT `list_prospects` first; "
+        "only `list_prospects` first when you need a number you don't have. Use a call only when it "
+        "clearly beats an email."
     ).strip()
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.

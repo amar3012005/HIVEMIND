@@ -38,8 +38,9 @@ GUIDANCE = (
     "note on why it matters now.\n"
     "- CALL: when a live phone call is the right next step for a specific prospect (warm/qualified lead, "
     "booked-meeting opening, time-sensitive follow-up — not routine info), call propose_call(company, "
-    "phone, why). It only QUEUES the call for the user's approval. Use only when a call beats an email; "
-    "never without a real phone number — if you don't have it, list_prospects first."
+    "phone, why) — it only QUEUES the call for the user's approval. If the user GIVES a phone number (or "
+    "you already have it), call propose_call DIRECTLY — do NOT list_prospects first. Only list_prospects "
+    "first when you need a number you don't have. Use a call only when it beats an email."
 )
 
 QUERIES = [

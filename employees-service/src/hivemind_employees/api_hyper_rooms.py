@@ -1512,6 +1512,10 @@ async def _run_groq_compound_web_intel(
     return payload_out
 
 
+class _HivemindWebPrimary(Exception):
+    """Sentinel: route web-intel to the HIVEMIND path (not an error)."""
+
+
 async def _run_web_intel_turn(
     req: "RoomTurnRequest",
     lead: Dict[str, Any],
@@ -1524,7 +1528,13 @@ async def _run_web_intel_turn(
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "typing", "agent": "web-intel", "kind": "web_intel",
     })
+    # Canonical (owner "no groq" rule, 2026-07-23): HIVEMIND web tools are PRIMARY —
+    # the block below runs hivemind_web_search (web_search_emulated) + recall. groq/compound
+    # only when HYPER_WEB_INTEL_PROVIDER=groq (reversible). Default = hivemind.
+    _use_groq_web = os.environ.get("HYPER_WEB_INTEL_PROVIDER", "hivemind").strip().lower() == "groq"
     try:
+        if not _use_groq_web:
+            raise _HivemindWebPrimary()
         payload = await _run_groq_compound_web_intel(
             req=req,
             lead=lead,
@@ -1533,8 +1543,9 @@ async def _run_web_intel_turn(
             room_template=room_template,
         )
     except Exception as groq_exc:  # noqa: BLE001
-        log.warning("[web-intel] groq compound failed turn=%s: %s — falling back to Hivemind web tools",
-                    req.turn_id, groq_exc)
+        if not isinstance(groq_exc, _HivemindWebPrimary):
+            log.warning("[web-intel] groq compound failed turn=%s: %s — falling back to Hivemind web tools",
+                        req.turn_id, groq_exc)
         web_agent = await _build_web_intel_agent_for_room(
             req.room_id,
             lead,

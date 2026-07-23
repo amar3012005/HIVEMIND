@@ -1065,7 +1065,7 @@ class Director:
         # Live public-web search uses Groq's built-in web search (only on the
         # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
         # cheaper/faster and fine for in-room gathering; env-tunable.
-        self.web_model = os.environ.get("HYPER_WEB_MODEL", "groq/compound-mini")
+        self.web_model = os.environ.get("HYPER_WEB_MODEL", "")  # UNUSED: web goes via _web_search → HIVEMIND (no groq)
         self.max_iters = max_iters
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)

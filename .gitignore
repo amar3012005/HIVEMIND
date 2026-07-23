@@ -91,3 +91,15 @@ core/src/tara/hivemind-agent/
 .claude/loop/PAUSE
 .claude/worktrees/
 infra/secrets/
+
+# ── Local ops artifacts — never commit (repo-hygiene, added 2026-07-23) ──
+.env
+backups/
+*.rollback
+.last-*
+*.exit
+infra/Caddyfile.bak*
+infra/Caddyfile.backup*
+DEPLOY-SOURCE.md
+# CSI-Engine is a SEPARATE project (see docker-compose comment) — not a submodule here
+CSI-Engine/

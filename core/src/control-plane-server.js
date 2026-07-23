@@ -16,6 +16,7 @@ import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
+import { SEAM_SCHEMA_VERSION } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { registerEmbeddedAmrOrg, unregisterEmbeddedAmrOrg } from './storage/amr-registry.js';
 import { PLANS } from './billing/plans.js';
@@ -707,11 +708,17 @@ function outreachModule() {
 }
 
 function dispatchHyperRoomTurn(body) {
+  // P1 seam contract: stamp the negotiated schema_version if the caller didn't (the
+  // sidecar treats it as an optional hint, never a gate). Non-destructive — an already
+  // stamped or unusual body passes through untouched, so no existing caller breaks.
+  const payload = (body && typeof body === 'object' && body.schema_version === undefined)
+    ? { ...body, schema_version: SEAM_SCHEMA_VERSION }
+    : body;
   return internalFetch(`${HYPER_SIDECAR_BASE_URL}/internal/hyper/room-turn`, {
     service: 'hm-employees',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body,
+    body: payload,
   });
 }
 

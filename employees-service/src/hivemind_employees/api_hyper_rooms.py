@@ -43,7 +43,7 @@ import httpx
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .agents.agentscope_factory import build_react_agent
 from .agents.agentscope_tools import (
@@ -1682,6 +1682,10 @@ Hard rules:
 
 
 class RoomTurnRequest(BaseModel):
+    # P1 seam contract: forward-tolerant — silently ignore unknown fields from a newer
+    # caller (version skew never 400s), and accept an optional negotiated schema_version.
+    model_config = ConfigDict(extra="ignore")
+    schema_version: Optional[str] = None
     room_id: str
     turn_id: str
     user_id: str
@@ -1732,6 +1736,10 @@ class RoomTurnResponse(BaseModel):
 
 
 class ApprovalDecisionRequest(BaseModel):
+    # P1 seam contract: forward-tolerant — silently ignore unknown fields from a newer
+    # caller (version skew never 400s), and accept an optional negotiated schema_version.
+    model_config = ConfigDict(extra="ignore")
+    schema_version: Optional[str] = None
     approval_id: str
     decision: str  # "approve" | "deny"
 

@@ -18,7 +18,7 @@ from typing import Dict, Optional
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import asyncio
 
@@ -33,6 +33,10 @@ router = APIRouter(prefix="/v1/employees", tags=["employee-chat"])
 
 
 class ChatRequest(BaseModel):
+    # P1 seam contract: forward-tolerant — silently ignore unknown fields from a newer
+    # caller (version skew never 400s), and accept an optional negotiated schema_version.
+    model_config = ConfigDict(extra="ignore")
+    schema_version: Optional[str] = None
     text: str = Field(..., min_length=1, description="User message")
     conversation_id: Optional[str] = Field(
         None,

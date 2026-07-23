@@ -17,6 +17,17 @@ Entry format:
 
 ---
 
+## 2026-07-23 — P7: round-table debate reacts to named peers (SHIPPED)
+- **commits:** `014457f1f` · image `hivemind/employees:prod-20260723-014457f1f` (LIVE)
+- **what:** round-2 of `_debate` now reacts to the OTHER experts' verbatim round-1 messages
+  (exclude self) and must NAME whose point is weakest + challenge THEIR argument. The verbatim-
+  peer core already existed (feature-recon HALT — did not rebuild); this sharpened it to a true
+  hub so rebuttals target real peer claims, not self-echo/director summary.
+- **verified live:** MANDI Solvis decision turn (gpt-oss/Cerebras) — R2: Maya→Victor, Victor→Lina,
+  Lina→Maya+Victor, each quoting the peer's actual claim; 0 self-citations. Deployed + healthy.
+- **scorecard:** feature-recon caught the existing verbatim-peer round-2 (avoided a rebuild);
+  change was 1 surgical refinement; verified first try. → harness: none.
+
 ## 2026-07-23 — F0b: web-intel on HIVEMIND tools (no groq); P3 eval harness found (not rebuilt)
 - **commits:** `d73ad4401` · image `hivemind/employees:prod-20260723-d73ad4401` (LIVE)
 - **F0b what:** the round-table web lane preferred `groq/compound` (HIVEMIND fallback). Flipped:

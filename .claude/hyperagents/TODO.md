@@ -27,7 +27,7 @@ provenance+actionable-gate and a Governor). Owner-chosen order below.
   actionable? zero hallucinated facts). Baseline now; regression-gate later phases.
 
 ### Then the plan (owner's visual-first order, with the two guards above landed first)
-- [ ] **P7 — MsgHub round-table debate** — round-2 argues verbatim round-1 peer msgs (`_debate`, engine.py).
+- [x] **P7 — MsgHub round-table debate** (SHIPPED 014457f1f) — — round-2 argues verbatim round-1 peer msgs (`_debate`, engine.py).
 - [ ] **P5 — parallel verified presence scan at genesis** — address+socials, ≥2-source `verified` (control-plane onboarding). WRITE to the P0 schema (define P0 fields first).
 - [ ] **P4 — `HYPER_SYNTH_MODEL` frontier final report** — one frontier call for the sealed report (engine.py synth seam). Gate cost via Governor. Re-run P3.
 - [ ] **P1 — typed contracts at the 4 seams** — CompanyProfile/RoundtableReport/OutreachContract/OutcomeReport v1 (JS + pydantic), version-tolerant (accept vN & vN-1).

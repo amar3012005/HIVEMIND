@@ -275,10 +275,10 @@ const { parseWithDocling, chunkWithDocling } = await import('./knowledge/enterpr
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
 
-// Evaluation imports
-const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
-const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
-const { generateEvalQueries } = await import('./evaluation/auto-dataset-generator.js');
+// Evaluation imports RETIRED (2026-07-23): the offline retrieval-evaluator +
+// /api/evaluate/* endpoints depended on the duplicate ThreeTier/hybrid engine,
+// which is now deleted. Recall quality is measured against the single canonical
+// engine (recallPersistedMemories) instead.
 
 // Decision Intelligence imports
 const { detectDecisionCandidate } = await import('./executor/decision/detect-heuristics.js');
@@ -1818,12 +1818,7 @@ try {
   console.log('[server] PageIndexIntegration not available, skipping PageIndex ingestion:', err.message);
 }
 
-// Initialize Retrieval Evaluator
-const retrievalEvaluator = new RetrievalEvaluator({
-  vectorStore: qdrantClient,
-  graphStore: persistentMemoryStore,
-  llmClient: groqClient.isAvailable() ? groqClient : null
-});
+// Retrieval Evaluator RETIRED (2026-07-23) — see note at the evaluation imports.
 
 // Default user/org for local mode
 const DEFAULT_USER = process.env.HIVEMIND_DEFAULT_USER_ID || '00000000-0000-4000-8000-000000000001';
@@ -20481,263 +20476,8 @@ exit \$RC
             }
           }
           break;
-
-        // ==========================================
-        // Retrieval Evaluation API Endpoints
-        // ==========================================
-
-        case '/api/evaluate/retrieval':
-          if (req.method === 'POST') {
-            try {
-              const {
-                query,
-                relevant_memories,
-                method = 'hybrid',
-                category = 'general',
-                limit = 20
-              } = body;
-
-              // Single query evaluation
-              if (query && relevant_memories) {
-                const evaluation = await retrievalEvaluator.evaluateQuery(
-                  query,
-                  relevant_memories,
-                  {
-                    userId,
-                    orgId,
-                    method,
-                    category,
-                    limit
-                  }
-                );
-
-                return jsonResponse(res, {
-                  success: true,
-                  evaluation
-                });
-              }
-
-              // Batch evaluation
-              const {
-                queries,
-                methods = ['hybrid'],
-                sample_size,
-                dataset,
-                category: batchCategory,
-                difficulty
-              } = body;
-
-              let testQueries = queries;
-
-              // Use built-in test dataset if no queries provided
-              if (!testQueries) {
-                // 1. If explicit dataset requested, try that
-                if (dataset) {
-                  try {
-                    testQueries = getQueriesForDataset(dataset);
-                  } catch (error) {
-                    // If 'tenant' or other named dataset fails, fall through to auto-gen
-                    if (dataset !== 'default') testQueries = null;
-                    else throw error;
-                  }
-                }
-
-                // 2. Auto-generate from user's actual memories (works for any user)
-                if (!testQueries && userId) {
-                  try {
-                    testQueries = await generateEvalQueries(userId, orgId, {
-                      maxQueries: sample_size || 20,
-                      maxMemories: 300
-                    });
-                  } catch (autoErr) {
-                    console.warn('[EVAL] Auto-generation failed, falling back to default:', autoErr.message, autoErr.stack);
-                    testQueries = null;
-                  }
-                }
-
-                // 3. Fallback to static dataset
-                if (!testQueries || testQueries.length === 0) {
-                  if (sample_size) {
-                    testQueries = getSampleQueries(sample_size);
-                  } else if (batchCategory) {
-                    testQueries = getQueriesByCategory(batchCategory);
-                  } else if (difficulty) {
-                    testQueries = getQueriesByDifficulty(difficulty);
-                  } else {
-                    testQueries = TEST_QUERIES;
-                  }
-                }
-
-                // Apply sample_size if set
-                if (sample_size && testQueries.length > sample_size) {
-                  testQueries = testQueries.slice(0, sample_size);
-                }
-              }
-
-              const report = await retrievalEvaluator.evaluateBatch(testQueries, {
-                userId,
-                orgId,
-                methods,
-                warmup: true
-              });
-              persistEvaluationReport(report);
-
-              return jsonResponse(res, {
-                success: true,
-                report
-              });
-            } catch (error) {
-              console.error('Retrieval evaluation failed:', error);
-              return jsonResponse(res, {
-                error: 'Evaluation failed',
-                message: error.message,
-                requestId: crypto.randomUUID()
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/results':
-          if (req.method === 'GET') {
-            try {
-              const reportId = url.searchParams.get('evaluation_id');
-              const latestReport = reportId
-                ? getEvaluationReportById(reportId)
-                : retrievalEvaluator.getLatestReport() || loadEvaluationReports().slice(-1)[0];
-
-              if (!latestReport) {
-                return jsonResponse(res, {
-                  error: 'No evaluation results available',
-                  message: 'Run an evaluation first using POST /api/evaluate/retrieval'
-                }, 404);
-              }
-
-              return jsonResponse(res, {
-                success: true,
-                report: latestReport
-              });
-            } catch (error) {
-              console.error('Failed to get evaluation results:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve results',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/history':
-          if (req.method === 'GET') {
-            try {
-              const history = loadEvaluationReports();
-              const limit = parseInt(url.searchParams.get('limit'), 10) || 10;
-
-              return jsonResponse(res, {
-                success: true,
-                count: history.length,
-                history: history.slice(-limit).map(h => ({
-                  evaluationId: h.evaluationId,
-                  timestamp: h.timestamp,
-                  summary: h.summary,
-                  targets: h.targets
-                }))
-              });
-            } catch (error) {
-              console.error('Failed to get evaluation history:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve history',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/compare':
-          if (req.method === 'POST') {
-            try {
-              const { baseline_id, current_id } = body;
-              const history = loadEvaluationReports();
-
-              const baseline = baseline_id
-                ? history.find(h => h.evaluationId === baseline_id)
-                : history.length > 1 ? history[history.length - 2] : null;
-
-              const current = current_id
-                ? history.find(h => h.evaluationId === current_id)
-                : history.length > 0 ? history[history.length - 1] : null;
-
-              if (!baseline || !current) {
-                return jsonResponse(res, {
-                  error: 'Comparison failed',
-                  message: 'Both baseline and current reports are required. Run at least 2 evaluations.'
-                }, 400);
-              }
-
-              const comparison = retrievalEvaluator.compareReports(baseline, current);
-
-              return jsonResponse(res, {
-                success: true,
-                comparison
-              });
-            } catch (error) {
-              console.error('Evaluation comparison failed:', error);
-              return jsonResponse(res, {
-                error: 'Comparison failed',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/dataset':
-          if (req.method === 'GET') {
-            try {
-              const filteredCategory = url.searchParams.get('category');
-              const filteredDifficulty = url.searchParams.get('difficulty');
-              let queries = TEST_QUERIES;
-
-              if (filteredCategory) {
-                queries = queries.filter(query => query.category === filteredCategory);
-              }
-
-              if (filteredDifficulty) {
-                queries = queries.filter(query => query.difficulty === filteredDifficulty);
-              }
-
-              const stats = {
-                total: queries.length,
-                categories: queries.reduce((accumulator, query) => {
-                  accumulator[query.category] = (accumulator[query.category] || 0) + 1;
-                  return accumulator;
-                }, {}),
-                difficulties: queries.reduce((accumulator, query) => {
-                  accumulator[query.difficulty] = (accumulator[query.difficulty] || 0) + 1;
-                  return accumulator;
-                }, {}),
-              };
-
-              return jsonResponse(res, {
-                success: true,
-                dataset: {
-                  stats,
-                  queries: queries.map(q => ({
-                    query: q.query,
-                    category: q.category,
-                    difficulty: q.difficulty,
-                    relevantCount: q.relevantMemories.length,
-                    tags: q.tags
-                  }))
-                }
-              });
-            } catch (error) {
-              console.error('Failed to get dataset info:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve dataset',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
+        // /api/evaluate/* endpoints RETIRED (2026-07-23) — depended on the deleted
+        // ThreeTier/hybrid duplicate engine + offline retrieval-evaluator harness.
 
         case '/api/billing/usage':
           if (req.method === 'GET') {
@@ -22743,14 +22483,7 @@ if (shouldStartHttpServer()) {
 ║   • POST /api/search/quick    - Fast semantic search       ║
 ║   • POST /api/search/panorama - Historical search          ║
 ║   • POST /api/search/insight  - LLM-powered analysis       ║
-║   • POST /api/search/compare  - Compare all tiers          ║
-║                                                            ║
-║   Evaluation API Endpoints:                                ║
-║   • POST /api/evaluate/retrieval - Run evaluation          ║
-║   • GET  /api/evaluate/results   - Get latest results      ║
-║   • GET  /api/evaluate/history   - Get evaluation history  ║
-║   • POST /api/evaluate/compare   - Compare evaluations     ║
-║   • GET  /api/evaluate/dataset   - Get test dataset info   ║
+║   • POST /api/search/compare  - unified recall (one engine) ║
 ║                                                            ║
 ║   Open your browser to get started!                        ║
 ║                                                            ║

@@ -17,7 +17,42 @@ Entry format:
 
 ---
 
-## 2026-07-23 — AI Company OS foundations: P1 seam contracts · P0 provenance+gate · P2 Governor · P6 Outreach Contract
+## 2026-07-23 — Gates closed + user-facing FE: plan-limit popup · P0 enforce+columns · P6 autonomy · 5xx toast
+- **commits:** `b457c4f2a` (402 fix) · Da-vinci `ab4eaf4` + gitlink `07df69ab3` (5xx toast) ·
+  `3e878fb5b` (P0 columns) · `dcf70b4bc` (P6 autonomy). All singulance-main.
+- **images LIVE:** control-plane `prod-20260723-dcf70b4bc` (402 fix + P1 + P6) · core
+  `prod-20260723-3e878fb5b` (P0 columns) · employees `c3fe566bb` (P0 enforce) ·
+  `hivemind/fe:latest` on BOTH hm-fe + hivemind-next-frontend-1 (5xx toast). All --no-deps.
+- **Usage-limit popup (the user's bug):** room/project-limit 402s emitted internal code
+  'PLAN_LIMIT' but the FE modal needs 'plan_limit_exceeded' → silent console 402. Fixed
+  capacityErrorResponse + both project-limit paths to the FE contract (resource→modal key,
+  suggested_plan, upgrade_url). Verified live: 402 body matches isPlanLimitError → modal fires.
+  Backend-only (existing FE modal/interceptor already deployed).
+- **FE 5xx/network toast:** mycompany openTask was a silent `catch {}`. Added shared/serviceError.js
+  + interceptor emit + ServiceErrorToast (AppShell), mirroring the plan-limit pattern. Built
+  hivemind/fe:latest, recreated BOTH FE containers (NOT via deploy-fe.sh — it SSHes to a remote +
+  `git reset --hard` which would nuke local work + only touches hm-fe). Verified: HTTP 200 + toast
+  code in the shipped bundle. Da-vinci committed+pushed (ab4eaf4), parent gitlink bumped.
+- **P0 enforce:** shadow logs empty (no would-rejects) → flipped HYPER_PROVENANCE_GATE=enforce
+  (employees force-recreate). Junk saves now rejected.
+- **P0 first-class columns:** applied produced_by_turn/agent/actionable/provenance to
+  hivemind.memories (nullable/no-default = metadata-only, CONCURRENTLY index) + schema.prisma +
+  migration 20260723090000 + client regen + core deployed. prisma-graph-store populates them
+  (uuid-guarded, hyperagents-only, additive). CAVEAT: the canonical V5 ingest normalizer replaces
+  source_metadata, so columns don't auto-populate via that path yet (threading provenance through
+  the normalizer = documented follow-up, NOT rushed into the hot path). Recall verified healthy.
+- **P6 autonomy:** enabled the ONLY safe autonomy — HYPER_OUTREACH_AUTONOMY=on lets the drain
+  worker autonomously advance/execute HUMAN-authorized campaigns; assertAutonomousSendAllowed
+  enforces the hard first-contact-HITL invariant (only 'running' human-created campaigns). Cold
+  origination (OS contacts a new audience with no human) deliberately NOT built — outbound-safety
+  line (consent/deliverability/legal). Verified via node.
+- **verified:** full cluster healthy; gates live (P0=enforce, P6=on, governor caps present);
+  hm-core recall OK; both FE containers 200. deploy-fe.sh + CLAUDE.md paths verified before trust
+  (per owner instruction — not blindly followed; the SSH/reset script was rejected).
+- **scorecard:** verified the deploy pipeline before running (deploy-fe.sh would have destroyed
+  local FE work + missed the mycompany container); every plan-limit/5xx fix reused the existing
+  modal/interceptor pattern (no rebuild); RISK items shipped safe (enforce reversible, columns
+  additive+guarded, autonomy HITL-hard-invariant); --no-deps everywhere (no core-recreate incident).
 - **commits:** `8167ce651` (P1) · `0b9cd8105` (P0) · `4770a8c87` (P2) · `c3fe566bb` (P6), all singulance-main.
 - **images LIVE:** `hivemind/employees:prod-20260723-c3fe566bb` (P0+P2+P1-pydantic) ·
   `hivemind/control-plane:prod-20260723-c3fe566bb` (P1-js+P6-js). **hm-core NOT redeployed**

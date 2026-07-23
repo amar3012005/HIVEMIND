@@ -32,6 +32,10 @@ Entry format:
   `provider=Cerebras, content='pong'`; hm-employees healthy; singulance-main features
   (method-skills, maps-discovery) intact (I first mis-copied feat's older engine.py — caught
   the divergence, re-applied edits to the singulance-main version).
+- **verified E2E (full pipeline):** fired a real room turn (MANDI "Research Market Trends",
+  3 agents, auto template) via /internal/hyper/room-turn → HTTP 200; the WHOLE pipeline
+  (plan/gather/debate/synth) = 8/8 calls `provider=Cerebras model=openai/gpt-oss-120b`,
+  out_tok 175-329 each (real content → no empty-content regression), ZERO groq/llama/errors.
 - **residual (flagged, NOT changed):** `HYPER_WEB_MODEL=groq/compound-mini` = agentic
   web-search, no gpt-oss twin (same class as whisper/vision passthrough JS-side) — owner call.
   `_OR_MODEL_MAP` llama entries are a dead safety map (no llama usage by default).

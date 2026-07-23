@@ -7,6 +7,7 @@ saves — via the existing REST endpoints (and the policy-gated
 from __future__ import annotations
 
 import os
+import re
 import httpx
 import logging
 from typing import Any, Dict, Optional
@@ -105,6 +106,49 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         r = await c.post("/api/recall", json=body)
         r.raise_for_status()
         return r.json()
+
+
+async def save_prospect_emulated(*, company: str, note: str, user_id: Optional[str], org_id: Optional[str],
+                                 phone: str = "", email: str = "", website: str = "",
+                                 project_id: Optional[str] = None, api_key: str = "",
+                                 source: str = "discovery") -> Dict[str, Any]:
+    """Persist a prospect/lead as an org-scoped memory (tag 'prospect') with a PERSONAL NOTE,
+    via master+emulation headers. The company-wide lead book list_prospects reads. Idempotent-ish
+    (memory claim-key dedup). Returns the created memory JSON (or {} on any failure — never raises
+    into a turn)."""
+    company = str(company or "").strip()
+    note = str(note or "").strip()
+    if not company or not note:
+        return {}
+    lines = [f"PROSPECT: {company}"]
+    if phone:
+        lines.append(f"PHONE: {phone}")
+    if email:
+        lines.append(f"EMAIL: {email}")
+    if website:
+        lines.append(f"WEBSITE: {website}")
+    lines.append(f"NOTE: {note}")
+    slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")[:60]
+    tags = ["prospect", "lead", f"company:{slug}"] + (["has-phone"] if phone else []) + (["has-email"] if email else [])
+    body: Dict[str, Any] = {
+        "title": f"Prospect: {company}"[:120], "content": "\n".join(lines), "tags": tags,
+        "sync": True, "memory_type": "fact", "source_platform": "hyperagents-prospect",
+        "source_metadata": {"source_type": "prospect", "source_platform": "hyperagents-prospect",
+                            "prospect_source": source, "company": company,
+                            "phone": phone or None, "email": email or None, "website": website or None},
+    }
+    if project_id:
+        body["project_id"] = project_id
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(base_url=settings.hivemind_core_url,
+                                     timeout=httpx.Timeout(20.0, connect=5.0), headers=headers) as c:
+            r = await c.post("/api/memories", json=body)
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        return {}
 
 
 async def list_tagged_emulated(*, tags: str, user_id: Optional[str], org_id: Optional[str],

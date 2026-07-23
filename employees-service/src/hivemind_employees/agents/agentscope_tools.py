@@ -112,6 +112,56 @@ def _actionable_verdict(title: str, content: str):
     if c.endswith("?") and len(c) < 80 and "." not in c:
         return False, "reads as a question, not a durable fact"
     return True, "ok"
+
+
+def _prospect_slug(v: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(v or "").lower()).strip("-")[:60]
+
+
+def _save_prospect_memory(api_key, user_id, org_id, project_id, *, company, note,
+                          phone="", email="", website="", source="agent") -> dict:
+    """Persist a prospect/lead as an org-scoped memory (tag 'prospect') carrying a PERSONAL NOTE.
+    The whole company's rooms see it via list_prospects → reuse over re-discovery. The memory's
+    createdAt records WHEN the lead was added. Returns the created memory or an {error} dict."""
+    company = str(company or "").strip()
+    note = str(note or "").strip()
+    if not company or not note:
+        return {"error": "company and note are required"}
+    phone = str(phone or "").strip()
+    email = str(email or "").strip()
+    website = str(website or "").strip()
+    lines = [f"PROSPECT: {company}"]
+    if phone:
+        lines.append(f"PHONE: {phone}")
+    if email:
+        lines.append(f"EMAIL: {email}")
+    if website:
+        lines.append(f"WEBSITE: {website}")
+    lines.append(f"NOTE: {note}")
+    tags = ["prospect", "lead", f"company:{_prospect_slug(company)}"]
+    if phone:
+        tags.append("has-phone")
+    if email:
+        tags.append("has-email")
+    body = {
+        "title": f"Prospect: {company}"[:120], "content": "\n".join(lines), "tags": tags,
+        "sync": True, "memory_type": "fact", "source_platform": "hyperagents-prospect",
+        "source_metadata": {"source_type": "prospect", "source_platform": "hyperagents-prospect",
+                            "prospect_source": source, "company": company,
+                            "phone": phone or None, "email": email or None, "website": website or None},
+    }
+    if project_id:
+        body["project_id"] = project_id
+    try:
+        with _client(api_key, user_id, org_id) as c:
+            r = c.post("/api/memories", json=body)
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[save_prospect] failed: %s", exc)
+        return {"error": str(exc)[:160]}
+
+
 # Outward sends that ALWAYS need HITL approval even after consensus (they leave
 # the org). Internal artifacts (docs/sheets) run without HITL once consensus is
 # reached. gmail_send + MCP non-read calls are outward.
@@ -1193,6 +1243,51 @@ def build_hivemind_toolkit(
             log.warning("[propose_call] failed: %s", exc)
             return _tool_response_text(f"Could not queue the call proposal ({str(exc)[:120]}).")
     tk.register_tool_function(propose_call)
+
+    # ── Shared LEAD BOOK — the company's persistent prospects/leads (org-scoped memories,
+    # tagged 'prospect'). Every room sees the same book, so agents REUSE leads instead of
+    # re-discovering/re-generating (expensive Places calls). Each lead carries a PERSONAL NOTE
+    # captured when it was added (the memory's createdAt records WHEN). ALWAYS registered.
+    def list_prospects(query: str = "", limit: int = 30) -> ToolResponse:
+        """See the company's EXISTING prospects/leads (with the note captured when each was added)
+        BEFORE you discover or generate new ones — reuse what's already there, don't re-search.
+        Call this ONLY when you actually need leads (it's not free). Optional `query` narrows by
+        company or keyword. Returns company + contact (phone/email/website) + the note + when-added."""
+        params = {"tags": "prospect", "is_latest": "true", "limit": min(max(int(limit or 30), 1), 60)}
+        try:
+            with _client(api_key, user_id, org_id) as c:
+                r = c.get("/api/memories", params=params)
+                r.raise_for_status()
+                data = r.json()
+        except Exception as exc:  # noqa: BLE001
+            return _tool_response_text(f"Could not read the lead book ({str(exc)[:120]}).")
+        rows = data.get("memories") or data.get("results") or (data if isinstance(data, list) else [])
+        q = str(query or "").strip().lower()
+        out = []
+        for m in (rows if isinstance(rows, list) else []):
+            if not isinstance(m, dict):
+                continue
+            title = str(m.get("title") or "")
+            content = str(m.get("content") or m.get("summary") or "")
+            if q and q not in (title + " " + content).lower():
+                continue
+            out.append({"company": title.replace("Prospect:", "").strip() or None,
+                        "note": content[:400], "added": m.get("created_at") or m.get("createdAt"),
+                        "tags": [t for t in (m.get("tags") or []) if isinstance(t, str)][:8]})
+        return _tool_response({"count": len(out), "prospects": out[:params["limit"]],
+                               "hint": "Reuse these before discovering new leads."})
+    tk.register_tool_function(list_prospects)
+
+    def save_prospect(company: str, note: str, phone: str = "", email: str = "", website: str = "") -> ToolResponse:
+        """Add a prospect/lead to the company's shared lead book with a PERSONAL NOTE about why
+        they matter right now — the reason/angle/signal, captured at THIS moment. Use when you
+        identify a lead worth tracking so the whole company can reuse it later without re-searching.
+        Args: company (required), note (why this lead matters — required), phone (E.164), email, website."""
+        res = _save_prospect_memory(api_key, user_id, org_id, project_id,
+                                    company=company, note=note, phone=phone, email=email,
+                                    website=website, source="agent")
+        return _tool_response(res) if isinstance(res, dict) else _tool_response_text(str(res))
+    tk.register_tool_function(save_prospect)
 
     if "hivemind_slack_post" in enabled_tool_names:
         def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:

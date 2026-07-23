@@ -39,6 +39,7 @@ from ..hivemind_client import (
     org_members_emulated,
     recall_emulated,
     report_llm_usage,
+    save_prospect_emulated,
     web_search_emulated,
 )
 
@@ -1632,9 +1633,28 @@ class Director:
         self.gather_count += 1
         await self.emit({"t": "prospects", "query": query, "count": len(rows),
                          "with_email": sum(1 for x in rows if x.get('email')), "prospects": rows})
-        log.info("[hyper-engine] places_search '%s' → %d firms, %d with email",
-                 query[:60], len(rows), sum(1 for x in rows if x.get('email')))
-        return json.dumps({"found": len(rows), "prospects": rows})
+        # Persist CONTACTABLE discoveries to the company's shared LEAD BOOK (prospect memories)
+        # with a note capturing WHY + WHEN they were found — so other rooms reuse them via
+        # list_prospects instead of re-running this (expensive) search. Best-effort, bounded,
+        # concurrent; memory claim-key dedups re-discovery. The memory's createdAt records WHEN.
+        contactable = [x for x in rows if x.get("phone") or x.get("email")][:15]
+        if contactable:
+            _note = f"Discovered via prospect search “{query[:80]}” — dial/email-ready lead; consider for outreach."
+            try:
+                await asyncio.gather(*[
+                    save_prospect_emulated(
+                        company=x["company"], note=_note, phone=x.get("phone", "") or "",
+                        email=x.get("email", "") or "", website=x.get("website", "") or "",
+                        user_id=self.user_id, org_id=self.org_id, project_id=self.project_id,
+                        source="places-discovery")
+                    for x in contactable
+                ], return_exceptions=True)
+            except Exception as exc:  # noqa: BLE001
+                log.info("[hyper-engine] lead-book persist skipped: %s", exc)
+        log.info("[hyper-engine] places_search '%s' → %d firms, %d with email (%d saved to lead book)",
+                 query[:60], len(rows), sum(1 for x in rows if x.get('email')), len(contactable))
+        return json.dumps({"found": len(rows), "prospects": rows,
+                           "note": "Contactable leads saved to the shared lead book — use list_prospects to reuse them."})
 
     # Role-address ranking: a named person beats a role inbox beats nothing.
     _IMPRESSUM_PATHS = ("/impressum", "/impressum/", "/de/impressum", "/kontakt", "/imprint", "/contact", "")

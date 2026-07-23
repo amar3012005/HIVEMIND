@@ -103,3 +103,22 @@ infra/Caddyfile.backup*
 DEPLOY-SOURCE.md
 # CSI-Engine is a SEPARATE project (see docker-compose comment) — not a submodule here
 CSI-Engine/
+
+# ── stray external/reference repos — NOT submodules, keep out of git (2026-07-23) ──
+awesome-agent-skills/
+benchmarks/LongMemEval/
+caveman/
+deepresearch_csi/3d-force-graph/
+google_workspace_mcp/
+paperclip/
+supermemory/
+references/HyperAgents/
+references/SlackAgents/
+references/agentscope/
+references/claude-code-security-review/
+references/code-review-graph/
+references/frontend-design-pro-demo/
+references/humanizer/
+references/mempalace/
+references/obsidian-3d-graph/
+references/paperclip/

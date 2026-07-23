@@ -1936,7 +1936,11 @@ async function _recallPersistedMemoriesImpl(store, {
     return { ...candidate, keywordScore: _lexEvidence, similarityScore: _lexEvidence, graphScore, policyScore, recencyScore, score };
   }).filter(c => c.memory?.id);
 
-  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0).sort((a, b) => b.score - a.score);
+  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0)
+    // Deterministic ordering: score desc, then a STABLE id tie-break so equal
+    // scores never reorder run-to-run (the "sometimes works, sometimes not"
+    // non-determinism). Same input → same candidate order → same rerank window.
+    .sort((a, b) => (b.score - a.score) || String(a.memory?.id || a.id || '').localeCompare(String(b.memory?.id || b.id || '')));
 
   // Rarity-weighted distinctive-token boost (hybrid lexical recall, flag-gated).
   // ts_rank + vector similarity both reward the COMMON brand token (e.g. every
@@ -2386,7 +2390,8 @@ async function _recallPersistedMemoriesImpl(store, {
         const dateB = new Date(b.memory?.document_date || b.document_date || b.memory?.created_at || b.created_at || 0);
         return dateB - dateA;
       }
-      return b.score - a.score; // default: score descending
+      // Deterministic: score desc + stable id tie-break (see merge-sort note above).
+      return (b.score - a.score) || String(a.memory?.id || a.id || '').localeCompare(String(b.memory?.id || b.id || ''));
     })
     // RERANK WINDOW — keep a wide window (not just the delivered top-N) so the
     // rerankers below can surface a relevant row buried by score (e.g. a cross-

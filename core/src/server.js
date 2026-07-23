@@ -214,7 +214,8 @@ const { SmartIngestRouter } = await import('./memory/smart-ingest-router.js');
 const { SyncScheduler } = await import('./connectors/framework/sync-scheduler.js');
 
 // Three-Tier Retrieval imports
-const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
+// ThreeTierRetrieval import retired — no longer used in any request path (see note
+// at the former instantiation site). Kept out of the server bundle entirely.
 
 // Hosted MCP Service imports
 const {
@@ -1786,11 +1787,11 @@ try {
 }
 
 // Initialize Three-Tier Retrieval
-const threeTierRetrieval = new ThreeTierRetrieval({
-  vectorStore: qdrantClient,
-  graphStore: persistentMemoryStore,
-  llmClient: groqClient.isAvailable() ? groqClient : null
-});
+// ThreeTierRetrieval RETIRED from all request paths (2026-07-23). Every /api/search/*
+// endpoint now routes through the single canonical engine, recallPersistedMemories —
+// one recall implementation, so tuning it improves every surface (no more "which
+// engine am I tuning?"). The three-tier/hybrid files remain only for the offline
+// retrieval-evaluator benchmark; they no longer serve any live request.
 
 // Initialize PageIndex Searcher (optional optimization layer)
 let pageindexSearcher = null;
@@ -20270,15 +20271,19 @@ exit \$RC
                   count: results.length,
                 });
               } else {
-                // Fallback to three-tier quick search
-                const result = await threeTierRetrieval.quickSearch(query, {
-                  userId,
-                  orgId,
-                  limit,
-                  project: searchProject,
+                // Fallback to the unified recall engine (one source of truth —
+                // ThreeTier retired). Same core every other surface uses.
+                const fbAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+                const fbRecall = await recallPersistedMemories(persistentMemoryStore, {
+                  query_context: query, user_id: userId, org_id: orgId,
+                  ...(searchProject ? { project_id: searchProject } : {}),
+                  max_memories: limit || 10, access_context: fbAccessCtx,
+                }).catch((e) => { console.warn('[search/pageindex-fallback] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+                jsonResponse(res, {
+                  results: fbRecall.memories || [], memories: fbRecall.memories || [],
+                  evidence: fbRecall.evidence || [], count: (fbRecall.memories || []).length,
+                  source: 'unified-recall',
                 });
-
-                jsonResponse(res, result);
               }
             } catch (error) {
               console.error('PageIndex search failed:', error);
@@ -20334,17 +20339,20 @@ exit \$RC
               }
 
               const searchProject = project || effectiveContainerTag || null;
-              const result = await threeTierRetrieval.panoramaSearch(query, {
-                userId,
-                orgId,
-                project: searchProject,
-                includeExpired: include_expired !== false,
-                includeHistorical: include_historical !== false,
-                dateRange: date_range,
-                temporalStatus: temporal_status,
-                limit: limit || 50,
-                includeTimeline: include_timeline !== false
-              });
+              // Unified recall engine (ThreeTier retired). panorama → temporal/history mode.
+              const pAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const pRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                ...(searchProject ? { project_id: searchProject } : {}),
+                recall_mode: 'panorama',
+                ...(date_range ? { date_range } : {}),
+                max_memories: limit || 50, access_context: pAccessCtx,
+              }).catch((e) => { console.warn('[search/panorama] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              const result = {
+                results: pRecall.memories || [], memories: pRecall.memories || [],
+                evidence: pRecall.evidence || [], count: (pRecall.memories || []).length,
+                categories: {}, metadata: {}, source: 'unified-recall',
+              };
 
               if (searchProject && Array.isArray(result.results) && result.results.length === 0) {
                 const scopedFallback = await persistentMemoryStore.searchMemories({
@@ -20409,22 +20417,20 @@ exit \$RC
               }
 
               const searchProject = project || effectiveContainerTag || null;
-              const result = await threeTierRetrieval.insightForge(query, {
-                userId,
-                orgId,
-                project: searchProject,
-                simulationRequirement: simulation_requirement,
-                subQueryLimit: sub_query_limit || 5,
-                resultsPerSubQuery: results_per_sub_query || 15,
-                includeAnalysis: include_analysis !== false
-              });
-
-              if (searchProject && Array.isArray(result.results)) {
-                result.results = result.results.filter((entry) => {
-                  const scopedProject = entry?.project || entry?.payload?.project || entry?.memory?.project || null;
-                  return scopedProject === searchProject;
-                });
-              }
+              // Unified recall engine (ThreeTier retired). insight → relationship/synthesis mode.
+              const iAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const iRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                ...(searchProject ? { project_id: searchProject } : {}),
+                recall_mode: 'insight',
+                max_memories: results_per_sub_query || 15, access_context: iAccessCtx,
+              }).catch((e) => { console.warn('[search/insight] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              const result = {
+                results: iRecall.memories || [], memories: iRecall.memories || [],
+                evidence: iRecall.evidence || [],
+                synthesis_evidence_chains: iRecall.synthesis_evidence_chains || [],
+                count: (iRecall.memories || []).length, source: 'unified-recall',
+              };
 
               jsonResponse(res, result);
             } catch (error) {
@@ -20453,13 +20459,18 @@ exit \$RC
                 }, 400);
               }
 
-              const result = await threeTierRetrieval.compareTiers(query, {
-                userId,
-                orgId,
-                tier: tier || 'auto'
+              // ThreeTier retired — there is now ONE unified engine, so there are no
+              // separate tiers to compare. Return the unified recall result.
+              const cAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const cRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                max_memories: 20, access_context: cAccessCtx,
+              }).catch((e) => { console.warn('[search/compare] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              jsonResponse(res, {
+                results: cRecall.memories || [], memories: cRecall.memories || [],
+                evidence: cRecall.evidence || [], count: (cRecall.memories || []).length,
+                engine: 'unified-recall', note: 'tiered comparison retired — single canonical engine',
               });
-
-              jsonResponse(res, result);
             } catch (error) {
               console.error('Tier comparison failed:', error);
               return jsonResponse(res, {

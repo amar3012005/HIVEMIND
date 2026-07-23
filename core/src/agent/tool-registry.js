@@ -1096,15 +1096,24 @@ const TOOL_HANDLERS = {
       }
       }
     }
-    if (!targetId) return { updated: false, error: 'memory_target_required' };
+    if (!targetId) {
+      console.warn(`[hivemind_update_memory] FAIL memory_target_required user=${ctx.userId} org=${ctx.orgId} target_query=${JSON.stringify(args.target_query || null)} id=${JSON.stringify(args.id || null)}`);
+      return { updated: false, error: 'memory_target_required' };
+    }
     const existing = await ctx.persistentMemoryStore.getMemoryScoped?.(targetId, {
       user_id: ctx.userId, org_id: ctx.orgId, access_context: ctx.accessContext,
     });
-    if (!existing) return { updated: false, error: 'memory_not_found_or_forbidden' };
+    if (!existing) {
+      console.warn(`[hivemind_update_memory] FAIL memory_not_found_or_forbidden user=${ctx.userId} org=${ctx.orgId} targetId=${targetId}`);
+      return { updated: false, error: 'memory_not_found_or_forbidden' };
+    }
     if (existing.is_latest === false || existing.isLatest === false) {
+      console.warn(`[hivemind_update_memory] FAIL memory_target_is_superseded user=${ctx.userId} org=${ctx.orgId} targetId=${targetId}`);
       return { updated: false, error: 'memory_target_is_superseded' };
     }
-    const result = await ctx.persistentMemoryEngine.ingestMemory({
+    let result;
+    try {
+      result = await ctx.persistentMemoryEngine.ingestMemory({
       title: args.title || existing.title,
       content: args.content || existing.content,
       tags: Array.isArray(args.tags) ? args.tags : (existing.tags || []),
@@ -1121,7 +1130,15 @@ const TOOL_HANDLERS = {
         metadata: { update_reason: args.reason || null, original_target_query: args.target_query || null },
       },
       ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
-    });
+      });
+    } catch (err) {
+      // Previously an ingestMemory throw propagated up as an opaque tool failure
+      // with NO server log — "update tool failed" in chat with nothing to see in
+      // `docker logs`. Log the real cause and return it as a structured result so
+      // the agent can explain it instead of hard-erroring the turn.
+      console.error(`[hivemind_update_memory] ingestMemory THREW user=${ctx.userId} org=${ctx.orgId} targetId=${targetId}: ${err?.message}`, err?.stack?.split('\n').slice(0, 3).join(' | '));
+      return { updated: false, error: 'update_write_failed', detail: err?.message || String(err) };
+    }
     return {
       updated: true,
       id: result?.memoryId || result?.id || null,

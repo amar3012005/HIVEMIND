@@ -7,6 +7,23 @@ Entry format:
 ```
 ---
 
+---
+
+## 2026-07-23 — propose_call: the OS decides to call in-room → contract popup fires
+- **commits:** `020e5875d` (employees + control), singulance-main. Images LIVE at that tag.
+- **what:** the last link — an agent/director calls `propose_call(company, phone, why)` when a live
+  call is the right move → sidecar POSTs control `propose` with the EXPLICIT prospect + the turn's
+  callback_url → contract generates (goal/strategy + auto language + concrete Cartesia voice) →
+  live `call_contract` event → `<CallContractModal>` popup → Approve → TARA dials. Never dials on
+  its own (queued campaign; first-contact HITL).
+- **files:** agentscope_tools.py (propose_call tool, always-registered, safe; provenance carries
+  callback_url), api_hyper_rooms.py (arm callback_url), campaigns.js propose (accepts explicit
+  prospect/prospects).
+- **verified E2E (live):** propose with an explicit German prospect → HTTP 200, campaign=queued,
+  contract {language:de, voice_style:'warm professional', voice_id:38aabb6a… (real Cartesia),
+  German goal+strategy}. Test campaign cleaned up. hm-core recall healthy; --no-deps.
+- **NOT exercised:** the actual dial (queued → needs human Start → TARA) — HITL-gated, never auto-placed.
+
 ## 2026-07-23 — TARA call-contract: auto voice/language/strategy + first-contact-HITL popup
 - **commits:** `ad8de6663` (BE: employees+control) · Da-vinci `7165961` + gitlink `f069846dd` (FE).
 - **images LIVE:** employees/control `prod-20260723-ad8de6663`, fe `latest` (both containers).

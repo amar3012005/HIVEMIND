@@ -30,7 +30,16 @@ const URL       = (process.env.RERANK_URL || '').replace(/\/+$/, '');
 const MODEL     = process.env.RERANK_MODEL || 'bge-reranker-v2-m3';
 const API_KEY   = process.env.RERANK_API_KEY || '';
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
-const TIMEOUT   = Number(process.env.RERANK_TIMEOUT_MS || 1500);
+// 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to
+// 1-2s under burst/queueing, tripping the abort → the cross-encoder pass got
+// silently dropped exactly when load was highest. 2500ms covers spikes while
+// still bounding the answer path.
+const TIMEOUT   = Number(process.env.RERANK_TIMEOUT_MS || 2500);
+// One transient retry (abort/timeout/429/5xx) so a single slow attempt doesn't
+// drop the rerank — ensures Cohere is actually used, not just when the network
+// is calm. Non-transient errors degrade immediately (no load amplification).
+const RETRIES   = Number(process.env.RERANK_RETRIES || 1);
+const RETRYABLE = /abort|timeout|429|50[0-9]|network|fetch failed|ECONNRESET|ETIMEDOUT/i;
 
 export function isRerankEnabled() {
   return ENABLED && !!URL;
@@ -81,28 +90,44 @@ export async function rerank(query, candidates, { topN } = {}) {
   }
   const pool = candidates.slice(0, POOL);
   const tail = candidates.slice(POOL); // never reranked, kept after
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
-  try {
-    const texts = pool.map(textOf);
-    const scored = PROVIDER === 'cohere'
-      ? await callCohere(query, texts, ctrl.signal)
-      : await callTei(query, texts, ctrl.signal);
-    if (!scored.length) throw new Error('empty rerank result');
-    const byIdx = new Map(scored.map((s) => [s.index, s.score]));
-    const reordered = pool
-      .map((c, i) => ({ c, s: byIdx.has(i) ? byIdx.get(i) : -Infinity }))
-      .sort((a, b) => b.s - a.s)
-      .map((x) => ({ ...x.c, rerank_score: Number.isFinite(x.s) ? Number(x.s.toFixed(4)) : null }));
-    const out = [...reordered, ...tail];
-    return topN ? out.slice(0, topN) : out;
-  } catch (err) {
-    // Graceful degrade — keep algorithmic order.
-    console.warn('[reranker] degraded to algorithmic order:', err.message);
-    return topN ? candidates.slice(0, topN) : candidates;
-  } finally {
-    clearTimeout(timer);
+  const texts = pool.map(textOf);
+
+  // One attempt with a fresh timeout. Retryable failures (transient) get one
+  // more shot before we degrade; anything else degrades immediately.
+  const attempt = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
+    try {
+      const scored = PROVIDER === 'cohere'
+        ? await callCohere(query, texts, ctrl.signal)
+        : await callTei(query, texts, ctrl.signal);
+      if (!scored.length) throw new Error('empty rerank result');
+      const byIdx = new Map(scored.map((s) => [s.index, s.score]));
+      const reordered = pool
+        .map((c, i) => ({ c, s: byIdx.has(i) ? byIdx.get(i) : -Infinity }))
+        .sort((a, b) => b.s - a.s)
+        .map((x) => ({ ...x.c, rerank_score: Number.isFinite(x.s) ? Number(x.s.toFixed(4)) : null }));
+      return [...reordered, ...tail];
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let lastErr = null;
+  for (let a = 0; a <= RETRIES; a++) {
+    try {
+      const out = await attempt();
+      return topN ? out.slice(0, topN) : out;
+    } catch (err) {
+      lastErr = err;
+      if (a < RETRIES && RETRYABLE.test(String(err?.message || ''))) continue; // transient → retry
+      break;
+    }
   }
+  // Graceful degrade — keep algorithmic order (correctness preserved by the
+  // upstream tiered reranker + stable tie-break; we just lose the cross-encoder).
+  console.warn(`[reranker] degraded to algorithmic order after ${RETRIES + 1} attempt(s):`, lastErr?.message);
+  return topN ? candidates.slice(0, topN) : candidates;
 }
 
 export default rerank;

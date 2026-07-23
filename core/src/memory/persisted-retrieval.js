@@ -657,6 +657,25 @@ async function extractQueryEntitiesLLM(query, orgId) {
   return tags;
 }
 
+// Scope-filter matcher — the chat scope selector (personal / all-org / project)
+// must ACTUALLY restrict the delivered set. The naive `m.scope === scope_filter`
+// check fails because several lanes (FTS / lexical / Qdrant-payload) deliver rows
+// with NO hydrated `scope`, and `m.scope && …` then keeps every scope-less row —
+// so a project fact leaked into a `personal` recall. Infer the tier the SAME way
+// the access-context filter does (~L790): a project link ⇒ 'project'; otherwise
+// 'organization'. NEVER infer 'personal' — the personal tier requires a proven
+// scope row, so the `personal` lens admits ONLY provably-personal memories (a
+// scope-less row can't claim it). 'organization'/none is passed as null upstream
+// → this is never called for the org-wide lens (everything the access context
+// already allows is delivered).
+function matchesScopeFilter(m, scope_filter) {
+  if (!scope_filter) return true;
+  if (!m) return false;
+  const eff = m.scope
+    || ((m.project_id || (Array.isArray(m.project_ids) && m.project_ids.length)) ? 'project' : 'organization');
+  return eff === scope_filter;
+}
+
 async function vectorCandidatesForRecall(store, {
   query_context,
   user_id,
@@ -783,7 +802,7 @@ async function vectorCandidatesForRecall(store, {
       const pids = Array.isArray(memory.project_ids) ? memory.project_ids : [];
       if (pid !== project && !pids.includes(project)) return null;
     }
-    if (scope_filter && memory.scope && memory.scope !== scope_filter) return null;
+    if (!matchesScopeFilter(memory, scope_filter)) return null;
 
     return {
       memory,
@@ -1615,7 +1634,7 @@ async function _recallPersistedMemoriesImpl(store, {
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
     if (!isMemoryInTemporalSnapshot(memory, { validAt: snapshotValidAt, knownAt: known_at })) return false;
-    if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
+    if (!matchesScopeFilter(memory, scope_filter)) return false;
     // Exclude canonical-summary rows from default recall — BUT ONLY the
     // generic chat / conversation compactions. Knowledge-base, document,
     // entity-scoped, and entity-tagged compactions are the substantive
@@ -1994,7 +2013,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // mismatched scope; keep scope-less rows). 'organization'/none is passed as null → no filter
   // (everything the access_context already allows in the org).
   if (scope_filter) {
-    filtered = filtered.filter((m) => !(m && m.scope && m.scope !== scope_filter));
+    filtered = filtered.filter((m) => matchesScopeFilter(m, scope_filter));
   }
 
   // Filter out meta-facts from LLM extraction that describe the extraction process, not actual user facts

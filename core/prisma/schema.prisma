@@ -548,6 +548,13 @@ model Memory {
   sourceSessionId                                             String?              @map("source_session_id") @db.VarChar(255)
   sourceMessageId                                             String?              @map("source_message_id") @db.VarChar(255)
   sourceUrl                                                   String?              @map("source_url")
+  // P0 first-class HyperAgents provenance (nullable, additive; populated only for
+  // hyperagents-agent saves — see prisma-graph-store.createMemory). Applied to the DB
+  // via migration 20260723090000_add_hyperagents_provenance.
+  producedByTurn                                              String?              @map("produced_by_turn") @db.Uuid
+  producedByAgent                                             String?              @map("produced_by_agent") @db.VarChar(120)
+  actionable                                                  Boolean?             @map("actionable")
+  provenance                                                  Json?                @map("provenance")
   isLatest                                                    Boolean?             @default(true) @map("is_latest")
   supersedesId                                                String?              @map("supersedes_id") @db.Uuid
   strength                                                    Float?               @default(1.0) @db.Real

@@ -460,6 +460,23 @@ export class PrismaGraphStore {
         sourceSessionId: memory.source_metadata?.source_session_id || null,
         sourceMessageId: memory.source_metadata?.source_id || null,
         sourceUrl: memory.source_metadata?.source_url || null,
+        // P0 first-class provenance — populated ONLY for HyperAgents agent saves
+        // (the sidecar's produced_by marker). Guarded so a non-uuid session id from
+        // any OTHER ingest path can never reach the uuid column and break the write;
+        // all other paths leave these NULL (purely additive).
+        ...(memory.source_metadata?.produced_by === 'hyperagents-agent'
+          ? {
+              producedByTurn: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+                .test(String(memory.source_metadata?.source_session_id || ''))
+                ? memory.source_metadata.source_session_id
+                : null,
+              producedByAgent: memory.source_metadata?.produced_by || null,
+              actionable: typeof memory.source_metadata?.actionable === 'boolean'
+                ? memory.source_metadata.actionable
+                : null,
+              provenance: memory.source_metadata,
+            }
+          : {}),
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
         // Bi-temporal lower bound — when the fact became TRUE in the world.
         // Default to document_date (KB facts carry it 100%) so time-travel

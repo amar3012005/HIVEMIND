@@ -24,6 +24,28 @@ or uncommitted changes as completed work.
 - Next: review and commit the audit record on the isolated branch without
   merging or deploying it.
 
+## 2026-07-23 UTC - TARA Deepgram history and runtime audit committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/tara-deepgram-history`
+- Base / commit: `8eaf4e35963d3664c88a2c0f818849e0486caa87` ->
+  `c5eb3c5b9590566c4381e826bab1936437bad35e`
+- Scope: `docs/TARA_DEEPGRAM_HISTORY.md` and this append-only journal; complete
+  24-commit service ledger, component ownership, live/canonical parity,
+  Meeting Notes and `tara-aaas` boundaries, and prioritized open gaps.
+- Verification: fresh recursive clone passed; all canonical/live Python and
+  dependency hashes matched; Python compile passed; telephony tests 3/3 passed;
+  live health was HTTP 200 with a healthy zero-restart container; no secrets,
+  call, connector action, paid preview, or customer write was used.
+- Production: existing runtime inspected read-only; no build, deployment,
+  configuration change, restart or image mutation.
+- Rollback: not applicable; the audit documents that the expected TARA
+  `stable` tag is missing and `stable-20260722` is identical to live.
+- Next: review the P0 voice-authentication and rollback findings before the
+  next TARA feature release, then merge this documentation through the normal
+  integration path.
+
 ## Required Session Protocol
 
 1. At session start, read the latest entries, `git log origin/hivemind-main`,

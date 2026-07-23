@@ -776,7 +776,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
-    ...(plan.scope_filter ? { scope_filter: plan.scope_filter } : {}),
+    // Scope: an EXPLICIT request scope (the chat's personal/organization/project selector,
+    // ctx.scopeFilter) WINS over the planner's inferred scope — the user's chosen lens is
+    // authoritative. 'organization'/none → no filter (everything accessible in the org).
+    ...((ctx.scopeFilter || plan.scope_filter) ? { scope_filter: ctx.scopeFilter || plan.scope_filter } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick

@@ -21095,6 +21095,17 @@ exit \$RC
             // calls dispatched by the ReAct agent are auto-bound to this
             // project, and the auto-saved conversation memory inherits it.
             const requestProjectId = (body?.project_id || (Array.isArray(body?.project_ids) ? body.project_ids[0] : null)) || null;
+            // Chat scope selector (personal | organization/all | project). Maps to the recall
+            // scope_filter (org+user-scoped, SAME method as memories). 'organization'/'all'/unset
+            // → no filter (everything the user can access in their org); 'personal' → the user's
+            // own private memories; 'project'/'team' → that scope (project_id carries the project).
+            const requestScopeFilter = (() => {
+              const s = String(body?.scope || '').toLowerCase();
+              if (s === 'personal') return 'personal';
+              if (s === 'project') return 'project';
+              if (s === 'team') return 'team';
+              return null; // organization | all | '' → unrestricted within the org
+            })();
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
@@ -21209,6 +21220,7 @@ exit \$RC
                       ctx: {
                         userId, orgId,
                         projectId: requestProjectId,
+                        scopeFilter: requestScopeFilter,
                         prisma,
                         persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                         smartIngestRouter,
@@ -21253,6 +21265,7 @@ exit \$RC
                   ctx: {
                     userId, orgId,
                     projectId: requestProjectId,
+                    scopeFilter: requestScopeFilter,
                     prisma,
                     persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                     smartIngestRouter,

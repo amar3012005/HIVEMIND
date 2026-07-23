@@ -347,14 +347,33 @@ async function upsertConnectorWithinPlan(orgId, connectorInput) {
   });
 }
 
+// Map the internal resource label + plan id to the FE plan-limit contract so the global
+// <PlanLimitModal> (shared/planLimit.js) fires instead of the caller seeing a raw 402.
+const _PLAN_LIMIT_RESOURCE_KEY = {
+  'HyperAgents room': 'hyperRooms',
+  'user': 'users',
+  'connector': 'connectors',
+  'project': 'projects',
+};
+const _PLAN_LIMIT_NEXT = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
+
 function capacityErrorResponse(res, error) {
+  const planId = error.plan;
   return jsonResponse(res, {
     error: error.message,
-    code: error.code,
-    resource: error.resource,
-    plan: error.plan,
+    // FE contract (shared/planLimit.js isPlanLimitError): the machine code MUST be
+    // 'plan_limit_exceeded' for the upgrade modal to surface. `reason` keeps the internal
+    // code ('PLAN_LIMIT') for backend routing/debug. Was previously emitting the internal
+    // code here → the FE never recognised it → the user got a silent console 402.
+    code: 'plan_limit_exceeded',
+    reason: error.code,
+    message: error.message,
+    resource: _PLAN_LIMIT_RESOURCE_KEY[error.resource] || error.resource,
+    plan: planId,
     limit: error.limit,
     current: error.current,
+    suggested_plan: Object.prototype.hasOwnProperty.call(_PLAN_LIMIT_NEXT, planId) ? _PLAN_LIMIT_NEXT[planId] : null,
+    upgrade_url: '/hivemind/app/billing',
   }, 402);
 }
 
@@ -4079,7 +4098,7 @@ const server = http.createServer(async (req, res) => {
     const projectLimit = effectivePlan.limits?.maxProjects ?? -1;
     const existingProjectCount = await prisma.project.count({ where: { orgId, archivedAt: null } });
     if (projectLimit !== -1 && existingProjectCount >= projectLimit) {
-      return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'PLAN_LIMIT', limit: projectLimit, current: existingProjectCount }, 402);
+      return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'plan_limit_exceeded', reason: 'PLAN_LIMIT', message: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, resource: 'projects', plan: effectivePlan.id, limit: projectLimit, current: existingProjectCount, suggested_plan: (_PLAN_LIMIT_NEXT[effectivePlan.id] ?? null), upgrade_url: '/hivemind/app/billing' }, 402);
     }
 
     const body = await parseBody(req);
@@ -5420,7 +5439,7 @@ const server = http.createServer(async (req, res) => {
         const projectLimit = effectivePlan.limits?.maxProjects ?? -1;
         const existingProjectCount = await prisma.project.count({ where: { orgId, archivedAt: null } });
         if (projectLimit !== -1 && existingProjectCount >= projectLimit) {
-          return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'PLAN_LIMIT', limit: projectLimit, current: existingProjectCount }, 402);
+          return jsonResponse(res, { error: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, code: 'plan_limit_exceeded', reason: 'PLAN_LIMIT', message: `Project limit reached (${effectivePlan.name}: ${projectLimit})`, resource: 'projects', plan: effectivePlan.id, limit: projectLimit, current: existingProjectCount, suggested_plan: (_PLAN_LIMIT_NEXT[effectivePlan.id] ?? null), upgrade_url: '/hivemind/app/billing' }, 402);
         }
         const body = await parseBody(req);
         if (!body.name) return jsonResponse(res, { error: 'name required' }, 400);

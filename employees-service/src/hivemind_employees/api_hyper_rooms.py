@@ -58,6 +58,7 @@ from .agents.agentscope_tools import (
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
+from .governor import kill_switch_active, kill_switch_reason, outbound_cap, turn_token_cap
 from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
@@ -3531,6 +3532,16 @@ async def post_room_turn(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ) -> RoomTurnResponse:
     _require_master_key(x_api_key)
+    # P2 Governor — master kill switch (all orgs, no DB write). Refuse instantly: no LLM
+    # spend, no debate, no outbound. Emit a seal so the FE stream closes cleanly.
+    if kill_switch_active():
+        log.warning("[governor] kill switch ON — refusing room turn %s", req.turn_id)
+        if req.callback_url:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "line", "agent": "system", "kind": "disabled", "content": kill_switch_reason()})
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "status": "disabled", "cost_tokens": 0})
+        return RoomTurnResponse(ok=False, cost_tokens=0, status="disabled")
     # Phase 4 — arm the write-approval gate in THIS handler's context so every
     # fanned-out agent task (which copies the context) appends to the same
     # pending list. Sync connector tools read the policy at call time.
@@ -3559,6 +3570,14 @@ async def post_room_turn(
         for rnd in range(1, max_rounds + 1):
             resp = await _orchestrate(req)
             total_cost += int(resp.cost_tokens or 0)
+            # P2 Governor — per-turn token ceiling across goalkeeper rounds. Stop a runaway
+            # re-plan loop from burning budget; seal the turn cost_capped. 0 = unlimited.
+            _tcap = turn_token_cap()
+            if _tcap and total_cost >= _tcap:
+                log.warning("[governor] turn=%s cost_capped: %d tokens ≥ cap %d — stopping",
+                            req.turn_id, total_cost, _tcap)
+                resp.status = "cost_capped"
+                break
             plan = _PLAN_BY_TURN.get(req.turn_id)
             verdict = plan.get("verification") if isinstance(plan, dict) else None
             # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
@@ -3617,6 +3636,13 @@ async def post_room_turn(
     # are force-queued regardless of policy, so they must appear even under
     # "auto". docs/sheets never queue (no HITL), so this only carries real sends.
     pending = drain_pending_writes()
+    # P2 Governor — outbound cap: one turn cannot fan out more than N outward sends
+    # (emails etc.). Excess is dropped + logged; the rest stay HITL-approved. 0 = unlimited.
+    _ocap = outbound_cap()
+    if _ocap and pending and len(pending) > _ocap:
+        log.warning("[governor] turn=%s outbound %d > cap %d — dropping %d excess send(s)",
+                    req.turn_id, len(pending), _ocap, len(pending) - _ocap)
+        pending = pending[:_ocap]
     if pending:
         await _register_and_emit_approvals(req, pending)
         # Strip the replay descriptor from the client-facing payload —

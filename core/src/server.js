@@ -21104,7 +21104,8 @@ exit \$RC
               if (s === 'personal') return 'personal';
               if (s === 'project') return 'project';
               if (s === 'team') return 'team';
-              return null; // organization | all | '' → unrestricted within the org
+              if (s === 'organization') return 'organization'; // org-tier only
+              return null; // all | '' → ALL accessible tiers (my-space + org + projects)
             })();
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);

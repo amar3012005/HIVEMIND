@@ -2547,6 +2547,13 @@ export async function runReactAgentV2({
         score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
         tags,
         memory_type: m.memory_type,
+        // Scope provenance so the chat can show WHERE each memory was found
+        // (personal / project / team / organization) — mirrors the Memories
+        // page ScopeBadge. Populated for every lane now that recall hydrates
+        // scope + project on delivered memories.
+        scope: m.scope || null,
+        project: m.project || null,
+        project_id: m.project_id || null,
         rank_trace: {
           is_synthesis: !!isSynth,
           synthesis_type: synthType,
@@ -2561,9 +2568,26 @@ export async function runReactAgentV2({
     const publicSources = evidence.coverage?.source_requested
       ? citationSources
       : [...citationSources, ...memorySources].slice(0, 10);
+    // Distinct scopes the answer's memories were drawn from — the chat renders
+    // "(memory found in <scope>)" so the user sees which tier(s) answered
+    // (my-space / project:<name> / org-wide). Default ALL recall spans all
+    // accessible tiers, so this makes the tenant scoping visible per turn.
+    const scopesFound = (() => {
+      const seenScope = new Map(); // scope|project → label
+      for (const m of (evidence.memories || [])) {
+        const s = m && m.scope;
+        if (!s) continue;
+        const key = s === 'project' ? `project:${m.project || m.project_id || ''}` : s;
+        if (!seenScope.has(key)) {
+          seenScope.set(key, s === 'project' && m.project ? `project:${m.project}` : s);
+        }
+      }
+      return [...seenScope.values()];
+    })();
 
     return {
       project_choice: recallProjectChoice,
+      scopes_found: scopesFound,
       // When a save was deferred for project choice, don't claim it was saved —
       // prompt the user to pick (the FE renders project buttons below).
       response: finalResponse,

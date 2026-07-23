@@ -46,6 +46,14 @@ log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Cerebras' OWN inference API. Models it hosts natively (GLM synth) route DIRECT here
+# with CEREBRAS_API_KEY — NOT via OpenRouter's Cerebras provider (owner policy 2026-07-23:
+# "use GLM from Cerebras, not from OpenRouter"; also keeps synth off the OpenRouter bill).
+_CEREBRAS_URL = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai/v1").rstrip("/") + "/chat/completions"
+# Bare (slash-less) ids Cerebras serves on its own API. Env-overridable CSV. The GLM
+# final-report synth writer (zai-glm-4.7, measured ~4s/2.8k-char report) lives here.
+_CEREBRAS_DIRECT_MODELS = {m.strip() for m in
+    (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7")).split(",") if m.strip()}
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 # Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
@@ -58,6 +66,7 @@ _OR_MODEL_MAP: Dict[str, str] = {
     "llama-3.3-70b-versatile": "meta-llama/llama-3.3-70b-instruct",
     "llama-3.1-8b-instant": "meta-llama/llama-3.1-8b-instruct",
     "llama-3.1-70b-versatile": "meta-llama/llama-3.1-70b-instruct",
+    "zai-glm-4.7": "z-ai/glm-4.7",  # emergency failover only — primary is Cerebras-direct
 }
 # Agentic web-search / audio / vision / safety — never fall back to OpenRouter.
 _OR_NO_FALLBACK = re.compile(r"compound|whisper|playai|tts|guard|vision|parakeet|moderation", re.I)
@@ -184,6 +193,14 @@ def _route_direct_openrouter(model: str) -> bool:
     return "/" in m
 
 
+def _route_cerebras_direct(model: str) -> bool:
+    """Model is hosted on Cerebras' OWN API → route DIRECT with CEREBRAS_API_KEY,
+    bypassing OpenRouter entirely (owner policy: GLM synth comes from Cerebras, and
+    keeps synth spend off the OpenRouter key). Bare slash-less ids in the allow-set."""
+    m = str(model or "")
+    return bool(m) and m in _CEREBRAS_DIRECT_MODELS and bool(os.environ.get("CEREBRAS_API_KEY"))
+
+
 def _or_provider_pin(model: str) -> Optional[List[str]]:
     """OpenRouter provider order to pin for a model vendor (consistent latency)."""
     m = str(model or "")
@@ -270,6 +287,57 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
         return None
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] OpenRouter fallback failed: %s", exc)
+        return None
+
+
+async def _cerebras_chat(body: Dict[str, Any], *, timeout: httpx.Timeout,
+                         cache_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """POST a chat body to Cerebras' OWN API (api.cerebras.ai) with CEREBRAS_API_KEY.
+    OpenAI-compatible. Strips OpenRouter-only fields (provider / reasoning-exclude).
+
+    Prompt caching: Cerebras caches prompt PREFIXES automatically (128-token blocks,
+    5-min+ TTL) — no flag needed; our synth prompts are already static-first
+    (system+skills prefix, dynamic task last) so repeat turns of a room hit the cache.
+    The optional `prompt_cache_key` (a routing hint that keeps one workflow's turns on
+    the same cache backend) is account-gated → only sent when HYPER_CEREBRAS_PROMPT_CACHE_KEY
+    is truthy, else Cerebras 400s. cached_tokens are metered so the savings are visible.
+    Returns parsed JSON (OpenAI shape) or None (→ caller may failover)."""
+    key = os.environ.get("CEREBRAS_API_KEY", "")
+    if not key:
+        return None
+    cb = {k: v for k, v in body.items() if k not in ("provider", "reasoning")}
+    cb.pop("stream", None)
+    if cache_key and os.environ.get("HYPER_CEREBRAS_PROMPT_CACHE_KEY", "").lower() in ("1", "true", "yes", "on"):
+        cb["prompt_cache_key"] = str(cache_key)[:1024]
+    _t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(_CEREBRAS_URL, headers={"Authorization": f"Bearer {key}"}, json=cb)
+        if r.status_code != 200:
+            log.warning("[hyper-engine] Cerebras-direct %s: %s", r.status_code, (r.text or "")[:200])
+            return None
+        j = r.json()
+        msg = (j.get("choices") or [{}])[0].get("message") or {}
+        # GLM emits its analysis in a side channel; the final answer is in `content`.
+        # Coalesce reasoning into content ONLY if content came back empty (defensive —
+        # mirrors _openrouter_chat), sanitising raw chain-of-thought.
+        if msg.get("reasoning") and not msg.get("reasoning_content"):
+            msg["reasoning_content"] = msg["reasoning"]
+        if not msg.get("content") and (msg.get("reasoning_content") or msg.get("reasoning")):
+            msg["content"] = _strip_cot(msg.get("reasoning_content") or msg.get("reasoning") or "")
+        _ms = int((time.time() - _t0) * 1000)
+        _u = j.get("usage") or {}
+        _ctok = int(_u.get("completion_tokens", 0) or 0)
+        _cached = int(((_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+        (log.warning if _ms > 15000 else log.info)(
+            "[hyper-engine] Cerebras-direct served model=%s ms=%d out_tok=%d cached=%d%s",
+            cb.get("model"), _ms, _ctok, _cached, " SLOW" if _ms > 15000 else "")
+        return j
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        log.warning("[hyper-engine] Cerebras-direct transport error: %s", exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[hyper-engine] Cerebras-direct failed: %s", exc)
         return None
 
 # Quality skills loaded WITHIN the call (model-driven, not pre-inserted) — the
@@ -1061,7 +1129,11 @@ class Director:
         # on a cheap model (orchestration), but the synthesis is the product — so a
         # strong model writes it. When equal to director_model, no extra call (the
         # loop's own final IS the deliverable). Multi-model "Auto" = cheap gather + strong synth.
-        self.synth_model = synth_model or self.director_model
+        # P4: route ONLY the final-report synth call to a frontier writer via env
+        # (HYPER_SYNTH_MODEL). A Cerebras-hosted id (zai-glm-4.7) → _cerebras_chat DIRECT;
+        # a namespaced slug (deepseek/…, google/…) → _openrouter_chat direct. Default =
+        # director model (gpt-oss-120b) so unset = no behavior change.
+        self.synth_model = synth_model or os.environ.get("HYPER_SYNTH_MODEL") or self.director_model
         # Live public-web search uses Groq's built-in web search (only on the
         # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
         # cheaper/faster and fine for in-room gathering; env-tunable.
@@ -1159,6 +1231,31 @@ class Director:
             _to = float(os.getenv("HYPER_SYNTH_TIMEOUT_S", "90") or 90)
         else:
             _to = 60.0
+        # Cerebras-direct FIRST (bypasses OpenRouter): the GLM synth writer bills to
+        # Cerebras + hits its automatic prompt cache. A stable per-room+bucket cache_key
+        # routes a room's repeat turns to the same cache backend (sent only when the
+        # account has prompt_cache_key enabled — see _cerebras_chat).
+        if _route_cerebras_direct(body.get("model")):
+            _ck = f"hyper:{self.org_id or 'x'}:{getattr(self, 'project_id', None) or 'x'}:{bucket}"
+            j = await _cerebras_chat(body, timeout=httpx.Timeout(_to, connect=5.0), cache_key=_ck)
+            if j is not None:
+                u = j.get("usage") or {}
+                t = int(u.get("total_tokens", 0) or 0)
+                self.tokens += t
+                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
+                self._last_tok = t
+                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
+                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
+                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+                return (j.get("choices") or [{}])[0].get("message") or None
+            # Cerebras-direct unavailable → emergency failover to the SAME model on
+            # OpenRouter (still GLM, other host) so the room still produces a report.
+            _or = _or_model(body.get("model"))
+            if _or:
+                log.warning("[hyper-engine] Cerebras-direct miss → OpenRouter failover %s", _or)
+                body["model"] = _or
+            else:
+                return None
         if _route_direct_openrouter(body.get("model")):
             j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if j is not None:
@@ -1173,7 +1270,7 @@ class Director:
                 # through). Prod runs OpenRouter-PRIMARY, so without this the seal's
                 # tokens_cached was always 0 — cache savings were invisible.
                 self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
-                return j["choices"][0]["message"]
+                return (j.get("choices") or [{}])[0].get("message") or None
             return None
         max_attempts = 3
         _nudged = False

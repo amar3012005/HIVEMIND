@@ -162,4 +162,5 @@ async def main():
         print(f"REGRESSION: mean_quality {mean_q} < floor {floor}")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

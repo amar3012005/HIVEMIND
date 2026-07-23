@@ -2736,7 +2736,7 @@ def _quality_models(mode: str) -> tuple:
     return (
         os.environ.get("HYPER_AUTO_GATHER", "openai/gpt-oss-20b"),
         os.environ.get("HYPER_AUTO_DEBATE", "openai/gpt-oss-20b"),
-        os.environ.get("HYPER_AUTO_SYNTH", "openai/gpt-oss-120b"),
+        os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", "openai/gpt-oss-120b"),  # P4: auto-mode inherits the frontier synth model
     )
 
 

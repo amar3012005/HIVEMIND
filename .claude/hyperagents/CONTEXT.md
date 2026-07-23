@@ -100,12 +100,14 @@ gitlink. Commit author ALWAYS `amarsai3012005 <amarsai3012005@users.noreply.gith
 ## Deploy (THIS box — local docker, not ssh)
 Everything is local docker on this host; `/root/hivemind` is the repo.
 - **sidecar (Python) fast dev:** `docker cp <file> hm-employees:/app/src/hivemind_employees/<path> && docker restart hm-employees` (ephemeral — lost on recreate).
-- **durable ship:** build the image from a **singulance-main** worktree →
-  `docker build -f employees-service/Dockerfile -t hivemind/employees:prod-<date>-<sha> employees-service` →
-  bump `VERSION` in `/root/hivemind/.env` →
-  `docker compose --env-file /root/hivemind/.env -f infra/docker-compose.hetzner.yml up -d employees`.
-  **The `--env-file` flag is MANDATORY** (compose interpolates `${VAR}` from the
-  project dir, not the per-service `env_file`; omitting it fails on `BROKER_DATABASE_URL`).
+- **durable ship:** build the image from the **`/root/hivemind-main` singulance-main** worktree
+  (NOT `/root/hivemind`, which is the dirty feat tree) →
+  `docker build -f /root/hivemind-main/employees-service/Dockerfile -t hivemind/employees:prod-<date>-<sha> /root/hivemind-main/employees-service` →
+  `VERSION=prod-<date>-<sha> docker compose --env-file /root/hivemind/.env -f infra/docker-compose.hetzner.yml up -d --no-deps employees`.
+  **`--env-file` is MANDATORY** (compose interpolates `${VAR}` from the project dir, not the
+  per-service `env_file`; omitting it fails on `BROKER_DATABASE_URL`).
+  **`--no-deps` is MANDATORY** and **pass VERSION on the command line, do NOT bump `.env`
+  VERSION** — see the deploy lesson below. `.env VERSION` tracks CORE.
 - **core** (control-plane / server / campaigns): rebuild `hivemind/core-api`, recreate `hm-core` (see recall_final.md deploy ledger).
 - Write a rollback marker (`.last-*-rollback`, gitignored) before each deploy.
 
@@ -139,6 +141,12 @@ Test email recipient is ALWAYS `amarsai2005@gmail.com` (user-controlled, safe re
 - Two core replicas historically shared a queue — on this box confirm replica count before assuming.
 - Email is NEVER "sent" in-turn — draft + approval card only.
 - `docker compose up` needs `--env-file /root/hivemind/.env` or it fails on interpolation.
+- **DEPLOY TRAP (bit us 2026-07-23):** `VERSION=<tag> docker compose … up -d employees` WITHOUT
+  `--no-deps` also recreates **hm-core** (core is employees' `depends_on`), and because all services
+  share one `${VERSION}` it rebuilds core from compose context `..` = the **dirty `/root/hivemind`
+  feat tree**, silently running unintended core code. ALWAYS `--no-deps` for a sidecar-only deploy;
+  pass VERSION as a shell override (never bump `.env` VERSION — that's core's). Recover a mis-recreated
+  core with `VERSION=<core-.env-tag> docker compose … up -d --no-deps core` + verify recall warm-up.
 
 ## Key IDs (active test org on THIS box)
 - org **MANDI** `807ebb88-94a3-447b-8d84-727479cdd979` · user `c8876290-8836-472c-94b0-231fa1843ee9`.

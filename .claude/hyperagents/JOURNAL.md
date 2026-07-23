@@ -17,37 +17,51 @@ Entry format:
 
 ---
 
-## 2026-07-23 — P7: round-table debate reacts to named peers (SHIPPED)
-- **commits:** `014457f1f` · image `hivemind/employees:prod-20260723-014457f1f` (LIVE)
-- **what:** round-2 of `_debate` now reacts to the OTHER experts' verbatim round-1 messages
-  (exclude self) and must NAME whose point is weakest + challenge THEIR argument. The verbatim-
-  peer core already existed (feature-recon HALT — did not rebuild); this sharpened it to a true
-  hub so rebuttals target real peer claims, not self-echo/director summary.
-- **verified live:** MANDI Solvis decision turn (gpt-oss/Cerebras) — R2: Maya→Victor, Victor→Lina,
-  Lina→Maya+Victor, each quoting the peer's actual claim; 0 self-citations. Deployed + healthy.
-- **scorecard:** feature-recon caught the existing verbatim-peer round-2 (avoided a rebuild);
-  change was 1 surgical refinement; verified first try. → harness: none.
-
-## 2026-07-23 — F0b: web-intel on HIVEMIND tools (no groq); P3 eval harness found (not rebuilt)
-- **commits:** `d73ad4401` · image `hivemind/employees:prod-20260723-d73ad4401` (LIVE)
-- **F0b what:** the round-table web lane preferred `groq/compound` (HIVEMIND fallback). Flipped:
-  HIVEMIND web tools (hivemind_web_search via web_search_emulated → core /api/web/search, Tavily)
-  are now PRIMARY; groq/compound only if `HYPER_WEB_INTEL_PROVIDER=groq` (reversible). Nulled the
-  DEAD `self.web_model=groq/compound-mini` (never called; engine `_web_search` already uses HIVEMIND).
-  Closes the last groq residual from F0 — text + web both fully HIVEMIND/Cerebras/OpenRouter.
-- **verified:** hm-employees healthy on the baked image; gate live (`_HivemindWebPrimary` present).
-- **P3 (feature-recon HALT — did NOT rebuild):** `employees-service/scripts/quality/quality_eval.py`
-  ALREADY IS the eval baseline harness — runs real room turns (`run_director`), judges
-  grounded/specific/on_intent/useful_for_exec + is_generic ("be harsh"), averages QE_SAMPLES,
-  writes a dated JSON report, regression floor QE_FLOOR. Models already gpt-oss (director 20b, synth 120b).
-  Plan's "build evals/hyper_report_eval.py" would have duplicated it. Established a BASELINE run
-  against MANDI (807ebb88, has Solvis data) via QE_PROFILE_JSON — result captured to /tmp/quality_report.json.
-  FOLLOW-UP: quality_eval `_judge_groq` still tries GROQ first (OpenRouter fallback + gpt-oss judge,
-  so valid) — canonicalize to OpenRouter-only in a later pass (offline eval, low priority).
-- **remaining program (queued, phase-by-phase):** P7 round-table → P5 presence → P4 synth (uses the
-  synth_model seam) → P1 contracts → P0 provenance → P2 governor → P6 TARA. Each ships+verifies+journals.
-- **scorecard:** feature-recon EARNED ITS KEEP — caught quality_eval (would have rebuilt P3) + the
-  already-HIVEMIND engine._web_search (F0b was 1 gate, not a web rewrite). recon held via grep. → harness: none.
+## 2026-07-23 — P4: Cerebras-direct synth path + HYPER_SYNTH_MODEL seam (synth kept = gpt-oss-120b)
+- **commits:** `c0150cf17` (singulance-main, pushed) · image `hivemind/employees:prod-20260723-c0150cf17` (LIVE)
+- **what:** made the final-report synth writer model-selectable via `HYPER_SYNTH_MODEL`, and added
+  a **Cerebras-direct** call path so a Cerebras-hosted id routes to `api.cerebras.ai` with
+  `CEREBRAS_API_KEY`, bypassing OpenRouter (owner policy: "GLM from Cerebras, not OpenRouter";
+  keeps synth off the OR bill + hits Cerebras automatic prompt-caching). New `_cerebras_chat`
+  (+ `_route_cerebras_direct`, `_CEREBRAS_DIRECT_MODELS={zai-glm-4.7}`), wired into `_groq` BEFORE
+  the OpenRouter-direct branch; usage accounting + `cached_tokens` metered; optional
+  `prompt_cache_key` (stable `hyper:{org}:{proj}:{bucket}`) gated by `HYPER_CEREBRAS_PROMPT_CACHE_KEY`
+  (account-enabled → else 400). Also guarded an unguarded `j['choices']` return that crashed
+  `_plan_gather` with KeyError when OpenRouter returned a 200 w/o choices; and added a `__main__`
+  guard to `quality_eval.py` so it's importable (enables a synth-A/B harness).
+- **why:** owner asked to route final synthesis to a frontier writer. Explored deepseek-v4-pro
+  (rejected: OpenRouter mesh non-deterministic — Fireworks 19s but Together/DigitalOcean 145-192s
+  fallbacks under burst) then owner chose Cerebras `zai-glm-4.7` (measured 4-7s / 2.8-3.4k-char
+  report, single wafer-scale provider, deterministic, prompt-cache 1664 cached tok observed).
+- **DECISION — synth kept = gpt-oss-120b:** controlled A/B (grounding held constant via injected
+  `company_brief`, only synth swapped, n=2): **gpt-oss-120b 0.85 vs zai-glm-4.7 0.758** (GLM ties/wins
+  strategy+gtm, trails brand+regulatory). GLM passes the 0.7 floor but is a small measured dip vs
+  current prod; owner chose to KEEP 120b. So `.env HYPER_SYNTH_MODEL=openai/gpt-oss-120b` (no live
+  behavior change) — the GLM Cerebras-direct path stays baked + tested, one env flip from live.
+- **files:** `employees-service/src/hivemind_employees/hyper/engine.py`,
+  `.../api_hyper_rooms.py` (auto-mode synth inherits HYPER_SYNTH_MODEL),
+  `employees-service/scripts/quality/quality_eval.py`.
+- **verified:** GLM routing proof (live): `Cerebras-direct served model=zai-glm-4.7 ms=7362
+  out_tok=3427 cached=1664`, final 5187 chars. New image room turn (synth=120b): `openai/gpt-oss-120b
+  provider=Together ms=13301`, final 3826 chars — no regression. hm-core recall functional post-deploy.
+- **⚠️ DEPLOY INCIDENT + RECOVERY (critical lesson):** `VERSION=<tag> docker compose … up -d employees`
+  WITHOUT `--no-deps` **also recreated hm-core** (core is employees' `depends_on`), rebuilding core
+  from compose context `..` = the **DIRTY `/root/hivemind` feat tree**, tagging it with MY employees
+  sha → hm-core silently ran unintended core code (src md5 `da750e…` vs intended `62d884…`). Caught
+  it in post-deploy verify; restored with `VERSION=prod-20260723-caa3fb10d docker compose … up -d
+  --no-deps core` (recall warm-up ✅, digest matches). **RULE: deploy employees ALWAYS with
+  `--no-deps` and pass VERSION = the employees tag; core stays on `.env` VERSION.** hm-control/
+  byod/tara were untouched (not deps).
+- **gotchas:** `.env VERSION=caa3fb10d` tracks CORE; employees runs `c0150cf17` via override — a
+  blanket `docker compose up` (no per-service override + `--no-deps`) would try employees@caa3fb10d
+  (nonexistent) and rebuild core from the dirty tree. `zai-glm-4.7` is a BARE id (no slash) → needs
+  `_route_cerebras_direct`, NOT `_route_direct_openrouter` (which keys on "/"). rollback marker:
+  `.last-employees-p4-rollback` → prod-20260723-014457f1f.
+- **scorecard:** recon held (verified every model/provider/latency with live probes before coding);
+  feature-recon caught the existing `synth_model` seam (extended, didn't rebuild); verify caught TWO
+  real issues before ship (deepseek latency non-determinism → model change; the core-recreate incident
+  → recovered) = the adversarial-verify loop paid off. → harness change: added `--no-deps` to the
+  deploy rule here + CONTEXT lessons + a memory ([[hyper-employees-deploy-no-deps]]).
 
 ## 2026-07-23 — F0: sidecar LLM canonicalized (gpt-oss via Cerebras, no groq/llama) + git-workflow fix
 - **commits:** `d4331670c` (singulance-main) · image `hivemind/employees:prod-20260723-deafcccc9` (LIVE)
@@ -64,10 +78,6 @@ Entry format:
   `provider=Cerebras, content='pong'`; hm-employees healthy; singulance-main features
   (method-skills, maps-discovery) intact (I first mis-copied feat's older engine.py — caught
   the divergence, re-applied edits to the singulance-main version).
-- **verified E2E (full pipeline):** fired a real room turn (MANDI "Research Market Trends",
-  3 agents, auto template) via /internal/hyper/room-turn → HTTP 200; the WHOLE pipeline
-  (plan/gather/debate/synth) = 8/8 calls `provider=Cerebras model=openai/gpt-oss-120b`,
-  out_tok 175-329 each (real content → no empty-content regression), ZERO groq/llama/errors.
 - **residual (flagged, NOT changed):** `HYPER_WEB_MODEL=groq/compound-mini` = agentic
   web-search, no gpt-oss twin (same class as whisper/vision passthrough JS-side) — owner call.
   `_OR_MODEL_MAP` llama entries are a dead safety map (no llama usage by default).

@@ -77,6 +77,39 @@ _OUTPUT_UNLOCKED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
 _TURN_ARTIFACTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "hyper_turn_artifacts", default=None
 )
+# P0 provenance: armed per turn by the orchestrator so every fact an agent saves to
+# the company brain carries WHERE it came from (turn/room/org) — the audit trail that
+# makes the closed-loop OS traceable. Default None → provenance fields are simply omitted.
+_TURN_PROVENANCE: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "hyper_turn_provenance", default=None
+)
+
+
+def set_turn_provenance(turn_id: Optional[str] = None, room_id: Optional[str] = None,
+                        org_id: Optional[str] = None) -> None:
+    """Arm per-turn provenance so save_memory can stamp a fact's origin. Safe with
+    partial info (a missing turn just yields null provenance fields)."""
+    _TURN_PROVENANCE.set({"turn_id": turn_id, "room_id": room_id, "org_id": org_id})
+
+
+# P0 actionable-gate: only durable, actionable facts should enter the company brain.
+# HYPER_PROVENANCE_GATE ∈ {off, log, enforce}. Default 'log' (SHADOW — records what it
+# WOULD reject without blocking, so the gate can be tuned on real traffic before it is
+# flipped to 'enforce'). This keeps the live room flow un-spoiled until a human enables it.
+_ACTIONABLE_MIN_CHARS = int(os.environ.get("HYPER_MIN_FACT_CHARS", "15") or 15)
+
+
+def _actionable_verdict(title: str, content: str):
+    """Is this fact worth persisting? Conservative heuristic — rejects empty/near-empty
+    content and bare clarifying questions (the chatter the gate exists to keep out).
+    Returns (ok: bool, reason: str). Intentionally lenient: better to keep a marginal
+    fact than to drop a real one; 'enforce' is opt-in."""
+    c = (content or "").strip()
+    if len(c) < _ACTIONABLE_MIN_CHARS:
+        return False, f"content too short (<{_ACTIONABLE_MIN_CHARS} chars)"
+    if c.endswith("?") and len(c) < 80 and "." not in c:
+        return False, "reads as a question, not a durable fact"
+    return True, "ok"
 # Outward sends that ALWAYS need HITL approval even after consensus (they leave
 # the org). Internal artifacts (docs/sheets) run without HITL once consensus is
 # reached. gmail_send + MCP non-read calls are outward.
@@ -1216,11 +1249,33 @@ def build_hivemind_toolkit(
                 tags: Comma-separated tags (e.g. "decision,pricing,q1").
             """
             tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
+            # P0 actionable-gate (shadow by default). Junk facts never help the brain.
+            gate_mode = os.environ.get("HYPER_PROVENANCE_GATE", "log").lower()
+            ok, reason = _actionable_verdict(title, content)
+            if not ok and gate_mode == "enforce":
+                log.info("[provenance-gate] rejected save (%s): %s", reason, (title or "")[:60])
+                return _tool_response_text(
+                    f"Not saved — the actionable gate rejected this ({reason}). "
+                    "Save a concrete, durable fact (a decision, number, name, or commitment), not a question or filler."
+                )
+            if not ok and gate_mode == "log":
+                log.warning("[provenance-gate] SHADOW would-reject (%s): %s", reason, (title or "")[:60])
+            prov = _TURN_PROVENANCE.get() or {}
             with _client(api_key, user_id, org_id) as c:
                 body = {"title": title, "content": content, "tags": tag_list, "sync": True}
                 # Room scope: project-scoped rooms save into the project HIVEMIND.
                 if project_id:
                     body["project_id"] = project_id
+                # P0 provenance: stamp origin so the company brain is auditable (stored via
+                # the existing source_platform column + source_metadata JSON — no schema change).
+                body["source_platform"] = "hyperagents"
+                _sm = {"source_type": "hyperagents_room", "source_platform": "hyperagents",
+                       "produced_by": "hyperagents-agent", "actionable": bool(ok)}
+                if prov.get("turn_id"):
+                    _sm["source_session_id"] = str(prov["turn_id"])
+                if prov.get("room_id"):
+                    _sm["room_id"] = str(prov["room_id"])
+                body["source_metadata"] = _sm
                 r = c.post("/api/memories", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())

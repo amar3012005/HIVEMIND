@@ -54,6 +54,7 @@ from .agents.agentscope_tools import (
     queue_email_approval,
     record_artifact,
     reset_turn_outputs,
+    set_turn_provenance,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
@@ -3535,6 +3536,9 @@ async def post_room_turn(
     # pending list. Sync connector tools read the policy at call time.
     policy = await _resolve_write_policy(req)
     begin_turn_write_gate(policy)
+    # P0 — arm per-turn provenance so any fact an agent saves this turn is stamped
+    # with its origin (turn/room/org) for the company-brain audit trail.
+    set_turn_provenance(turn_id=req.turn_id, room_id=req.room_id, org_id=req.org_id)
 
     # Phase 6 — goalkeeper loop. Run the full round (plan → simulate → verify);
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back

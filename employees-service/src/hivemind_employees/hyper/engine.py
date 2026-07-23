@@ -102,10 +102,10 @@ _OR_PROVIDER_PIN = {
     # 2.4k tok ≈ 2s) while Groq under load served the same call in 12-18s
     # (logged "SLOW — fell off the fast-provider pin" on 2026-07-14). Groq stays
     # the immediate fallback.
-    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Together"],
+    "openai/gpt-oss-120b": ["Cerebras", "Together"],  # canonical 2026-07-23: Groq dropped (owner no-groq)
     # Fireworks dropped from the 20b pin — measured 13.5s and 39.3s per call live
     # (2026-07-07) vs Groq ~1.6-2.5s on the same calls; it was the plan-phase spike.
-    "openai/gpt-oss-20b": ["Groq", "Together", "Cerebras"],
+    "openai/gpt-oss-20b": ["Together", "Cerebras"],  # canonical: no Groq (Cerebras lacks 20b)
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],
@@ -213,7 +213,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     # as Theo, concise, 3-5 sentences...") straight into the room bubble. This
     # OpenRouter-layer flag makes the model reason internally but return ONLY the
     # final answer in `content`. Merges with any caller-supplied reasoning opts.
-    or_body["reasoning"] = {**(or_body.get("reasoning") or {}), "exclude": True}
+    or_body["reasoning"] = {**(or_body.get("reasoning") or {}), "exclude": True, "effort": "low"}  # effort=low → gpt-oss emits clean content for extractive tasks
     # Fastest provider that supports the request's params (tools / response_format),
     # with OpenRouter's own cross-provider fallback enabled.
     _pin = _or_provider_pin(or_model)
@@ -393,9 +393,9 @@ _READ_TOOL_HINTS = ("search", "list", "get", "read", "fetch", "query", "find", "
 # AFTER gather and feeds its report into the synthesis. Modeled on MiroFish CSI. Bursts on
 # the cheap model with a fallback chain; the report on the strong synth model. All bounded +
 # wrapped so a failure NEVER breaks the main turn.
-_SIM_AGENT_MODEL = os.environ.get("HYPER_SIM_AGENT_MODEL", "llama-3.1-8b-instant")
+_SIM_AGENT_MODEL = os.environ.get("HYPER_SIM_AGENT_MODEL", "openai/gpt-oss-20b")  # canonical: no llama
 _SIM_FALLBACKS = [m.strip() for m in os.environ.get(
-    "HYPER_SIM_FALLBACKS", "openai/gpt-oss-20b,llama-3.3-70b-versatile").split(",") if m.strip()]
+    "HYPER_SIM_FALLBACKS", "openai/gpt-oss-20b,openai/gpt-oss-120b").split(",") if m.strip()]
 _SIM_PERSONAS = max(4, min(150, int(os.environ.get("HYPER_SIM_PERSONAS", "24") or "24")))
 _SIM_TYPES = max(3, min(20, int(os.environ.get("HYPER_SIM_TYPES", "8") or "8")))
 _SIM_CONCURRENCY = max(2, int(os.environ.get("HYPER_SIM_CONCURRENCY", "10") or "10"))
@@ -429,9 +429,10 @@ _REACTOR_REACH = (os.environ.get("HYPER_REACTOR_REACH", "false").strip().lower()
 # with NO quality loss (digest strips noise → debaters ground cleaner). Compressing the synth
 # too (the deliverable's source) craters grounding — so synth ALWAYS keeps raw.
 _DIGEST_ENABLED = (os.environ.get("HYPER_DIGEST_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
-# gpt-oss models can route plain-text output to an analysis channel → empty content; a llama
-# instruct model returns content reliably + is just as cheap for extractive compression.
-_DIGEST_MODEL = os.environ.get("HYPER_DIGEST_MODEL", "llama-3.1-8b-instant")
+# Was llama (gpt-oss could route plain text to the analysis channel → empty content). Now
+# gpt-oss-20b + reasoning.effort=low + the reasoning→content coalesce → clean extractive content,
+# honoring the "no llama" rule without regressing.
+_DIGEST_MODEL = os.environ.get("HYPER_DIGEST_MODEL", "openai/gpt-oss-20b")
 _DIGEST_MIN_CHARS = max(1500, int(os.environ.get("HYPER_DIGEST_MIN_CHARS", "2500") or "2500"))  # gate: engage on a moderately-full board (spike: +21% even at ~2k chars)
 _DIGEST_MAX_CHARS = max(800, int(os.environ.get("HYPER_DIGEST_MAX_CHARS", "2400") or "2400"))   # bound the digest
 _DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000") or "12000"))  # cap the digester's own input
@@ -442,7 +443,7 @@ _DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000"
 # prior-turn figure 0.45 vs blank arm 0.00 (blank FABRICATES). Bounded (last N entries) → no token
 # regression. Distinct from evo_playbooks (skills) — this is episodic memory of WHAT HAPPENED.
 _JOURNAL_ENABLED = (os.environ.get("HYPER_JOURNAL_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
-_JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "llama-3.1-8b-instant")  # cheap, content-returning summariser
+_JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "openai/gpt-oss-20b")  # canonical: no llama (effort=low returns content)
 _JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
 
 # ── Self-revision (reflexion on the final deliverable) ─────────────────────

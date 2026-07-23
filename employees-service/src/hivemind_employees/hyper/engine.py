@@ -1772,10 +1772,16 @@ class Director:
         if rounds >= 2:
             self._round_seq += 1
             await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
-            prior = "\n".join(f"{c['name']}: {c['text']}" for c in r1 if not c.get("empty"))[:3500]
+            # P7: each expert reacts to the VERBATIM round-1 messages of the OTHERS
+            # (exclude self) so rebuttals target real PEER arguments by name — a true
+            # round-table hub, not a self-echo or a director summary.
+            def _peers_prior(self_slug: str) -> str:
+                return "\n".join(f"{c['name']}: {c['text']}" for c in r1
+                                 if not c.get("empty") and c.get("slug") != self_slug)[:3500]
             r2 = await asyncio.gather(*[
-                _consult_and_emit(m, (f"Your teammates said:\n{prior}\n\nREACT: whose point is weakest? Challenge "
-                                      f"or build on it — be specific. Do you change your view on '{topic}'?"),
+                _consult_and_emit(m, (f"Your teammates said:\n{_peers_prior(m.get('slug'))}\n\nREACT: name whose "
+                                      f"point is weakest and why; challenge or build on THEIR argument — be specific. "
+                                      f"Do you change your view on '{topic}'?"),
                                   self._round_seq, ("challenge", "support"))
                 for m in members
             ])

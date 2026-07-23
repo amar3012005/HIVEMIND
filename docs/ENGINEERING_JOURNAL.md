@@ -5,6 +5,25 @@ releases. Git is the source of truth; every entry must cite immutable commit
 SHAs, release IDs, and verification evidence. Do not record plans, guesses,
 or uncommitted changes as completed work.
 
+## 2026-07-23 UTC - TARA Deepgram history and runtime audit started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/tara-deepgram-history`
+- Base / commit: `8eaf4e35963d3664c88a2c0f818849e0486caa87` -> `pending`
+- Scope: source-backed `tara-deepgram` architecture, full service commit
+  history, live image/source parity, runtime boundaries, and unresolved release
+  and authentication gaps; documentation only.
+- Verification: fresh recursive clone, Git history, Python compile, 3 telephony
+  unit tests, live read-only health/runtime inspection, source and requirements
+  checksum comparison; no call or customer write.
+- Production: read-only verification of existing
+  `hivemind/tara-deepgram:prod-20260722-rmye01367541`; not deployed or modified.
+- Rollback: not applicable; audit found the `stable` tag expected by the deploy
+  script is missing and `stable-20260722` is not a distinct image.
+- Next: review and commit the audit record on the isolated branch without
+  merging or deploying it.
+
 ## Required Session Protocol
 
 1. At session start, read the latest entries, `git log origin/hivemind-main`,

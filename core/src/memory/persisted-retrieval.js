@@ -671,8 +671,14 @@ async function extractQueryEntitiesLLM(query, orgId) {
 function matchesScopeFilter(m, scope_filter) {
   if (!scope_filter) return true;
   if (!m) return false;
-  const eff = m.scope
-    || ((m.project_id || (Array.isArray(m.project_ids) && m.project_ids.length)) ? 'project' : 'organization');
+  // Accept BOTH shapes: a flat memory (per-lane checks pass one) AND a ranked
+  // wrapper item `{ memory, score, … }` (the post-merge choke point passes one —
+  // the flatten to `{...item.memory}` happens later). Reading scope off the
+  // wrapper saw undefined and inferred 'organization', silently dropping the
+  // whole pool for a project/personal lens.
+  const mem = (m.memory && typeof m.memory === 'object') ? m.memory : m;
+  const eff = mem.scope
+    || ((mem.project_id || (Array.isArray(mem.project_ids) && mem.project_ids.length)) ? 'project' : 'organization');
   return eff === scope_filter;
 }
 

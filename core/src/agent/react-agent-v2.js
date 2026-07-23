@@ -2572,17 +2572,36 @@ export async function runReactAgentV2({
     // "(memory found in <scope>)" so the user sees which tier(s) answered
     // (my-space / project:<name> / org-wide). Default ALL recall spans all
     // accessible tiers, so this makes the tenant scoping visible per turn.
-    const scopesFound = (() => {
-      const seenScope = new Map(); // scope|project → label
+    const scopesFound = await (async () => {
+      const tiers = new Set();          // 'personal' | 'organization' | 'team'
+      const projectIds = new Set();     // distinct project ids seen
+      const projectNames = new Set();   // project names already on the memory
       for (const m of (evidence.memories || [])) {
         const s = m && m.scope;
         if (!s) continue;
-        const key = s === 'project' ? `project:${m.project || m.project_id || ''}` : s;
-        if (!seenScope.has(key)) {
-          seenScope.set(key, s === 'project' && m.project ? `project:${m.project}` : s);
+        if (s === 'project') {
+          if (m.project) projectNames.add(String(m.project));
+          else if (m.project_id) projectIds.add(String(m.project_id));
+          else tiers.add('project');
+        } else {
+          tiers.add(s);
         }
       }
-      return [...seenScope.values()];
+      // Resolve project_id → name (single batched read) so the chip shows the
+      // real project (e.g. "project:SOLVIS"), not a bare uuid. Best-effort.
+      if (projectIds.size && ctx.prisma?.project?.findMany) {
+        try {
+          const rows = await ctx.prisma.project.findMany({
+            where: { id: { in: [...projectIds] } }, select: { id: true, name: true },
+          });
+          const byId = new Map(rows.map((r) => [r.id, r.name]));
+          for (const id of projectIds) projectNames.add(byId.get(id) || 'Project');
+        } catch { for (const _ of projectIds) projectNames.add('Project'); }
+      }
+      return [
+        ...[...tiers],
+        ...[...projectNames].map((n) => `project:${n}`),
+      ];
     })();
 
     return {

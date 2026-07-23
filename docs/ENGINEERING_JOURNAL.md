@@ -46,6 +46,22 @@ or uncommitted changes as completed work.
   next TARA feature release, then merge this documentation through the normal
   integration path.
 
+## 2026-07-23 UTC - TARA history audit SHA correction
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/tara-deepgram-history`
+- Base / commit: correction to the preceding entry; the short SHA `c5eb3c5b`
+  was correct, but its expanded value was transcribed incorrectly. The actual
+  pushed history-record commit is
+  `c5eb3c5b7c4caa89633a0f9aa0ba91b667220769`.
+- Scope: journal correction only; no application or documentation content
+  changed.
+- Verification: `git rev-parse c5eb3c5b` and remote branch push output.
+- Production: not deployed or modified.
+- Rollback: not applicable.
+- Next: use the corrected immutable SHA for review and integration.
+
 ## Required Session Protocol
 
 1. At session start, read the latest entries, `git log origin/hivemind-main`,

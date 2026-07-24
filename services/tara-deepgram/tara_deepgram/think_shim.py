@@ -151,6 +151,7 @@ async def think(request: Request):
         produced = False
         first_ms = None
         path = "core-legacy"
+        forced_recall = False  # hoisted so the end-of-turn diag log is always safe
         decision = {"action": "recall", "history_turns": 2, "directive": ""}
         try:
             persona = {}
@@ -331,9 +332,19 @@ async def think(request: Request):
                 }, user_id, org_id))
         except Exception:  # noqa: BLE001
             pass
-        log.info("turn session=%s path=%s router_ms=%s first_token_ms=%s total_ms=%s tok=%s/%s",
-                 session_id, path, decision.get("router_ms", "-") if use_router else "-",
-                 first_ms, total_ms, state["tok"]["p"], state["tok"]["c"])
+        # Minimal per-turn diagnostic — one line, everything needed to tell WHY a
+        # turn behaved as it did: which path answered, whether clinical was live +
+        # recall forced, the router's action + the directive that steered the reply,
+        # latency, tokens, and the (truncated) user utterance.
+        _diag_dir = (state.get("directive") or decision.get("directive") or "")[:80]
+        log.info(
+            "turn session=%s path=%s clinical=%s forced_recall=%s action=%s "
+            "router_ms=%s first_token_ms=%s total_ms=%s tok=%s/%s q=%r directive=%r",
+            session_id, path, config.CLINICAL_LIVE, forced_recall,
+            (decision.get("action", "-") if use_router else "-"),
+            (decision.get("router_ms", "-") if use_router else "-"),
+            first_ms, total_ms, state["tok"]["p"], state["tok"]["c"],
+            (query or "")[:60], _diag_dir)
         yield _chunk(chunk_id, model, {}, finish="stop")
         yield "data: [DONE]\n\n"
 

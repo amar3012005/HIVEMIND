@@ -7475,7 +7475,34 @@ exit \$RC
           }
           const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
           const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
-          return jsonResponse(res, { calls });
+          // Attach each call's post-call insight (summary + outcome + LEADS) so the
+          // dashboard Leads/Insights tabs populate the instant a call ends. The list
+          // previously returned bare call rows and never joined tara_insights, so on
+          // hybrid orgs leads/insights only appeared in the per-call detail view —
+          // the board + insights tab (which read the LIST) stayed empty. Mirrors the
+          // remote-org branch's flat insight shape. Batched single query; optional.
+          const _insById = new Map();
+          try {
+            if (calls.length) {
+              const _ins = await prisma.taraInsight.findMany({ where: { callId: { in: calls.map((c) => c.id) } } });
+              for (const i of _ins) _insById.set(i.callId, i.data || {});
+            }
+          } catch (e) { console.warn('[tara/calls] insight join failed:', e.message); }
+          const callsOut = calls.map((c) => {
+            const d = _insById.get(c.id);
+            return {
+              ...c,
+              insight: d ? {
+                summary: d.summary || null,
+                sentiment: d.sentiment || null,
+                goal_outcome: d.goal_outcome || null,
+                lead_found: !!d.lead_found,
+                leads: Array.isArray(d.leads) ? d.leads : [],
+                tara_learnings: Array.isArray(d.tara_learnings) ? d.tara_learnings : [],
+              } : null,
+            };
+          });
+          return jsonResponse(res, { calls: callsOut });
         }
 
         const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);

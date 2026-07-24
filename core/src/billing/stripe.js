@@ -105,6 +105,60 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
 }
 
 /**
+ * Runway self-serve checkout — a DYNAMIC-price monthly subscription for a scope the
+ * org configured (no fixed Stripe price id). `unit_amount` is the server-computed
+ * monthly total; a self-hosted setup fee rides the first invoice via add_invoice_items.
+ * The subscription carries metadata.kind='runway' + checkout_id so (a) the webhook can
+ * activate the stored custom entitlement and (b) syncPersonalStripeSubscription's
+ * price→plan map (which returns null for this unmapped dynamic price) never clobbers it.
+ */
+export async function createRunwayCheckoutSession({ customerId, orgId, userId, quote, checkoutId }) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
+    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success';
+  const returnCancel = process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
+    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled';
+  const currency = String(quote?.currency || 'eur').toLowerCase();
+  const cfg = quote?.config || {};
+  const label = `HIVEMIND Runway — ${quote?.mode || 'managed'} · ${cfg.seats} seats · ${cfg.tokens}M tokens`
+    + (quote?.mode === 'managed' ? ` · ${cfg.dataGb}GB` : '');
+  const subscription_data = {
+    metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '', kind: 'runway', checkout_id: checkoutId || '' },
+  };
+  if (Number(quote?.setupOneTime) > 0) {
+    subscription_data.add_invoice_items = [{
+      quantity: 1,
+      price_data: {
+        currency,
+        unit_amount: Math.round(Number(quote.setupOneTime) * 100),
+        product_data: { name: 'One-time deployment & security setup' },
+      },
+    }];
+  }
+  return stripe.checkout.sessions.create({
+    mode: 'subscription',
+    customer: customerId,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency,
+        recurring: { interval: 'month' },
+        unit_amount: Math.round(Number(quote.monthlyTotal) * 100),
+        product_data: { name: label },
+      },
+    }],
+    success_url: returnSuccess,
+    cancel_url: returnCancel,
+    billing_address_collection: 'auto',
+    automatic_tax: { enabled: true },
+    customer_update: { address: 'auto', name: 'auto' },
+    subscription_data,
+    metadata: { hivemind_org_id: orgId, kind: 'runway', checkout_id: checkoutId || '' },
+  });
+}
+
+/**
  * Create a Stripe Customer Portal session so the user can manage their
  * subscription (change plan, update card, view invoices, cancel) without
  * us building those screens ourselves.

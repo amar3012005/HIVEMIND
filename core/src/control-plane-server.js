@@ -30,6 +30,7 @@ import {
   normalizeReferralCode,
   redeemReferral,
 } from './billing/entitlements.js';
+import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import {
@@ -9706,6 +9707,72 @@ Write the persona now.`;
     }
 
     // POST /v1/billing/checkout — { plan: "pro"|"scale", referral_code? }
+    // POST /v1/billing/runway/quote — server-authoritative price for a scope config
+    // (mode/data/seats/tokens). The FE estimator shows this; checkout re-computes it
+    // so a client can never dictate the amount.
+    if (pathname === '/v1/billing/runway/quote' && req.method === 'POST') {
+      const body = await parseBody(req).catch(() => ({}));
+      const quote = computeRunwayQuote(body);
+      return jsonResponse(res, {
+        mode: quote.mode, config: quote.config, currency: quote.currency,
+        rows: quote.rows.map(([label, detail, amount]) => ({ label, detail, amount })),
+        monthly_total: quote.monthlyTotal, setup_one_time: quote.setupOneTime,
+      });
+    }
+
+    // POST /v1/billing/runway/checkout — self-serve runway subscription. The org
+    // configures its scope; we price it HERE, charge the calculated amount via a
+    // dynamic Stripe subscription, and (on webhook) activate a CUSTOM entitlement
+    // matching the scope. This is the post-onboarding path for enterprise orgs.
+    if (pathname === '/v1/billing/runway/checkout' && req.method === 'POST') {
+      const body = await parseBody(req).catch(() => ({}));
+      const quote = computeRunwayQuote(body);
+      if (!(quote.monthlyTotal > 0)) return jsonResponse(res, { error: 'invalid scope configuration' }, 400);
+      const offer = buildRunwayOffer(body, quote);
+      const now = new Date();
+      // Dummy path for allow-listed test orgs (no real charge) — mirrors /billing/checkout.
+      if (!billingMod.isEnabled() || dummyCheckoutAllowed(orgId)) {
+        if (!dummyCheckoutAllowed(orgId)) {
+          return jsonResponse(res, { error: 'Payment provider is not configured for this organization' }, 503);
+        }
+        const checkout = await prisma.billingCheckout.create({
+          data: { orgId, userId, provider: 'dummy', targetPlanId: 'enterprise', offer,
+            expiresAt: new Date(now.getTime() + 30 * 60 * 1000) },
+        });
+        return jsonResponse(res, {
+          checkout_url: `/hivemind/app/billing?dummy_checkout=${checkout.id}`,
+          session_id: checkout.id, provider: 'dummy', offer,
+          monthly_total: quote.monthlyTotal, setup_one_time: quote.setupOneTime,
+        });
+      }
+      // Real Stripe: dynamic-price monthly subscription (+ one-time setup for self-hosted).
+      const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+      const customerId = await billingMod.ensureCustomer(prisma, org, owner?.email || null);
+      if (!customerId) return jsonResponse(res, { error: 'Failed to create Stripe customer' }, 502);
+      // Persist the offer BEFORE Stripe so the webhook can activate it by session id.
+      const checkout = await prisma.billingCheckout.create({
+        data: { orgId, userId, provider: 'stripe', targetPlanId: 'enterprise', offer,
+          expiresAt: new Date(now.getTime() + 60 * 60 * 1000) },
+      });
+      try {
+        const session = await billingMod.createRunwayCheckoutSession({
+          customerId, orgId, userId, quote,
+          checkoutId: checkout.id,
+        });
+        await prisma.billingCheckout.update({ where: { id: checkout.id }, data: { providerRef: session.id } }).catch(() => {});
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'billing.runway_checkout_started', eventCategory: 'billing', action: 'create',
+          resourceType: 'subscription', resourceId: session.id,
+          metadata: { monthly_total: quote.monthlyTotal, mode: quote.mode }, ..._reqMeta(req),
+        });
+        return jsonResponse(res, { checkout_url: session.url, session_id: session.id, monthly_total: quote.monthlyTotal });
+      } catch (err) {
+        await prisma.billingCheckout.updateMany({ where: { id: checkout.id, status: 'pending' }, data: { status: 'expired' } }).catch(() => {});
+        return jsonResponse(res, { error: `Stripe checkout failed: ${err.message}` }, 502);
+      }
+    }
+
     if (pathname === '/v1/billing/checkout' && req.method === 'POST') {
       const body = await parseBody(req).catch(() => ({}));
       const targetPlanId = String(body.plan || '').trim();
@@ -9935,6 +10002,29 @@ Write the persona now.`;
               where: { id: org.id },
               data: { stripeCustomerId: customerId },
             });
+          }
+          // Runway self-serve: activate the CUSTOM entitlement stored on the checkout
+          // row (scope-configured limits) instead of the fixed-plan sync. Keyed by the
+          // Stripe session id we saved as providerRef. Idempotent via advisory lock +
+          // status check. The dynamic runway price is unmapped, so the fixed-plan sync
+          // below no-ops for it anyway — this branch is what grants access.
+          if (org && obj.payment_status === 'paid'
+              && (obj.metadata?.kind === 'runway' || obj.id)) {
+            const pending = await prisma.billingCheckout.findUnique({ where: { providerRef: obj.id } }).catch(() => null);
+            if (pending && pending.orgId === org.id && pending.offer?.kind === 'runway') {
+              try {
+                await prisma.$transaction(async (tx) => {
+                  await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `billing:checkout:${pending.id}`);
+                  const fresh = await tx.billingCheckout.findUnique({ where: { id: pending.id } });
+                  if (fresh?.status !== 'pending') return;
+                  await activateOffer({ tx, orgId: org.id, offer: pending.offer, source: 'stripe_runway' });
+                  await tx.billingCheckout.update({ where: { id: pending.id }, data: { status: 'confirmed', confirmedAt: new Date() } });
+                });
+                provisionPaidManagedOrg(org.id, 'enterprise')
+                  .catch((e) => console.error('[managed-provision] runway post-checkout failed', { orgId: org.id, error: e.message }));
+              } catch (e) { console.error('[runway] activation failed', { orgId: org.id, error: e.message }); }
+              break; // handled — skip the fixed-plan sync
+            }
           }
           if (org && obj.payment_status === 'paid') {
             const subscriptionId = billingMod.getSubscriptionIdFromStripeObject(obj);

@@ -414,26 +414,43 @@ export function getSectionForChunk(chunkText, sections, fullText) {
 // ── Document-level summary generation ────────────────────
 
 /**
- * Generate a brief document summary from the first ~2000 chars.
+ * Generate a DETAILED whole-document summary. This is the one 'document-summary'
+ * memory that represents the entire ingestion in recall/lists, so it walks the
+ * WHOLE document (a snippet per section across its full length), not just the
+ * opening — deterministic, no extra LLM call.
  */
 export function generateDocumentSummary(text, metadata) {
-  const preview = text.slice(0, 2000);
-  const sections = extractSections(text);
-  const headings = sections.map(s => s.title).slice(0, 10);
+  const full = String(text || '');
+  const sections = extractSections(full);
+  const words = full.split(/\s+/).filter(Boolean).length;
 
-  const parts = [
-    `Document: ${metadata.title || 'Untitled'}`,
-  ];
-
+  const parts = [`Document: ${metadata.title || 'Untitled'}`];
   if (metadata.author) parts.push(`Author: ${metadata.author}`);
   if (metadata.pages) parts.push(`Pages: ${metadata.pages}`);
   if (metadata.rowCount) parts.push(`Rows: ${metadata.rowCount}`);
-  if (headings.length > 0) parts.push(`Sections: ${headings.join(', ')}`);
+  parts.push(`Length: ~${words.toLocaleString()} words${sections.length ? `, ${sections.length} sections` : ''}`);
 
-  // First paragraph as preview
-  const firstParagraph = preview.split(/\n\s*\n/)[0]?.trim();
-  if (firstParagraph && firstParagraph.length > 50) {
-    parts.push('', firstParagraph.slice(0, 500));
+  if (sections.length > 0) {
+    parts.push(`Sections: ${sections.map(s => s.title).slice(0, 20).join(', ')}`);
+    // Section-by-section walkthrough — a snippet of each section's own body so
+    // the summary reflects the entire document, not just the first page.
+    parts.push('', 'Overview:');
+    const maxSections = Math.min(sections.length, 14);
+    for (let i = 0; i < maxSections; i += 1) {
+      const start = sections[i].offset;
+      const end = i + 1 < sections.length ? sections[i + 1].offset : full.length;
+      const body = full.slice(start, end)
+        .replace(/^#{1,4}\s+.+$/m, '')        // drop the heading line itself
+        .replace(/\s+/g, ' ').trim();
+      const snippet = body.slice(0, 220).trim();
+      parts.push(`• ${sections[i].title}${snippet ? `: ${snippet}${body.length > 220 ? '…' : ''}` : ''}`);
+    }
+    if (sections.length > maxSections) parts.push(`• …and ${sections.length - maxSections} more section(s).`);
+  } else {
+    // No headings — sample a longer opening excerpt so the summary still carries
+    // substance from the body.
+    const excerpt = full.slice(0, 1500).replace(/\s+/g, ' ').trim();
+    if (excerpt.length > 50) parts.push('', excerpt + (full.length > 1500 ? '…' : ''));
   }
 
   return parts.join('\n');

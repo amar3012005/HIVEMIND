@@ -12,6 +12,9 @@
  * existing Groq vision model is a provider fallback only.
  */
 
+import { EntityExtractor } from '../knowledge/entity-extractor.js';
+import { normalizeEntityTag } from '../memory/entity-normalize.js';
+
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const VISION_MODEL = process.env.HIVEMIND_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
@@ -168,6 +171,24 @@ export async function buildImageMemoryPayload({
     'kind:image',
     ...(filename ? [`filename:${filename}`] : []),
   ];
+
+  // Rich entity tags on the image memory. Atomic-mode ingestion (which keeps the
+  // image as ONE memory) does NOT run the document pipeline's entity extractor,
+  // so without this an image lands with zero entities. Extract them here from the
+  // visual evidence and attach `entity:<slug>` tags — the recall-linkage surface
+  // the rest of the graph uses. Best-effort: never fail image ingest on this.
+  try {
+    const cands = await new EntityExtractor({ prisma: null })._llmExtract(visualEvidence);
+    const entityTags = [...new Set(
+      (cands || [])
+        .filter((c) => c?.name && (c.confidence == null || c.confidence >= 0.5))
+        .map((c) => normalizeEntityTag(`entity:${c.name}`))
+        .filter((t) => typeof t === 'string' && t.startsWith('entity:') && t.length > 'entity:'.length),
+    )].slice(0, 25);
+    tags.push(...entityTags);
+  } catch (e) {
+    console.warn('[image-ingest] entity extraction failed (non-fatal):', e?.message);
+  }
 
   const payload = {
     title,

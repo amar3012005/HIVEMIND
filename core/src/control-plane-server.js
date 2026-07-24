@@ -9768,6 +9768,7 @@ Write the persona now.`;
         });
         return jsonResponse(res, { checkout_url: session.url, session_id: session.id, monthly_total: quote.monthlyTotal });
       } catch (err) {
+        console.error(`[billing/runway] Stripe checkout failed org=${orgId}: ${err?.message}`, err?.type || '', err?.param || '');
         await prisma.billingCheckout.updateMany({ where: { id: checkout.id, status: 'pending' }, data: { status: 'expired' } }).catch(() => {});
         return jsonResponse(res, { error: `Stripe checkout failed: ${err.message}` }, 502);
       }

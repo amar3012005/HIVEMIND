@@ -123,36 +123,50 @@ export async function createRunwayCheckoutSession({ customerId, orgId, userId, q
   const cfg = quote?.config || {};
   const label = `HIVEMIND Runway — ${quote?.mode || 'managed'} · ${cfg.seats} seats · ${cfg.tokens}M tokens`
     + (quote?.mode === 'managed' ? ` · ${cfg.dataGb}GB` : '');
+  // Optional Stripe tax code (e.g. txcd_10103001 = SaaS, business use). When set,
+  // automatic tax is enabled with this code on the ad-hoc line; when unset, tax is
+  // skipped so the ad-hoc-price checkout always opens (see product_data below).
+  const runwayTaxCode = process.env.RUNWAY_STRIPE_TAX_CODE || null;
   const subscription_data = {
     metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '', kind: 'runway', checkout_id: checkoutId || '' },
   };
+  // Recurring monthly line. Ad-hoc product: Stripe automatic_tax needs a per-line
+  // tax_code for ad-hoc products (unlike the fixed Pro/Scale prices, whose Products
+  // carry a tax code in the dashboard). Only attach a tax_code + enable automatic_tax
+  // when RUNWAY_STRIPE_TAX_CODE is set — otherwise automatic tax throws "You must
+  // specify a tax code…" and the checkout never opens. Default: no automatic tax.
+  const line_items = [{
+    quantity: 1,
+    price_data: {
+      currency,
+      recurring: { interval: 'month' },
+      unit_amount: Math.round(Number(quote.monthlyTotal) * 100),
+      product_data: { name: label, ...(runwayTaxCode ? { tax_code: runwayTaxCode } : {}) },
+    },
+  }];
+  // Self-hosted one-time setup fee: a ONE-TIME line item (no `recurring`). In
+  // subscription mode Stripe bills one-time line items on the first invoice.
+  // (subscription_data.add_invoice_items is NOT accepted by Checkout Sessions.)
   if (Number(quote?.setupOneTime) > 0) {
-    subscription_data.add_invoice_items = [{
+    line_items.push({
       quantity: 1,
       price_data: {
         currency,
         unit_amount: Math.round(Number(quote.setupOneTime) * 100),
-        product_data: { name: 'One-time deployment & security setup' },
+        product_data: { name: 'One-time deployment & security setup', ...(runwayTaxCode ? { tax_code: runwayTaxCode } : {}) },
       },
-    }];
+    });
   }
   return stripe.checkout.sessions.create({
     mode: 'subscription',
     customer: customerId,
-    line_items: [{
-      quantity: 1,
-      price_data: {
-        currency,
-        recurring: { interval: 'month' },
-        unit_amount: Math.round(Number(quote.monthlyTotal) * 100),
-        product_data: { name: label },
-      },
-    }],
+    line_items,
     success_url: returnSuccess,
     cancel_url: returnCancel,
     billing_address_collection: 'auto',
-    automatic_tax: { enabled: true },
-    customer_update: { address: 'auto', name: 'auto' },
+    ...(runwayTaxCode
+      ? { automatic_tax: { enabled: true }, customer_update: { address: 'auto', name: 'auto' } }
+      : {}),
     subscription_data,
     metadata: { hivemind_org_id: orgId, kind: 'runway', checkout_id: checkoutId || '' },
   });

@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+import os
+
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
+XAI_REALTIME_URL = os.environ.get("XAI_REALTIME_URL", "wss://api.x.ai/v1/realtime").strip()
+TARA_GROK_MODEL = os.environ.get("TARA_GROK_MODEL", "grok-voice-think-fast-1.0").strip()
+CORE_EVENTS_URL = os.environ.get("HIVEMIND_CORE_EVENTS_URL", "http://core:3000/internal/v1/tara/calls").rstrip("/")
+SERVICE_TOKEN = os.environ.get("TARA_GROK_SERVICE_TOKEN", "").strip()
+CAPABILITY_SECRET = os.environ.get("TARA_GROK_CAPABILITY_SECRET", "").strip()
+TELNYX_PUBLIC_KEY = os.environ.get("TELNYX_PUBLIC_KEY", "").strip()
+CUSTOM_VOICES_ENABLED = os.environ.get("TARA_GROK_CUSTOM_VOICES_ENABLED", "0").lower() in {"1", "true", "yes"}
+
+def ready_error() -> str | None:
+    if not XAI_API_KEY:
+        return "XAI_API_KEY is not configured"
+    if not SERVICE_TOKEN:
+        return "TARA_GROK_SERVICE_TOKEN is not configured"
+    if not CAPABILITY_SECRET:
+        return "TARA_GROK_CAPABILITY_SECRET is not configured"
+    if TARA_GROK_MODEL != "grok-voice-think-fast-1.0":
+        return "TARA_GROK_MODEL must pin grok-voice-think-fast-1.0"
+    return None

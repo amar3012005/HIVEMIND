@@ -242,6 +242,35 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Voice agent (TARA) — xAI Grok Voice, parallel to Deepgram ───────────
+  tara-grok:
+    build: { context: ../services/tara-grok }
+    image: hivemind/tara-grok:${VERSION:-latest}
+    container_name: tara-grok
+    restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1152m
+    cpus: 0.75
+    env_file:
+      - ${TARA_GROK_ENV_FILE:-/opt/tara-grok/.env}
+    environment:
+      HIVEMIND_CORE_EVENTS_URL: http://core:3000/internal/v1/tara/calls
+    ports:
+      - "127.0.0.1:${TARA_GROK_PORT:-8092}:8092"
+    depends_on:
+      core: { condition: service_healthy }
+    read_only: true
+    tmpfs: [ /tmp ]
+    security_opt: [ "no-new-privileges:true" ]
+    cap_drop: [ ALL ]
+    user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # ── Hermes (agent gateway) — buildable from services/hm-hermes ──
   hermes:
     build: { context: ../services/hm-hermes }

@@ -31,12 +31,12 @@ const DRAIN_EVERY_MS = 2 * 60 * 1000;
  * Wire the outreach routes + drain loop. `deps` supplies the control-plane's own
  * primitives so this module never duplicates auth/ledger/config logic:
  *   { prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
- *     requireSession, recordOutboundAction, sidecarBaseUrl }
+ *     requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor }
  */
 export function createOutreachModule(deps) {
   const {
     prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
-    requireSession, recordOutboundAction, sidecarBaseUrl,
+    requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor,
   } = deps;
 
   // ── snapshot: latest prospects event per query from the sealed turn ────────
@@ -76,12 +76,13 @@ export function createOutreachModule(deps) {
   // (TARA's persona) for warm/friendly tones, else the first for that language. Returns null
   // on any failure → TARA resolves a language-appropriate default itself (never blocks a call).
   const _voiceCache = { at: 0, byLang: {} };
-  async function resolveVoiceId(language, voiceStyle) {
+  async function resolveVoiceId(orgId, language, voiceStyle) {
     try {
       const lang = String(language || 'en').slice(0, 8);
       if (Date.now() - _voiceCache.at > 3600000) { _voiceCache.byLang = {}; _voiceCache.at = Date.now(); }
       if (!_voiceCache.byLang[lang]) {
-        const r = await fetch(`${CONFIG.taraDeepgramBaseUrl}/voices?language=${encodeURIComponent(lang)}`,
+        const provider = await taraProviderFor(orgId);
+        const r = await fetch(`${provider.baseUrl}/voices?language=${encodeURIComponent(lang)}`,
           { signal: AbortSignal.timeout(6000) }).catch(() => null);
         const j = r && r.ok ? await r.json().catch(() => null) : null;
         _voiceCache.byLang[lang] = Array.isArray(j) ? j : (Array.isArray(j?.voices) ? j.voices : []);
@@ -248,12 +249,15 @@ export function createOutreachModule(deps) {
     ].filter(Boolean).join('. ');
     // Auto-select voice from the contract (language + tone). Best-effort; null → TARA default.
     const language = String(payload.language || 'en').slice(0, 8);
-    const voiceId = await resolveVoiceId(language, payload.voice_style);
-    const r = await fetch(`${CONFIG.taraDeepgramBaseUrl}/calls/outbound`, {
+    const voiceId = await resolveVoiceId(campaign.orgId, language, payload.voice_style);
+    const provider = campaign.voiceProvider
+      ? { provider: campaign.voiceProvider, revision: campaign.voiceConfigSnapshot?.revision || 1, config: campaign.voiceConfigSnapshot || {}, baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl }
+      : await taraProviderFor(campaign.orgId);
+    const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        ...(provider.provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
       },
       body: JSON.stringify({
         to, session_id: sessionId, user_id: campaign.userId, org_id: campaign.orgId,
@@ -266,6 +270,8 @@ export function createOutreachModule(deps) {
         // calling (firm brief + why-fit + prior-call learnings from generate).
         context: payload.context ? String(payload.context).slice(0, 800) : undefined,
         contact_name: target.company ? String(target.company).slice(0, 120) : undefined,
+        provider: provider.provider,
+        config_revision: provider.revision,
       }),
       signal: AbortSignal.timeout(20000),
     }).catch(() => null);
@@ -287,7 +293,7 @@ export function createOutreachModule(deps) {
     recordOutboundAction({
       orgId: campaign.orgId, userId: campaign.userId, roomId: campaign.roomId,
       channel: 'call', recipient: to, messageId: result?.call_leg_id || null,
-      meta: { via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id, session_id: sessionId, goal: payload.goal, company: target.company || undefined },
+      meta: { via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id, session_id: sessionId, provider: provider.provider, goal: payload.goal, company: target.company || undefined },
     }).catch(() => {});
     // Dial success = executed (v1). Call OUTCOME (completed/booked/no-answer)
     // lands on the OutboundAction via the existing /api/tara/calls/end path.
@@ -430,10 +436,12 @@ export function createOutreachModule(deps) {
         : p.phone && E164_RE.test(String(p.phone).replace(/[\s()/-]/g, '')))).slice(0, MAX_TARGETS);
       if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospect(s)` }, 400), true;
       const senderEmail = channel === 'email' ? await connectedGmail(room.userId) : null;
+      const voice = channel === 'call' ? await taraProviderFor(room.orgId) : null;
       const campaign = await prisma.outreachCampaign.create({
         data: {
           roomId: room.id, turnId, userId: room.userId, orgId: room.orgId,
           channel, senderEmail,
+          ...(voice ? { voiceProvider: voice.provider, voiceConfigSnapshot: { revision: voice.revision, ...voice.config } } : {}),
           status: 'queued',       // PROPOSED — a human must Start it (first-contact HITL)
           lastTickAt: null,       // not live; drain ignores non-'running' anyway
           targets: {
@@ -513,10 +521,12 @@ export function createOutreachModule(deps) {
       if (channel === 'email' && !senderEmail) {
         return jsonResponse(res, { error: 'no connected Gmail — connect Gmail to send outreach' }, 400), true;
       }
+      const voice = channel === 'call' ? await taraProviderFor(room.orgId) : null;
       const campaign = await prisma.outreachCampaign.create({
         data: {
           roomId: room.id, turnId, userId: room.userId, orgId: room.orgId,
           channel, senderEmail, lastTickAt: new Date(),
+          ...(voice ? { voiceProvider: voice.provider, voiceConfigSnapshot: { revision: voice.revision, ...voice.config } } : {}),
           targets: {
             create: eligible.map((p, i) => ({
               position: i,

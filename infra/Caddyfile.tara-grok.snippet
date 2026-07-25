@@ -1,0 +1,6 @@
+# Add this block in the existing core.singulancelabs.com site before its catch-all
+# Core proxy. Keep the existing /voice2 block byte-for-byte unchanged.
+handle /voice-grok/* {
+	uri strip_prefix /voice-grok
+	reverse_proxy localhost:8092
+}

@@ -135,6 +135,7 @@ const CONFIG = {
   // INTERNAL — Deepgram TARA service. The outbound call bridge posts to its
   // allowlisted Telnyx dial endpoint; the legacy tara-aaas service is not used.
   taraDeepgramBaseUrl: process.env.HIVEMIND_TARA_DEEPGRAM_URL || 'http://tara-deepgram:8091',
+  taraGrokBaseUrl: process.env.HIVEMIND_TARA_GROK_URL || 'http://tara-grok:8092',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: requireSessionSecret('HIVEMIND_CONTROL_PLANE_SESSION_SECRET', ['SESSION_SECRET']),
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
@@ -152,6 +153,11 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+async function taraProviderFor(orgId) {
+  const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId }, select: { defaultProvider: true, revision: true, grokConfig: true } }).catch(() => null);
+  const provider = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
+  return { provider, revision: runtime?.revision || 1, config: runtime?.grokConfig || {}, baseUrl: provider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl };
+}
 const controlUsageTracker = new UsageTracker(prisma);
 const planEnforcer = new PlanEnforcer(
   prisma,
@@ -721,7 +727,7 @@ function outreachModule() {
   if (!_outreachModule) {
     _outreachModule = createOutreachModule({
       prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
-      requireSession, recordOutboundAction, sidecarBaseUrl: HYPER_SIDECAR_BASE_URL,
+      requireSession, recordOutboundAction, sidecarBaseUrl: HYPER_SIDECAR_BASE_URL, taraProviderFor,
     });
     _outreachModule.startDrain();
   }
@@ -9007,13 +9013,14 @@ Write the persona now.`;
       try {
         const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId, archivedAt: null } });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-        const taraBase = CONFIG.taraDeepgramBaseUrl;
+        const provider = await taraProviderFor(room.orgId);
+        const taraBase = provider.baseUrl;
         const sessionId = `hyper-${roomId.slice(0, 8)}-${Date.now()}`;
         const r = await fetch(`${taraBase}/calls/outbound`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+            ...(provider.provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
           },
           body: JSON.stringify({
             to,
@@ -9021,6 +9028,8 @@ Write the persona now.`;
             user_id: room.userId,
             org_id: room.orgId,
             goal: String(body.goal || '').slice(0, 300) || undefined,
+            provider: provider.provider,
+            config_revision: provider.revision,
           }),
           signal: AbortSignal.timeout(20000),
         }).catch(() => null);
@@ -9033,9 +9042,9 @@ Write the persona now.`;
           orgId: room.orgId, userId: room.userId, roomId,
           channel: 'call', recipient: to,
           messageId: result?.call_leg_id || null,
-          meta: { via: 'room-call', session_id: sessionId, goal: String(body.goal || '').slice(0, 300) || undefined },
+          meta: { via: 'room-call', session_id: sessionId, provider: provider.provider, goal: String(body.goal || '').slice(0, 300) || undefined },
         }).catch(() => {});
-        return jsonResponse(res, { ok: true, dialing: true, session_id: sessionId, call_leg_id: result?.call_leg_id || null }, 200);
+        return jsonResponse(res, { ok: true, dialing: true, provider: provider.provider, session_id: sessionId, call_leg_id: result?.call_leg_id || null }, 200);
       } catch (err) {
         console.warn('[hyper-rooms] call failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
@@ -10368,6 +10377,24 @@ Write the persona now.`;
       console.warn('[tara] cartesia token mint error:', err.message);
       return jsonResponse(res, { error: 'Token mint error' }, 502);
     }
+  }
+
+  // ─── TARA provider control (session-cookie → Core, admin-gated writes) ──
+  if (pathname === '/v1/tara/runtime-config' || pathname === '/v1/tara/voice-sessions') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (pathname === '/v1/tara/runtime-config' && req.method === 'PATCH') {
+      const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+      if (!admin) return;
+    }
+    const body = req.method === 'GET' ? undefined : await parseBody(req);
+    return proxyToCore(req, res, {
+      session: current.session,
+      method: req.method,
+      path: pathname === '/v1/tara/runtime-config' ? '/api/tara/runtime-config' : '/api/tara/voice-sessions',
+      body,
+      query: url.search || '',
+    });
   }
 
   // ─── Proxy Routes (session-cookie → core API with master key) ─────

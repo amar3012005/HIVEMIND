@@ -266,6 +266,7 @@ const { TaraSkillsStore } = await import('./tara/skills-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
 const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
+const { createTaraGrokRuntime } = await import('./tara/grok-runtime.js');
 
 // Phase 1: Document-Backed Memory Architecture
 const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
@@ -1363,6 +1364,11 @@ const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   llmApiKey: process.env.GROQ_API_KEY || '',
   defaultModel: process.env.GROQ_MODEL || 'cerebras/gpt-oss-120b',
 }) : null;
+const taraGrokRuntime = createTaraGrokRuntime({
+  prisma,
+  recallFn: recallPersistedMemories,
+  memoryStore: persistentMemoryStore,
+});
 // TARA Skills store — named prompt presets; select copies prompts into config.
 if (taraHandler) {
   taraHandler.skillsStore = new TaraSkillsStore({
@@ -5575,6 +5581,13 @@ exit \$RC
       // Master-key callers: authenticateApiKey folds x-hm-org-id/x-hm-user-id INTO
       // principal (line ~3191-3194), so control-plane proxy calls keep working.
       // NOTE: do NOT add any public webhook paths (/api/connectors/*/webhook etc.) here.
+      // The Grok adapter uses a narrowly-scoped service token rather than the
+      // master API key, so handle its internal events before the user API gate.
+      if (pathname.startsWith('/internal/v1/tara/calls/')) {
+        const handled = await taraGrokRuntime({ pathname, method: req.method, body, url, req, res, userId: null, orgId: null, jsonResponse, accessContext: null });
+        if (handled) return;
+      }
+
       let _mAuth = null;
       if (/^\/api\/(meetings|tara|autofill)(\/|$)/.test(pathname)) {
         _mAuth = await authenticateApiKey(req).catch(() => null);
@@ -5603,6 +5616,11 @@ exit \$RC
             code: 'PRIVILEGED_AGENT_ROLE_REQUIRED',
           }, 403);
         }
+      }
+
+      if (pathname.startsWith('/api/tara/')) {
+        const handled = await taraGrokRuntime({ pathname, method: req.method, body, url, req, res, userId: _mUserId, orgId: _mOrgId, jsonResponse, accessContext: null });
+        if (handled) return;
       }
       // RESIDENCY: meetings + tara are now routed to the org's agent for remote (self-host) orgs.
       // The 501 block is gone — each endpoint below branches on orgIsRemote(_mOrgId) and calls

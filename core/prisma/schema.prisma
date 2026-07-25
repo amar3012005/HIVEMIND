@@ -471,6 +471,8 @@ model OutreachCampaign {
   userId      String           @map("user_id") @db.Uuid
   orgId       String           @map("org_id") @db.Uuid
   channel     String           @db.VarChar(8) // email | call
+  voiceProvider String?        @map("voice_provider") @db.VarChar(32)
+  voiceConfigSnapshot Json     @default("{}") @map("voice_config_snapshot")
   status      String           @default("queued") @db.VarChar(12) // queued | running | paused | done | cancelled
   senderEmail String?          @map("sender_email") @db.VarChar(160) // connected Gmail (email channel)
   taraNumber  String?          @map("tara_number") @db.VarChar(32) // outbound caller id (call channel)
@@ -1946,7 +1948,12 @@ model TaraCall {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String    @map("org_id") @db.Uuid
   userId           String    @map("user_id") @db.Uuid
-  sessionId        String    @unique @map("session_id") @db.VarChar(120)
+  sessionId        String    @map("session_id") @db.VarChar(120)
+  provider         String    @default("deepgram") @db.VarChar(32)
+  providerModel    String?   @map("provider_model") @db.VarChar(120)
+  configRevision   Int       @default(1) @map("config_revision")
+  skillId          String?   @map("skill_id") @db.Uuid
+  goal             String?
   mode             String    @default("external") @db.VarChar(20) // internal | external
   voiceId          String?   @map("voice_id") @db.VarChar(120)
   language         String    @default("en") @db.VarChar(10)
@@ -1955,12 +1962,19 @@ model TaraCall {
   durationMs       Int       @default(0) @map("duration_ms")
   promptTokens     Int       @default(0) @map("prompt_tokens")
   completionTokens Int       @default(0) @map("completion_tokens")
+  inputAudioMs     Int       @default(0) @map("input_audio_ms")
+  outputAudioMs    Int       @default(0) @map("output_audio_ms")
+  billableMessages Int       @default(0) @map("billable_messages")
+  toolUsage        Json      @default("{}") @map("tool_usage")
+  estimatedCostMicros Int    @default(0) @map("estimated_cost_micros")
+  failureCode      String?   @map("failure_code") @db.VarChar(120)
   startedAt        DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   endedAt          DateTime? @map("ended_at") @db.Timestamptz(6)
 
   @@index([orgId])
   @@index([userId])
   @@index([orgId, startedAt])
+  @@unique([orgId, sessionId])
   @@map("tara_calls")
 }
 
@@ -1985,7 +1999,56 @@ model TaraTurn {
 
   @@index([callId])
   @@index([orgId])
+  @@unique([callId, seq])
   @@map("tara_turns")
+}
+
+/// Provider-neutral voice configuration. Secrets are deliberately not stored here.
+model TaraRuntimeConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @unique @map("org_id") @db.Uuid
+  defaultProvider String  @default("deepgram") @map("default_provider") @db.VarChar(32)
+  revision       Int      @default(1)
+  deepgramConfig Json     @default("{}") @map("deepgram_config")
+  grokConfig     Json     @default("{}") @map("grok_config")
+  updatedBy      String?  @map("updated_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("tara_runtime_configs")
+}
+
+/// One-time browser and listener capability issuance. The adapter atomically consumes it.
+model TaraVoiceSession {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  provider       String   @db.VarChar(32)
+  mode           String   @default("external") @db.VarChar(20)
+  capabilityJti  String   @unique @map("capability_jti") @db.VarChar(96)
+  configSnapshot Json     @default("{}") @map("config_snapshot")
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(6)
+  consumedAt     DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, expiresAt])
+  @@map("tara_voice_sessions")
+}
+
+/// Durable idempotency ledger for provider webhooks and adapter events.
+model TaraProviderEvent {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider        String   @db.VarChar(32)
+  providerEventId String   @map("provider_event_id") @db.VarChar(160)
+  sessionId       String?  @map("session_id") @db.VarChar(120)
+  orgId           String?  @map("org_id") @db.Uuid
+  eventType       String   @map("event_type") @db.VarChar(80)
+  payload         Json     @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([provider, providerEventId])
+  @@index([orgId, sessionId])
+  @@map("tara_provider_events")
 }
 
 /// TaraInsight — one row per call, generated at call end (LLM over the transcript).
@@ -2014,6 +2077,8 @@ model TaraCampaign {
   name             String   @db.VarChar(200)
   status           String   @default("draft") @db.VarChar(20) // draft | active | paused | completed
   agentSkill       String?  @map("agent_skill") @db.VarChar(120)
+  provider         String   @default("deepgram") @db.VarChar(32)
+  configSnapshot   Json     @default("{}") @map("config_snapshot")
   goal             String?
   callingWindow    Json     @default("{}") @map("calling_window") // {tz, days[], startHour, endHour}
   caps             Json     @default("{}") // {concurrency, dailyMax}
@@ -2076,6 +2141,9 @@ model TaraCallAttempt {
   gateResult  Json?     @map("gate_result")
   sessionId   String?   @map("session_id") @db.VarChar(120)
   callLegId   String?   @map("call_leg_id") @db.VarChar(120)
+  provider    String    @default("deepgram") @db.VarChar(32)
+  configSnapshot Json   @default("{}") @map("config_snapshot")
+  actionKey   String?   @unique @map("action_key") @db.VarChar(120)
   scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
   startedAt   DateTime? @map("started_at") @db.Timestamptz(6)
   endedAt     DateTime? @map("ended_at") @db.Timestamptz(6)

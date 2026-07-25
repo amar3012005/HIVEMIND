@@ -1,3 +1,59 @@
+# JOURNAL — newest first
+
+## 2026-07-25 — Maps discovery gate + Universal Outreach Contract v1 + browser-call fallback
+**Commit** `eea260835` (singulance-main, /root/hivemind-main) · images `prod-20260725-eea260835`
+for **core**, **tara-grok**, **employees**. Rollback pins: `.last-employees-hyper-rollback`
+(`prod-20260723-fe8b2f92f`), `.last-core-taragrok-rollback`.
+
+### 1. Rooms weren't using Google Maps — the GATE, not the wiring
+Recon corrected two wrong assumptions: `GOOGLE_MAPS_API_KEY` **is** set in hm-employees
+(39 chars, verified live) and rooms **do** reach the Places tool (`api_hyper_rooms.py:2965`
+calls `run_director`; the tool lives in `class Director`, engine.py ~1591/2151 — `places`
+legitimately appears 0× in api_hyper_rooms.py, which misleads a grep-only recon).
+The real blocker was **`_wants_discovery()`** (engine.py ~586): its regex needed a find-verb
+**plus a GENERIC noun**, so it missed
+- the verb `generate` entirely → the literal **"generate leads" was BLOCKED**, and
+- every concrete business type → **"get me 20 dental clinics in Munich"**, **"find restaurants
+  near Cologne"** blocked (the most natural way to ask for Maps prospects).
+FIX: broadened `_DISCOVERY_VERBS` (+generate/build/create/compile/assemble/put together) and
+`_DISCOVERY_NOUNS` (+clinics/restaurants/hotels/agencies/practices/…); added `_DISCOVERY_GEO_RE`
+— find-verb + explicit place, with a negative lookahead so "leads in our pipeline" / "in the
+market" stay out — to catch types we can't enumerate ("find Steuerberater in Hamburg"). The
+drafting veto now reuses the same constants.
+**Verified:** 12/12 discovery phrasings PASS, 6/6 drafting/strategy phrasings still BLOCK (no
+"20 firms every run" regression — the guard the owner asked for is intact). Live Places call
+returned real Munich clinics with phone numbers (HTTP 200).
+
+### 2. Universal HyperAgent→TARA contract — `core/src/outreach/contract.js` (NEW)
+**Outreach Contract v1**: one versioned, provider-NEUTRAL envelope
+`{contract_version, target, objective{goal,opener,strategy,directive}, persona{skill_id,
+language,voice_style,voice_id}, provider{preferred,config_revision}, delivery{mode,reason},
+constraints}`. `provider.preferred` is a **hint, never a requirement** — deepgram, grok, a
+future vendor, or the user's own browser can all fulfil the same document. Readers accept
+vN/vN-1 and ignore unknown fields, so a new provider needs no lock-step deploy. Built by a
+**pure function** so the approval popup previews EXACTLY what executes.
+Verified: body contains no grok/deepgram/telnyx/xai token outside `provider.preferred`.
+
+### 3. No telephony → run the call from the user's browser
+`executeCall` dialed `${provider.baseUrl}/calls/outbound` unconditionally. Probed live:
+**tara-deepgram → 405** (route exists, POST-only) but **tara-grok → 404** (no PSTN bridge).
+So with the org toggled to Grok, every outreach call 404'd and died `failed`.
+FIX: new **`GET /capabilities`** on tara-grok (`telephony:false, browser:true,
+contract_versions:[1]`) + a cached probe in campaigns.js that falls back to probing the dial
+route itself for older adapters (**405 = exists, 404 = absent**). When telephony is absent the
+target is parked as **`state:'browser'`** carrying the same contract (state is `VarChar(12)` —
+`awaiting_browser` would NOT fit) instead of hard-failing.
+
+### Scorecard (retrospective)
+- RECON held only because it was verified against ground truth — a grep-only pass would have
+  concluded "rooms have no Places tool" and wired a duplicate. CONTEXT.md's "verify X-is-absent"
+  lesson paid off again.
+- FEATURE-RECON caught prior art: TODO P1/P6 already specified the contract; this implements
+  the P6 seam rather than inventing a parallel one.
+- VERIFY passed first try on all three; 0 rework rounds.
+- Gap left open: the FE has no "Call from browser" affordance for `state:'browser'` targets yet
+  (backend + contract are live and ready for it).
+
 # HyperAgents — Ship Journal
 
 Append-only. **Newest first.** One entry per shipped feature/fix. Written by the
@@ -5,6 +61,83 @@ Append-only. **Newest first.** One entry per shipped feature/fix. Written by the
 
 Entry format:
 ```
+---
+
+---
+
+---
+
+---
+
+## 2026-07-23 — Lead/call tool-discipline (prompt-driven, not hardcoded) + tool-selection sandbox
+- **commits:** through `fe8b2f92f` (employees), singulance-main. Image LIVE.
+- **what:** replaced leave-it-to-chance triggering with explicit prompt guidance + a sandbox to
+  tune it. Agent persona (agentscope_factory) + director planner (engine.py) now say: SEE/REUSE
+  the shared lead book (list_prospects) before acting on/finding leads; discover NEW only when the
+  book lacks them or the user asks (discovery is room/Places, agents never invent firms);
+  save_prospect with a note when qualifying; propose_call when a live call beats an email (phone
+  given → propose_call directly, else list_prospects first).
+- **sandbox:** scripts/quality/tool_sandbox.py — feeds varied queries through one LLM tool-calling
+  round with the REAL tool schemas + guidance, prints which tools fire, NO side effects. Used it to
+  catch + fix two over/under-triggers (existing-lead action answered blind; phone-given routed to
+  list). Final verified triggers (deployed fe8b2f92f): our-leads→list_prospects; reach-out/email
+  existing→list_prospects; call X at +49→propose_call; add lead→save_prospect; pricing/decision→
+  recall; give-lead-a-call (no phone)→list_prospects (then propose_call).
+- hm-core/hm-control untouched; --no-deps.
+
+## 2026-07-23 — Shared LEAD BOOK (list_prospects/save_prospect + notes) + popup diagnosis
+- **commits:** `58b02e2f6` (employees), singulance-main. Image LIVE.
+- **lead book:** every room shares one org-scoped, persistent prospect store (memories tagged
+  'prospect') so agents REUSE leads instead of re-discovering. Tools (always-registered):
+  list_prospects(query) — see existing leads + note + when; save_prospect(company, note, phone,
+  email, website) — add a lead with a PERSONAL NOTE (createdAt = when). _places_search
+  auto-persists ≤15 contactable discoveries with a note; claim-key dedups re-discovery.
+  save_prospect_emulated async client helper (master emulation).
+- **verified E2E (live):** save_prospect → memory created; list_prospects('Solvis Test') → count:1
+  with the note + phone/website + timestamp. Test lead cleaned up. recall healthy; --no-deps.
+- **popup diagnosis:** delivery is SOUND — propose emits call_contract → turn-event handler appends
+  it → SSE flush pushes EVERY event type unfiltered → FE onAny dispatches hm:call-contract →
+  <CallContractModal>. "No popup" = no agent invoked propose_call in that room (fires only when an
+  agent decides a call is warranted — the intended 'only when needed'). To see it: run a room with
+  a task where calling a named prospect (name + phone) is the obvious next step.
+
+## 2026-07-23 — propose_call: the OS decides to call in-room → contract popup fires
+- **commits:** `020e5875d` (employees + control), singulance-main. Images LIVE at that tag.
+- **what:** the last link — an agent/director calls `propose_call(company, phone, why)` when a live
+  call is the right move → sidecar POSTs control `propose` with the EXPLICIT prospect + the turn's
+  callback_url → contract generates (goal/strategy + auto language + concrete Cartesia voice) →
+  live `call_contract` event → `<CallContractModal>` popup → Approve → TARA dials. Never dials on
+  its own (queued campaign; first-contact HITL).
+- **files:** agentscope_tools.py (propose_call tool, always-registered, safe; provenance carries
+  callback_url), api_hyper_rooms.py (arm callback_url), campaigns.js propose (accepts explicit
+  prospect/prospects).
+- **verified E2E (live):** propose with an explicit German prospect → HTTP 200, campaign=queued,
+  contract {language:de, voice_style:'warm professional', voice_id:38aabb6a… (real Cartesia),
+  German goal+strategy}. Test campaign cleaned up. hm-core recall healthy; --no-deps.
+- **NOT exercised:** the actual dial (queued → needs human Start → TARA) — HITL-gated, never auto-placed.
+
+## 2026-07-23 — TARA call-contract: auto voice/language/strategy + first-contact-HITL popup
+- **commits:** `ad8de6663` (BE: employees+control) · Da-vinci `7165961` + gitlink `f069846dd` (FE).
+- **images LIVE:** employees/control `prod-20260723-ad8de6663`, fe `latest` (both containers).
+- **what:** when HyperAgents proposes an outbound call, the contract now AUTO-CONFIGURES the voice
+  call + gates it behind a visible popup:
+  - `api_outreach.generate` (call) emits `language` (inferred from prospect), `strategy`
+    (conversation plan), `voice_style` (tone) alongside goal/opener/context.
+  - `campaigns.js`: persists them; `resolveVoiceId` picks a concrete Cartesia voice from TARA's
+    live `/voices` catalog by language+tone; `executeCall` passes language+voice_id + folds
+    strategy into TARA's directive. `propose` generates the first contract up front + returns it +
+    pushes a live `call_contract` event to the room callback_url.
+  - FE `<CallContractModal>` (AppShell, global `hm:call-contract` from the SSE handler): shows
+    goal/strategy/language/voice + Approve&call / Not now. Approve → startOutreachCampaign (dial);
+    reject → stopOutreachCampaign. Nothing dials without it (first-contact HITL made visible).
+- **verified:** sidecar generate live returns {language:de, voice_style:'warm professional',
+  German strategy} for a German firm; propose endpoint auth/flag/validation green; FE compiles +
+  `hm:call-contract` in the shipped bundle; both FE containers 200; hm-core untouched (--no-deps).
+- **NOT exercised:** a real dial to a real phone — correctly HITL-gated; never auto-placed a call.
+- **scorecard:** reused the modal/global-event + approval + propose patterns (no rebuild); TARA
+  DialRequest already accepted voice_id/language (pure connection); verified the enrichment live
+  via a safe LLM-only call (no side effect). --no-deps everywhere.
+
 ## YYYY-MM-DD — <title>
 - **commits:** <parent sha(s)> (+ Da-vinci <sha> if FE)
 - **what:** one line
@@ -16,6 +149,183 @@ Entry format:
 ```
 
 ---
+
+## 2026-07-23 — Gates closed + user-facing FE: plan-limit popup · P0 enforce+columns · P6 autonomy · 5xx toast
+- **commits:** `b457c4f2a` (402 fix) · Da-vinci `ab4eaf4` + gitlink `07df69ab3` (5xx toast) ·
+  `3e878fb5b` (P0 columns) · `dcf70b4bc` (P6 autonomy). All singulance-main.
+- **images LIVE:** control-plane `prod-20260723-dcf70b4bc` (402 fix + P1 + P6) · core
+  `prod-20260723-3e878fb5b` (P0 columns) · employees `c3fe566bb` (P0 enforce) ·
+  `hivemind/fe:latest` on BOTH hm-fe + hivemind-next-frontend-1 (5xx toast). All --no-deps.
+- **Usage-limit popup (the user's bug):** room/project-limit 402s emitted internal code
+  'PLAN_LIMIT' but the FE modal needs 'plan_limit_exceeded' → silent console 402. Fixed
+  capacityErrorResponse + both project-limit paths to the FE contract (resource→modal key,
+  suggested_plan, upgrade_url). Verified live: 402 body matches isPlanLimitError → modal fires.
+  Backend-only (existing FE modal/interceptor already deployed).
+- **FE 5xx/network toast:** mycompany openTask was a silent `catch {}`. Added shared/serviceError.js
+  + interceptor emit + ServiceErrorToast (AppShell), mirroring the plan-limit pattern. Built
+  hivemind/fe:latest, recreated BOTH FE containers (NOT via deploy-fe.sh — it SSHes to a remote +
+  `git reset --hard` which would nuke local work + only touches hm-fe). Verified: HTTP 200 + toast
+  code in the shipped bundle. Da-vinci committed+pushed (ab4eaf4), parent gitlink bumped.
+- **P0 enforce:** shadow logs empty (no would-rejects) → flipped HYPER_PROVENANCE_GATE=enforce
+  (employees force-recreate). Junk saves now rejected.
+- **P0 first-class columns:** applied produced_by_turn/agent/actionable/provenance to
+  hivemind.memories (nullable/no-default = metadata-only, CONCURRENTLY index) + schema.prisma +
+  migration 20260723090000 + client regen + core deployed. prisma-graph-store populates them
+  (uuid-guarded, hyperagents-only, additive). CAVEAT: the canonical V5 ingest normalizer replaces
+  source_metadata, so columns don't auto-populate via that path yet (threading provenance through
+  the normalizer = documented follow-up, NOT rushed into the hot path). Recall verified healthy.
+- **P6 autonomy:** enabled the ONLY safe autonomy — HYPER_OUTREACH_AUTONOMY=on lets the drain
+  worker autonomously advance/execute HUMAN-authorized campaigns; assertAutonomousSendAllowed
+  enforces the hard first-contact-HITL invariant (only 'running' human-created campaigns). Cold
+  origination (OS contacts a new audience with no human) deliberately NOT built — outbound-safety
+  line (consent/deliverability/legal). Verified via node.
+- **verified:** full cluster healthy; gates live (P0=enforce, P6=on, governor caps present);
+  hm-core recall OK; both FE containers 200. deploy-fe.sh + CLAUDE.md paths verified before trust
+  (per owner instruction — not blindly followed; the SSH/reset script was rejected).
+- **scorecard:** verified the deploy pipeline before running (deploy-fe.sh would have destroyed
+  local FE work + missed the mycompany container); every plan-limit/5xx fix reused the existing
+  modal/interceptor pattern (no rebuild); RISK items shipped safe (enforce reversible, columns
+  additive+guarded, autonomy HITL-hard-invariant); --no-deps everywhere (no core-recreate incident).
+- **commits:** `8167ce651` (P1) · `0b9cd8105` (P0) · `4770a8c87` (P2) · `c3fe566bb` (P6), all singulance-main.
+- **images LIVE:** `hivemind/employees:prod-20260723-c3fe566bb` (P0+P2+P1-pydantic) ·
+  `hivemind/control-plane:prod-20260723-c3fe566bb` (P1-js+P6-js). **hm-core NOT redeployed**
+  (server.js uses none of these modules) → chat/recall untouched, verified healthy after.
+- **P1 — version-tolerant seam contracts.** `core/src/contracts/hyper-seams.js` (single
+  source of truth: buildRoomTurnPayload + normalizeTurnEvent, drop-undefined / default-missing /
+  ignore-unknown / stamp schema_version) + dispatchHyperRoomTurn stamps it; pydantic
+  RoomTurn/Chat/CreateTeamTask/ApprovalDecision get explicit `extra='ignore'` + optional
+  schema_version. 5 JS asserts + pydantic tolerance green; **live smoke: endpoint accepted
+  schema_version + an unknown field with HTTP 200 (no 422)**.
+- **P0 — provenance + actionable-gate (shadow).** _TURN_PROVENANCE contextvar armed at
+  room-turn start; save_memory stamps source_platform='hyperagents' + source_metadata
+  {turn/room/produced_by/actionable} (NO schema migration — uses existing columns). Gate
+  `HYPER_PROVENANCE_GATE` off|log|**enforce**, DEFAULT 'log' (shadow — logs would-rejects,
+  never blocks). Verified: enforce+junk → not posted; good fact → posted w/ full provenance.
+  Optional first-class columns authored as a GATED artifact (decision-docs/p0-provenance-optional-migration.md).
+- **P2 — Governor.** governor.py: kill switch (HYPER_KILL_SWITCH, refuses turn instantly +
+  seals 'disabled') + per-turn token cap (HYPER_TURN_TOKEN_CAP → cost_capped) + outbound cap
+  (HYPER_OUTBOUND_CAP). All DEFAULT off/0 = behavior-neutral. Kill-switch functional path green
+  (orchestrate NOT called). Complements the existing per-org pause-all.
+- **P6 — Outreach Contract.** outreach-contract.js + guard at campaigns.js executeTarget (the
+  send choke point for FE + drain worker): kill switch (global/outreach-specific) + per-org
+  daily cap, skip-not-throw, DEFAULT-neutral, stacks on the existing hard cross-campaign dedup.
+  Autonomous ORIGINATION intentionally NOT built — human-gated (decision-docs/p6-outreach-autonomy-gate.md).
+- **verified:** each phase unit/integration-tested in-container BEFORE deploy; both images
+  deployed with `--no-deps` (the P4-incident lesson — core never recreated); post-deploy: both
+  new containers healthy, no boot errors, P1 tolerance live, hm-core recall OK.
+- **OPEN human gates (owner decision):** (1) flip P0 `HYPER_PROVENANCE_GATE=enforce` after
+  reviewing shadow logs; (2) optionally apply the P0 first-class-column migration; (3) authorize
+  P6 autonomous origination (needs P0 live + per-org opt-in + first-contact HITL + caps + consent).
+- **scorecard:** recon held (cartographer map verified against grep/Read; only 1 caller of the
+  toolkit builder + an existing contextvar mechanism made P0 cheap); feature-recon caught prior art
+  everywhere (existing pydantic models, per-org pause-all, outreach dedup/pacing) → extended not
+  rebuilt; RISK phases (P0/P6) shipped SAFE (shadow / default-neutral / gated) not rushed; deploy
+  used --no-deps so no repeat of the P4 core-recreate incident. → harness unchanged (rules held).
+
+## 2026-07-23 — P4: Cerebras-direct synth path + HYPER_SYNTH_MODEL seam (synth kept = gpt-oss-120b)
+- **commits:** `c0150cf17` (singulance-main, pushed) · image `hivemind/employees:prod-20260723-c0150cf17` (LIVE)
+- **what:** made the final-report synth writer model-selectable via `HYPER_SYNTH_MODEL`, and added
+  a **Cerebras-direct** call path so a Cerebras-hosted id routes to `api.cerebras.ai` with
+  `CEREBRAS_API_KEY`, bypassing OpenRouter (owner policy: "GLM from Cerebras, not OpenRouter";
+  keeps synth off the OR bill + hits Cerebras automatic prompt-caching). New `_cerebras_chat`
+  (+ `_route_cerebras_direct`, `_CEREBRAS_DIRECT_MODELS={zai-glm-4.7}`), wired into `_groq` BEFORE
+  the OpenRouter-direct branch; usage accounting + `cached_tokens` metered; optional
+  `prompt_cache_key` (stable `hyper:{org}:{proj}:{bucket}`) gated by `HYPER_CEREBRAS_PROMPT_CACHE_KEY`
+  (account-enabled → else 400). Also guarded an unguarded `j['choices']` return that crashed
+  `_plan_gather` with KeyError when OpenRouter returned a 200 w/o choices; and added a `__main__`
+  guard to `quality_eval.py` so it's importable (enables a synth-A/B harness).
+- **why:** owner asked to route final synthesis to a frontier writer. Explored deepseek-v4-pro
+  (rejected: OpenRouter mesh non-deterministic — Fireworks 19s but Together/DigitalOcean 145-192s
+  fallbacks under burst) then owner chose Cerebras `zai-glm-4.7` (measured 4-7s / 2.8-3.4k-char
+  report, single wafer-scale provider, deterministic, prompt-cache 1664 cached tok observed).
+- **DECISION — synth kept = gpt-oss-120b:** controlled A/B (grounding held constant via injected
+  `company_brief`, only synth swapped, n=2): **gpt-oss-120b 0.85 vs zai-glm-4.7 0.758** (GLM ties/wins
+  strategy+gtm, trails brand+regulatory). GLM passes the 0.7 floor but is a small measured dip vs
+  current prod; owner chose to KEEP 120b. So `.env HYPER_SYNTH_MODEL=openai/gpt-oss-120b` (no live
+  behavior change) — the GLM Cerebras-direct path stays baked + tested, one env flip from live.
+- **files:** `employees-service/src/hivemind_employees/hyper/engine.py`,
+  `.../api_hyper_rooms.py` (auto-mode synth inherits HYPER_SYNTH_MODEL),
+  `employees-service/scripts/quality/quality_eval.py`.
+- **verified:** GLM routing proof (live): `Cerebras-direct served model=zai-glm-4.7 ms=7362
+  out_tok=3427 cached=1664`, final 5187 chars. New image room turn (synth=120b): `openai/gpt-oss-120b
+  provider=Together ms=13301`, final 3826 chars — no regression. hm-core recall functional post-deploy.
+- **⚠️ DEPLOY INCIDENT + RECOVERY (critical lesson):** `VERSION=<tag> docker compose … up -d employees`
+  WITHOUT `--no-deps` **also recreated hm-core** (core is employees' `depends_on`), rebuilding core
+  from compose context `..` = the **DIRTY `/root/hivemind` feat tree**, tagging it with MY employees
+  sha → hm-core silently ran unintended core code (src md5 `da750e…` vs intended `62d884…`). Caught
+  it in post-deploy verify; restored with `VERSION=prod-20260723-caa3fb10d docker compose … up -d
+  --no-deps core` (recall warm-up ✅, digest matches). **RULE: deploy employees ALWAYS with
+  `--no-deps` and pass VERSION = the employees tag; core stays on `.env` VERSION.** hm-control/
+  byod/tara were untouched (not deps).
+- **gotchas:** `.env VERSION=caa3fb10d` tracks CORE; employees runs `c0150cf17` via override — a
+  blanket `docker compose up` (no per-service override + `--no-deps`) would try employees@caa3fb10d
+  (nonexistent) and rebuild core from the dirty tree. `zai-glm-4.7` is a BARE id (no slash) → needs
+  `_route_cerebras_direct`, NOT `_route_direct_openrouter` (which keys on "/"). rollback marker:
+  `.last-employees-p4-rollback` → prod-20260723-014457f1f.
+- **scorecard:** recon held (verified every model/provider/latency with live probes before coding);
+  feature-recon caught the existing `synth_model` seam (extended, didn't rebuild); verify caught TWO
+  real issues before ship (deepseek latency non-determinism → model change; the core-recreate incident
+  → recovered) = the adversarial-verify loop paid off. → harness change: added `--no-deps` to the
+  deploy rule here + CONTEXT lessons + a memory ([[hyper-employees-deploy-no-deps]]).
+
+## 2026-07-23 — F0: sidecar LLM canonicalized (gpt-oss via Cerebras, no groq/llama) + git-workflow fix
+- **commits:** `d4331670c` (singulance-main) · image `hivemind/employees:prod-20260723-deafcccc9` (LIVE)
+- **what:** closed the Brain/OS LLM gap — the Python employees-service still used llama
+  defaults + a Groq-first provider pin while JS core was canonical. Now: sim/digest/journal
+  defaults llama-3.1-8b-instant → openai/gpt-oss-20b; sim fallbacks drop llama-3.3; provider
+  pins drop Groq (120b→[Cerebras,Together], 20b→[Together,Cerebras]); OpenRouter body sets
+  `reasoning.effort=low` so gpt-oss emits clean content for the extractive digest/journal
+  tasks (the reason they were on llama).
+- **why:** owner rule "Cerebras or OpenRouter only, no Groq/llama" for text; the OS was
+  running strategy/debate on the banned providers.
+- **files:** `employees-service/src/hivemind_employees/hyper/engine.py`.
+- **verified:** baked image live — `engine._openrouter_chat('openai/gpt-oss-120b')` →
+  `provider=Cerebras, content='pong'`; hm-employees healthy; singulance-main features
+  (method-skills, maps-discovery) intact (I first mis-copied feat's older engine.py — caught
+  the divergence, re-applied edits to the singulance-main version).
+- **residual (flagged, NOT changed):** `HYPER_WEB_MODEL=groq/compound-mini` = agentic
+  web-search, no gpt-oss twin (same class as whisper/vision passthrough JS-side) — owner call.
+  `_OR_MODEL_MAP` llama entries are a dead safety map (no llama usage by default).
+- **git-workflow fix (root of recurring pain):** `/root/hivemind` is on `feat/mneme-foundation`
+  (dirty, diverged); PROD is `singulance-main`; the clone's fetch refspec was FEAT-ONLY
+  (`+refs/heads/feat/…`) → `origin/singulance-main` never updated → stale-ref push rejections +
+  editing the wrong branch's files. FIXED: refspec → `+refs/heads/*:refs/remotes/origin/*`, and
+  created a permanent clean worktree **`/root/hivemind-main`** on a real `singulance-main` branch
+  tracking origin. Edit/commit/build/push there; `/root/hivemind` stays for `.env`+compose only.
+- **gotchas:** sidecar engine.py DIVERGED between feat and singulance-main — always work from
+  `/root/hivemind-main` now. Deploy employees via shell `VERSION=<tag> docker compose --env-file
+  /root/hivemind/.env … up -d employees` (don't mutate the shared .env VERSION core uses).
+- **scorecard:** recon held (verified every model/route with grep + a live Cerebras smoke, no agent);
+  feature-recon caught the divergence + the existing synth_model seam; verify passed after 1 rework
+  (the feat-vs-singulance engine.py mis-copy — now permanently prevented by the worktree). → harness
+  change: added "Canonical dev tree" to CONTEXT/deploy-topology so no session repeats the branch trap.
+
+## 2026-07-23 — CONTEXT/TODO rewritten to live ground truth; Singulance-OS program set
+- **what:** the `.claude/hyperagents/` docs were a month stale and described a DIFFERENT box
+  (ssh 116.202.24.69 / /Users/amar / branch `main`). Rewrote CONTEXT.md + TODO.md from
+  verified current state on THIS box; opened the "AI Company OS" program in TODO.
+- **verified ground truth (grep/Read + `docker exec hm-employees env`, this session):**
+  - Deploy = local docker: compose service `employees` → `hivemind/employees:${VERSION}` →
+    container `hm-employees:8060`. Running `prod-20260722-rmyd4f127595`. Ship = build image +
+    `docker compose --env-file /root/hivemind/.env … up -d employees` (the `--env-file` is mandatory).
+  - PROD branch is **`singulance-main`** (not `main`; the working `/root/hivemind` checkout is a
+    dirty diverged `feat/mneme-foundation`). Deploys build from a singulance-main worktree.
+  - 3 sidecar surfaces: rooms (`api_hyper_rooms.py` `/room-turn`), round-table (`api_team_tasks.py`
+    → `hyper/engine.py` `room.run()`/`run_director`, `/{task_id}`), employee chat (`/{slug}/chat`).
+  - FE `/employees/mycompany` = `HyperAgents.jsx` hero = CompanyDashboard; components:
+    CompanyDashboard/HyperOnboarding/OnboardingTerminal/CampaignPanel/LeadsView/AgentAvatar.
+  - engine.py has the P4 seam live: `synth_model = synth_model or self.director_model` (~970),
+    `_debate` (~1441). `HYPER_SYNTH_MODEL` unused.
+  - **LLM inconsistency confirmed:** JS core is canonicalized (Cerebras→OpenRouter/gpt-oss-120b,
+    no groq/llama) but the Python sidecar is NOT — `GROQ_URL` + `_GROQ_DEAD` primary path, and
+    llama/groq defaults (`HYPER_WEB_MODEL=groq/compound-mini`; code `_SIM/_DIGEST/_JOURNAL=llama-3.1-8b-instant`;
+    env `MIND_READER/COGNITION_WRITER/GROQ_INFERENCE/HIVEMIND_LLM_MODEL`=llama). `HYPER_AUTO_*`=gpt-oss-120b already.
+  - Active test org on this box = MANDI `807ebb88…` / user `c8876290…`.
+- **next (owner priority):** F0 employees-service LLM canonicalization → P3 eval baseline → then the plan.
+- **gotchas:** don't trust the old box/paths; the parked 2026-06-19 "Agentic orchestrator" feature
+  (flag OFF) is NOT this program — left as-is.
+- **scorecard:** recon held (verified every claim with grep/env, no agent); feature-recon caught the
+  parked agentic feature + the existing synth_model seam (extend, don't rebuild); doc-only, no deploy. → harness change: none.
 
 ## 2026-06-19 — FULL VISION COMPLETE: real artifacts (Google re-auth) + email recipient
 - **commits:** `ec4ae0d2`

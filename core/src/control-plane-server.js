@@ -56,6 +56,7 @@ import {
 } from './routes/hyper-rooms.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
+import { validateDomain } from './web/web-policy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -595,6 +596,138 @@ const _hyperOnboardJobs = new Map();
 // GET /v1/hyper/company/screenshot.
 const HYPER_SHOT_DIR = path.join(process.env.HIVEMIND_DATA_DIR || '/app/data', 'hyper-screenshots');
 try { fs.mkdirSync(HYPER_SHOT_DIR, { recursive: true }); } catch { /* best-effort */ }
+
+const HYPER_VISUAL_MAX_BYTES = 5 * 1024 * 1024;
+
+function companyVisualPaths(orgId) {
+  return {
+    screenshot: path.join(HYPER_SHOT_DIR, `${orgId}.jpg`),
+    official: path.join(HYPER_SHOT_DIR, `${orgId}.image`),
+    metadata: path.join(HYPER_SHOT_DIR, `${orgId}.image.json`),
+  };
+}
+
+function removeCompanyVisual(orgId) {
+  const paths = companyVisualPaths(orgId);
+  for (const fp of Object.values(paths)) {
+    try { fs.rmSync(fp, { force: true }); } catch { /* best-effort */ }
+  }
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .trim();
+}
+
+function tagAttributes(tag) {
+  const attrs = {};
+  const re = /([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+  for (const match of String(tag || '').matchAll(re)) {
+    attrs[match[1].toLowerCase()] = decodeHtmlAttribute(match[2] ?? match[3] ?? match[4] ?? '');
+  }
+  return attrs;
+}
+
+function websiteVisualCandidates(html, pageUrl) {
+  if (!html) return [];
+  const candidates = [];
+  const add = (raw) => {
+    if (!raw || /^data:/i.test(raw)) return;
+    try { candidates.push(new URL(raw, pageUrl).href); } catch { /* malformed asset */ }
+  };
+  for (const tag of String(html).match(/<meta\b[^>]*>/gi) || []) {
+    const attrs = tagAttributes(tag);
+    const key = String(attrs.property || attrs.name || '').toLowerCase();
+    if (['og:image', 'og:image:secure_url', 'twitter:image', 'twitter:image:src'].includes(key)) add(attrs.content);
+  }
+  for (const tag of String(html).match(/<link\b[^>]*>/gi) || []) {
+    const attrs = tagAttributes(tag);
+    const rel = String(attrs.rel || '').toLowerCase();
+    if (/\b(?:apple-touch-icon|icon)\b/.test(rel)) add(attrs.href);
+  }
+  for (const match of String(html).matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const root = JSON.parse(match[1]);
+      const queue = Array.isArray(root) ? [...root] : [root];
+      while (queue.length) {
+        const item = queue.shift();
+        if (!item || typeof item !== 'object') continue;
+        const logo = item.logo;
+        if (typeof logo === 'string') add(logo);
+        else if (logo && typeof logo === 'object') add(logo.url || logo.contentUrl);
+        if (Array.isArray(item['@graph'])) queue.push(...item['@graph']);
+      }
+    } catch { /* malformed structured data */ }
+  }
+  return [...new Set(candidates)];
+}
+
+function verifiedImageType(buffer, declaredType) {
+  const type = String(declaredType || '').split(';')[0].trim().toLowerCase();
+  if (type === 'image/jpeg' && buffer[0] === 0xff && buffer[1] === 0xd8) return type;
+  if (type === 'image/png' && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return type;
+  if (type === 'image/webp' && buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP') return type;
+  return null;
+}
+
+async function fetchWebsiteImage(candidate) {
+  let current = candidate;
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    if (!validateDomain(current).allowed) return null;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10000);
+    try {
+      const response = await fetch(current, {
+        signal: ac.signal,
+        redirect: 'manual',
+        headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0', 'Accept': 'image/avif,image/webp,image/png,image/jpeg' },
+      });
+      if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
+        current = new URL(response.headers.get('location'), current).href;
+        continue;
+      }
+      if (!response.ok) return null;
+      const length = Number(response.headers.get('content-length') || 0);
+      if (length > HYPER_VISUAL_MAX_BYTES || !response.body) return null;
+      const chunks = [];
+      let total = 0;
+      for await (const chunk of response.body) {
+        total += chunk.length;
+        if (total > HYPER_VISUAL_MAX_BYTES) {
+          await response.body.cancel();
+          return null;
+        }
+        chunks.push(chunk);
+      }
+      const buffer = Buffer.concat(chunks, total);
+      const contentType = verifiedImageType(buffer, response.headers.get('content-type'));
+      return contentType ? { buffer, contentType, sourceUrl: current } : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function storeOfficialWebsiteVisual({ html, pageUrl, orgId }) {
+  const paths = companyVisualPaths(orgId);
+  for (const candidate of websiteVisualCandidates(html, pageUrl).slice(0, 8)) {
+    try {
+      const image = await fetchWebsiteImage(candidate);
+      if (!image) continue;
+      fs.writeFileSync(paths.official, image.buffer);
+      fs.writeFileSync(paths.metadata, JSON.stringify({ contentType: image.contentType, sourceUrl: image.sourceUrl }));
+      try { fs.rmSync(paths.screenshot, { force: true }); } catch { /* best-effort */ }
+      return `/v1/hyper/company/screenshot?v=${Date.now()}`;
+    } catch (error) {
+      console.warn('[hyper-onboarding] official website image skipped:', error.message);
+    }
+  }
+  return null;
+}
 
 // ── HyperAgents nightly operating cycle (Polsia's "works while you sleep") ──
 // Once a day (HYPER_CYCLE_HOUR_UTC) every onboarded org gets ONE todo task
@@ -7482,6 +7615,11 @@ Write the persona now.`;
       // JS-heavy sites paint before the shot. Best-effort — never blocks onboarding.
       const screenshotSite = async (targetUrl) => {
         const base = process.env.HYPER_PLAYWRIGHT_URL || 'http://hm-playwright:8931/mcp';
+        const toolError = (json) => {
+          const content = json?.result?.content || [];
+          const line = content.find((item) => item?.type === 'text' && /(?:^|\n)### Error\b/.test(item.text || ''));
+          return line ? String(line.text || '').replace(/^### Error\s*/i, '').trim() : '';
+        };
         const parseMcp = async (r) => {
           const txt = await r.text();
           const m = txt.match(/data:\s*(\{[\s\S]*?\})\s*(?:\n\n|$)/);
@@ -7502,7 +7640,11 @@ Write the persona now.`;
             });
             clearTimeout(t);
             return { sid: r.headers.get('mcp-session-id') || sessionId, json: await parseMcp(r) };
-          } catch { clearTimeout(t); return { sid: sessionId, json: null }; }
+          } catch (error) {
+            clearTimeout(t);
+            console.warn('[hyper-onboarding] Playwright MCP call failed:', error.message);
+            return { sid: sessionId, json: null };
+          }
         };
         await _acquireShotSlot();
         try {
@@ -7512,10 +7654,15 @@ Write the persona now.`;
           }, 8000);
           if (!init.sid) return null;
           await call(init.sid, { jsonrpc: '2.0', method: 'notifications/initialized' }, 4000);
-          await call(init.sid, {
+          const navigated = await call(init.sid, {
             jsonrpc: '2.0', id: 2, method: 'tools/call',
             params: { name: 'browser_navigate', arguments: { url: targetUrl } },
           }, 25000);
+          const navigationError = toolError(navigated.json);
+          if (navigationError) {
+            console.warn('[hyper-onboarding] Playwright navigation failed:', navigationError);
+            return null;
+          }
           // Settle: let lazy-loaded/hero JS paint before the capture (best-effort;
           // browser_wait_for {time} just sleeps browser-side).
           await call(init.sid, {
@@ -7526,15 +7673,26 @@ Write the persona now.`;
             jsonrpc: '2.0', id: 4, method: 'tools/call',
             params: { name: 'browser_take_screenshot', arguments: { type: 'jpeg' } },
           }, 20000);
+          const screenshotError = toolError(shot.json);
+          if (screenshotError) {
+            console.warn('[hyper-onboarding] Playwright screenshot failed:', screenshotError);
+            return null;
+          }
           const content = shot.json?.result?.content || [];
           const img = content.find((c) => c.type === 'image' && c.data);
           if (!img?.data) return null;
           try {
-            fs.writeFileSync(path.join(HYPER_SHOT_DIR, `${orgId}.jpg`), Buffer.from(img.data, 'base64'));
+            const paths = companyVisualPaths(orgId);
+            fs.writeFileSync(paths.screenshot, Buffer.from(img.data, 'base64'));
+            try { fs.rmSync(paths.official, { force: true }); } catch { /* best-effort */ }
+            try { fs.rmSync(paths.metadata, { force: true }); } catch { /* best-effort */ }
           } catch (e) { console.warn('[hyper-onboarding] screenshot write failed:', e.message); return null; }
           // Cache-bust so a re-onboard's new capture isn't served stale.
           return `/v1/hyper/company/screenshot?v=${Date.now()}`;
-        } catch { return null; }
+        } catch (error) {
+          console.warn('[hyper-onboarding] screenshot capture failed:', error.message);
+          return null;
+        }
         finally { _releaseShotSlot(); }
       };
       const webSearch = async (query, { limit = 5 } = {}) => {
@@ -7582,15 +7740,28 @@ Write the persona now.`;
             const t = setTimeout(() => ac.abort(), 8000);
             try {
               const r = await fetch(`https://${host}${pagePath}`, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
-              return r.ok ? stripHtml(await r.text()) : '';
-            } catch { return ''; } finally { clearTimeout(t); }
+              if (!r.ok) return { text: '', html: '' };
+              const html = await r.text();
+              return { text: stripHtml(html), html };
+            } catch { return { text: '', html: '' }; } finally { clearTimeout(t); }
           }));
-          const siteText = pages.join(' ').slice(0, 12000);
+          const siteText = pages.map((page) => page.text).join(' ').slice(0, 12000);
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
           say(`Capturing homepage: https://${host}/...`);
-          const screenshot = await screenshotPromise;
-          if (!screenshot) say('Screenshot skipped — browser service unavailable');
+          let screenshot = await screenshotPromise;
+          let websiteVisualSource = screenshot ? 'homepage-screenshot' : null;
+          if (!screenshot) {
+            screenshot = await storeOfficialWebsiteVisual({
+              html: pages[0]?.html || '', pageUrl: `https://${host}/`, orgId,
+            });
+            if (screenshot) {
+              websiteVisualSource = 'official-site-image';
+              say('Using your website’s official preview image');
+            } else {
+              say('Website preview unavailable — using a branded company card');
+            }
+          }
 
           // ── Market research: real web searches, each its own log line ──
           say('Researching your market');
@@ -7892,6 +8063,7 @@ Write the persona now.`;
             company: companyName,
             website: siteUrl,
             screenshot: screenshot || null,
+            website_visual_source: websiteVisualSource,
             profile, mission, tasks,
             research: research.slice(0, 10),
             documents: [
@@ -7943,7 +8115,7 @@ Write the persona now.`;
              WHERE org_id = $1::uuid AND "agent_connectors" ? '_company'`,
           current.session.orgId,
         );
-        try { fs.rmSync(path.join(HYPER_SHOT_DIR, `${current.session.orgId}.jpg`), { force: true }); } catch { /* best-effort */ }
+        removeCompanyVisual(current.session.orgId);
         // Also delete the filed onboarding memories (company profile/mission/
         // positioning/etc.) so "start fresh" truly clears them. Rooms untouched.
         try {
@@ -7972,13 +8144,22 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       try {
-        const fp = path.join(HYPER_SHOT_DIR, `${current.session.orgId}.jpg`);
-        if (!fs.existsSync(fp)) return jsonResponse(res, { error: 'no screenshot' }, 404);
+        const paths = companyVisualPaths(current.session.orgId);
+        const fp = fs.existsSync(paths.screenshot) ? paths.screenshot
+          : (fs.existsSync(paths.official) ? paths.official : null);
+        if (!fp) return jsonResponse(res, { error: 'no screenshot' }, 404);
         const buf = fs.readFileSync(fp);
+        let contentType = 'image/jpeg';
+        if (fp === paths.official && fs.existsSync(paths.metadata)) {
+          try {
+            contentType = JSON.parse(fs.readFileSync(paths.metadata, 'utf8')).contentType || contentType;
+          } catch { /* retain safe JPEG default */ }
+        }
         res.writeHead(200, {
-          'Content-Type': 'image/jpeg',
+          'Content-Type': contentType,
           'Content-Length': buf.length,
           'Cache-Control': 'private, max-age=300',
+          'X-Content-Type-Options': 'nosniff',
         });
         return res.end(buf);
       } catch (err) {

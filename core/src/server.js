@@ -11036,6 +11036,7 @@ exit \$RC
                 'google-mail': 'google-mail',
                 'google-drive': 'google-drive',
                 'google-calendar': 'google-calendar',
+                'x-ads': 'twitter',
               };
               try {
                 if (prisma?.nangoConnection) {

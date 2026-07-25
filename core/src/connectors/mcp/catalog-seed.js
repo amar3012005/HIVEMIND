@@ -124,6 +124,7 @@ export const MCP_CATALOG = [
   { name: 'google-docs',     label: 'Google Docs',     transport: 'streamable-http', url: 'https://docs.googleapis.com',             nango_provider: 'google-docs',     category: 'google_workspace' },
   { name: 'google-gemini',   label: 'Google Gemini',   transport: 'streamable-http', url: 'https://generativelanguage.googleapis.com', nango_provider: 'google-gemini', category: 'google_workspace' },
   { name: 'salesforce',      label: 'Salesforce',      transport: 'streamable-http', url: 'https://api.salesforce.com',              nango_provider: 'salesforce',      category: 'crm' },
+  { name: 'x-ads',           label: 'X Ads',           transport: 'streamable-http', url: 'https://ads-api.x.com',                  nango_provider: 'twitter',         category: 'marketing', connect_only: true },
 ];
 
 /**

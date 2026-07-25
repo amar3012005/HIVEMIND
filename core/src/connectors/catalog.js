@@ -187,6 +187,17 @@ export const CONNECTOR_CATALOG = [
     status: 'planned',
     description: 'Contacts, deals, companies, tickets.',
   },
+  {
+    id: 'x-ads',
+    name: 'X Ads',
+    category: 'marketing',
+    mode: ['live'],
+    authType: 'oauth1',
+    status: 'needs_oauth_setup',
+    nangoProvider: 'twitter',
+    description: 'Advertiser accounts, paid campaigns, budgets and performance.',
+    setupHint: 'Requires an X developer app approved for Ads API access.',
+  },
 
   // ── INGESTION — Database ─────────────────────────────────────────────
   {
@@ -233,6 +244,7 @@ export const CONNECTOR_CATEGORIES = [
   { id: 'productivity', name: 'Productivity' },
   { id: 'comms', name: 'Communication' },
   { id: 'crm', name: 'CRM & Sales' },
+  { id: 'marketing', name: 'Marketing & Ads' },
   { id: 'project', name: 'Project Management' },
   { id: 'code', name: 'Code & DevOps' },
   { id: 'database', name: 'Databases' },

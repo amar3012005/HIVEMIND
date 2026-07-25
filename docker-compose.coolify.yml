@@ -128,7 +128,7 @@ services:
             X_OAUTH2_CLIENT_SECRET: '${X_OAUTH2_CLIENT_SECRET:-}'
             X_OAUTH1_CONSUMER_KEY: '${X_OAUTH1_CONSUMER_KEY:-}'
             X_OAUTH1_CONSUMER_SECRET: '${X_OAUTH1_CONSUMER_SECRET:-}'
-            X_ADS_CALLBACK_BASE_URL: '${X_ADS_CALLBACK_BASE_URL:-https://core.hivemind.davinciai.eu:8050}'
+            X_ADS_CALLBACK_BASE_URL: '${X_ADS_CALLBACK_BASE_URL:-https://core.singulancelabs.com}'
             X_ADS_FRONTEND_URL: '${X_ADS_FRONTEND_URL:-https://next.singulancelabs.com/hivemind/app/employees/campaigns}'
             X_ADS_BASE_URL: '${X_ADS_BASE_URL:-https://ads-api.x.com}'
             DOCLING_URL: 'http://docling:5001'

@@ -163,6 +163,7 @@ def _session_update(snapshot: dict) -> dict:
                     "format": {"type": "audio/pcm", "rate": 16000},
                     "transport": "binary",
                     "transcription": {
+                        "model": "grok-transcribe",
                         "language_hint": snapshot.get("language", "en"),
                         "keyterms": snapshot.get("keyterms", []),
                     },
@@ -178,6 +179,32 @@ def _session_update(snapshot: dict) -> dict:
         },
     }
 
+def _browser_event(event: dict) -> dict | None:
+    """Normalize xAI events to TARA's provider-neutral widget contract."""
+    event_type = event.get("type")
+    if event_type == "session.updated":
+        return {"type": "ready"}
+    if event_type == "input_audio_buffer.speech_started":
+        return {"type": "speech_start"}
+    if event_type in {
+        "conversation.item.input_audio_transcription.updated",
+        "conversation.item.input_audio_transcription.completed",
+    }:
+        return {"type": "transcript", "text": event.get("transcript") or ""}
+    if event_type in {
+        "response.output_audio_transcript.delta",
+        "response.text.delta",
+        "response.output_text.delta",
+    }:
+        return {"type": "agent_text", "text": event.get("delta") or ""}
+    if event_type == "response.done":
+        return {"type": "turn_done"}
+    if event_type == "error":
+        error = event.get("error") or {}
+        return {"type": "error", "error": error.get("message") or event.get("message") or "Grok realtime error"}
+    return None
+
+
 @app.get("/health/live")
 async def health_live():
     return {"ok": True, "service": "tara-grok"}
@@ -189,14 +216,21 @@ async def health_ready():
         return JSONResponse({"ok": False, "error": error}, status_code=503)
     return {"ok": True, "service": "tara-grok", "model": config.TARA_GROK_MODEL}
 
+# Grok speech-to-speech supported languages (official list). The voices themselves
+# are multilingual — the model detects and answers in the caller's language — so the
+# language selector drives the conversation/ASR hint, not which voices are offered.
+GROK_LANGUAGES = [
+    "en", "ar-EG", "ar-SA", "ar-AE", "bn", "zh", "fr", "de", "hi", "id",
+    "it", "ja", "ko", "pt-BR", "pt-PT", "ru", "es-MX", "es-ES", "tr", "vi",
+]
+
+
 @app.get("/voices")
 async def voices(language: str | None = None):
     catalogue = await _load_voices()
-    items = [v for v in catalogue if not language or (v.get("language") or "").startswith(language.split("-")[0])]
-    # Never hand back an empty picker just because the language filter missed.
-    if not items:
-        items = catalogue
-    return {"voices": items, "languages": sorted({v.get("language") or "en" for v in catalogue})}
+    # Grok voices are multilingual, so a language filter must never narrow them —
+    # filtering by exact language would empty the picker.
+    return {"voices": catalogue, "languages": GROK_LANGUAGES}
 
 async def _xai_connect(snapshot: dict, resume_conversation_id: str | None = None):
     url = f"{config.XAI_REALTIME_URL}?model={config.TARA_GROK_MODEL}"
@@ -300,7 +334,9 @@ async def voice(ws: WebSocket, session_id: str):
                     pending_tool_calls.append({"name": event.get("name", ""), "call_id": event.get("call_id"), "arguments": args})
                     if not tool_batch_task or tool_batch_task.done():
                         tool_batch_task = asyncio.create_task(flush_tool_calls())
-                await ws.send_text(json.dumps(event))
+                browser_event = _browser_event(event)
+                if browser_event:
+                    await ws.send_text(json.dumps(browser_event))
         except Exception:
             log.exception("xAI realtime session failed")
             terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": "xai_session_failed"}}

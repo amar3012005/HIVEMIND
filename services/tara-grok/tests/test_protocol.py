@@ -1,6 +1,6 @@
 import unittest
 
-from tara_grok.app import _browser_event, _capability_from_subprotocols, _session_update
+from tara_grok.app import _browser_event, _capability_from_subprotocols, _opening_events, _session_update
 
 
 class TaraGrokProtocolTests(unittest.TestCase):
@@ -36,3 +36,10 @@ class TaraGrokProtocolTests(unittest.TestCase):
             {"type": "agent_text", "text": "Hi there"},
         )
         self.assertEqual(_browser_event({"type": "response.done"}), {"type": "turn_done"})
+
+    def test_opening_events_make_grok_speak_first(self):
+        events = _opening_events({"opening_instruction": "Speak first about the goal."})
+        self.assertEqual(events[0]["type"], "conversation.item.create")
+        self.assertEqual(events[0]["item"]["role"], "user")
+        self.assertIn("Speak first", events[0]["item"]["content"][0]["text"])
+        self.assertEqual(events[1], {"type": "response.create"})

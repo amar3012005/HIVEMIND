@@ -52,6 +52,13 @@ async def get_persona(user_id: Optional[str], org_id: Optional[str]) -> Dict[str
                 headers=_headers(user_id, org_id),
             )
             cfg = (r.json() or {}).get("config") or {} if r.status_code == 200 else {}
+            try:
+                p = await c.get(f"{config.HIVEMIND_CORE_URL}/api/profiles",
+                                headers=_headers(user_id, org_id))
+                if p.status_code == 200:
+                    cfg["profile_context"] = ((p.json() or {}).get("context") or "")[:2000]
+            except Exception as e:  # noqa: BLE001
+                log.debug("profile context fetch failed: %s", e)
     except Exception as e:  # noqa: BLE001
         log.warning("persona fetch failed: %s", e)
         cfg = {}

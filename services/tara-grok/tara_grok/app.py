@@ -205,6 +205,37 @@ def _browser_event(event: dict) -> dict | None:
     return None
 
 
+def _opening_events(snapshot: dict) -> list[dict]:
+    """Seed an assistant-first opening turn after the realtime session is ready."""
+    instruction = (snapshot.get("opening_instruction") or "").strip()
+    if not instruction:
+        goal = (snapshot.get("goal") or "").strip()
+        language = snapshot.get("language", "en")
+        if goal:
+            instruction = (
+                "The voice session has just connected. The user has not spoken yet. "
+                f"Speak first in {language}. Privately plan a concise opening for this goal, "
+                f"then say only the opening aloud: {goal}"
+            )
+        else:
+            instruction = (
+                "The voice session has just connected. The user has not spoken yet. "
+                f"Speak first in {language}. Give a short natural TARA greeting and invite "
+                "the user to choose what to work through first."
+            )
+    return [
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": instruction}],
+            },
+        },
+        {"type": "response.create"},
+    ]
+
+
 @app.get("/health/live")
 async def health_live():
     return {"ok": True, "service": "tara-grok"}
@@ -300,6 +331,7 @@ async def voice(ws: WebSocket, session_id: str):
 
     pending_tool_calls: list[dict] = []
     tool_batch_task: asyncio.Task | None = None
+    opening_sent = False
 
     async def flush_tool_calls():
         nonlocal pending_tool_calls
@@ -315,7 +347,7 @@ async def voice(ws: WebSocket, session_id: str):
         await xai.send(json.dumps({"type": "response.create"}))
 
     async def xai_to_browser():
-        nonlocal tool_batch_task
+        nonlocal tool_batch_task, opening_sent
         terminal_event = {"event_id": str(uuid.uuid4()), "type": "completed", "payload": {"provider": "grok"}}
         try:
             async for message in xai:
@@ -326,6 +358,10 @@ async def voice(ws: WebSocket, session_id: str):
                 if event.get("type") == "conversation.created":
                     # Capture the id so the NEXT connection can resume this conversation.
                     _remember_conversation(principal, (event.get("conversation") or {}).get("id"))
+                if event.get("type") == "session.updated" and not opening_sent:
+                    opening_sent = True
+                    for opening_event in _opening_events(snapshot):
+                        await xai.send(json.dumps(opening_event))
                 if event.get("type") == "response.function_call_arguments.done":
                     try:
                         args = json.loads(event.get("arguments") or "{}")

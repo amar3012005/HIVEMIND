@@ -59,6 +59,31 @@ _AURA_BY_LANG = {
 }
 
 
+def _company_from_profile(profile_context: str) -> str:
+    for line in (profile_context or "").splitlines():
+        if line.strip().lower().startswith("company:"):
+            return line.split(":", 1)[1].strip()[:120]
+    return ""
+
+
+def _profile_greeting(*, mode: str, language: str, profile_context: str) -> str:
+    company = _company_from_profile(profile_context)
+    if company:
+        templates = {
+            "en": f"Hi, I'm TARA. I have the company context for {company} ready — what should we work through first?",
+            "de": f"Hallo, ich bin TARA. Ich habe den Kontext von {company} bereit — woran sollen wir zuerst arbeiten?",
+            "fr": f"Bonjour, je suis TARA. J'ai le contexte de {company} prêt — par quoi voulez-vous commencer ?",
+            "es": f"Hola, soy TARA. Tengo listo el contexto de {company} — ¿por dónde empezamos?",
+            "nl": f"Hallo, ik ben TARA. Ik heb de context van {company} klaar — waar zullen we eerst naar kijken?",
+            "it": f"Ciao, sono TARA. Ho pronto il contesto di {company} — da dove iniziamo?",
+        }
+        return templates.get(language, templates["en"])
+    return (_WIDGET_GREETING_INTERNAL if mode == "internal"
+            else _WIDGET_GREETING_EXTERNAL).get(
+        language, (_WIDGET_GREETING_INTERNAL if mode == "internal"
+                   else _WIDGET_GREETING_EXTERNAL)["en"])
+
+
 def _resolve_voice(voice_id: Optional[str], language: str) -> str:
     if voice_id and voice_id.startswith("aura"):
         return voice_id  # already a Deepgram voice
@@ -78,6 +103,7 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
     from .core_client import get_persona
     persona = await get_persona(user_id, org_id)
     skill_prompt = persona.get("internal_prompt" if mode == "internal" else "system_prompt") or ""
+    profile_context = persona.get("profile_context") or ""
     prompt = skill_prompt or (
         "You are TARA, the voice of this company's HIVEMIND. Answer briefly "
         "(1-3 spoken sentences), warmly and factually. Never invent facts."
@@ -107,10 +133,7 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
                                   company="the company", language=language)
         opening = (plan.get("opening") or "").strip()
     if not opening:
-        opening = (_WIDGET_GREETING_INTERNAL if mode == "internal"
-                   else _WIDGET_GREETING_EXTERNAL).get(
-            language, (_WIDGET_GREETING_INTERNAL if mode == "internal"
-                       else _WIDGET_GREETING_EXTERNAL)["en"])
+        opening = _profile_greeting(mode=mode, language=language, profile_context=profile_context)
     settings["agent"]["greeting"] = opening
 
     closed = asyncio.Event()

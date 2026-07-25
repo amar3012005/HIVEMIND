@@ -45,6 +45,39 @@ const DEFAULT_GROK_CONFIG = {
   vad_silence_duration_ms: 650, vad_prefix_padding_ms: 333,
 };
 
+function languageLabel(code) {
+  return String(code || 'en').split('-')[0] || 'en';
+}
+
+function profileCompany(profileContext = '') {
+  const match = String(profileContext).match(/^\s*company:\s*(.+)$/im);
+  return boundedString(match?.[1], 120) || '';
+}
+
+function buildOpeningInstruction({ mode, goal, language, skillPrompt, profileContext }) {
+  const lang = languageLabel(language);
+  const company = profileCompany(profileContext);
+  const lines = [
+    'The voice session has just connected. The user has not spoken yet. You must speak first now.',
+    `Respond in ${lang}.`,
+    'Privately plan the opening, then say only the opening aloud. No stage directions.',
+    'Keep it to one or two short natural spoken sentences.',
+  ];
+  if (goal) {
+    lines.push(`Session goal: ${goal}`);
+    lines.push('Open with a concise first move toward that goal: state the purpose and ask the single best first question.');
+  } else {
+    lines.push('No explicit session goal was provided.');
+    if (company) lines.push(`Known company from the user profile: ${company}.`);
+    if (profileContext) lines.push(`User + organization profile context:\n${String(profileContext).slice(0, 1200)}`);
+    lines.push(mode === 'internal'
+      ? 'Open as the organization HIVEMIND using the profile/company context; invite the user to choose what to work through first.'
+      : 'Open as TARA using the profile/company context; offer help and ask what they want to accomplish first.');
+  }
+  if (skillPrompt) lines.push(`Selected TARA skill/persona:\n${String(skillPrompt).slice(0, 1200)}`);
+  return lines.join('\n');
+}
+
 function b64(value) { return Buffer.from(JSON.stringify(value)).toString('base64url'); }
 function sign(value, secret) { return crypto.createHmac('sha256', secret).update(value).digest('base64url'); }
 function safeEqual(a, b) {
@@ -135,6 +168,17 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const taraConfig = await getTaraConfig?.({ userId, orgId }).catch(() => null);
       const selectedSkillId = mode === 'internal' ? taraConfig?.selected_internal_skill_id : taraConfig?.selected_external_skill_id;
       const configuredPrompt = mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
+      const profileContext = await (async () => {
+        if (!prisma || !userId) return '';
+        try {
+          const { getSharedProfileStore } = await import('../memory/profile-store.js');
+          const store = getSharedProfileStore(prisma);
+          return (await store.buildProfileContext(userId, orgId, null)) || '';
+        } catch (error) {
+          console.warn('[tara-grok] profile context unavailable for opening:', error.message);
+          return '';
+        }
+      })();
       let effectiveProviderConfig = providerConfig;
       if (provider === 'grok') {
         try {
@@ -155,6 +199,14 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         skill_id: selectedSkillId || null,
         config_revision: current.revision,
         instructions: boundedString(configuredPrompt, 12_000) || '',
+        profile_context: boundedString(profileContext, 2_000) || '',
+        opening_instruction: boundedString(buildOpeningInstruction({
+          mode,
+          goal: boundedString(body.goal, 300) || '',
+          language: effectiveProviderConfig.language || body.language || 'en',
+          skillPrompt: configuredPrompt,
+          profileContext,
+        }), 3_000) || '',
       };
       const jti = crypto.randomUUID();
       const expiresAt = new Date(Date.now() + 90_000);

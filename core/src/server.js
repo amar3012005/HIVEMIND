@@ -5420,6 +5420,31 @@ exit \$RC
     });
   }
 
+  // ── Grok voice adapter internal callbacks (service-token authed) ─────────
+  // MUST sit OUTSIDE the `/api/` block below. These paths start with /internal/,
+  // so while this dispatch was nested inside `if (pathname.startsWith('/api/'))`
+  // it could never run: every consume/events/tools call 404'd and the whole Grok
+  // voice path was unreachable (the adapter rejected the WS handshake with 403
+  // after its consume failed). The runtime authenticates with the narrowly
+  // scoped TARA_GROK_SERVICE_TOKEN — never the master key — so it correctly
+  // sits above the user-facing API auth gate.
+  if (pathname.startsWith('/internal/v1/tara/calls/')) {
+    let body = {};
+    if (req.method !== 'GET') {
+      try {
+        body = await parseBody(req);
+      } catch {
+        return jsonResponse(res, { error: 'invalid_json_body' }, 400);
+      }
+    }
+    const handled = await taraGrokRuntime({
+      pathname, method: req.method, body, url, req, res,
+      userId: null, orgId: null, jsonResponse, accessContext: null,
+    });
+    if (handled) return;
+    return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+
   // API Routes
   if (pathname.startsWith('/api/')) {
     try {
@@ -5582,12 +5607,8 @@ exit \$RC
       // Master-key callers: authenticateApiKey folds x-hm-org-id/x-hm-user-id INTO
       // principal (line ~3191-3194), so control-plane proxy calls keep working.
       // NOTE: do NOT add any public webhook paths (/api/connectors/*/webhook etc.) here.
-      // The Grok adapter uses a narrowly-scoped service token rather than the
-      // master API key, so handle its internal events before the user API gate.
-      if (pathname.startsWith('/internal/v1/tara/calls/')) {
-        const handled = await taraGrokRuntime({ pathname, method: req.method, body, url, req, res, userId: null, orgId: null, jsonResponse, accessContext: null });
-        if (handled) return;
-      }
+      // (The Grok adapter's /internal/v1/tara/calls/* dispatch lives ABOVE this
+      // `/api/` block — it was unreachable while nested here.)
 
       let _mAuth = null;
       if (/^\/api\/(meetings|tara|autofill)(\/|$)/.test(pathname)) {

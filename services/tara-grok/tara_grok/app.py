@@ -20,13 +20,79 @@ from .tools import TOOL_SCHEMAS, execute
 log = logging.getLogger("tara_grok")
 app = FastAPI(title="TARA Grok Voice", version="1.0.0")
 
-BUILTIN_VOICES = [
+# Fallback only. The live roster comes from xAI's own catalogue (GET /v1/tts/voices
+# + GET /v1/custom-voices) — see _load_voices(). These five are the documented
+# built-ins and keep the picker usable if xAI is briefly unreachable.
+FALLBACK_VOICES = [
     {"id": "eve", "provider": "grok", "name": "Eve", "language": "en", "gender": "feminine", "description": "Clear, warm and conversational", "custom": False},
     {"id": "ara", "provider": "grok", "name": "Ara", "language": "en", "gender": "feminine", "description": "Calm and professional", "custom": False},
     {"id": "rex", "provider": "grok", "name": "Rex", "language": "en", "gender": "masculine", "description": "Confident and direct", "custom": False},
     {"id": "sal", "provider": "grok", "name": "Sal", "language": "en", "gender": "neutral", "description": "Balanced and natural", "custom": False},
     {"id": "leo", "provider": "grok", "name": "Leo", "language": "en", "gender": "masculine", "description": "Warm and measured", "custom": False},
 ]
+
+VOICE_CACHE_TTL_SECONDS = 10 * 60
+_voice_cache: dict[str, tuple[list[dict], float]] = {}
+
+
+async def _load_voices() -> list[dict]:
+    """Every official Grok voice, straight from xAI, plus the team's custom voices.
+
+    `GET /v1/tts/voices` is the authoritative roster (the same voice ids the
+    realtime `session.update` `voice` parameter accepts), so the picker tracks
+    xAI's catalogue instead of a list we have to hand-maintain. Custom voices are
+    merged in when the team has any. Cached; falls back to the documented
+    built-ins if xAI is unreachable so the picker is never empty.
+    """
+    cached = _voice_cache.get("all")
+    if cached and cached[1] > time.monotonic():
+        return cached[0]
+
+    headers = {"Authorization": f"Bearer {config.XAI_API_KEY}"}
+    voices: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get("https://api.x.ai/v1/tts/voices", headers=headers)
+            response.raise_for_status()
+            for item in (response.json() or {}).get("voices", []):
+                voice_id = item.get("voice_id")
+                if not voice_id:
+                    continue
+                voices.append({
+                    "id": voice_id,
+                    "provider": "grok",
+                    "name": item.get("name") or str(voice_id).title(),
+                    "language": item.get("language") or "en",
+                    "gender": "",
+                    "description": "",
+                    "custom": False,
+                })
+            # Custom (cloned) voices are optional and entitlement-gated — never fatal.
+            try:
+                custom = await client.get("https://api.x.ai/v1/custom-voices", headers=headers)
+                if custom.status_code == 200:
+                    for item in (custom.json() or {}).get("voices", []):
+                        voice_id = item.get("voice_id")
+                        if not voice_id:
+                            continue
+                        voices.append({
+                            "id": voice_id,
+                            "provider": "grok",
+                            "name": item.get("name") or str(voice_id),
+                            "language": item.get("language") or "en",
+                            "gender": item.get("gender") or "",
+                            "description": item.get("description") or "",
+                            "custom": True,
+                        })
+            except Exception:
+                log.warning("custom voice list unavailable", exc_info=False)
+    except Exception:
+        log.warning("xAI voice catalogue unavailable — serving fallback roster", exc_info=False)
+
+    if not voices:
+        return FALLBACK_VOICES
+    _voice_cache["all"] = (voices, time.monotonic() + VOICE_CACHE_TTL_SECONDS)
+    return voices
 
 MAX_BINARY_FRAME_BYTES = 32 * 1024
 MAX_CONTROL_FRAME_BYTES = 16 * 1024
@@ -125,8 +191,12 @@ async def health_ready():
 
 @app.get("/voices")
 async def voices(language: str | None = None):
-    items = [v for v in BUILTIN_VOICES if not language or v["language"].startswith(language.split("-")[0])]
-    return {"voices": items, "languages": sorted({v["language"] for v in items})}
+    catalogue = await _load_voices()
+    items = [v for v in catalogue if not language or (v.get("language") or "").startswith(language.split("-")[0])]
+    # Never hand back an empty picker just because the language filter missed.
+    if not items:
+        items = catalogue
+    return {"voices": items, "languages": sorted({v.get("language") or "en" for v in catalogue})}
 
 async def _xai_connect(snapshot: dict, resume_conversation_id: str | None = None):
     url = f"{config.XAI_REALTIME_URL}?model={config.TARA_GROK_MODEL}"
@@ -139,13 +209,26 @@ async def _xai_connect(snapshot: dict, resume_conversation_id: str | None = None
 async def voice(ws: WebSocket, session_id: str):
     capability = _capability_from_subprotocols(ws.scope.get("subprotocols", []))
     if not capability or not session_id:
+        # Minimal, non-secret diagnostics: both rejection paths used to close 4401
+        # silently, so a failed handshake was indistinguishable from a bad token.
+        log.warning(
+            "voice handshake rejected: no capability subprotocol (session=%s, subprotocols=%s)",
+            session_id, [p.split(".")[0:3] for p in ws.scope.get("subprotocols", [])],
+        )
         await ws.close(code=4401)
         return
     try:
         session = await consume_capability(session_id, capability)
-    except Exception:
+    except Exception as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        detail = getattr(getattr(error, "response", None), "text", "")
+        log.warning(
+            "voice handshake rejected: capability consume failed (session=%s, core_status=%s, detail=%s)",
+            session_id, status, str(detail)[:200] or type(error).__name__,
+        )
         await ws.close(code=4401)
         return
+    log.info("voice session accepted (session=%s, provider=grok)", session_id)
     await ws.accept(subprotocol="hm.tara.v1")
     snapshot = session.get("config", {})
     # Principal comes from the CONSUMED capability (Core-authenticated), so the

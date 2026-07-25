@@ -9,6 +9,31 @@ const GROK_VOICES = [
   ['sal', 'Sal', 'neutral', 'Balanced and natural'],
   ['leo', 'Leo', 'masculine', 'Warm and measured'],
 ].map(([id, name, gender, description]) => ({ id, provider: 'grok', name, gender, description, language: 'en', custom: false }));
+
+// Live Grok voice roster. The adapter owns the xAI integration (it holds
+// XAI_API_KEY and queries GET /v1/tts/voices + /v1/custom-voices), so core asks
+// IT rather than duplicating the key here or hand-maintaining a list that drifts
+// from xAI's catalogue. Cached 10 min; falls back to the documented built-ins
+// above so the picker is never empty when the adapter is unreachable.
+const GROK_VOICES_TTL_MS = 10 * 60 * 1000;
+let _grokVoiceCache = { voices: null, expiresAt: 0 };
+async function loadGrokVoices() {
+  if (_grokVoiceCache.voices && _grokVoiceCache.expiresAt > Date.now()) return _grokVoiceCache.voices;
+  const base = (process.env.TARA_GROK_INTERNAL_URL || 'http://tara-grok:8092').replace(/\/$/, '');
+  try {
+    const response = await fetch(`${base}/voices`, { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`adapter ${response.status}`);
+    const data = await response.json();
+    const voices = Array.isArray(data?.voices) ? data.voices.filter((v) => v && v.id) : [];
+    if (!voices.length) throw new Error('empty roster');
+    _grokVoiceCache = { voices, expiresAt: Date.now() + GROK_VOICES_TTL_MS };
+    return voices;
+  } catch (error) {
+    console.warn('[tara-grok] voice roster unavailable, serving built-ins:', error.message);
+    return GROK_VOICES;
+  }
+}
+
 const GROK_CONFIG_KEYS = new Set([
   'model', 'voice_id', 'language', 'reasoning_effort', 'output_speed', 'keyterms',
   'pronunciation_replacements', 'vad_threshold', 'vad_silence_duration_ms',
@@ -141,7 +166,8 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     if (pathname === '/api/tara/voices' && method === 'GET') {
       const provider = url.searchParams.get('provider') || (await configFor(orgId)).defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
-      return reply(res, { provider, voices: provider === 'grok' ? GROK_VOICES : [], delegated: provider !== 'grok' });
+      const voices = provider === 'grok' ? await loadGrokVoices() : [];
+      return reply(res, { provider, voices, delegated: provider !== 'grok' });
     }
 
     const consume = pathname.match(/^\/internal\/v1\/tara\/calls\/([0-9a-f-]{36})\/consume$/i);

@@ -2172,6 +2172,14 @@ class Director:
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
+        if (not (isinstance(pq, str) and pq.strip())) and _places_on and _wants_discovery(self.user_message):
+            try:
+                composed = await self._compose_places_queries()
+                pq = composed[0] if composed else None
+                if pq:
+                    log.info("[hyper-engine] places query FORCED by explicit prospect/lead request: %s", str(pq)[:80])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[hyper-engine] places query backstop failed: %s", exc)
         # Deterministic backstop: even if the planner emits a query, only run Maps
         # when THIS turn genuinely asks to source new prospects (not a drafting/
         # strategy turn). Stops the "20 firms every run" noise the user flagged.

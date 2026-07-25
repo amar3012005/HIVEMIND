@@ -9016,6 +9016,25 @@ Write the persona now.`;
         const provider = await taraProviderFor(room.orgId);
         const taraBase = provider.baseUrl;
         const sessionId = `hyper-${roomId.slice(0, 8)}-${Date.now()}`;
+        const caps = await fetch(`${taraBase}/capabilities`, { signal: AbortSignal.timeout(4000) })
+          .then(async (r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (caps && caps.telephony === false && caps.browser !== false) {
+          return jsonResponse(res, {
+            ok: true,
+            dialing: false,
+            delivery: 'browser',
+            provider: provider.provider,
+            reason: 'provider has no telephony bridge — use the browser voice session',
+            browser_call: {
+              provider: provider.provider,
+              session_id: sessionId,
+              goal: String(body.goal || '').slice(0, 300) || undefined,
+              language: String(body.language || 'en').slice(0, 8),
+              mode: 'external',
+            },
+          }, 200);
+        }
         const r = await fetch(`${taraBase}/calls/outbound`, {
           method: 'POST',
           headers: {

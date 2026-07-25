@@ -533,15 +533,21 @@ export function createOutreachModule(deps) {
         if (t0) {
           const gen = await generateTarget(campaign, t0);
           const pl = gen?.payload || {};
-          const voiceId = channel === 'call' ? await resolveVoiceId(pl.language, pl.voice_style) : null;
+          const voiceId = channel === 'call' ? await resolveVoiceId(room.orgId, pl.language, pl.voice_style) : null;
+          const capabilities = voice ? await providerCapabilities(voice.baseUrl) : { telephony: false, browser: true };
+          const delivery = resolveDelivery({ channel, capabilities });
+          const universal = buildOutreachContract({
+            campaign, target: gen, delivery, voiceId,
+            skillId: campaign.voiceConfigSnapshot?.skill_id || null,
+          });
           contract = {
+            ...universal,
             prospect: t0.company || t0.email || t0.phone || null,
-            channel,
-            goal: pl.goal || null,
-            strategy: pl.strategy || null,
-            language: pl.language || 'en',
-            voice_style: pl.voice_style || null,
-            voice_id: voiceId,
+            goal: universal.objective.goal || null,
+            strategy: universal.objective.strategy || null,
+            language: universal.persona.language || 'en',
+            voice_style: universal.persona.voice_style || null,
+            voice_id: universal.persona.voice_id || null,
             targets: campaign.targets.length,
           };
         }

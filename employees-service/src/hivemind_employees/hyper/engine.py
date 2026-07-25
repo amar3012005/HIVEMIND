@@ -583,11 +583,36 @@ def _resolve_language(lang: str) -> str:
 # ONLY when THIS turn actually asks to find NEW real-world orgs/contacts. A turn that
 # drafts emails, writes a sequence, or reasons over already-known targets must NOT
 # re-run discovery. Verb-of-finding + a discoverable object; drafting verbs veto it.
+# Verbs that mean "source something new". `generate|build|create|compile|assemble`
+# were missing, so even the literal "generate leads" failed the gate and Maps
+# never ran.
+_DISCOVERY_VERBS = (
+    r"(?:find|get|source|sources?|list|give\s+me|need|pull|gather|identif\w+|show\s+me|"
+    r"look\s+up|search\s+for|discover|reach\s+out|prospect\w*|scrape|generate|build|"
+    r"create|compile|assemble|put\s+together)"
+)
+# Discoverable objects. The original list held only GENERIC nouns, so the most
+# natural way to ask for Maps prospects — naming the actual business type
+# ("dental clinics in Munich", "restaurants near Cologne") — was blocked.
+_DISCOVERY_NOUNS = (
+    r"(?:prospects?|leads?|clients?|customers?|contacts?|companies|compan\w+|firms?|"
+    r"institutions?|organi[sz]ations?|partners?|niches?|decision[-\s]?makers?|buyers?|"
+    r"accounts?|buisness\w*|businesses|business|venues?|practices?|clinics?|surgeries|"
+    r"shops?|stores?|agencies|agency|studios?|restaurants?|cafes?|hotels?|dealers?|"
+    r"dealerships?|suppliers?|manufacturers?|distributors?|retailers?|wholesalers?|"
+    r"contractors?|providers?|offices?|centers?|centres?|schools?|gyms?|salons?|"
+    r"pharmacies|hospitals?|labs?|laboratories|startups?|vendors?)"
+)
 _DISCOVERY_RE = re.compile(
-    r"\b(find|get|source|sources?|list|give\s+me|need|pull|gather|identif\w+|show\s+me|"
-    r"look\s+up|search\s+for|discover|reach\s+out|prospect\w*|scrape)\b[^.\n]{0,60}?"
-    r"\b(prospects?|leads?|clients?|customers?|contacts?|companies|compan\w+|firms?|"
-    r"institutions?|organi[sz]ations?|partners?|niches?|decision[-\s]?makers?)\b",
+    rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,60}}?\b{_DISCOVERY_NOUNS}\b", re.I)
+# Geo-anchored fallback: a find-verb plus an explicit PLACE is a Maps query even
+# when the business type isn't in the noun list ("find Steuerberater in Hamburg").
+# The negative lookahead keeps "leads in our pipeline" / "in the market" out.
+_DISCOVERY_GEO_RE = re.compile(
+    rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,80}}?\b(?:in|near|around|within|across)\s+"
+    r"(?!our\b|the\b|this\b|that\b|these\b|those\b|your\b|my\b|their\b|its\b|it\b|"
+    r"order\b|general\b|mind\b|total\b|time\b|advance\b|house\b|scope\b|charge\b)"
+    r"[A-Za-zÄÖÜäöüß][\w\-]{2,}",
     re.I)
 _DRAFTING_RE = re.compile(
     r"\b(draft|write|compose|rewrite|edit|revise|sequence|template|email\s+copy|"
@@ -598,14 +623,12 @@ _DRAFTING_RE = re.compile(
 def _wants_discovery(user_message: str) -> bool:
     """True only when THIS turn's message asks to source NEW real-world orgs/contacts."""
     msg = str(user_message or "")
-    if not _DISCOVERY_RE.search(msg):
+    if not (_DISCOVERY_RE.search(msg) or _DISCOVERY_GEO_RE.search(msg)):
         return False
     # A drafting/analysis turn with NO explicit find-verb-on-contacts stays off, but
     # an explicit "find/give me contacts" wins even if drafting words co-occur.
     if _DRAFTING_RE.search(msg) and not re.search(
-            r"\b(find|get|source|list|give\s+me|pull|gather|identif\w+|discover)\b[^.\n]{0,40}?"
-            r"\b(prospects?|leads?|clients?|contacts?|companies|firms?|institutions?|niches?)\b",
-            msg, re.I):
+            rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,40}}?\b{_DISCOVERY_NOUNS}\b", msg, re.I):
         return False
     return True
 

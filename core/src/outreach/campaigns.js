@@ -18,6 +18,40 @@
 // Spec: docs/superpowers/specs/2026-07-16-outreach-campaign-runner-design.md
 
 import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed, outreachAutoProposeEnabled } from './outreach-contract.js';
+import { buildOutreachContract, resolveDelivery } from './contract.js';
+
+// ── Provider capability probe ───────────────────────────────────────────────
+// Telephony is NOT guaranteed: an adapter can ship realtime voice with no PSTN
+// bridge (tara-grok does exactly that — it has no /calls/outbound, so dialing it
+// 404s and the campaign target hard-fails). Ask the adapter what it supports,
+// cache it, and let the caller fall back to a browser-run call.
+const CAPABILITY_TTL_MS = 5 * 60 * 1000;
+const _capabilityCache = new Map(); // baseUrl → { value, expiresAt }
+
+async function providerCapabilities(baseUrl) {
+  const hit = _capabilityCache.get(baseUrl);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+  let value = null;
+  try {
+    const res = await fetch(`${baseUrl}/capabilities`, { signal: AbortSignal.timeout(4000) });
+    if (res.ok) {
+      const data = await res.json();
+      value = { telephony: !!data?.telephony, browser: data?.browser !== false };
+    }
+  } catch { /* adapter down or older build — fall through to the probe below */ }
+  if (!value) {
+    // Older adapters have no /capabilities. Probe the dial route itself: a
+    // POST-only route answers 405 to GET (exists); a missing one answers 404.
+    try {
+      const res = await fetch(`${baseUrl}/calls/outbound`, { method: 'GET', signal: AbortSignal.timeout(4000) });
+      value = { telephony: res.status !== 404, browser: true };
+    } catch {
+      value = { telephony: false, browser: true };
+    }
+  }
+  _capabilityCache.set(baseUrl, { value, expiresAt: Date.now() + CAPABILITY_TTL_MS });
+  return value;
+}
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
@@ -253,6 +287,39 @@ export function createOutreachModule(deps) {
     const provider = campaign.voiceProvider
       ? { provider: campaign.voiceProvider, revision: campaign.voiceConfigSnapshot?.revision || 1, config: campaign.voiceConfigSnapshot || {}, baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl }
       : await taraProviderFor(campaign.orgId);
+
+    // ── Telephony present? If not, hand the contract to the user's browser ──
+    // Previously this dialed unconditionally: against a provider with no PSTN
+    // bridge the POST 404s and the target dies as 'failed'. Instead park it as
+    // 'browser' carrying the SAME universal contract, so the user can run the
+    // call from their own voice session with the identical goal/voice/language.
+    const capabilities = await providerCapabilities(provider.baseUrl);
+    const delivery = resolveDelivery({ channel: 'call', capabilities });
+    if (delivery.mode === 'browser') {
+      const contract = buildOutreachContract({
+        campaign, target, delivery, voiceId,
+        skillId: campaign.voiceConfigSnapshot?.skill_id || null,
+      });
+      const updated = await prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: {
+          state: 'browser',
+          payload: { ...payload, contract },
+          resultRef: {
+            ...(target.resultRef || {}),
+            delivery: 'browser',
+            provider: provider.provider,
+            reason: delivery.reason,
+          },
+        },
+      });
+      console.log(JSON.stringify({
+        svc: 'outreach', level: 'info', event: 'call_handoff_browser',
+        campaign_id: campaign.id, target_id: target.id, provider: provider.provider,
+      }));
+      return updated;
+    }
+
     const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
       method: 'POST',
       headers: {

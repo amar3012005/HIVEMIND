@@ -256,6 +256,26 @@ GROK_LANGUAGES = [
 ]
 
 
+@app.get("/capabilities")
+async def capabilities():
+    """What this adapter can actually fulfil, for the Outreach Contract router.
+
+    Declared, not guessed: core reads this to decide whether an outreach call can
+    be dialed here or must be handed to the user's browser. `telephony` stays
+    False until the SIP/Telnyx bridge is enabled — dialing an adapter without one
+    404s and kills the campaign target.
+    """
+    return {
+        "provider": "grok",
+        "model": config.TARA_GROK_MODEL,
+        "telephony": False,          # no PSTN/SIP bridge yet — see /webhooks/telnyx
+        "browser": True,             # realtime browser voice over /voice/{session_id}
+        "channels": ["call"],
+        "contract_versions": [1],
+        "custom_voices": config.CUSTOM_VOICES_ENABLED if hasattr(config, "CUSTOM_VOICES_ENABLED") else False,
+    }
+
+
 @app.get("/voices")
 async def voices(language: str | None = None):
     catalogue = await _load_voices()

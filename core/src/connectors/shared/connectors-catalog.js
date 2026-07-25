@@ -210,6 +210,17 @@ const CONNECTOR_CATALOG = [
     status: 'planned',
   },
   {
+    id: 'x-account',
+    name: 'X',
+    description: 'X identity, media upload and public Post creation.',
+    category: 'marketing',
+    nangoProvider: 'twitter-v2',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'needs_oauth_setup',
+    setupHint: 'Configure OAuth 2.0 PKCE with users.read, tweet.read, tweet.write, media.write and offline.access.',
+  },
+  {
     id: 'x-ads',
     name: 'X Ads',
     description: 'Advertiser accounts, paid campaigns, budgets and performance.',

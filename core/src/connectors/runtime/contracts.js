@@ -12,7 +12,7 @@
 import { ManifestError } from './errors.js';
 
 /** Surfaces a connector tool may be exposed on. plan §3 ConnectorExecutionContext.surface */
-export const SURFACES = Object.freeze(['chat', 'hyperagents', 'tara', 'mcp', 'sync', 'admin']);
+export const SURFACES = Object.freeze(['chat', 'hyperagents', 'tara', 'mcp', 'sync', 'admin', 'dashboard']);
 
 /** Canonical result statuses. plan §3 CanonicalConnectorResult.status */
 export const RESULT_STATUSES = Object.freeze([

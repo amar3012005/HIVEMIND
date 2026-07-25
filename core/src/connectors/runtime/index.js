@@ -23,6 +23,7 @@ import { createSlackPlugin } from './plugins/slack/index.js';
 import { createNotionPlugin } from './plugins/notion/index.js';
 import { createGithubPlugin } from './plugins/github/index.js';
 import { createLinearPlugin } from './plugins/linear/index.js';
+import { createXAdsPlugin } from './plugins/x_ads/index.js';
 
 export { ConnectorRegistry } from './connector-registry.js';
 export { ConnectorRuntime } from './connector-runtime.js';
@@ -48,6 +49,7 @@ export function buildRegistry(deps = {}) {
   registry.register(createNotionPlugin(deps.notion));
   registry.register(createGithubPlugin(deps.github));
   registry.register(createLinearPlugin(deps.linear));
+  registry.register(createXAdsPlugin(deps.x_ads));
   return registry;
 }
 

@@ -34,6 +34,7 @@ import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
+import { handleXAdsRequest } from './x-ads/routes.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -8070,6 +8071,16 @@ exit \$RC
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
 
+      // Standalone X paid-campaign workspace. It shares the authenticated
+      // control-plane proxy but is intentionally outside HyperAgents/TARA.
+      if (pathname.startsWith('/api/x-ads/')) {
+        await handleXAdsRequest({
+          pathname, method: req.method, body, url, req, res, prisma, userId, orgId,
+          jsonResponse, parseMultipart, auditLogger,
+        });
+        return;
+      }
+
       // ── HyperAgents director LLM-usage report (cross-service metering bridge) ──
       // The HyperAgents director runs in the Python employees-service, off core's JS metering
       // chokepoint. It POSTs its per-turn token spend here so usage records against the org's HIVEMIND
@@ -11036,6 +11047,7 @@ exit \$RC
                 'google-mail': 'google-mail',
                 'google-drive': 'google-drive',
                 'google-calendar': 'google-calendar',
+                'x-account': 'twitter-v2',
                 'x-ads': 'twitter',
               };
               try {

@@ -512,6 +512,78 @@ model OutreachTarget {
   @@map("outreach_targets")
 }
 
+/// Customer-owned X paid campaign. X remains the delivery source of truth;
+/// this row owns the local draft, resumable publication state and metrics cache.
+model XAdsCampaign {
+  id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String             @map("org_id") @db.Uuid
+  userId                String             @map("user_id") @db.Uuid
+  adAccountId           String?            @map("ad_account_id") @db.VarChar(64)
+  adAccountName         String?            @map("ad_account_name") @db.VarChar(255)
+  fundingInstrumentId   String?            @map("funding_instrument_id") @db.VarChar(64)
+  xUserId               String?            @map("x_user_id") @db.VarChar(32)
+  xUsername             String?            @map("x_username") @db.VarChar(64)
+  name                  String             @db.VarChar(255)
+  destinationUrl        String             @map("destination_url") @db.VarChar(2048)
+  postText              String             @map("post_text") @db.VarChar(500)
+  imageData             Bytes?             @map("image_data")
+  imageContentType      String?            @map("image_content_type") @db.VarChar(64)
+  imageFilename         String?            @map("image_filename") @db.VarChar(255)
+  locationTargets       Json               @default("[]") @map("location_targets") @db.JsonB
+  languageTargets       Json               @default("[]") @map("language_targets") @db.JsonB
+  dailyBudgetMicros     BigInt?            @map("daily_budget_micros")
+  totalBudgetMicros     BigInt?            @map("total_budget_micros")
+  currency              String?            @db.VarChar(8)
+  accountTimezone       String?            @map("account_timezone") @db.VarChar(80)
+  endDate               String             @map("end_date") @db.VarChar(10)
+  endAt                 DateTime?           @map("end_at") @db.Timestamptz(6)
+  status                String             @default("DRAFT") @db.VarChar(32)
+  draftVersion          Int                @default(1) @map("draft_version")
+  confirmationHash      String?            @map("confirmation_hash") @db.VarChar(64)
+  confirmationExpiresAt DateTime?           @map("confirmation_expires_at") @db.Timestamptz(6)
+  publishLockAt         DateTime?           @map("publish_lock_at") @db.Timestamptz(6)
+  xCampaignId           String?            @map("x_campaign_id") @db.VarChar(64)
+  xLineItemId           String?            @map("x_line_item_id") @db.VarChar(64)
+  xMediaId              String?            @map("x_media_id") @db.VarChar(32)
+  xPostId               String?            @map("x_post_id") @db.VarChar(32)
+  xPromotedTweetId      String?            @map("x_promoted_tweet_id") @db.VarChar(64)
+  xApprovalStatus       String?            @map("x_approval_status") @db.VarChar(32)
+  xEffectiveStatus      String?            @map("x_effective_status") @db.VarChar(64)
+  xSnapshot             Json               @default("{}") @map("x_snapshot") @db.JsonB
+  metrics               Json               @default("{}") @db.JsonB
+  metricsSyncedAt       DateTime?           @map("metrics_synced_at") @db.Timestamptz(6)
+  lastError             String?            @map("last_error") @db.Text
+  createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  publishedAt           DateTime?          @map("published_at") @db.Timestamptz(6)
+  steps                 XAdsCampaignStep[]
+
+  @@unique([orgId, xCampaignId])
+  @@index([orgId, status, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("x_ads_campaigns")
+}
+
+/// One resumable external side effect in an X campaign publication.
+model XAdsCampaignStep {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String       @map("campaign_id") @db.Uuid
+  step        String       @db.VarChar(40)
+  status      String       @default("PENDING") @db.VarChar(20)
+  externalId  String?      @map("external_id") @db.VarChar(80)
+  attempts    Int          @default(0)
+  response    Json?        @db.JsonB
+  error       String?      @db.Text
+  startedAt   DateTime?    @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime?    @map("completed_at") @db.Timestamptz(6)
+  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign    XAdsCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, step])
+  @@index([campaignId, status])
+  @@map("x_ads_campaign_steps")
+}
+
 /// HQActivity — the HQ "control room" feed. One row per non-HQ room run that
 /// seals, written control-plane-side from the seal event. Agents "report" their
 /// room activity to the owner here so the HQ room becomes a live overview of all

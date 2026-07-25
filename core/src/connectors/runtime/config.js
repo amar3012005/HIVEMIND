@@ -31,14 +31,17 @@ export function loadRuntimeConfig(env = process.env) {
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
+  const xAdsEnabled = truthy(rd('X_ADS_ENABLED'));
+  if (xAdsEnabled && connectors.length > 0 && !connectors.includes('x_ads')) connectors.push('x_ads');
   return {
-    enabled: truthy(rd('CONNECTOR_RUNTIME_ENABLED')),
+    enabled: truthy(rd('CONNECTOR_RUNTIME_ENABLED')) || xAdsEnabled,
     surfaces: {
       chat: truthy(rd('CONNECTOR_RUNTIME_CHAT')),
       hyperagents: truthy(rd('CONNECTOR_RUNTIME_HYPER')),
       tara: truthy(rd('CONNECTOR_RUNTIME_TARA')),
       mcp: truthy(rd('CONNECTOR_RUNTIME_MCP')),
       sync: truthy(rd('CONNECTOR_RUNTIME_SYNC')),
+      dashboard: xAdsEnabled,
       // admin/diagnostic access follows the master switch only
       admin: truthy(rd('CONNECTOR_RUNTIME_ENABLED')),
     },

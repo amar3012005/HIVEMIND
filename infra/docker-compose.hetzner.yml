@@ -58,6 +58,7 @@ services:
       HOSTNAME: hm-core
       DOCLING_URL: http://docling:5001
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
+      NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
@@ -224,13 +225,19 @@ services:
     image: hivemind/tara-deepgram:${VERSION:-latest}
     container_name: tara-deepgram
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1152m
+    cpus: 0.75
     env_file:
       - ${TARA_DEEPGRAM_ENV_FILE:-/opt/tara-deepgram/.env}
     environment:
       HIVEMIND_API_KEY: ${HIVEMIND_MASTER_API_KEY}
       HIVEMIND_TARA_STREAM_URL: http://core:3000/api/tara/stream
     ports:
-      - "${TARA_DEEPGRAM_PORT:-8091}:8091"
+      # Loopback-only: hm-caddy (network_mode: host) fronts this at /voice2.
+      # Binding all interfaces would expose the voice adapter publicly — this
+      # matches the hardened run-tree config that production actually uses.
+      - "127.0.0.1:${TARA_DEEPGRAM_PORT:-8091}:8091"
     volumes:
       - /opt/tara-deepgram/call-logs:/data/call-logs
     depends_on:

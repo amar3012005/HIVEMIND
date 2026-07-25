@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Iterable
 
 import httpx
 import websockets
@@ -26,6 +27,53 @@ BUILTIN_VOICES = [
     {"id": "leo", "provider": "grok", "name": "Leo", "language": "en", "gender": "masculine", "description": "Warm and measured", "custom": False},
 ]
 
+MAX_BINARY_FRAME_BYTES = 32 * 1024
+MAX_CONTROL_FRAME_BYTES = 16 * 1024
+TOOL_BATCH_WINDOW_SECONDS = 0.05
+
+
+def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
+    """Read the one-time capability without putting it in a URL or its logs."""
+    for protocol in protocols:
+        if protocol.startswith("hm.tara.cap."):
+            return protocol.removeprefix("hm.tara.cap.")
+    return ""
+
+
+def _session_update(snapshot: dict) -> dict:
+    return {
+        "type": "session.update",
+        "session": {
+            "instructions": "\n\n".join(part for part in [SYSTEM_PROMPT, snapshot.get("instructions", "")] if part),
+            "voice": snapshot.get("voice_id", "eve"),
+            "reasoning": {"effort": snapshot.get("reasoning_effort", "high")},
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": snapshot.get("vad_threshold", 0.85),
+                "silence_duration_ms": snapshot.get("vad_silence_duration_ms", 650),
+                "prefix_padding_ms": snapshot.get("vad_prefix_padding_ms", 333),
+            },
+            "resumption": {"enabled": True},
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 16000},
+                    "transport": "binary",
+                    "transcription": {
+                        "language_hint": snapshot.get("language", "en"),
+                        "keyterms": snapshot.get("keyterms", []),
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 16000},
+                    "transport": "binary",
+                    "speed": snapshot.get("output_speed", 1.0),
+                },
+            },
+            "replace": snapshot.get("pronunciation_replacements", {}),
+            "tools": TOOL_SCHEMAS,
+        },
+    }
+
 @app.get("/health/live")
 async def health_live():
     return {"ok": True, "service": "tara-grok"}
@@ -46,10 +94,9 @@ async def _xai_connect(snapshot: dict):
     url = f"{config.XAI_REALTIME_URL}?model={config.TARA_GROK_MODEL}"
     return await websockets.connect(url, additional_headers={"Authorization": f"Bearer {config.XAI_API_KEY}"}, max_size=8 * 1024 * 1024)
 
-@app.websocket("/voice")
-async def voice(ws: WebSocket):
-    capability = ws.query_params.get("capability", "")
-    session_id = ws.query_params.get("session_id", "")
+@app.websocket("/voice/{session_id}")
+async def voice(ws: WebSocket, session_id: str):
+    capability = _capability_from_subprotocols(ws.scope.get("subprotocols", []))
     if not capability or not session_id:
         await ws.close(code=4401)
         return
@@ -58,10 +105,16 @@ async def voice(ws: WebSocket):
     except Exception:
         await ws.close(code=4401)
         return
-    await ws.accept()
+    await ws.accept(subprotocol="hm.tara.v1")
     snapshot = session.get("config", {})
-    xai = await _xai_connect(snapshot)
-    await xai.send(json.dumps({"type": "session.update", "session": {"instructions": SYSTEM_PROMPT, "voice": snapshot.get("voice_id", "eve"), "reasoning": {"effort": snapshot.get("reasoning_effort", "high")}, "audio": {"input": {"format": {"type": "audio/pcm", "rate": 16000}, "transcription": {"language_hint": snapshot.get("language", "en")}}, "output": {"format": {"type": "audio/pcm", "rate": 16000}, "speed": snapshot.get("output_speed", 1.0)}}, "tools": TOOL_SCHEMAS}}))
+    try:
+        xai = await _xai_connect(snapshot)
+        await xai.send(json.dumps(_session_update(snapshot)))
+    except Exception:
+        log.exception("xAI realtime connection failed")
+        await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"failure_code": "xai_connect_failed"}})
+        await ws.close(code=1011)
+        return
     await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "started", "payload": {"provider": "grok", "model": config.TARA_GROK_MODEL}})
 
     async def browser_to_xai():
@@ -69,14 +122,40 @@ async def voice(ws: WebSocket):
             while True:
                 message = await ws.receive()
                 if message.get("bytes") is not None:
+                    if len(message["bytes"]) > MAX_BINARY_FRAME_BYTES:
+                        await ws.close(code=1009)
+                        return
                     await xai.send(message["bytes"])
                 elif message.get("text"):
+                    if len(message["text"].encode("utf-8")) > MAX_CONTROL_FRAME_BYTES:
+                        await ws.close(code=1009)
+                        return
                     payload = json.loads(message["text"])
+                    if payload.get("type") not in {"input_audio_buffer.commit", "input_audio_buffer.clear", "response.cancel"}:
+                        continue
                     await xai.send(json.dumps(payload))
         except WebSocketDisconnect:
             pass
 
+    pending_tool_calls: list[dict] = []
+    tool_batch_task: asyncio.Task | None = None
+
+    async def flush_tool_calls():
+        nonlocal pending_tool_calls
+        await asyncio.sleep(TOOL_BATCH_WINDOW_SECONDS)
+        calls, pending_tool_calls = pending_tool_calls, []
+        results = await asyncio.gather(*[
+            execute(session_id, event["name"], event["arguments"])
+            for event in calls
+        ], return_exceptions=True)
+        for event, result in zip(calls, results):
+            output = result if not isinstance(result, Exception) else {"error": "tool_execution_failed"}
+            await xai.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": event["call_id"], "output": json.dumps(output)}}))
+        await xai.send(json.dumps({"type": "response.create"}))
+
     async def xai_to_browser():
+        nonlocal tool_batch_task
+        terminal_event = {"event_id": str(uuid.uuid4()), "type": "completed", "payload": {"provider": "grok"}}
         try:
             async for message in xai:
                 if isinstance(message, bytes):
@@ -84,13 +163,21 @@ async def voice(ws: WebSocket):
                     continue
                 event = json.loads(message)
                 if event.get("type") == "response.function_call_arguments.done":
-                    args = json.loads(event.get("arguments") or "{}")
-                    result = await execute(session_id, event.get("name", ""), args)
-                    await xai.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": event.get("call_id"), "output": json.dumps(result)}}))
-                    await xai.send(json.dumps({"type": "response.create"}))
+                    try:
+                        args = json.loads(event.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    pending_tool_calls.append({"name": event.get("name", ""), "call_id": event.get("call_id"), "arguments": args})
+                    if not tool_batch_task or tool_batch_task.done():
+                        tool_batch_task = asyncio.create_task(flush_tool_calls())
                 await ws.send_text(json.dumps(event))
+        except Exception:
+            log.exception("xAI realtime session failed")
+            terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": "xai_session_failed"}}
         finally:
-            await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "completed", "payload": {"provider": "grok"}})
+            if tool_batch_task and not tool_batch_task.done():
+                tool_batch_task.cancel()
+            await emit_event(session_id, terminal_event)
 
     tasks = [asyncio.create_task(browser_to_xai()), asyncio.create_task(xai_to_browser())]
     try:

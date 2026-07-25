@@ -1368,6 +1368,7 @@ const taraGrokRuntime = createTaraGrokRuntime({
   prisma,
   recallFn: recallPersistedMemories,
   memoryStore: persistentMemoryStore,
+  getTaraConfig: async ({ userId, orgId }) => taraHandler?.configStore?.getConfig('default', 'default', { userId, orgId }),
 });
 // TARA Skills store — named prompt presets; select copies prompts into config.
 if (taraHandler) {

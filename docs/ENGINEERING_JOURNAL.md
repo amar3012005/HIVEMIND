@@ -201,3 +201,37 @@ or uncommitted changes as completed work.
 - Rollback: revert `ce24b7b891ccd48bca8740f489f7990cbb0d07ff`
 - Next: review and merge the pushed branch, then run the additive migration and
   authenticated `/api/chat` canaries through the production release protocol.
+
+## 2026-07-25 UTC - TARA Grok voice implementation started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/tara-grok`
+- Base / commit: `699377a88` -> `pending`
+- Scope: parallel xAI Grok Voice adapter, provider-aware Core contracts, TARA
+  UI/provider routing, additive call-ledger migration, and guarded deployment
+  configuration; no production deployment.
+- Verification: pending focused adapter, Core, frontend, compose, and diff checks.
+- Production: not deployed
+- Rollback: not applicable
+- Next: implement and verify the isolated branch, then push frontend before its
+  parent gitlink.
+
+## 2026-07-25 UTC - TARA Grok voice implementation committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/tara-grok`
+- Base / commit: `699377a88` -> `dff830deb`, `9e13ecc20`
+- Scope: parallel `tara-grok` xAI Voice adapter, capability-scoped Core events
+  and provider configuration, additive TARA call/campaign schema, provider
+  toggle UI, HyperAgents provider snapshots, and guarded Compose/Caddy inputs.
+- Verification: Python compilation; Core JavaScript syntax checks in the Core
+  image; Prisma 5.22 schema validation; local Grok `/health/live`,
+  `/health/ready`, and catalog checks; Grok image build; frontend production
+  image build; `git diff --check`.
+- Production: not deployed
+- Rollback: disable Grok in Core, preserve `/voice2`, and remove only
+  `tara-grok` using `TARA_GROK_DEPLOYMENT.md`.
+- Next: review, merge, apply the additive migration, provision scoped secrets,
+  then use the runbook's single-service canary sequence.

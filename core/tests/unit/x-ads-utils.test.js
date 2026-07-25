@@ -9,7 +9,7 @@ import {
   calculateMetrics, getCampaign, listCampaigns, normalizeFundingInstrument, normalizeServiceError,
   reconciledCampaignStatus, xAdsBetaEnabled,
 } from '../../src/x-ads/service.js';
-import { ProviderError } from '../../src/x-ads/nango-proxy.js';
+import { ProviderError } from '../../src/x-ads/x-api-client.js';
 
 test('amountToMicros converts local currency without floating point math', () => {
   assert.equal(amountToMicros('12.34', 'EUR'), 12_340_000n);
@@ -113,7 +113,7 @@ test('X delivery state reconciliation prioritizes rejection and completion', () 
   assert.equal(reconciledCampaignStatus({ currentStatus: 'PAUSED', effectiveStatus: 'PAUSED' }), 'PAUSED');
 });
 
-test('campaign reads always include the authenticated organization scope', async () => {
+test('campaign reads always include the authenticated organization and user scope', async () => {
   const previousEnabled = process.env.X_ADS_ENABLED;
   const previousOrgs = process.env.X_ADS_BETA_ORG_IDS;
   process.env.X_ADS_ENABLED = 'true'; process.env.X_ADS_BETA_ORG_IDS = 'org-a';
@@ -127,9 +127,9 @@ test('campaign reads always include the authenticated organization scope', async
     findMany: async (args) => { calls.push(args.where); return [row]; },
     findFirst: async (args) => { calls.push(args.where); return row; },
   } };
-  await listCampaigns({ prisma, orgId: 'org-a' });
-  await getCampaign({ prisma, orgId: 'org-a', id: 'campaign-a' });
-  assert.deepEqual(calls, [{ orgId: 'org-a' }, { id: 'campaign-a', orgId: 'org-a' }]);
+  await listCampaigns({ prisma, orgId: 'org-a', userId: 'user-a' });
+  await getCampaign({ prisma, orgId: 'org-a', userId: 'user-a', id: 'campaign-a' });
+  assert.deepEqual(calls, [{ orgId: 'org-a', userId: 'user-a' }, { id: 'campaign-a', orgId: 'org-a', userId: 'user-a' }]);
   if (previousEnabled === undefined) delete process.env.X_ADS_ENABLED; else process.env.X_ADS_ENABLED = previousEnabled;
   if (previousOrgs === undefined) delete process.env.X_ADS_BETA_ORG_IDS; else process.env.X_ADS_BETA_ORG_IDS = previousOrgs;
 });

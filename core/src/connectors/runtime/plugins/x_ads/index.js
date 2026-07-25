@@ -2,6 +2,7 @@ import { ConnectorPlugin } from '../../connector-plugin.js';
 import { makeResult, jsonContent } from '../../contracts.js';
 import { NotConnectedError, classifyError } from '../../errors.js';
 import { changeCampaignState, publishCampaign } from '../../../../x-ads/service.js';
+import { X_AUTH_OAUTH1 } from '../../../../x-ads/x-auth-store.js';
 
 function writeTool(name, description) {
   return {
@@ -39,12 +40,12 @@ export class XAdsPlugin extends ConnectorPlugin {
 
   async getConnection(context) {
     const prisma = context.db || this._deps.prisma;
-    const row = await prisma?.nangoConnection?.findFirst({
-      where: { userId: context.userId, orgId: context.orgId, providerKey: 'twitter', status: 'active' },
-      select: { connectionId: true },
+    const row = await prisma?.xAdsCredential?.findUnique({
+      where: { orgId_userId_authKind: { orgId: context.orgId, userId: context.userId, authKind: X_AUTH_OAUTH1 } },
+      select: { id: true, status: true },
     });
-    if (!row) throw new NotConnectedError('X Ads is not connected for this organization');
-    return { connected: true, connectionId: row.connectionId };
+    if (!row || row.status !== 'active') throw new NotConnectedError('X Ads is not connected for this user and organization');
+    return { connected: true, connectionId: row.id };
   }
 
   async executeTool(toolName, input, context) {

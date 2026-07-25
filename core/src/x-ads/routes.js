@@ -3,8 +3,10 @@ import { getConnectorRuntime } from '../connectors/runtime/index.js';
 import {
   createCampaign, getCampaign, getStatus, listAccounts, listCampaigns,
   listFundingInstruments, normalizeServiceError, prepareCampaign, searchTargets,
-  syncCampaign, updateCampaign, uploadCampaignImage,
+  syncCampaign, updateCampaign, uploadCampaignImage, xAdsBetaEnabled,
 } from './service.js';
+import { disconnectX, startOAuth1, startOAuth2 } from './oauth.js';
+import { X_AUTH_OAUTH1, X_AUTH_OAUTH2 } from './x-auth-store.js';
 
 function jsonResult(result) {
   return result?.content?.find((item) => item.type === 'json')?.data || null;
@@ -24,6 +26,22 @@ async function audit(prisma, auditLogger, { userId, orgId, action, campaignId, m
 export async function handleXAdsRequest({ pathname, method, body, url, req, res, prisma, userId, orgId, jsonResponse, parseMultipart, auditLogger }) {
   if (!pathname.startsWith('/api/x-ads/')) return false;
   try {
+    if (pathname === '/api/x-ads/oauth/oauth2/start' && method === 'POST') {
+      if (!xAdsBetaEnabled(orgId)) return jsonResponse(res, { error: 'x_ads_beta_disabled', message: 'X Ads beta is not enabled for this organization' }, 403);
+      return jsonResponse(res, await startOAuth2({ prisma, userId, orgId }));
+    }
+    if (pathname === '/api/x-ads/oauth/oauth1/start' && method === 'POST') {
+      if (!xAdsBetaEnabled(orgId)) return jsonResponse(res, { error: 'x_ads_beta_disabled', message: 'X Ads beta is not enabled for this organization' }, 403);
+      if (process.env.X_ADS_API_APPROVED !== 'true') return jsonResponse(res, { error: 'x_ads_api_not_approved', message: 'X Ads API access is not approved for customer publishing' }, 403);
+      return jsonResponse(res, await startOAuth1({ prisma, userId, orgId }));
+    }
+    let oauthMatch = pathname.match(/^\/api\/x-ads\/oauth\/(oauth1|oauth2)\/disconnect$/);
+    if (oauthMatch && method === 'POST') {
+      const authKind = oauthMatch[1] === 'oauth1' ? X_AUTH_OAUTH1 : X_AUTH_OAUTH2;
+      const result = await disconnectX({ prisma, userId, orgId, authKind });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'connection_disconnected', metadata: { auth_kind: authKind } });
+      return jsonResponse(res, result);
+    }
     if (pathname === '/api/x-ads/status' && method === 'GET') return jsonResponse(res, await getStatus({ prisma, userId, orgId }));
     if (pathname === '/api/x-ads/accounts' && method === 'GET') return jsonResponse(res, await listAccounts({ prisma, userId, orgId }));
 
@@ -37,7 +55,7 @@ export async function handleXAdsRequest({ pathname, method, body, url, req, res,
     }));
 
     if (pathname === '/api/x-ads/campaigns') {
-      if (method === 'GET') return jsonResponse(res, await listCampaigns({ prisma, orgId }));
+      if (method === 'GET') return jsonResponse(res, await listCampaigns({ prisma, userId, orgId }));
       if (method === 'POST') {
         const campaign = await createCampaign({ prisma, userId, orgId, input: body || {} });
         await audit(prisma, auditLogger, { userId, orgId, action: 'draft_created', campaignId: campaign.id });
@@ -47,7 +65,7 @@ export async function handleXAdsRequest({ pathname, method, body, url, req, res,
 
     match = pathname.match(/^\/api\/x-ads\/campaigns\/([0-9a-f-]{36})$/i);
     if (match) {
-      if (method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, id: match[1] }) });
+      if (method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, userId, orgId, id: match[1] }) });
       if (method === 'PATCH') {
         const campaign = await updateCampaign({ prisma, userId, orgId, id: match[1], input: body || {} });
         await audit(prisma, auditLogger, { userId, orgId, action: 'draft_updated', campaignId: match[1], metadata: {
@@ -73,7 +91,7 @@ export async function handleXAdsRequest({ pathname, method, body, url, req, res,
           chunks.push(chunk);
         }
         const file = parseMultipart(Buffer.concat(chunks), boundary).find((part) => part.name === 'image' && part.filename);
-        const campaign = await uploadCampaignImage({ prisma, orgId, id, file });
+        const campaign = await uploadCampaignImage({ prisma, userId, orgId, id, file });
         await audit(prisma, auditLogger, { userId, orgId, action: 'image_uploaded', campaignId: id, metadata: { content_type: file?.contentType, bytes: file?.data?.length } });
         return jsonResponse(res, { campaign });
       }

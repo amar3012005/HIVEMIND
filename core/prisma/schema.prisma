@@ -514,6 +514,47 @@ model OutreachTarget {
 
 /// Customer-owned X paid campaign. X remains the delivery source of truth;
 /// this row owns the local draft, resumable publication state and metrics cache.
+model XAdsCredential {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String   @map("org_id") @db.Uuid
+  userId                String   @map("user_id") @db.Uuid
+  authKind              String   @map("auth_kind") @db.VarChar(16)
+  xUserId               String?  @map("x_user_id") @db.VarChar(32)
+  xUsername             String?  @map("x_username") @db.VarChar(64)
+  accessTokenEncrypted  String   @map("access_token_encrypted") @db.Text
+  refreshTokenEncrypted String?  @map("refresh_token_encrypted") @db.Text
+  tokenSecretEncrypted  String?  @map("token_secret_encrypted") @db.Text
+  scopes                String[] @default([])
+  expiresAt             DateTime? @map("expires_at") @db.Timestamptz(6)
+  status                String   @default("active") @db.VarChar(20)
+  connectedAt           DateTime @default(now()) @map("connected_at") @db.Timestamptz(6)
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, userId, authKind], map: "x_ads_credentials_tenant_auth_key")
+  @@index([orgId, userId, status], map: "x_ads_credentials_org_user_status_idx")
+  @@index([xUserId], map: "x_ads_credentials_x_user_idx")
+  @@map("x_ads_credentials")
+}
+
+/// Short-lived, one-time state for native X OAuth callbacks. Secrets are
+/// encrypted and bound to the originating organization, user and auth flow.
+model XAdsOAuthState {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                  String    @map("org_id") @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  authKind               String    @map("auth_kind") @db.VarChar(16)
+  stateHash              String?   @unique(map: "x_ads_oauth_states_state_hash_key") @map("state_hash") @db.VarChar(64)
+  requestTokenHash       String?   @unique(map: "x_ads_oauth_states_request_token_hash_key") @map("request_token_hash") @db.VarChar(64)
+  verifierEncrypted      String?   @map("verifier_encrypted") @db.Text
+  requestSecretEncrypted String?   @map("request_secret_encrypted") @db.Text
+  expiresAt              DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt             DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, authKind, expiresAt], map: "x_ads_oauth_states_tenant_expiry_idx")
+  @@map("x_ads_oauth_states")
+}
+
 model XAdsCampaign {
   id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId                 String             @map("org_id") @db.Uuid

@@ -12,7 +12,7 @@ const context = {
 };
 
 function fakePrisma() {
-  return { nangoConnection: { findFirst: async () => ({ connectionId: 'nango-x-ads' }) } };
+  return { xAdsCredential: { findUnique: async (args) => ({ id: 'official-x-ads', status: 'active', args }) } };
 }
 
 test('dashboard-confirmed publish enters connector runtime once', async () => {
@@ -34,7 +34,7 @@ test('dashboard-confirmed publish enters connector runtime once', async () => {
 
 test('X Ads plugin fails closed when org has no OAuth1 connection', async () => {
   const registry = new ConnectorRegistry();
-  registry.register(createXAdsPlugin({ prisma: { nangoConnection: { findFirst: async () => null } } }));
+  registry.register(createXAdsPlugin({ prisma: { xAdsCredential: { findUnique: async () => null } } }));
   const runtime = new ConnectorRuntime({ registry, db: {} });
   const result = await runtime.executeTool('x_ads__pause', { campaign_id: '33333333-3333-4333-8333-333333333333' }, context);
   assert.equal(result.status, 'not_connected');

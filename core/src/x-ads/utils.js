@@ -137,7 +137,7 @@ export function campaignConfirmationPayload(campaign) {
 }
 
 function confirmationSecret() {
-  const secret = process.env.X_ADS_CONFIRMATION_SECRET || process.env.NANGO_SECRET_KEY;
+  const secret = process.env.X_ADS_CONFIRMATION_SECRET || process.env.SESSION_SECRET;
   if (!secret) throw new Error('X Ads confirmation secret is not configured');
   return secret;
 }

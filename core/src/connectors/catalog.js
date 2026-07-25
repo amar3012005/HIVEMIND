@@ -194,9 +194,8 @@ export const CONNECTOR_CATALOG = [
     mode: ['live'],
     authType: 'oauth2',
     status: 'needs_oauth_setup',
-    nangoProvider: 'twitter-v2',
     description: 'X identity, media upload and public Post creation.',
-    setupHint: 'Configure OAuth 2.0 PKCE with users.read, tweet.read, tweet.write, media.write and offline.access.',
+    setupHint: 'Uses the official X OAuth 2.0 PKCE flow.',
   },
   {
     id: 'x-ads',
@@ -205,9 +204,8 @@ export const CONNECTOR_CATALOG = [
     mode: ['live'],
     authType: 'oauth1',
     status: 'needs_oauth_setup',
-    nangoProvider: 'twitter',
     description: 'Advertiser accounts, paid campaigns, budgets and performance.',
-    setupHint: 'Requires an X developer app approved for Ads API access.',
+    setupHint: 'Uses official X OAuth 1.0a and requires Ads API access.',
   },
 
   // ── INGESTION — Database ─────────────────────────────────────────────

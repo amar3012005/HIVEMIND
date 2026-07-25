@@ -35,6 +35,7 @@ import { requireAdminSecret, requireSessionSecret } from './security/internal-au
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
+import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -5444,6 +5445,13 @@ exit \$RC
     });
     if (handled) return;
     return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+
+  // Native X OAuth callbacks are intentionally outside the user API auth gate.
+  // Their random, one-time server-side state resolves the exact org/user owner.
+  if (pathname === '/api/x-ads/oauth/oauth2/callback' || pathname === '/api/x-ads/oauth/oauth1/callback') {
+    await handleXAdsOAuthCallback({ pathname, url, res, prisma });
+    return;
   }
 
   // API Routes
@@ -11047,8 +11055,6 @@ exit \$RC
                 'google-mail': 'google-mail',
                 'google-drive': 'google-drive',
                 'google-calendar': 'google-calendar',
-                'x-account': 'twitter-v2',
-                'x-ads': 'twitter',
               };
               try {
                 if (prisma?.nangoConnection) {
@@ -11077,6 +11083,23 @@ exit \$RC
                 }
               } catch (nangoErr) {
                 console.warn('[connectors/status] nango overlay failed:', nangoErr.message);
+              }
+
+              try {
+                const nativeXRows = await prisma.xAdsCredential.findMany({
+                  where: { userId, orgId, status: 'active' },
+                  select: { id: true, authKind: true, connectedAt: true, xUsername: true },
+                });
+                for (const row of nativeXRows) {
+                  const connectorId = row.authKind === 'OAUTH2' ? 'x-account' : (row.authKind === 'OAUTH1' ? 'x-ads' : null);
+                  if (connectorId) byProvider[connectorId] = {
+                    provider: connectorId, status: 'connected', lastSyncAt: null,
+                    createdAt: row.connectedAt, metadata: { username: row.xUsername },
+                    connectionId: row.id, source: 'official_x',
+                  };
+                }
+              } catch (xError) {
+                console.warn('[connectors/status] native X overlay failed:', xError.message);
               }
 
               const merged = CONNECTOR_CATALOG.map(c => ({
@@ -12568,6 +12591,12 @@ exit \$RC
               const connectorId = body.connector_id;
               if (!connectorId) {
                 return jsonResponse(res, { error: 'connector_id is required' }, 400);
+              }
+              if (connectorId === 'x-account' || connectorId === 'x-ads') {
+                return jsonResponse(res, {
+                  error: 'native_x_oauth_required',
+                  message: 'Connect X from Your Campaigns using the official X authorization flow.',
+                }, 409);
               }
 
               // Resolve which Nango provider this connector maps to.

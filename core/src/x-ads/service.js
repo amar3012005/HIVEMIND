@@ -1,15 +1,11 @@
-import { getConnectionId } from '../connectors/mcp/nango-service.js';
-import { nangoProxy, ProviderError } from './nango-proxy.js';
+import { getXCredential, X_AUTH_OAUTH1, X_AUTH_OAUTH2 } from './x-auth-store.js';
+import { directAdsRequest, directXRequest, ProviderError } from './x-api-client.js';
 import {
   amountToMicros, campaignConfirmationPayload, createConfirmation, inclusiveCampaignDays,
   inclusiveEndAt, normalizeTargets, serializeCampaign, validateDestinationUrl,
   validatePostText, verifyConfirmation,
 } from './utils.js';
 
-const ADS_PROVIDER = 'twitter';
-const X_PROVIDER = 'twitter-v2';
-const ADS_BASE = process.env.X_ADS_BASE_URL || 'https://ads-api.x.com';
-const X_BASE = 'https://api.x.com';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const TARGET_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -24,10 +20,10 @@ export function xAdsBetaEnabled(orgId, env = process.env) {
 
 async function connectionIds(prisma, userId, orgId) {
   const [x, ads] = await Promise.all([
-    getConnectionId({ userId, orgId, providerKey: X_PROVIDER }, { db: prisma }),
-    getConnectionId({ userId, orgId, providerKey: ADS_PROVIDER }, { db: prisma }),
+    getXCredential({ prisma, userId, orgId, authKind: X_AUTH_OAUTH2 }),
+    getXCredential({ prisma, userId, orgId, authKind: X_AUTH_OAUTH1 }),
   ]);
-  return { x, ads };
+  return { prisma, userId, orgId, x, ads };
 }
 
 function requireBeta(orgId) {
@@ -52,11 +48,11 @@ function requireConnections(ids, { x = false, ads = false } = {}) {
 }
 
 async function xRequest(ids, options) {
-  return nangoProxy({ providerKey: X_PROVIDER, connectionId: ids.x, baseUrl: X_BASE, ...options });
+  return directXRequest({ prisma: ids.prisma, userId: ids.userId, orgId: ids.orgId, ...options });
 }
 
 async function adsRequest(ids, options) {
-  return nangoProxy({ providerKey: ADS_PROVIDER, connectionId: ids.ads, baseUrl: ADS_BASE, ...options });
+  return directAdsRequest({ prisma: ids.prisma, userId: ids.userId, orgId: ids.orgId, ...options });
 }
 
 function queryPath(path, params) {
@@ -91,15 +87,23 @@ export function normalizeFundingInstrument(item, now = new Date()) {
 export async function getStatus({ prisma, userId, orgId }) {
   const ids = await connectionIds(prisma, userId, orgId);
   let identity = null;
+  let xConnected = Boolean(ids.x);
   if (ids.x) {
     try {
       identity = providerData(await xRequest(ids, { path: '/2/users/me?user.fields=id,name,username,profile_image_url' }));
-    } catch { /* connection status remains visible; detailed error is returned by account calls */ }
+    } catch (error) {
+      if (error?.code === 'reauth_required') {
+        xConnected = false;
+        await prisma.xAdsCredential.updateMany({
+          where: { orgId, userId, authKind: X_AUTH_OAUTH2 }, data: { status: 'expired' },
+        }).catch(() => {});
+      }
+    }
   }
   return {
     beta_enabled: xAdsBetaEnabled(orgId),
     ads_api_approved: process.env.X_ADS_API_APPROVED === 'true',
-    connections: { x: Boolean(ids.x), x_ads: Boolean(ids.ads) },
+    connections: { x: xConnected, x_ads: Boolean(ids.ads) },
     identity,
   };
 }
@@ -172,8 +176,8 @@ export async function searchTargets({ prisma, userId, orgId, type, query = '', c
   return value;
 }
 
-async function getScopedCampaign(prisma, id, orgId, includeSteps = false) {
-  const campaign = await prisma.xAdsCampaign.findFirst({ where: { id, orgId }, ...(includeSteps ? { include: { steps: { orderBy: { updatedAt: 'asc' } } } } : {}) });
+async function getScopedCampaign(prisma, id, orgId, userId, includeSteps = false) {
+  const campaign = await prisma.xAdsCampaign.findFirst({ where: { id, orgId, userId }, ...(includeSteps ? { include: { steps: { orderBy: { updatedAt: 'asc' } } } } : {}) });
   if (!campaign) { const e = new Error('Campaign not found'); e.status = 404; e.code = 'not_found'; throw e; }
   return campaign;
 }
@@ -231,7 +235,7 @@ export async function createCampaign({ prisma, userId, orgId, input }) {
 
 export async function updateCampaign({ prisma, userId, orgId, id, input }) {
   requireBeta(orgId);
-  const current = await getScopedCampaign(prisma, id, orgId);
+  const current = await getScopedCampaign(prisma, id, orgId, userId);
   if (!['DRAFT', 'READY', 'SETUP_FAILED'].includes(current.status) || current.xCampaignId) throw new Error('Published campaign settings are immutable in V1');
   const accountId = input.ad_account_id || current.adAccountId;
   const fundingId = input.funding_instrument_id || current.fundingInstrumentId;
@@ -270,9 +274,9 @@ function microsToInput(value, currency) {
   return digits ? `${whole}.${fraction.toString().padStart(6, '0').slice(0, digits)}` : whole.toString();
 }
 
-export async function uploadCampaignImage({ prisma, orgId, id, file }) {
+export async function uploadCampaignImage({ prisma, userId, orgId, id, file }) {
   requireBeta(orgId);
-  const current = await getScopedCampaign(prisma, id, orgId);
+  const current = await getScopedCampaign(prisma, id, orgId, userId);
   if (current.xPostId || !['DRAFT', 'READY', 'SETUP_FAILED'].includes(current.status)) throw new Error('Creative is immutable after Post creation');
   if (!file) throw new Error('image file is required');
   if (!IMAGE_TYPES.has(file.contentType)) throw new Error('image must be JPG, PNG, or WEBP');
@@ -284,20 +288,20 @@ export async function uploadCampaignImage({ prisma, orgId, id, file }) {
   return serializeCampaign(campaign);
 }
 
-export async function listCampaigns({ prisma, orgId }) {
+export async function listCampaigns({ prisma, userId, orgId }) {
   requireBeta(orgId);
-  const campaigns = await prisma.xAdsCampaign.findMany({ where: { orgId }, orderBy: { createdAt: 'desc' }, take: 100 });
+  const campaigns = await prisma.xAdsCampaign.findMany({ where: { orgId, userId }, orderBy: { createdAt: 'desc' }, take: 100 });
   return { campaigns: campaigns.map((campaign) => serializeCampaign(campaign)) };
 }
 
-export async function getCampaign({ prisma, orgId, id }) {
+export async function getCampaign({ prisma, userId, orgId, id }) {
   requireBeta(orgId);
-  return serializeCampaign(await getScopedCampaign(prisma, id, orgId, true), { includeSteps: true });
+  return serializeCampaign(await getScopedCampaign(prisma, id, orgId, userId, true), { includeSteps: true });
 }
 
 export async function prepareCampaign({ prisma, userId, orgId, id }) {
   requireBeta(orgId);
-  let campaign = await getScopedCampaign(prisma, id, orgId);
+  let campaign = await getScopedCampaign(prisma, id, orgId, userId);
   if (campaign.xCampaignId && campaign.status !== 'SETUP_FAILED') throw new Error('Campaign has already entered publication');
   const selected = await validateAccountSelection({ prisma, userId, orgId, accountId: campaign.adAccountId, fundingInstrumentId: campaign.fundingInstrumentId });
   const validated = validateDraftInput({
@@ -362,16 +366,16 @@ async function runStep(prisma, campaign, step, action, persist = () => ({})) {
 export async function publishCampaign({ prisma, userId, orgId, id, confirmationToken }) {
   requireBeta(orgId);
   requireAdsApproval();
-  let campaign = await getScopedCampaign(prisma, id, orgId);
-  if (['ACTIVE', 'PENDING_REVIEW', 'PAUSED', 'COMPLETED'].includes(campaign.status)) return serializeCampaign(await getScopedCampaign(prisma, id, orgId, true), { includeSteps: true });
+  let campaign = await getScopedCampaign(prisma, id, orgId, userId);
+  if (['ACTIVE', 'PENDING_REVIEW', 'PAUSED', 'COMPLETED'].includes(campaign.status)) return serializeCampaign(await getScopedCampaign(prisma, id, orgId, userId, true), { includeSteps: true });
   if (!verifyConfirmation(campaign, confirmationToken)) { const e = new Error('Confirmation expired or campaign changed'); e.status = 409; e.code = 'confirmation_invalid'; throw e; }
   const lockBefore = new Date(Date.now() - 2 * 60 * 1000);
   const claimed = await prisma.xAdsCampaign.updateMany({
-    where: { id, orgId, OR: [{ publishLockAt: null }, { publishLockAt: { lt: lockBefore } }], status: { in: ['READY', 'SETUP_FAILED'] } },
+    where: { id, orgId, userId, OR: [{ publishLockAt: null }, { publishLockAt: { lt: lockBefore } }], status: { in: ['READY', 'SETUP_FAILED'] } },
     data: { status: 'PUBLISHING', publishLockAt: new Date(), lastError: null },
   });
   if (claimed.count !== 1) { const e = new Error('Campaign publication is already running'); e.status = 409; e.code = 'publish_in_progress'; throw e; }
-  campaign = await getScopedCampaign(prisma, id, orgId);
+  campaign = await getScopedCampaign(prisma, id, orgId, userId);
   let ids;
   try {
     ids = await connectionIds(prisma, userId, orgId);
@@ -478,7 +482,7 @@ export async function publishCampaign({ prisma, userId, orgId, id, confirmationT
 export async function changeCampaignState({ prisma, userId, orgId, id, action }) {
   requireBeta(orgId);
   if (action === 'resume') requireAdsApproval();
-  let campaign = await getScopedCampaign(prisma, id, orgId);
+  let campaign = await getScopedCampaign(prisma, id, orgId, userId);
   if (!campaign.xCampaignId || !campaign.xLineItemId) throw new Error('Campaign has not been published');
   const ids = await connectionIds(prisma, userId, orgId); requireConnections(ids, { ads: true });
   if (action === 'resume') {
@@ -521,7 +525,7 @@ export function reconciledCampaignStatus({ currentStatus, approval, effectiveSta
 
 export async function syncCampaign({ prisma, userId, orgId, id, force = false }) {
   requireBeta(orgId);
-  let campaign = await getScopedCampaign(prisma, id, orgId);
+  let campaign = await getScopedCampaign(prisma, id, orgId, userId);
   if (!campaign.xCampaignId) return serializeCampaign(campaign);
   if (!force && campaign.metricsSyncedAt && Date.now() - campaign.metricsSyncedAt.getTime() < METRICS_CACHE_MS) return serializeCampaign(campaign);
   const ids = await connectionIds(prisma, userId, orgId); requireConnections(ids, { ads: true });

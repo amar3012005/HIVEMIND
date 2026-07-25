@@ -31,6 +31,7 @@ import {
   redeemReferral,
 } from './billing/entitlements.js';
 import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
+import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import {
@@ -3178,8 +3179,26 @@ const server = http.createServer(async (req, res) => {
     }
     // Plans are commercial state. A browser cannot self-assign a paid plan;
     // referrals and Stripe webhooks create time-bound entitlements server-side.
+    // EXCEPTION: a valid enterprise ACCESS CODE unlocks the standard 14-day
+    // enterprise onboarding → runway terms (seeded below via activateOffer). The
+    // code is an allow-list (see billing/access-codes.js), never "any non-empty
+    // string" — that would let anyone self-provision a paid enterprise workspace.
     const requestedPlanInput = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
-    const requestedPlan = isAdminAuthorized(req, url) ? requestedPlanInput : 'free';
+    const enterpriseAccessCode = normalizeEnterpriseAccessCode(body.enterprise_access_code);
+    let enterpriseViaAccessCode = false;
+    let requestedPlan;
+    if (isAdminAuthorized(req, url)) {
+      requestedPlan = requestedPlanInput;
+    } else if (requestedPlanInput === 'enterprise') {
+      if (!isValidEnterpriseAccessCode(enterpriseAccessCode)) {
+        // FE maps a 403 here → onboarding_error=invalid_enterprise_code.
+        return jsonResponse(res, { error: 'invalid or inactive enterprise access code', code: 'invalid_enterprise_code' }, 403);
+      }
+      requestedPlan = 'enterprise';
+      enterpriseViaAccessCode = true;
+    } else {
+      requestedPlan = 'free';
+    }
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
@@ -3238,6 +3257,14 @@ const server = http.createServer(async (req, res) => {
             joinedAt: new Date(),
           },
         });
+        // Enterprise access code → seed the standard 14-day onboarding → runway
+        // entitlement atomically with org creation. activateOffer writes the
+        // onboarding + runway phase rows, keeps plan='enterprise', sets
+        // subscriptionStatus='active' and trialEndsAt = now + 14d (full access
+        // during onboarding, then the self-serve Runway estimator takes over).
+        if (enterpriseViaAccessCode) {
+          await activateOffer({ tx, orgId: newOrg.id, offer: buildStandardOffer('enterprise'), source: 'enterprise_access_code' });
+        }
         return { org: newOrg };
       });
       org = created.org;

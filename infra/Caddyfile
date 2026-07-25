@@ -1,0 +1,62 @@
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+core.singulancelabs.com {
+	handle /voice2/* {
+		uri strip_prefix /voice2
+		reverse_proxy localhost:8091
+	}
+	handle /voice-grok/* {
+		uri strip_prefix /voice-grok
+		reverse_proxy localhost:8092
+	}
+	reverse_proxy localhost:2026
+}
+api.singulancelabs.com {
+	handle /v1/byod/* {
+		reverse_proxy localhost:8790
+	}
+	reverse_proxy localhost:2027
+}
+nango.singulancelabs.com {
+	reverse_proxy localhost:3003
+}
+singulancelabs.com {
+	handle /api/waitlist* {
+		reverse_proxy localhost:8095
+	}
+	handle /hivemind* {
+		redir https://next.singulancelabs.com{uri} permanent
+	}
+	reverse_proxy localhost:8088
+}
+www.singulancelabs.com {
+	redir https://singulancelabs.com{uri}
+}
+
+founder.singulancelabs.com {
+	root * /srv/sites/founder
+	file_server
+	redir / /meeting_schedule/ 302
+}
+# Append only after both loopback health checks pass. Restart hm-caddy afterwards.
+# Production core/api routes remain untouched on ports 2026/2027.
+
+
+
+
+
+next.singulancelabs.com {
+	reverse_proxy localhost:2388
+}
+
+
+
+# Canonical customer entry points. Both use the same production frontend and
+# control plane; tenant isolation is by authenticated organization, not hostname.
+personal.singulancelabs.com, enterprise.singulancelabs.com {
+	reverse_proxy localhost:2388
+}

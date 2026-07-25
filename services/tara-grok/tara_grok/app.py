@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Iterable
 
@@ -30,6 +31,43 @@ BUILTIN_VOICES = [
 MAX_BINARY_FRAME_BYTES = 32 * 1024
 MAX_CONTROL_FRAME_BYTES = 16 * 1024
 TOOL_BATCH_WINDOW_SECONDS = 0.05
+
+# ── Session resumption (xAI realtime spec) ──────────────────────────────────
+# Sending `resumption.enabled: true` only makes xAI CACHE the turns. To actually
+# replay them the reconnect must carry `?conversation_id=<id>`, where the id came
+# from the server's `conversation.created` event. Without that round-trip the
+# opt-in is dead config and every reconnect starts cold.
+#
+# The id is cached HERE, keyed by the authenticated principal taken from the
+# consumed capability — never accepted from the client. A client-supplied
+# conversation_id would let a caller replay another tenant's conversation.
+RESUMPTION_TTL_SECONDS = 15 * 60
+MAX_RESUMPTION_ENTRIES = 5_000
+_conversation_cache: dict[tuple[str, str], tuple[str, float]] = {}
+
+
+def _resume_conversation_id(principal: tuple[str, str]) -> str | None:
+    entry = _conversation_cache.get(principal)
+    if not entry:
+        return None
+    conversation_id, expires_at = entry
+    if expires_at <= time.monotonic():
+        _conversation_cache.pop(principal, None)
+        return None
+    return conversation_id
+
+
+def _remember_conversation(principal: tuple[str, str], conversation_id: str | None) -> None:
+    if not conversation_id or not any(principal):
+        return
+    now = time.monotonic()
+    if len(_conversation_cache) >= MAX_RESUMPTION_ENTRIES:
+        for key, (_, expires_at) in list(_conversation_cache.items()):
+            if expires_at <= now:
+                _conversation_cache.pop(key, None)
+        if len(_conversation_cache) >= MAX_RESUMPTION_ENTRIES:
+            _conversation_cache.pop(next(iter(_conversation_cache)), None)
+    _conversation_cache[principal] = (conversation_id, now + RESUMPTION_TTL_SECONDS)
 
 
 def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
@@ -90,8 +128,11 @@ async def voices(language: str | None = None):
     items = [v for v in BUILTIN_VOICES if not language or v["language"].startswith(language.split("-")[0])]
     return {"voices": items, "languages": sorted({v["language"] for v in items})}
 
-async def _xai_connect(snapshot: dict):
+async def _xai_connect(snapshot: dict, resume_conversation_id: str | None = None):
     url = f"{config.XAI_REALTIME_URL}?model={config.TARA_GROK_MODEL}"
+    if resume_conversation_id:
+        # Replays the cached turns so the model stays conditioned on prior context.
+        url += f"&conversation_id={resume_conversation_id}"
     return await websockets.connect(url, additional_headers={"Authorization": f"Bearer {config.XAI_API_KEY}"}, max_size=8 * 1024 * 1024)
 
 @app.websocket("/voice/{session_id}")
@@ -107,8 +148,11 @@ async def voice(ws: WebSocket, session_id: str):
         return
     await ws.accept(subprotocol="hm.tara.v1")
     snapshot = session.get("config", {})
+    # Principal comes from the CONSUMED capability (Core-authenticated), so the
+    # resumption cache can never be steered by client input.
+    principal = (str(session.get("org_id") or ""), str(session.get("user_id") or ""))
     try:
-        xai = await _xai_connect(snapshot)
+        xai = await _xai_connect(snapshot, _resume_conversation_id(principal))
         await xai.send(json.dumps(_session_update(snapshot)))
     except Exception:
         log.exception("xAI realtime connection failed")
@@ -162,6 +206,9 @@ async def voice(ws: WebSocket, session_id: str):
                     await ws.send_bytes(message)
                     continue
                 event = json.loads(message)
+                if event.get("type") == "conversation.created":
+                    # Capture the id so the NEXT connection can resume this conversation.
+                    _remember_conversation(principal, (event.get("conversation") or {}).get("id"))
                 if event.get("type") == "response.function_call_arguments.done":
                     try:
                         args = json.loads(event.get("arguments") or "{}")

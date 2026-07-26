@@ -4,11 +4,11 @@
  * Replaces ONLY the intent-selection stage of /api/chat. Selected by
  * CHAT_ROUTER=progressive, which is the live production default as of the
  * 2026-07 flip (set CHAT_ROUTER=legacy to fall back to parseChatIntent, which
- * is kept in sync). The router picks ONE of six high-level capabilities
+ * is kept in sync). The router picks ONE of seven high-level capabilities
  * via a single Cerebras-direct call; a compact adapter compiles that choice
  * into the SAME `decision` shape parseChatIntent produces, which then flows
  * through the UNCHANGED intentDecisionToPlan → gatherEvidence → citation
- * validation → GPT-OSS synthesis pipeline. No behavior is duplicated; the six
+ * validation → GPT-OSS synthesis pipeline. No behavior is duplicated; the seven
  * tools are a thinner front-door, not a second orchestrator.
  *
  * Benchmarked: 96.7% routing accuracy, ~0.78s avg / 1.55s p95, ~1.3k tokens
@@ -26,7 +26,7 @@ const ROUTER_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_MODEL || 'cerebras/gpt-
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
 const nullable = (type) => ({ type: [type, 'null'] });
 
-// ── The six high-level capability tools (validated schema from the benchmark).
+// ── The high-level capability tools.
 export const HIGH_TOOLS = [
   { type: 'function', function: { name: 'hivemind_context', strict: true,
     description: 'Use for every workspace knowledge question: factual recall, named files, complete entity counts, relationships, timelines, changes, valid-time and known-time questions. This is the single grounded read capability.',
@@ -63,6 +63,11 @@ export const HIGH_TOOLS = [
       provider: { type: 'string', enum: ['gmail', 'google-docs', 'google-gemini', 'slack', 'notion', 'github', 'linear'] },
       intent: { type: 'string', enum: ['read', 'write'] }, request: { type: 'string' }, response_language: { type: 'string' },
     }) } },
+  { type: 'function', function: { name: 'use_campaign', strict: true,
+    description: 'Create, inspect, improve, pause, or refresh an AI campaign. Creating one hands the work to a dedicated Campaign Room and never publishes automatically.',
+    parameters: object({
+      intent: { type: 'string', enum: ['read', 'write'] }, request: { type: 'string' }, response_language: { type: 'string' },
+    }) } },
   { type: 'function', function: { name: 'respond_directly', strict: true,
     description: 'Use only for greetings, arithmetic, harmless general conversation, clarification questions, or safety refusals. Never use for workspace knowledge, memory writes, projects, web research or named connected applications.',
     parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] } }) } },
@@ -79,6 +84,7 @@ Use hivemind_memory for remember/save/update/delete/rename requests in every lan
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
 ALWAYS classify answer_type on every hivemind_context call, by MEANING in the user's language: decisions/agreements/choices => decision; goals/targets/action items/next steps => goal; likes/preferences => preference; learnings/takeaways => lesson; things that happened, meetings, quotes => event; how entities relate => relationship; plain attribute lookups => fact or null. Asking WHAT WAS DECIDED is answer_type=decision even when the topic is pricing, dates, or vendors.
 Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
+Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
@@ -254,6 +260,16 @@ export function adaptToDecision(tool, args, message, language) {
         // registers a connector's tools when selectedGroups includes the provider.
         // Empty groups (the bug) meant the connector was never registered.
         tool_groups: provider ? [provider] : [],
+      }, usage: null };
+    }
+    case 'use_campaign': {
+      const write = args?.intent === 'write';
+      return { decision: {
+        ...base,
+        operation: write ? 'connector_write' : 'connector_read',
+        queries: [s(args?.request, 2000) || message],
+        connector_provider: 'campaigns',
+        tool_groups: ['campaigns'],
       }, usage: null };
     }
     case 'respond_directly':

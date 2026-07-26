@@ -1792,6 +1792,7 @@ RULES:
 - For Slack: trust the registered tool names and descriptions above. Use slack_list_channels when it is registered and a channel id must be resolved; otherwise ask the user instead of inventing a tool.
 - If the user names a channel like "#all-davinci-ai" without giving you an ID, either (a) reuse a channel_id from prior context in this conversation, or (b) ask the user for it.
 - Write tools (send/schedule/draft) go through a draft-approval gate. When a tool returns status="draft_created", do NOT claim the message was sent. Tell the user the draft was created and is awaiting their approval.
+- campaign_create is an internal planning handoff: call it directly when requested, then report the returned Campaign and Campaign Room links. It never publishes; do not claim the campaign is live.
 - Be concise. Output a single sentence after the tool call completes.${contextHint}`;
   const messages = [
     { role: 'system', content: sys },

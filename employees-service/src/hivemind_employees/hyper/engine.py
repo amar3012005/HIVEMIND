@@ -33,6 +33,7 @@ import httpx
 from ..config import get_settings
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
 from ..hivemind_client import (
+    campaign_create_emulated,
     connector_exec_emulated,
     connector_inspect_emulated,
     google_exec_emulated,
@@ -1107,6 +1108,8 @@ class Director:
         sender_email: str = "",
         out_language: str = "",
         campaign_brief: Optional[Dict[str, Any]] = None,
+        room_id: str = "",
+        turn_id: str = "",
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1115,6 +1118,8 @@ class Director:
         self.user_id = user_id
         self.org_id = org_id
         self.project_id = project_id
+        self.room_id = str(room_id or "")
+        self.turn_id = str(turn_id or "")
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -2113,8 +2118,17 @@ class Director:
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
+                "campaign_request": {"type": ["object", "null"], "properties": {
+                    "goal": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "objective": {"type": "string", "enum": ["AWARENESS", "PRODUCT_LAUNCH", "LEAD_GENERATION", "WEBSITE_TRAFFIC", "THOUGHT_LEADERSHIP", "EVENT_PROMOTION", "RE_ENGAGEMENT", "CUSTOM"]},
+                    "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "gmail", "tara"]}},
+                    "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
+                    "intensity": {"type": "string", "enum": ["LIGHT", "FOCUSED", "HIGH"]},
+                    "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
+                }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "turn_mode"],
+            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "turn_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2126,6 +2140,13 @@ class Director:
             "deliverable ('hallo', 'who are you?', 'thanks!', 'what can you do?') — the room just REPLIES "
             "as people; every other field must then be empty/null/false. 'task' = real work is requested. "
             "The ROOM GOAL does NOT make a greeting a task — judge the MESSAGE, not the goal.\n"
+            "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
+            "RUN, START, or SET UP an operational campaign, return its complete brief here. This delegates to a "
+            "dedicated Campaign Room, so every gather field must be empty/null and needs_debate=false. Map X to "
+            "x_organic, email/Gmail to gmail, and calls/TARA to tara. Use channels=[] when the user did not specify "
+            "a channel; Core will select only channels that are connected and executable. Defaults: 14 days, "
+            "FOCUSED, APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when this is "
+            "already a Campaign Room. Starting a campaign NEVER means publishing it.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2783,6 +2804,51 @@ class Director:
         # pipeline ending in a fabricated report.
         if str(plan.get("turn_mode") or "task").lower() == "chat":
             return await self._chat_turn(t0)
+        campaign_request = plan.get("campaign_request")
+        if isinstance(campaign_request, dict) and self.room_kind != "campaign":
+            await self.emit({"t": "typing", "agent": _lead,
+                             "note": "Creating the dedicated Campaign Room…"})
+            response = await campaign_create_emulated(
+                campaign_request, user_id=self.user_id, org_id=self.org_id,
+                room_id=self.room_id or "room",
+                turn_id=self.turn_id or str(int(t0 * 1000)),
+            )
+            campaign = response.get("campaign") if isinstance(response, dict) else None
+            if isinstance(campaign, dict) and campaign.get("id"):
+                campaign_id = str(campaign["id"])
+                room_id = str(campaign.get("roomId") or "")
+                handoff = {
+                    "campaign_id": campaign_id,
+                    "room_id": room_id,
+                    "status": str(campaign.get("status") or "GENERATING"),
+                    "name": str(campaign.get("name") or campaign_request.get("name") or "Campaign"),
+                    "campaign_url": f"/hivemind/app/employees/campaigns?campaign={campaign_id}",
+                    "room_url": f"/hivemind/app/employees/rooms/{room_id}?campaignReturn={campaign_id}" if room_id else None,
+                }
+                final_text = (f"The dedicated Campaign Room is now building **{handoff['name']}**. "
+                              "Nothing has been published; the finished plan will return to Your Campaigns for approval.")
+                await self.emit({"t": "campaign_handoff", **handoff})
+                await self.emit({"t": "line", "agent": _lead, "kind": "synthesis", "content": final_text})
+                await report_llm_usage(
+                    user_id=self.user_id, org_id=self.org_id, model="hyperagents-director",
+                    total_tokens=int(self.tokens or 0), prompt_tokens=int(self.io.get("input", 0) or 0),
+                    completion_tokens=int(self.io.get("output", 0) or 0), feature="hyperagents-room",
+                )
+                return {"cost_tokens": self.tokens, "final_text": final_text, "transcript": self.transcript,
+                        "gather_count": 0, "tool_calls": 1, "sim_report": None,
+                        "campaign_handoff": handoff, "io": self.io, "tok_by": self.tok_by}
+            error = str((response or {}).get("error") or "The campaign could not be created.")
+            await self.emit({"t": "campaign_handoff_failed", "message": error,
+                             "code": (response or {}).get("code")})
+            await self.emit({"t": "line", "agent": _lead, "kind": "dead_end", "content": error})
+            await report_llm_usage(
+                user_id=self.user_id, org_id=self.org_id, model="hyperagents-director",
+                total_tokens=int(self.tokens or 0), prompt_tokens=int(self.io.get("input", 0) or 0),
+                completion_tokens=int(self.io.get("output", 0) or 0), feature="hyperagents-room",
+            )
+            return {"cost_tokens": self.tokens, "final_text": error, "transcript": self.transcript,
+                    "gather_count": 0, "tool_calls": 1, "sim_report": None,
+                    "campaign_handoff_error": error, "io": self.io, "tok_by": self.tok_by}
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
         tool_calls_made = await self._run_gather(plan)
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
@@ -2925,6 +2991,8 @@ async def run_director(
     sender_email: str = "",
     out_language: str = "",
     campaign_brief: Optional[Dict[str, Any]] = None,
+    room_id: str = "",
+    turn_id: str = "",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2942,5 +3010,6 @@ async def run_director(
         sender_email=sender_email,
         out_language=out_language,
         campaign_brief=campaign_brief,
+        room_id=room_id, turn_id=turn_id,
     )
     return await director.run()

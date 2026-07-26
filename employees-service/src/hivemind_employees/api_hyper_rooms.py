@@ -3078,6 +3078,7 @@ async def _orchestrate_single_agent(
             "room_playbook": _room_playbook, "room_instructions": _room_instructions,
             "sender_email": _sender_email, "out_language": (req.language or ""),
             "campaign_brief": req.campaign_brief,
+            "room_id": req.room_id, "turn_id": req.turn_id,
         }
         if _room_kind == "campaign":
             result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()
@@ -3095,6 +3096,29 @@ async def _orchestrate_single_agent(
     gather_count = int(result.get("gather_count") or 0)
     _io = result.get("io") or {}
     _tok_by = result.get("tok_by") or {}
+
+    # A campaign tool call is a handoff, not a generic Room deliverable. The
+    # dedicated Campaign Room now owns research, debate, compilation and its
+    # Campaign Board, so stop this originating turn before doc/email production,
+    # verification, next-task generation, or a second generalized report.
+    if result.get("campaign_handoff") or result.get("campaign_handoff_error"):
+        handoff = result.get("campaign_handoff") or {}
+        status = "complete" if handoff else "blocked"
+        await _emit({
+            "t": "plan", "agent": lead.get("slug"), "intended_output": "campaign_handoff",
+            "done_criterion": "Create and dispatch one dedicated Campaign Room",
+            "steps": ["Campaign toolkit invoked", "Dedicated Campaign Room dispatched"] if handoff else ["Campaign toolkit invoked"],
+            "assignments": {(lead.get("name") or lead.get("slug") or "Director"): "Campaign handoff"},
+        })
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": status,
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+            "tok_by": {k: int(v) for k, v in _tok_by.items()}, "quality_mode": _qmode,
+            "campaign_id": handoff.get("campaign_id"), "campaign_room_id": handoff.get("room_id"),
+        })
+        return RoomTurnResponse(ok=bool(handoff), cost_tokens=cost_tokens, status=status)
 
     # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
     # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).

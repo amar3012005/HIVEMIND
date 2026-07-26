@@ -340,6 +340,46 @@ async def connector_exec_emulated(
         return {"error": str(exc)[:200]}
 
 
+async def campaign_create_emulated(
+    brief: Dict[str, Any], *, user_id: Optional[str], org_id: Optional[str],
+    room_id: str, turn_id: str, api_key: str = "",
+) -> Dict[str, Any]:
+    """Start the canonical Core campaign pipeline from any non-campaign Room.
+
+    Identity and organization are injected through the existing server-side
+    emulation boundary; the model never supplies them. The originating turn is
+    the idempotency key, so retries cannot create duplicate Campaign Rooms.
+    """
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    payload = dict(brief or {})
+    payload["idempotency_key"] = f"hyper-room:{room_id}:turn:{turn_id}"[:160]
+    payload["source_room_id"] = room_id
+    payload["source_turn_id"] = turn_id
+    payload["trigger_surface"] = "hyperagents"
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(35.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.post("/api/campaigns", json=payload)
+            data: Dict[str, Any]
+            try:
+                data = r.json() or {}
+            except Exception:  # noqa: BLE001
+                data = {"message": r.text[:300]}
+            if r.status_code >= 400:
+                return {
+                    "error": str(data.get("message") or data.get("error") or f"campaign create {r.status_code}")[:300],
+                    "code": data.get("error") or "campaign_create_failed",
+                    "status": r.status_code,
+                }
+            return data
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:300], "code": "campaign_create_unavailable"}
+
+
 class HivemindClient:
     """Per-employee HTTP client. One instance per WorkflowAgent.
     Carries the employee's scoped API key."""

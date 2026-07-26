@@ -18,6 +18,8 @@ import { registerGdocsTools } from './connector-toolkits/gdocs-tools.js';
 import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
 import { registerSlackTools } from './connector-toolkits/slack-tools.js';
 import { getHivemindToolCatalog, registerHivemindTools } from './connector-toolkits/hivemind-tools.js';
+import { getCampaignToolCatalog, registerCampaignTools } from './connector-toolkits/campaign-tools.js';
+import { campaignsV2Enabled } from '../campaigns/state.js';
 
 // MCP-backed groups (run via persistent client pool).
 // 'slack' moved OUT of this list: Slack OAuth is native (PlatformIntegration
@@ -68,7 +70,8 @@ export async function getCapabilityCatalogForUser({ prisma, userId, orgId }) {
     name, description: CONNECTOR_CAPABILITIES[name].description,
     tools: CONNECTOR_CAPABILITIES[name].tools.map((tool) => ({ name: tool, description: `Server-owned ${name} capability`, readOnly: !CONNECTOR_WRITE_TOOLS.has(tool) })),
   }) : null).filter(Boolean);
-  const catalog = [...getHivemindToolCatalog(), ...connectorCatalog];
+  const nativeCatalog = campaignsV2Enabled(orgId) ? [getCampaignToolCatalog()] : [];
+  const catalog = [...getHivemindToolCatalog(), ...nativeCatalog, ...connectorCatalog];
   capabilityCache.set(key, { expiresAt: Date.now() + 30_000, catalog });
   return catalog;
 }
@@ -94,6 +97,7 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   // Native HIVEMIND tools use the same AgentScope-style group contract as
   // connectors. Groups remain inactive until selected for this turn.
   registerHivemindTools(tk, { selectedGroups });
+  if (campaignsV2Enabled(orgId)) registerCampaignTools(tk, { prisma, userId, orgId, selectedGroups });
 
   // 1. Register HIVEMIND-internal tools into 'basic' group (always active).
   for (const t of hivemindTools) {

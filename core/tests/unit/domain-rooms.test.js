@@ -17,14 +17,19 @@ test('domain room registry exposes every permanent expertise home', () => {
 
 test('domain room provisioning is idempotent and marks system homes', async () => {
   const creates = [];
+  const updates = [];
   const tx = {
     $executeRawUnsafe: async () => {},
-    $queryRawUnsafe: async () => [{ id: 'existing-research', room_tag: 'research' }],
+    $queryRawUnsafe: async () => [
+      { id: 'existing-general', room_tag: 'general' },
+      { id: 'existing-research', room_tag: 'research' },
+    ],
     hyperRoom: {
       create: async ({ data }) => {
         creates.push(data);
         return { id: `created-${data.roomTag}` };
       },
+      update: async (input) => { updates.push(input); },
     },
   };
   const prisma = { $transaction: async (callback) => callback(tx) };
@@ -37,7 +42,8 @@ test('domain room provisioning is idempotent and marks system homes', async () =
   });
 
   assert.equal(rooms.length, 9);
-  assert.equal(creates.length, 8);
+  assert.equal(creates.length, 7);
+  assert.deepEqual(updates, [{ where: { id: 'existing-general' }, data: { name: 'Acme HQ' } }]);
   assert.equal(rooms.find((room) => room.room_tag === 'research').created, false);
   assert.ok(creates.every((data) => data.agentConnectors._domain_home === true));
   assert.ok(creates.every((data) => data.participantIds.join(',') === 'b,a'));

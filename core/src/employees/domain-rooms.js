@@ -1,5 +1,5 @@
 export const DOMAIN_ROOM_DEFINITIONS = Object.freeze([
-  { key: 'general', name: 'General', purpose: 'Coordinate cross-functional company work and choose the highest-leverage next move.' },
+  { key: 'general', name: 'Company HQ', purpose: 'Coordinate cross-functional company work and choose the highest-leverage next move.' },
   { key: 'seo', name: 'SEO', purpose: 'Turn search demand and website evidence into measurable organic growth.' },
   { key: 'marketing', name: 'Marketing', purpose: 'Build audience, channel, campaign, and experiment systems grounded in the company offer.' },
   { key: 'branding', name: 'Branding', purpose: 'Strengthen positioning, narrative, voice, and market-facing consistency.' },
@@ -36,8 +36,14 @@ export async function ensureDomainRooms({ prisma, orgId, userId, participantIds 
     const rooms = [];
 
     for (const definition of DOMAIN_ROOM_DEFINITIONS) {
+      const roomName = definition.key === 'general'
+        ? `${companyName || 'Company'} HQ`.slice(0, 120)
+        : definition.name;
       const existingId = existingByTag.get(definition.key);
       if (existingId) {
+        if (definition.key === 'general') {
+          await tx.hyperRoom.update({ where: { id: existingId }, data: { name: roomName } });
+        }
         rooms.push({ id: existingId, room_tag: definition.key, created: false });
         continue;
       }
@@ -48,7 +54,7 @@ export async function ensureDomainRooms({ prisma, orgId, userId, participantIds 
         data: {
           userId,
           orgId,
-          name: definition.name,
+          name: roomName,
           goal: `${definition.purpose}${companyContext}`.slice(0, 2000),
           participantIds: normalizedParticipants,
           template: 'auto',

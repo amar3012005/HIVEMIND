@@ -6,8 +6,9 @@ import {
   normalizeTargets, validateDestinationUrl, validatePostText, verifyConfirmation,
 } from '../../src/x-ads/utils.js';
 import {
-  calculateMetrics, getCampaign, listCampaigns, normalizeFundingInstrument, normalizeServiceError,
-  reconciledCampaignStatus, xAdsBetaEnabled,
+  calculateMetrics, createOrganicPost, deleteOrganicPost, getCampaign, listCampaigns,
+  normalizeFundingInstrument, normalizeServiceError, reconciledCampaignStatus,
+  validateOrganicPostText, xAdsBetaEnabled,
 } from '../../src/x-ads/service.js';
 import { ProviderError } from '../../src/x-ads/x-api-client.js';
 
@@ -73,6 +74,30 @@ test('beta gate requires both master flag and org allowlist', () => {
   assert.equal(xAdsBetaEnabled('org-a', { X_ADS_ENABLED: 'true', X_ADS_BETA_ORG_IDS: 'org-a,org-b' }), true);
   assert.equal(xAdsBetaEnabled('org-c', { X_ADS_ENABLED: 'true', X_ADS_BETA_ORG_IDS: 'org-a' }), false);
   assert.equal(xAdsBetaEnabled('org-a', { X_ADS_ENABLED: 'false', X_ADS_BETA_ORG_IDS: '*' }), false);
+});
+
+test('ordinary X Post validation trims input and enforces the public Post limit', () => {
+  assert.equal(validateOrganicPostText('  Launch update  '), 'Launch update');
+  assert.equal(Array.from(validateOrganicPostText('🚀'.repeat(280))).length, 280);
+  assert.throws(() => validateOrganicPostText('   '), { code: 'post_text_required' });
+  assert.throws(() => validateOrganicPostText('x'.repeat(281)), { code: 'post_text_too_long' });
+});
+
+test('ordinary X Post writes require explicit confirmation before credential lookup', async () => {
+  const previousEnabled = process.env.X_ADS_ENABLED;
+  const previousOrgs = process.env.X_ADS_BETA_ORG_IDS;
+  process.env.X_ADS_ENABLED = 'true'; process.env.X_ADS_BETA_ORG_IDS = 'org-a';
+  const prisma = { xAdsCredential: { findFirst: async () => assert.fail('credential lookup should not run') } };
+  await assert.rejects(
+    createOrganicPost({ prisma, orgId: 'org-a', userId: 'user-a', text: 'Test', confirmed: false }),
+    { code: 'confirmation_required' },
+  );
+  await assert.rejects(
+    deleteOrganicPost({ prisma, orgId: 'org-a', userId: 'user-a', postId: '123', confirmed: false }),
+    { code: 'confirmation_required' },
+  );
+  if (previousEnabled === undefined) delete process.env.X_ADS_ENABLED; else process.env.X_ADS_ENABLED = previousEnabled;
+  if (previousOrgs === undefined) delete process.env.X_ADS_BETA_ORG_IDS; else process.env.X_ADS_BETA_ORG_IDS = previousOrgs;
 });
 
 test('funding instruments use X able-to-fund fields', () => {

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { getConnectorRuntime } from '../connectors/runtime/index.js';
 import {
-  createCampaign, getCampaign, getStatus, listAccounts, listCampaigns,
+  createCampaign, createOrganicPost, deleteOrganicPost, getCampaign, getStatus, listAccounts, listCampaigns,
   listFundingInstruments, normalizeServiceError, prepareCampaign, searchTargets,
   syncCampaign, updateCampaign, uploadCampaignImage, xAdsBetaEnabled,
 } from './service.js';
@@ -43,6 +43,17 @@ export async function handleXAdsRequest({ pathname, method, body, url, req, res,
       return jsonResponse(res, result);
     }
     if (pathname === '/api/x-ads/status' && method === 'GET') return jsonResponse(res, await getStatus({ prisma, userId, orgId }));
+    if (pathname === '/api/x-ads/posts' && method === 'POST') {
+      const post = await createOrganicPost({ prisma, userId, orgId, text: body?.text, confirmed: body?.confirmed });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'organic_post_created', metadata: { x_post_id: post.id } });
+      return jsonResponse(res, { post }, 201);
+    }
+    let postMatch = pathname.match(/^\/api\/x-ads\/posts\/([0-9]{1,19})$/);
+    if (postMatch && method === 'DELETE') {
+      const result = await deleteOrganicPost({ prisma, userId, orgId, postId: postMatch[1], confirmed: body?.confirmed });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'organic_post_deleted', metadata: { x_post_id: result.id } });
+      return jsonResponse(res, result);
+    }
     if (pathname === '/api/x-ads/accounts' && method === 'GET') return jsonResponse(res, await listAccounts({ prisma, userId, orgId }));
 
     let match = pathname.match(/^\/api\/x-ads\/accounts\/([^/]+)\/funding-instruments$/);

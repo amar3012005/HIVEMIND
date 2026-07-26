@@ -108,6 +108,38 @@ export async function getStatus({ prisma, userId, orgId }) {
   };
 }
 
+export function validateOrganicPostText(value) {
+  const text = String(value || '').trim();
+  const length = Array.from(text).length;
+  if (!text) { const e = new Error('Post text is required'); e.status = 400; e.code = 'post_text_required'; throw e; }
+  if (length > 280) { const e = new Error('Post text must be 280 characters or fewer'); e.status = 400; e.code = 'post_text_too_long'; throw e; }
+  return text;
+}
+
+export async function createOrganicPost({ prisma, userId, orgId, text, confirmed }) {
+  requireBeta(orgId);
+  if (confirmed !== true) { const e = new Error('Explicit confirmation is required before publishing'); e.status = 409; e.code = 'confirmation_required'; throw e; }
+  const normalizedText = validateOrganicPostText(text);
+  const ids = await connectionIds(prisma, userId, orgId);
+  requireConnections(ids, { x: true });
+  const response = await xRequest(ids, { method: 'POST', path: '/2/tweets', body: { text: normalizedText } });
+  const post = providerData(response);
+  if (!post?.id) throw new ProviderError('X did not return a Post ID');
+  return { id: String(post.id), text: post.text || normalizedText, url: `https://x.com/i/web/status/${post.id}` };
+}
+
+export async function deleteOrganicPost({ prisma, userId, orgId, postId, confirmed }) {
+  requireBeta(orgId);
+  if (confirmed !== true) { const e = new Error('Explicit confirmation is required before deleting'); e.status = 409; e.code = 'confirmation_required'; throw e; }
+  if (!/^[0-9]{1,19}$/.test(String(postId || ''))) { const e = new Error('A valid X Post ID is required'); e.status = 400; e.code = 'invalid_post_id'; throw e; }
+  const ids = await connectionIds(prisma, userId, orgId);
+  requireConnections(ids, { x: true });
+  const response = await xRequest(ids, { method: 'DELETE', path: `/2/tweets/${postId}` });
+  const result = providerData(response);
+  if (result?.deleted !== true) throw new ProviderError('X did not confirm Post deletion');
+  return { id: String(postId), deleted: true };
+}
+
 export async function listAccounts({ prisma, userId, orgId }) {
   requireBeta(orgId);
   requireAdsApproval();

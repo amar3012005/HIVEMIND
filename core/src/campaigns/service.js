@@ -519,7 +519,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
     const kickoff = buildCampaignKickoff(campaign, cleanFeedback);
     const turn = await tx.hyperTurn.create({ data: {
       roomId: room.id, seq: (lastTurn?.seq || 0) + 1, userMessage: kickoff, status: 'live',
-      idempotencyKey: `campaign-regenerate-${id}-${crypto.randomUUID()}`, lines: [],
+      idempotencyKey: `campaign-regen-${crypto.randomUUID()}`, lines: [],
     } });
     const briefSnapshot = {
       name: campaign.name, goal: campaign.goal, objective: campaign.objective, channels: campaign.requestedChannels,

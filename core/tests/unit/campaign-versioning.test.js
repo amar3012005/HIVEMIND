@@ -91,5 +91,6 @@ test('regeneration creates the next turn in the same campaign room', withCampaig
   const result = await regenerateCampaign({ prisma, orgId: 'org-a', userId: 'user-a', id: 'campaign-a', feedback: 'Use stronger evidence.' });
   assert.equal(result.campaignId, 'campaign-a'); assert.equal(result.dispatch.room_id, 'room-a'); assert.equal(result.dispatch.campaign_id, 'campaign-a');
   assert.equal(turns[0].seq, 4); assert.equal(runs[0].turnId, 'turn-4'); assert.equal(campaignUpdates[0].status, 'GENERATING');
+  assert.ok(turns[0].idempotencyKey.length <= 64); assert.match(turns[0].idempotencyKey, /^campaign-regen-/);
   assert.equal(events[0].eventType, 'campaign_regeneration_started');
 }));

@@ -39,6 +39,10 @@ class DialRequest(BaseModel):
     language: str = "en"
     voice_id: Optional[str] = None
     skill_id: Optional[str] = None
+    # The skill's PROMPT text, resolved by the caller. Core owns the skills store,
+    # so it hands the prompt down here exactly as it does for browser sessions via
+    # the config snapshot — this adapter never needs skills-read access itself.
+    skill_prompt: Optional[str] = None
     goal: Optional[str] = None
     campaign_id: Optional[str] = None
     contact_name: Optional[str] = None

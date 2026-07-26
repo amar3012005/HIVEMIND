@@ -197,8 +197,14 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
 
 
 def _telephony_instructions(meta: dict) -> str:
-    """Turn a dial request into the call's operating brief."""
+    """Turn a dial request into the call's operating brief.
+
+    The selected TARA skill's prompt leads (it defines persona and method); the
+    per-call brief follows so it can specialise, not fight, the skill.
+    """
     parts = []
+    if meta.get("skill_prompt"):
+        parts.append(str(meta["skill_prompt"]).strip())
     if meta.get("company"):
         parts.append(f"You are calling {meta['company']}.")
     if meta.get("contact_name"):

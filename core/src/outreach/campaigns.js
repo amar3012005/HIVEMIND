@@ -259,6 +259,43 @@ export function createOutreachModule(deps) {
     });
   }
 
+  // Resolve a pinned skill id to its prompt text. Core owns the skills store and
+  // this module runs in the control-plane, so fetch over the internal API rather
+  // than duplicating the store. Cached per (org, skill) — a campaign dials the
+  // same skill for every target. Best-effort: a miss degrades to the base prompt
+  // rather than failing the call.
+  const _skillPromptCache = new Map(); // `${orgId}:${skillId}` → { value, expiresAt }
+  const SKILL_PROMPT_TTL_MS = 5 * 60 * 1000;
+  async function resolveSkillPrompt(campaign, skillId) {
+    if (!skillId) return null;
+    const key = `${campaign.orgId}:${skillId}`;
+    const hit = _skillPromptCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.value;
+    let value = null;
+    try {
+      const res = await fetch(`${CONFIG.coreApiBaseUrl}/api/tara/skills`, {
+        headers: {
+          'X-API-Key': getInternalApiKey(),
+          'x-hm-user-id': campaign.userId,
+          'x-hm-org-id': campaign.orgId,
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const items = Array.isArray(data?.skills) ? data.skills : (Array.isArray(data) ? data : []);
+        const skill = items.find((s) => s?.id === skillId);
+        if (skill) {
+          value = [skill.primary_prompt, skill.secondary_prompt].filter(Boolean).join('\n\n') || null;
+        }
+      }
+    } catch (error) {
+      console.warn('[outreach] skill prompt resolve failed:', error.message);
+    }
+    _skillPromptCache.set(key, { value, expiresAt: Date.now() + SKILL_PROMPT_TTL_MS });
+    return value;
+  }
+
   async function executeCall(campaign, target) {
     if (target.resultRef?.taraCallLegId) return target; // already dialed
     const payload = target.payload || {};
@@ -284,6 +321,9 @@ export function createOutreachModule(deps) {
     // Auto-select voice from the contract (language + tone). Best-effort; null → TARA default.
     const language = String(payload.language || 'en').slice(0, 8);
     const voiceId = await resolveVoiceId(campaign.orgId, language, payload.voice_style);
+    // Same goal + SKILL plan for every outbound call, whichever provider runs it.
+    const skillId = campaign.voiceConfigSnapshot?.skill_id || null;
+    const skillPrompt = await resolveSkillPrompt(campaign, skillId);
     const provider = campaign.voiceProvider
       ? { provider: campaign.voiceProvider, revision: campaign.voiceConfigSnapshot?.revision || 1, config: campaign.voiceConfigSnapshot || {}, baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl }
       : await taraProviderFor(campaign.orgId);
@@ -324,11 +364,19 @@ export function createOutreachModule(deps) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(provider.provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        // Every adapter shares one dial gate, so send the key regardless of
+        // provider — scoping it to deepgram made a Grok campaign dial 401.
+        ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
       },
       body: JSON.stringify({
         to, session_id: sessionId, user_id: campaign.userId, org_id: campaign.orgId,
         goal: String(directive).slice(0, 600),
+        // The SAME goal + skill plan for every outbound call, whichever provider
+        // executes it. The snapshot pinned the skill; its prompt is resolved above
+        // so a phone call runs the chosen persona, not the bare base prompt.
+        skill_id: skillId || undefined,
+        skill_prompt: skillPrompt || undefined,
+        company: target.company ? String(target.company).slice(0, 200) : undefined,
         // Auto-selected call contract: language + concrete Cartesia voice (TARA resolves a
         // language default when voice_id is null).
         language,

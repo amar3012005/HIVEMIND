@@ -39,6 +39,10 @@ class DialRequest(BaseModel):
     language: str = "en"
     voice_id: Optional[str] = None
     skill_id: Optional[str] = None
+    # Resolved skill prompt from the caller. Core owns the skills store and pins
+    # the skill in the campaign snapshot, so it hands the text down — this keeps
+    # the pinned persona even if the org default changes mid-campaign.
+    skill_prompt: Optional[str] = None
     goal: Optional[str] = None
     campaign_id: Optional[str] = None
     contact_name: Optional[str] = None

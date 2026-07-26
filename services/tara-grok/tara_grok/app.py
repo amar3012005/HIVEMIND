@@ -162,21 +162,31 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
     if media == "telephony":
         audio_format = {"type": "audio/pcmu", "rate": 8000}
         transport = "json"
+        # Telephony-tuned VAD. The browser defaults are wrong for a phone line:
+        # PSTN audio is narrowband and quieter, so threshold 0.85 misses normal
+        # speech (the caller ends up repeating themselves); 333ms of prefix
+        # padding clips the start of the first word; 650ms of trailing silence
+        # makes every turn feel laggy on a call.
+        vad = {
+            "threshold": snapshot.get("vad_threshold", 0.5),
+            "silence_duration_ms": snapshot.get("vad_silence_duration_ms", 420),
+            "prefix_padding_ms": snapshot.get("vad_prefix_padding_ms", 500),
+        }
     else:
         audio_format = {"type": "audio/pcm", "rate": 16000}
         transport = "binary"
+        vad = {
+            "threshold": snapshot.get("vad_threshold", 0.85),
+            "silence_duration_ms": snapshot.get("vad_silence_duration_ms", 650),
+            "prefix_padding_ms": snapshot.get("vad_prefix_padding_ms", 333),
+        }
     return {
         "type": "session.update",
         "session": {
             "instructions": "\n\n".join(part for part in [SYSTEM_PROMPT, snapshot.get("instructions", "")] if part),
             "voice": snapshot.get("voice_id", "eve"),
             "reasoning": {"effort": snapshot.get("reasoning_effort", "high")},
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": snapshot.get("vad_threshold", 0.85),
-                "silence_duration_ms": snapshot.get("vad_silence_duration_ms", 650),
-                "prefix_padding_ms": snapshot.get("vad_prefix_padding_ms", 333),
-            },
+            "turn_detection": {"type": "server_vad", **vad},
             "resumption": {"enabled": True},
             "audio": {
                 "input": {
@@ -217,9 +227,10 @@ def _telephony_instructions(meta: dict) -> str:
         parts.append(f"Objective: {meta['goal']}")
     if meta.get("context"):
         parts.append(f"Background: {meta['context']}")
-    # Recording is enabled on the carrier number, so disclose it up front.
-    parts.append("State early that the call may be recorded. Keep turns short — "
-                 "this is a phone call, not a document.")
+    # The opener response.create carries the AI + recording disclosure, so don't
+    # duplicate it here — repeating it just burns the first turn.
+    parts.append("Keep every turn to one or two sentences — this is a phone call, "
+                 "not a document. Never wait in silence.")
     return " ".join(parts)
 
 def _browser_event(event: dict) -> dict | None:
@@ -542,11 +553,29 @@ async def telnyx_stream(ws: WebSocket):
         xai = await _xai_connect(snapshot, _resume_conversation_id(
             (str(meta.get("org_id") or ""), str(meta.get("user_id") or ""))))
         await xai.send(json.dumps(_session_update(snapshot, media="telephony")))
+        # SPEAK FIRST. With server_vad the model waits for the caller, so on an
+        # OUTBOUND call nobody talks until the callee does — the line just sits
+        # silent and the human hangs up or says "hello?" twice. We placed this
+        # call, so TARA owes the first word. Ask for the opening turn immediately
+        # with a per-response instruction: it also carries the AI + recording
+        # disclosure (EU AI Act Art. 50 parity with tara-deepgram's `greeting`)
+        # and is capped short so time-to-first-audio stays low.
+        await xai.send(json.dumps({
+            "type": "response.create",
+            "response": {"instructions": (
+                "Open the call now, before the other person speaks. In ONE short sentence: "
+                "say you are an AI assistant calling"
+                + (f" on behalf of {meta['company']}" if meta.get("company") else "")
+                + ", that the call may be recorded, then ask a single opening question that "
+                "serves your objective. Under 25 words. Do not wait."
+            )},
+        }))
     except Exception:  # noqa: BLE001
         log.exception("xAI connect failed for PSTN session=%s", session_id)
         await ws.close(code=1011)
         return
-    log.info("grok PSTN bridge open session=%s leg=%s", session_id, meta.get("call_control_id"))
+    log.info("grok PSTN bridge open session=%s leg=%s (opener requested)",
+             session_id, meta.get("call_control_id"))
     listen.tee_json(session_id, {"type": "ready", "session_id": session_id})
 
     async def pstn_to_xai():

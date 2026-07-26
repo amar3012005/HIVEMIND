@@ -360,7 +360,13 @@ if config.TARA_DG_ENABLED:
         company = meta.get("company") or "our team"
         call_lang = (meta.get("language") or "en").split("-")[0]
         persona = await get_persona(meta.get("user_id"), meta.get("org_id"))
-        skill_prompt = persona.get("internal_prompt" if call_mode == "internal" else "system_prompt") or ""
+        # A per-call skill_prompt on the dial request WINS over the org's currently
+        # selected persona. That is what makes "same goal + skill plan for every
+        # outbound call" true irrespective of provider: the campaign pinned a skill
+        # in its snapshot, and that pin must survive even if an admin later changes
+        # the org default mid-campaign. Falls back to the org selection.
+        skill_prompt = (meta.get("skill_prompt") or "").strip() or (
+            persona.get("internal_prompt" if call_mode == "internal" else "system_prompt") or "")
         prompt = skill_prompt or _BASE_PROMPT.format(company=company, goal=call_goal or "have a helpful conversation")
         if call_goal:
             prompt += f"\n\n[CALL GOAL] {call_goal} — steer every turn toward this; never lose sight of it."

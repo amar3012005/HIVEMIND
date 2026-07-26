@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { getCampaignCapabilities } from '../../campaigns/capabilities.js';
 import { dispatchCampaignRoomSafely } from '../../campaigns/dispatcher.js';
+import { enqueueCampaignImages } from '../../campaigns/image-service.js';
 import {
   controlCampaign,
   createCampaign,
@@ -50,6 +51,28 @@ const toolDefinitions = [
     name: 'campaign_get', readOnly: true,
     description: 'Get the current status and operating-plan summary for one campaign in the current organization.',
     parameters: { type: 'object', additionalProperties: false, properties: { campaign_id: uuidSchema }, required: ['campaign_id'] },
+  },
+  {
+    name: 'campaign_image_generate', readOnly: false,
+    description: 'Generate one or two approval-ready image variants for a specific ready campaign action. Use only when a visual materially improves that action. This queues generation and never publishes the campaign.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        campaign_id: uuidSchema, action_id: uuidSchema,
+        creative_brief: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            required: { type: 'boolean' }, objective: { type: 'string' }, subject: { type: 'string' }, composition: { type: 'string' },
+            brand_style: { type: 'string' }, audience: { type: 'string' }, aspect_ratio: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'] },
+            text_policy: { type: 'string' }, required_elements: { type: 'array', items: { type: 'string' } }, forbidden_elements: { type: 'array', items: { type: 'string' } },
+            unsupported_claims: { type: 'array', items: { type: 'string' } }, alt_text: { type: 'string' }, generation_prompt: { type: 'string' }, rationale: { type: 'string' },
+          },
+          required: ['required', 'objective', 'subject', 'composition', 'brand_style', 'audience', 'aspect_ratio', 'text_policy', 'required_elements', 'forbidden_elements', 'unsupported_claims', 'alt_text', 'generation_prompt'],
+        },
+        variant_count: { type: 'integer', minimum: 1, maximum: 2 },
+      },
+      required: ['campaign_id', 'action_id'],
+    },
   },
   {
     name: 'campaign_regenerate', readOnly: false,
@@ -182,6 +205,11 @@ async function executeCampaignTool(name, args, { prisma, userId, orgId, ctx }) {
         : 'The dedicated Campaign Room is building the operating plan. Nothing has been published.',
     };
   }
+  if (name === 'campaign_image_generate') {
+    const result = await enqueueCampaignImages({ prisma, orgId, userId, campaignId: args.campaign_id, actionId: args.action_id, creativeBrief: args.creative_brief, variantCount: args.variant_count || 1 });
+    await auditCampaignTool(prisma, { userId, orgId, campaignId: args.campaign_id, action: 'asset_generation_queued', ctx });
+    return { tool: name, campaign_id: args.campaign_id, action_id: args.action_id, queued: result.queued, assets: result.assets.map((asset) => ({ asset_id: asset.id, status: asset.status })), handoff: 'The campaign visual is being generated for review. Nothing has been published.' };
+  }
   if (name === 'campaign_regenerate') {
     const result = await regenerateCampaign({ prisma, orgId, userId, id: args.campaign_id, feedback: args.feedback });
     await dispatchCampaignRoomSafely({ prisma, campaignId: result.campaignId, dispatch: result.dispatch });
@@ -215,7 +243,7 @@ export function registerCampaignTools(toolkit, { prisma, userId, orgId, selected
   const catalog = getCampaignToolCatalog();
   toolkit.createToolGroup({
     name: catalog.name, description: catalog.description, active: false,
-    notes: 'campaign_create starts a dedicated specialist Room and never publishes. Use campaign_get for progress. Approval and launch stay in Your Campaigns.',
+    notes: 'campaign_create starts a dedicated specialist Room and never publishes. campaign_image_generate is only for a ready visual action and queues a reviewable asset. Approval and launch stay in Your Campaigns.',
   });
   for (const definition of toolDefinitions) {
     toolkit.registerToolFunction({

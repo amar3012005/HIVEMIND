@@ -1,5 +1,7 @@
 import { X_AUTH_OAUTH2 } from '../x-ads/x-auth-store.js';
 import { campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
+import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
+import { DAILY_GENERATION_LIMIT } from './image-service.js';
 
 async function hasGmailConnection(prisma, userId, orgId) {
   const [native, legacy] = await Promise.all([
@@ -27,6 +29,7 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
   const adsApproved = process.env.X_ADS_API_APPROVED === 'true';
   return {
     enabled, execution_enabled: enabled && campaignWorkerEnabled() && campaignExecutionChannels().size > 0,
+    image_generation: { available: Boolean(process.env.OPENROUTER_API_KEY), provider: 'openrouter', model: DEFAULT_CAMPAIGN_IMAGE_MODEL, max_variants: 2, max_upload_bytes: 5 * 1024 * 1024, daily_org_limit: DAILY_GENERATION_LIMIT },
     channels: [
       { id: 'x_organic', connected: xConnected, executable: enabled && xConnected, execution_ready: enabled && xConnected && campaignChannelExecutionEnabled('x_organic'), reason: xConnected ? null : 'connect_x', execution_reason: campaignChannelExecutionEnabled('x_organic') ? null : 'execution_not_enabled', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null },
       { id: 'gmail', connected: gmail, executable: enabled && gmail, execution_ready: enabled && gmail && campaignChannelExecutionEnabled('gmail'), reason: gmail ? null : 'connect_gmail', execution_reason: campaignChannelExecutionEnabled('gmail') ? null : 'execution_not_enabled' },

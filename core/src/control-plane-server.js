@@ -1445,9 +1445,17 @@ async function parseBody(req) {
 
 /** Same as parseBody but returns the raw Buffer + parsed JSON. Stripe webhook
  *  signature verification requires the exact raw bytes. */
-async function parseBodyWithRaw(req) {
+async function parseBodyWithRaw(req, maxBytes = Infinity) {
   const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      const error = new Error('Campaign image upload is too large');
+      error.status = 413;
+      error.code = 'campaign_asset_too_large';
+      throw error;
+    }
     chunks.push(chunk);
   }
   const raw = chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
@@ -2344,6 +2352,14 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
       return pump();
     }
 
+    if (!contentType.includes('json') && !contentType.startsWith('text/')) {
+      const respBody = Buffer.from(await coreResp.arrayBuffer());
+      const headers = { 'Content-Type': contentType, 'Content-Length': respBody.length };
+      const cacheControl = coreResp.headers.get('cache-control'); const etag = coreResp.headers.get('etag');
+      if (cacheControl) headers['Cache-Control'] = cacheControl;
+      if (etag) headers.ETag = etag;
+      res.writeHead(coreResp.status, headers); res.end(respBody); return;
+    }
     const respBody = await coreResp.text();
     res.writeHead(coreResp.status, { 'Content-Type': contentType });
     res.end(respBody);
@@ -10609,12 +10625,21 @@ Write the persona now.`;
   if (pathname === '/v1/campaigns' || pathname.startsWith('/v1/campaigns/')) {
     const current = await requireSession(req, res);
     if (!current) return;
-    const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : await parseBody(req);
+    const multipart = String(req.headers['content-type'] || '').includes('multipart/form-data');
+    let parsed;
+    try {
+      parsed = (req.method === 'GET' || req.method === 'HEAD')
+        ? { body: undefined, raw: undefined }
+        : multipart ? await parseBodyWithRaw(req, 6 * 1024 * 1024) : { body: await parseBody(req), raw: undefined };
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'invalid_request', message: error.message }, error.status || 400);
+    }
     return proxyToCore(req, res, {
       session: current.session,
       method: req.method,
       path: pathname.replace('/v1/campaigns', '/api/campaigns'),
-      body,
+      body: parsed.parsed ?? parsed.body,
+      rawBody: parsed.raw,
       query: url.search || '',
     });
   }

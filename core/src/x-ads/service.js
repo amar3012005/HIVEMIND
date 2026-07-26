@@ -125,16 +125,18 @@ export function validateOrganicPostText(value) {
   return text;
 }
 
-export async function createOrganicPost({ prisma, userId, orgId, text, confirmed }) {
+export async function createOrganicPost({ prisma, userId, orgId, text, confirmed, mediaIds = [] }) {
   requireOrganicAccess(orgId);
   if (confirmed !== true) { const e = new Error('Explicit confirmation is required before publishing'); e.status = 409; e.code = 'confirmation_required'; throw e; }
   const normalizedText = validateOrganicPostText(text);
   const ids = await connectionIds(prisma, userId, orgId);
   requireConnections(ids, { x: true });
-  const response = await xRequest(ids, { method: 'POST', path: '/2/tweets', body: { text: normalizedText } });
+  const body = { text: normalizedText };
+  if (Array.isArray(mediaIds) && mediaIds.length) body.media = { media_ids: mediaIds.map(String).slice(0, 4) };
+  const response = await xRequest(ids, { method: 'POST', path: '/2/tweets', body });
   const post = providerData(response);
   if (!post?.id) throw new ProviderError('X did not return a Post ID');
-  return { id: String(post.id), text: post.text || normalizedText, url: `https://x.com/i/web/status/${post.id}` };
+  return { id: String(post.id), text: post.text || normalizedText, media_ids: body.media?.media_ids || [], url: `https://x.com/i/web/status/${post.id}` };
 }
 
 export async function deleteOrganicPost({ prisma, userId, orgId, postId, confirmed }) {

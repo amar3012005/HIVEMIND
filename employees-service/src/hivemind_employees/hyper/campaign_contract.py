@@ -23,6 +23,10 @@ def campaign_system_contract() -> str:
         "never a complete campaign unless the normalized brief explicitly permits one.\n"
         "- Every x_organic action is exactly one X Post: payload.text and final_copy must match and each must be "
         "280 characters or fewer. Represent a thread as separate ordered x_organic actions, one action per Post.\n"
+        "- Decide image need per action. Use a visual only when it materially improves comprehension, attention, "
+        "proof, or emotional clarity; never add decorative images to every action. When required=true, apply the "
+        "visual-prompt-architecture skill and provide its complete art-direction fields. Generation happens only "
+        "after this plan is accepted.\n"
         "- A Campaign Room is complete ONLY when the final compiler calls campaign__submit_plan and its "
         "deterministic contract accepts the full CampaignBundle. A generic final_report, prose summary, or "
         "partial draft can never complete campaign work.\n"
@@ -276,6 +280,19 @@ def campaign_bundle_errors(
                 continue
             if not isinstance(action.get("creative_brief"), dict):
                 errors.append(f"action {action.get('id') or index + 1} needs creative_brief for contract v3")
+            else:
+                creative = action.get("creative_brief") or {}
+                if not isinstance(creative.get("required"), bool):
+                    errors.append(f"action {action.get('id') or index + 1} creative_brief.required must be boolean")
+                if creative.get("required") is True:
+                    legacy_concept = _non_empty_string(creative.get("concept")) and not _non_empty_string(creative.get("generation_prompt"))
+                    if not legacy_concept:
+                        for field in ("objective", "subject", "composition", "brand_style", "audience", "aspect_ratio", "text_policy", "alt_text", "generation_prompt"):
+                            if not _non_empty_string(creative.get(field)):
+                                errors.append(f"action {action.get('id') or index + 1} creative_brief.{field} is required for a visual action")
+                        for field in ("required_elements", "forbidden_elements", "unsupported_claims"):
+                            if not isinstance(creative.get(field), list):
+                                errors.append(f"action {action.get('id') or index + 1} creative_brief.{field} must be an array")
             if str(action.get("claim_status") or "") not in ("verified", "assumption", "no_claim"):
                 errors.append(f"action {action.get('id') or index + 1} needs a valid claim_status for contract v3")
             action_evidence = action.get("evidence_ids")

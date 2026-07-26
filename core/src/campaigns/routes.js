@@ -3,6 +3,10 @@ import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { processDueCampaignActions } from './worker.js';
 import { campaignWorkerEnabled } from './state.js';
+import {
+  deleteCampaignAsset, enqueueCampaignImages, getCampaignAssetContent, MAX_UPLOAD_BYTES,
+  selectCampaignAsset, uploadCampaignAsset,
+} from './image-service.js';
 
 function sendError(res, jsonResponse, error) {
   return jsonResponse(res, { error: error.code || 'campaign_error', message: error.message }, error.status || 500);
@@ -18,7 +22,42 @@ async function audit(prisma, auditLogger, { userId, orgId, action, campaignId, m
   return prisma.auditLog.create({ data: event }).catch(() => {});
 }
 
-export async function handleCampaignRequest({ pathname, method, body, res, prisma, userId, orgId, jsonResponse, auditLogger }) {
+async function readRawBody(req, maxBytes = MAX_UPLOAD_BYTES + 1024 * 1024) {
+  const chunks = []; let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error('Campaign image upload is too large'), { status: 413, code: 'campaign_asset_too_large' });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+function multipartImage(req, raw) {
+  const type = String(req.headers['content-type'] || '');
+  const boundary = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.slice(1).find(Boolean)?.trim();
+  if (!boundary) throw Object.assign(new Error('A multipart upload boundary is required'), { status: 400, code: 'campaign_asset_upload_invalid' });
+  const marker = Buffer.from(`--${boundary}`); const fields = {}; let file = null; let cursor = 0;
+  while (cursor < raw.length) {
+    const start = raw.indexOf(marker, cursor); if (start < 0) break;
+    const next = raw.indexOf(marker, start + marker.length); if (next < 0) break;
+    let part = raw.subarray(start + marker.length, next);
+    if (part.subarray(0, 2).toString() === '\r\n') part = part.subarray(2);
+    if (part.subarray(-2).toString() === '\r\n') part = part.subarray(0, -2);
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd > 0) {
+      const headers = part.subarray(0, headerEnd).toString('utf8'); const data = part.subarray(headerEnd + 4);
+      const name = headers.match(/name="([^"]+)"/i)?.[1]; const filename = headers.match(/filename="([^"]*)"/i)?.[1];
+      const contentType = headers.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase();
+      if (name === 'image' && filename !== undefined) file = { bytes: data, filename, contentType };
+      else if (name) fields[name] = data.toString('utf8');
+    }
+    cursor = next;
+  }
+  if (!file) throw Object.assign(new Error('The image file is required'), { status: 400, code: 'campaign_asset_upload_invalid' });
+  return { ...file, altText: fields.alt_text || '' };
+}
+
+export async function handleCampaignRequest({ pathname, method, body, req, res, prisma, userId, orgId, jsonResponse, auditLogger }) {
   try {
     if (pathname === '/api/campaigns/capabilities' && method === 'GET') {
       return jsonResponse(res, await getCampaignCapabilities({ prisma, userId, orgId }));
@@ -44,6 +83,36 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
     }
     const match = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})$/i);
     if (match && method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, id: match[1] }) });
+    const assetContentMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/assets\/([0-9a-f-]{36})\/content$/i);
+    if (assetContentMatch && method === 'GET') {
+      const result = await getCampaignAssetContent({ prisma, orgId, campaignId: assetContentMatch[1], assetId: assetContentMatch[2] });
+      res.writeHead(200, { 'Content-Type': result.asset.contentType || 'application/octet-stream', 'Content-Length': result.bytes.length, 'Cache-Control': 'private, max-age=300', ETag: `"${result.asset.contentHash}"` });
+      res.end(result.bytes); return;
+    }
+    const assetGenerateMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/assets\/generate$/i);
+    if (assetGenerateMatch && method === 'POST') {
+      const result = await enqueueCampaignImages({ prisma, orgId, userId, campaignId: assetGenerateMatch[1], actionId: assetGenerateMatch[2], creativeBrief: body?.creative_brief, variantCount: body?.variant_count });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'asset_generation_queued', campaignId: assetGenerateMatch[1], metadata: { action_id: assetGenerateMatch[2], asset_ids: result.assets.map((asset) => asset.id) } });
+      return jsonResponse(res, result, result.queued ? 202 : 200);
+    }
+    const assetUploadMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/assets\/upload$/i);
+    if (assetUploadMatch && method === 'POST') {
+      const upload = multipartImage(req, await readRawBody(req));
+      const asset = await uploadCampaignAsset({ prisma, orgId, userId, campaignId: assetUploadMatch[1], actionId: assetUploadMatch[2], bytes: upload.bytes, contentType: upload.contentType, filename: upload.filename, altText: upload.altText });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'asset_uploaded', campaignId: assetUploadMatch[1], metadata: { action_id: assetUploadMatch[2], asset_id: asset.id } });
+      return jsonResponse(res, { asset }, 201);
+    }
+    const assetControlMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/assets\/([0-9a-f-]{36})$/i);
+    if (assetControlMatch && method === 'POST') {
+      const asset = await selectCampaignAsset({ prisma, orgId, userId, campaignId: assetControlMatch[1], actionId: assetControlMatch[2], assetId: assetControlMatch[3] });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'asset_selected', campaignId: assetControlMatch[1], metadata: { action_id: assetControlMatch[2], asset_id: asset.id } });
+      return jsonResponse(res, { asset });
+    }
+    if (assetControlMatch && method === 'DELETE') {
+      const result = await deleteCampaignAsset({ prisma, orgId, userId, campaignId: assetControlMatch[1], actionId: assetControlMatch[2], assetId: assetControlMatch[3] });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'asset_removed', campaignId: assetControlMatch[1], metadata: { action_id: assetControlMatch[2], asset_id: assetControlMatch[3] } });
+      return jsonResponse(res, result);
+    }
     const regenerateMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/regenerate$/i);
     if (regenerateMatch && method === 'POST') {
       const result = await regenerateCampaign({ prisma, orgId, userId, id: regenerateMatch[1], feedback: body?.feedback });

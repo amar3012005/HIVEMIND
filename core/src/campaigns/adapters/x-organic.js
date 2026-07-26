@@ -2,6 +2,7 @@ import { createOrganicPost } from '../../x-ads/service.js';
 import { directXRequest } from '../../x-ads/x-api-client.js';
 import { X_AUTH_OAUTH2 } from '../../x-ads/x-auth-store.js';
 import { CampaignAdapterError, requireApproval, requireValue } from './contract.js';
+import { readSelectedCampaignAsset } from '../image-service.js';
 
 function validateXAction(action) {
   return requireValue(action?.payload?.text || action?.payload?.final_copy, 'X Post text is required', 'x_post_text_required');
@@ -21,14 +22,29 @@ export const xOrganicAdapter = {
   async execute({ prisma, action, approval, providers = {} }) {
     requireApproval(action, approval);
     const text = validateXAction(action);
+    const selectedAsset = await readSelectedCampaignAsset({ prisma, action });
+    let mediaIds = [];
+    if (selectedAsset) {
+      const upload = await (providers.directXRequest || directXRequest)({
+        prisma, userId: action.campaign.ownerUserId, orgId: action.campaign.orgId,
+        method: 'POST', path: '/2/media/upload',
+        body: { media: selectedAsset.bytes.toString('base64'), media_type: selectedAsset.asset.contentType, media_category: 'tweet_image' },
+        timeoutMs: 60_000,
+      });
+      const media = upload?.data?.data ?? upload?.data;
+      const mediaId = media?.id || media?.media_id_string;
+      if (!mediaId) throw new CampaignAdapterError('X did not return a media ID for the campaign image', { code: 'x_media_upload_failed', outcome: 'FAILED' });
+      mediaIds = [String(mediaId)];
+    }
     const post = await (providers.createOrganicPost || createOrganicPost)({
       prisma,
       userId: action.campaign.ownerUserId,
       orgId: action.campaign.orgId,
       text,
       confirmed: true,
+      mediaIds,
     });
-    return { externalId: post.id, response: post };
+    return { externalId: post.id, response: { ...post, campaign_asset_id: selectedAsset?.asset?.id || null } };
   },
   async reconcile({ action }) {
     if (action.externalId) return { status: 'SUCCEEDED', externalId: action.externalId };

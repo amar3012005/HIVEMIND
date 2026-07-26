@@ -2422,7 +2422,10 @@ class Director:
             "audience:{rationale:string,segments:array,safety_notes:array},"
             "content_pillars:string[],kpis:[{name:string,target:string,source:string}],actions:[{id:string,channel:string,"
             "title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
-            "creative_brief:{required:boolean,concept:string},claim_status:verified|assumption|no_claim,evidence_ids:string[]}],"
+            "creative_brief:{required:boolean,objective:string,subject:string,composition:string,brand_style:string,audience:string,"
+            "aspect_ratio:1:1|16:9|9:16|4:3|3:4,text_policy:string,required_elements:string[],forbidden_elements:string[],"
+            "unsupported_claims:string[],alt_text:string,generation_prompt:string,rationale:string},"
+            "claim_status:verified|assumption|no_claim,evidence_ids:string[]}],"
             "timeline:[{action_id:string,phase:string,scheduled_offset_minutes:integer}],"
             "safety:{guardrails:string[],prohibited_claims:string[]},"
             "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},"
@@ -2447,6 +2450,7 @@ class Director:
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:5000] if forced_debate else '(not forced)'}")
         errors = ["bundle was not generated"]
         bundle: Optional[Dict[str, Any]] = None
+        visual_skill = ""
         for attempt in range(3):
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             if attempt:
@@ -2458,6 +2462,19 @@ class Director:
                 bundle = json.loads(raw)
             except Exception:
                 bundle = None
+            visual_actions = [action for action in (bundle.get("actions") or [])
+                              if isinstance(action, dict)
+                              and isinstance(action.get("creative_brief"), dict)
+                              and action["creative_brief"].get("required") is True] if isinstance(bundle, dict) else []
+            if visual_actions and not visual_skill:
+                visual_skill = load_method_skill("visual-prompt-architecture")
+                if visual_skill:
+                    if "visual-prompt-architecture" not in self.skills_used:
+                        self.skills_used.append("visual-prompt-architecture")
+                    await self.emit({"t": "skill_used", "skill": "visual-prompt-architecture", "room_kind": "campaign",
+                                     "note": "Visual prompt architecture activated for selected campaign actions."})
+                    errors = ["The image gate selected visual actions. Apply this visual-prompt skill to those actions only, then return the complete bundle again:\n" + visual_skill]
+                    continue
             from .campaign_contract import campaign__submit_plan
             bundle, errors = campaign__submit_plan(
                 bundle,

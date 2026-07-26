@@ -38,6 +38,7 @@ import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
 import { processDueCampaignActions } from './campaigns/worker.js';
+import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
@@ -358,6 +359,15 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     intervalMs: 30_000,
     singleton: false,
     run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'campaign-images',
+    initialDelayMs: 10_000,
+    intervalMs: 15_000,
+    singleton: false,
+    run: async () => { await processQueuedCampaignAssets({ prisma, limit: 2 }); },
   });
 }
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run

@@ -3,10 +3,9 @@ import { getCampaignCapabilities } from './capabilities.js';
 import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 import { buildCampaignDisplayMessage, buildCampaignRoomDispatch } from './contracts.js';
 import { captureCampaignChannelBaseline, reconcileCampaignAction as reconcileWithAdapter, syncCampaignActionMetrics } from './adapters/index.js';
-
-function campaignError(message, status = 400, code = 'invalid_campaign') {
-  const error = new Error(message); error.status = status; error.code = code; return error;
-}
+import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
+import { buildCampaignImagePrompt, creativeBriefErrors, normalizeCreativeBrief } from './visual-prompt.js';
+import { campaignError } from './errors.js';
 
 function cleanText(value, max, label, required = false) {
   const text = String(value || '').trim();
@@ -164,6 +163,7 @@ export function validateCampaignBundle(bundle, campaign) {
     if (!horizon || String(horizon.intensity || '').toLowerCase() !== String(campaign?.brief?.cadence?.preset || 'focused').toLowerCase()) errors.push('Contract v3 campaign intensity must match the approved brief');
     actions.forEach((action, index) => {
       if (!action?.creative_brief || typeof action.creative_brief !== 'object') errors.push(`Action ${action?.id || index + 1} needs a creative brief`);
+      creativeBriefErrors(action?.creative_brief).forEach((error) => errors.push(`Action ${action?.id || index + 1}: ${error}`));
       if (!['verified', 'assumption', 'no_claim'].includes(String(action?.claim_status || ''))) errors.push(`Action ${action?.id || index + 1} needs a valid claim status`);
       if (action?.claim_status === 'verified' && (!Array.isArray(action?.evidence_ids) || !action.evidence_ids.length)) errors.push(`Action ${action?.id || index + 1} needs evidence for a verified claim`);
     });
@@ -223,6 +223,7 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
       campaignId: run.campaignId, version, status: 'READY', canonicalHash: bundleHash,
       bundle, reportMarkdown: renderBundleReport(bundle), validation: { valid: true, errors: [] }, readyAt: new Date(),
     } });
+    let visualActionCount = 0;
     for (const [position, action] of bundle.actions.entries()) {
       const identity = audienceIdentity(action); let audienceMemberId = null;
       if (identity) {
@@ -250,17 +251,27 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         });
         audienceMemberId = member.id;
       }
-      await tx.campaignAction.create({ data: {
+      const creativeBrief = normalizeCreativeBrief(action.creative_brief);
+      const createdAction = await tx.campaignAction.create({ data: {
         campaignId: run.campaignId, planVersionId: plan.id, audienceMemberId, channel: action.channel,
         actionType: actionType(action.channel), position, status: 'READY',
         scheduledAt: new Date(now + action.scheduled_offset_minutes * 60_000),
-        payload: { ...action.payload, final_copy: action.final_copy, title: action.title || action.id, evidence: action.evidence || [], source_action_id: String(action.id), scheduled_offset_minutes: action.scheduled_offset_minutes },
+        payload: { ...action.payload, final_copy: action.final_copy, title: action.title || action.id, evidence: action.evidence || [], creative_brief: creativeBrief, source_action_id: String(action.id), scheduled_offset_minutes: action.scheduled_offset_minutes },
         rationale: String(action.rationale || ''), successMetric: String(action.success_metric || '').slice(0, 200) || null,
         idempotencyKey: `plan:${version}:action:${String(action.id).slice(0, 100)}`,
       } });
+      if (creativeBrief.required) {
+        visualActionCount += 1;
+        await tx.campaignAsset.create({ data: {
+          campaignId: run.campaignId, actionId: createdAction.id, kind: 'IMAGE', status: 'QUEUED',
+          provider: 'openrouter', model: DEFAULT_CAMPAIGN_IMAGE_MODEL,
+          prompt: buildCampaignImagePrompt(creativeBrief, { goal: run.campaign.goal }),
+          metadata: { creative_brief: creativeBrief, alt_text: creativeBrief.alt_text, aspect_ratio: creativeBrief.aspect_ratio, source: 'campaign_room', variant_index: 0 },
+        } });
+      }
     }
     await tx.campaign.update({ where: { id: run.campaignId }, data: {
-      status: 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
+      status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
     } });
     await tx.campaignChannel.updateMany({ where: { campaignId: run.campaignId }, data: { status: 'READY' } });
     await tx.campaignRun.update({ where: { id: run.id }, data: {
@@ -268,9 +279,10 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
     } });
     await tx.campaignEvent.create({ data: {
       campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_plan_ready',
-      data: { plan_version_id: plan.id, version, canonical_hash: bundleHash, action_count: bundle.actions.length },
+      data: { plan_version_id: plan.id, version, canonical_hash: bundleHash, action_count: bundle.actions.length, visual_action_count: visualActionCount },
     } });
-    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version };
+    if (visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_asset_generation_queued', data: { plan_version_id: plan.id, action_count: visualActionCount, source: 'campaign_room' } } });
+    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', visualActionCount };
   });
 }
 
@@ -427,9 +439,14 @@ export async function getCampaign({ prisma, orgId, id }) {
   const currentActions = campaign.currentPlanVersionId
     ? campaign.actions.filter((action) => action.planVersionId === campaign.currentPlanVersionId)
     : [];
+  const safeAsset = (asset) => {
+    const { storageKey, ...safe } = asset;
+    return { ...safe, content_url: storageKey && !asset.deletedAt ? `/v1/campaigns/${asset.campaignId}/assets/${asset.id}/content` : null };
+  };
   return {
     ...campaign,
-    actions: currentActions,
+    assets: campaign.assets.map(safeAsset),
+    actions: currentActions.map((action) => ({ ...action, assets: action.assets.map(safeAsset) })),
     events: campaign.events.map((event) => ({ ...event, id: String(event.id) })),
     roomTranscript,
   };
@@ -461,6 +478,15 @@ export async function approveCampaign({ prisma, orgId, userId, id, clock = () =>
     select: { id: true, channel: true, payload: true },
   });
   if (!approvedActions.length) throw campaignError('Campaign plan has no actions ready to launch', 409, 'campaign_actions_not_ready');
+  const visualActions = approvedActions.filter((action) => action.payload?.creative_brief?.required === true);
+  const selectedAssetIds = visualActions.map((action) => String(action.payload?.asset_id || '')).filter(Boolean);
+  if (selectedAssetIds.length !== visualActions.length) throw campaignError('Every required campaign visual must have a selected image before launch', 409, 'campaign_assets_not_ready');
+  const selectedAssets = selectedAssetIds.length ? await prisma.campaignAsset.findMany({ where: { id: { in: selectedAssetIds }, campaignId: id, status: 'READY', deletedAt: null }, select: { id: true, actionId: true, contentHash: true } }) : [];
+  const assetsById = new Map(selectedAssets.map((asset) => [asset.id, asset]));
+  for (const action of visualActions) {
+    const asset = assetsById.get(String(action.payload.asset_id));
+    if (!asset || asset.actionId !== action.id || asset.contentHash !== action.payload.asset_hash) throw campaignError('A selected campaign image changed or is no longer ready', 409, 'campaign_asset_changed');
+  }
   const actionHashes = Object.fromEntries(approvedActions.map((action) => [action.id, canonicalHash(action.payload)]));
   const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
   const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
@@ -494,6 +520,7 @@ export async function approveCampaign({ prisma, orgId, userId, id, clock = () =>
       if (!updated.count) throw campaignError('Campaign actions changed while launch was being approved', 409, 'campaign_action_launch_conflict');
     }
     await tx.campaignAudienceMember.updateMany({ where: { campaignId: id, status: 'PROPOSED' }, data: { status: 'APPROVED', approvedAt: launchAt } });
+    if (selectedAssetIds.length) await tx.campaignAsset.updateMany({ where: { id: { in: selectedAssetIds }, campaignId: id, status: 'READY' }, data: { status: 'APPROVED' } });
     await tx.campaignChannel.updateMany({ where: { campaignId: id }, data: { status: 'RUNNING' } });
     await tx.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_approved', actorType: 'user', actorId: userId, data: {
       approval_id: approval.id, plan_version_id: plan.id, canonical_hash: plan.canonicalHash,

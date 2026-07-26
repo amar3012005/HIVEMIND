@@ -20,6 +20,15 @@ export function campaignWorkerEnabled(env = process.env) {
   return ['1', 'true', 'yes', 'on'].includes(String(env.CAMPAIGNS_V2_WORKER_ENABLED || '').toLowerCase());
 }
 
+export function campaignExecutionChannels(env = process.env) {
+  return new Set(String(env.CAMPAIGNS_V2_EXECUTION_CHANNELS || '')
+    .split(',').map((value) => value.trim().toLowerCase()).filter((value) => EXECUTABLE_V1_CHANNELS.has(value)));
+}
+
+export function campaignChannelExecutionEnabled(channel, env = process.env) {
+  return campaignWorkerEnabled(env) && campaignExecutionChannels(env).has(String(channel || '').toLowerCase());
+}
+
 export function requireCampaignsV2(orgId) {
   if (campaignsV2Enabled(orgId)) return;
   const error = new Error('AI Campaigns is not enabled for this organization');

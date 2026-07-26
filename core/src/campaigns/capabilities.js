@@ -1,5 +1,5 @@
 import { X_AUTH_OAUTH2 } from '../x-ads/x-auth-store.js';
-import { campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
+import { campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
 
 async function hasGmailConnection(prisma, userId, orgId) {
   const [native, legacy] = await Promise.all([
@@ -26,11 +26,11 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
   const xConnected = x?.status === 'active';
   const adsApproved = process.env.X_ADS_API_APPROVED === 'true';
   return {
-    enabled, execution_enabled: enabled && campaignWorkerEnabled(),
+    enabled, execution_enabled: enabled && campaignWorkerEnabled() && campaignExecutionChannels().size > 0,
     channels: [
-      { id: 'x_organic', connected: xConnected, executable: enabled && xConnected, reason: xConnected ? null : 'connect_x', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null },
-      { id: 'gmail', connected: gmail, executable: enabled && gmail, reason: gmail ? null : 'connect_gmail' },
-      { id: 'tara', connected: Boolean(tara), executable: enabled && Boolean(tara), reason: tara ? null : 'configure_tara', provider: tara?.defaultProvider || null },
+      { id: 'x_organic', connected: xConnected, executable: enabled && xConnected, execution_ready: enabled && xConnected && campaignChannelExecutionEnabled('x_organic'), reason: xConnected ? null : 'connect_x', execution_reason: campaignChannelExecutionEnabled('x_organic') ? null : 'execution_not_enabled', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null },
+      { id: 'gmail', connected: gmail, executable: enabled && gmail, execution_ready: enabled && gmail && campaignChannelExecutionEnabled('gmail'), reason: gmail ? null : 'connect_gmail', execution_reason: campaignChannelExecutionEnabled('gmail') ? null : 'execution_not_enabled' },
+      { id: 'tara', connected: Boolean(tara), executable: enabled && Boolean(tara), execution_ready: enabled && Boolean(tara) && campaignChannelExecutionEnabled('tara'), reason: tara ? null : 'configure_tara', execution_reason: campaignChannelExecutionEnabled('tara') ? null : 'execution_not_enabled', provider: tara?.defaultProvider || null },
       { id: 'x_ads', connected: false, executable: false, reason: adsApproved ? 'enable_x_ads' : 'awaiting_x_ads_approval' },
       { id: 'linkedin', connected: false, executable: false, reason: 'no_official_api' },
       { id: 'meta', connected: false, executable: false, reason: 'no_official_api' },

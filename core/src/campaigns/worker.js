@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import { createOrganicPost } from '../x-ads/service.js';
-import { runGoogleTool } from '../connectors/google-native.js';
+import { executeCampaignAction } from './adapters/index.js';
 import { canonicalHash } from './service.js';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'BLOCKED', 'NEEDS_RECONCILIATION', 'CANCELLED']);
@@ -9,57 +8,6 @@ function providerError(error) {
   const message = String(error?.message || error || 'Provider action failed').slice(0, 1000);
   const ambiguous = error?.name === 'TimeoutError' || error?.name === 'AbortError' || /timeout|socket hang up|connection reset/i.test(message);
   return { message, ambiguous, retryableRead: Number(error?.status) === 429 || Number(error?.status) >= 500 };
-}
-
-async function executeTara(action) {
-  const runtime = await action._prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId } });
-  const provider = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
-  const base = provider === 'grok'
-    ? (process.env.HIVEMIND_TARA_GROK_URL || process.env.TARA_GROK_INTERNAL_URL || 'http://tara-grok:8092')
-    : (process.env.HIVEMIND_TARA_DEEPGRAM_URL || 'http://tara-deepgram:8091');
-  const capability = await fetch(`${base}/capabilities`, { signal: AbortSignal.timeout(5000) }).then((res) => res.ok ? res.json() : null).catch(() => null);
-  if (capability && capability.telephony === false) {
-    const error = new Error('The selected TARA provider requires this call to be started in the browser');
-    error.code = 'browser_required'; throw error;
-  }
-  const payload = action.payload || {};
-  const sessionId = `campaign-${action.id.slice(0, 8)}-${Date.now()}`;
-  const response = await fetch(`${base}/calls/outbound`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}) },
-    body: JSON.stringify({
-      to: payload.to, session_id: sessionId, user_id: action.campaign.ownerUserId, org_id: action.campaign.orgId,
-      goal: [payload.goal, payload.opening ? `Open with: ${payload.opening}` : null, payload.strategy ? `Strategy: ${payload.strategy}` : null].filter(Boolean).join('. ').slice(0, 600),
-      context: String(payload.context || '').slice(0, 800) || undefined,
-      language: String(payload.language || 'en').slice(0, 8), provider,
-      config_revision: runtime?.revision || 1,
-    }),
-    signal: AbortSignal.timeout(20_000),
-  });
-  const text = await response.text(); let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 500) }; }
-  if (!response.ok) { const error = new Error(data?.error || `TARA outbound failed (${response.status})`); error.status = response.status; throw error; }
-  return { externalId: data?.call_leg_id || sessionId, response: { ...data, provider, session_id: sessionId } };
-}
-
-async function executeAction(prisma, action) {
-  const payload = action.payload || {};
-  if (action.channel === 'x_organic') {
-    const post = await createOrganicPost({
-      prisma, userId: action.campaign.ownerUserId, orgId: action.campaign.orgId,
-      text: payload.text || payload.final_copy, confirmed: true,
-    });
-    return { externalId: post.id, response: post };
-  }
-  if (action.channel === 'gmail') {
-    const result = await runGoogleTool('gmail_send', {
-      to: payload.to, subject: payload.subject, body: payload.body || payload.final_copy,
-      markdown: true, threadId: payload.thread_id || undefined,
-    }, { user_id: action.campaign.ownerUserId, org_id: action.campaign.orgId }, prisma);
-    return { externalId: result.id, response: result };
-  }
-  if (action.channel === 'tara') return executeTara({ ...action, _prisma: prisma });
-  const error = new Error(`No campaign adapter for ${action.channel}`); error.code = 'adapter_missing'; throw error;
 }
 
 async function leaseAction(prisma, { campaignId, workerId, leaseSeconds }) {
@@ -95,7 +43,7 @@ async function finishCampaignIfDone(prisma, campaignId) {
   await prisma.campaignEvent.create({ data: { campaignId, orgId: campaign.orgId, eventType: failed ? 'campaign_execution_failed' : 'campaign_completed', data: { failed_actions: failed } } });
 }
 
-export async function processDueCampaignActions({ prisma, campaignId = null, limit = 10, workerId = `campaign-${crypto.randomUUID()}` }) {
+export async function processDueCampaignActions({ prisma, campaignId = null, limit = 10, workerId = `campaign-${crypto.randomUUID()}`, providers = {} }) {
   if (!prisma) return { processed: 0 };
   let processed = 0;
   while (processed < Math.max(1, Math.min(Number(limit) || 10, 50))) {
@@ -106,7 +54,14 @@ export async function processDueCampaignActions({ prisma, campaignId = null, lim
     const attemptNumber = (action.attempts[0]?.attempt || 0) + 1;
     const attempt = await prisma.campaignActionAttempt.create({ data: { actionId, attempt: attemptNumber, requestHash: canonicalHash(action.payload) } });
     try {
-      const result = await executeAction(prisma, action);
+      const approval = await prisma.campaignApproval.findFirst({ where: {
+        campaignId: action.campaignId, planVersionId: action.planVersionId, status: 'ACTIVE',
+      }, orderBy: { approvedAt: 'desc' } });
+      if (!approval?.caps?.action_hashes || approval.caps.action_hashes[action.id] !== canonicalHash(action.payload)) {
+        const error = new Error('The action payload no longer matches the approved campaign plan');
+        error.code = 'campaign_action_changed'; error.outcome = 'BLOCKED'; throw error;
+      }
+      const result = await executeCampaignAction({ prisma, action, approval, providers, executionAttempt: attemptNumber });
       await prisma.$transaction([
         prisma.campaignActionAttempt.update({ where: { id: attempt.id }, data: { status: 'SUCCEEDED', externalId: result.externalId || null, response: result.response || {}, completedAt: new Date() } }),
         prisma.campaignAction.update({ where: { id: actionId }, data: { status: 'SUCCEEDED', externalId: result.externalId || null, executedAt: new Date(), leaseOwner: null, leaseExpiresAt: null, lastError: null } }),
@@ -114,7 +69,7 @@ export async function processDueCampaignActions({ prisma, campaignId = null, lim
       ]);
     } catch (error) {
       const normalized = providerError(error);
-      const status = error?.code === 'browser_required' ? 'BLOCKED' : (normalized.ambiguous ? 'NEEDS_RECONCILIATION' : 'FAILED');
+      const status = error?.outcome || (normalized.ambiguous ? 'NEEDS_RECONCILIATION' : 'FAILED');
       await prisma.$transaction([
         prisma.campaignActionAttempt.update({ where: { id: attempt.id }, data: { status, error: normalized.message, completedAt: new Date() } }),
         prisma.campaignAction.update({ where: { id: actionId }, data: { status, lastError: normalized.message, leaseOwner: null, leaseExpiresAt: null } }),

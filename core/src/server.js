@@ -38,6 +38,7 @@ import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
 import { processDueCampaignActions } from './campaigns/worker.js';
+import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -7368,6 +7369,16 @@ exit \$RC
             }
             const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
             await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            const campaignAttempt = await prisma.taraCallAttempt.findFirst({ where: { orgId: tOrg, sessionId: String(body.session_id) } }).catch(() => null);
+            if (campaignAttempt) {
+              let attemptStatus = campaignAttempt.status;
+              for (const next of ['connected', 'completed', 'done']) {
+                if (!canTransitionTaraAttempt(attemptStatus, next)) continue;
+                await prisma.taraCallAttempt.update({ where: { id: campaignAttempt.id }, data: { status: next, ...(next === 'done' ? { endedAt: new Date(), disposition: 'completed' } : {}) } });
+                attemptStatus = next;
+              }
+              await prisma.taraCampaignContact.update({ where: { id: campaignAttempt.contactId }, data: { status: 'done' } }).catch(() => {});
+            }
             if (durationMs > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', Math.ceil(durationMs / 1000));
             // Value-action metering: one completed TARA call (OrgUsage.taraUsage
             // was defined but never wired). Fire-and-forget, success-path only.

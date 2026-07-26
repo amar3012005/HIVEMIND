@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { campaignAgentWhere, canonicalHash, normalizeCampaignInput, validateCampaignBundle } from '../../src/campaigns/service.js';
-import { assertTransition, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
+import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
 
@@ -40,7 +40,7 @@ test('bundle gate requires every channel, recipient, and requirement', () => {
     kpis: [{ name: 'Qualified replies', target: 'Track from baseline', source: 'Gmail' }],
     actions: [
       { id: 'email-1', channel: 'gmail', final_copy: 'Hello', payload: { to: 'lead@example.com', subject: 'A relevant idea' }, scheduled_offset_minutes: 0, rationale: 'Establish relevance' },
-      { id: 'call-1', channel: 'tara', final_copy: 'Call contract', payload: { to: '+49123456789', opening: 'Hello, this is TARA calling about your request.' }, scheduled_offset_minutes: 60, rationale: 'Follow up with opted-in leads' },
+      { id: 'call-1', channel: 'tara', final_copy: 'Call contract', payload: { to: '+353123456789', opening: 'Hello, this is TARA calling about your request.', lawful_basis: 'consent', country: 'IE', timezone: 'Europe/Dublin' }, scheduled_offset_minutes: 60, rationale: 'Follow up with opted-in leads' },
     ],
     requirement_coverage: [
       { requirement_id: 'goal', action_ids: ['email-1'] },
@@ -57,6 +57,9 @@ test('state and rollout gates reject unsafe transitions', () => {
   assert.equal(campaignsV2Enabled('org-a', { CAMPAIGNS_V2_ENABLED: 'true', CAMPAIGNS_V2_ORG_IDS: 'org-a' }), true);
   assert.equal(campaignWorkerEnabled({ CAMPAIGNS_V2_WORKER_ENABLED: 'false' }), false);
   assert.equal(campaignWorkerEnabled({ CAMPAIGNS_V2_WORKER_ENABLED: 'true' }), true);
+  assert.deepEqual([...campaignExecutionChannels({ CAMPAIGNS_V2_EXECUTION_CHANNELS: 'x_organic,unknown' })], ['x_organic']);
+  assert.equal(campaignChannelExecutionEnabled('x_organic', { CAMPAIGNS_V2_WORKER_ENABLED: 'true', CAMPAIGNS_V2_EXECUTION_CHANNELS: 'x_organic' }), true);
+  assert.equal(campaignChannelExecutionEnabled('gmail', { CAMPAIGNS_V2_WORKER_ENABLED: 'true', CAMPAIGNS_V2_EXECUTION_CHANNELS: 'x_organic' }), false);
   assert.equal(assertTransition('READY_FOR_APPROVAL', 'RUNNING'), true);
   assert.throws(() => assertTransition('DRAFT', 'RUNNING'), { code: 'invalid_campaign_transition' });
 });

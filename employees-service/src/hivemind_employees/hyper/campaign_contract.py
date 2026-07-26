@@ -55,6 +55,12 @@ def campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[
             errors.append(f"TARA action {action_id or index + 1} needs a speak-first payload.opening")
         if channel == "tara" and not re.match(r"^\+[1-9]\d{6,14}$", str(payload.get("to") or "")):
             errors.append(f"TARA action {action_id or index + 1} needs a verified E.164 payload.to")
+        if channel == "tara" and str(payload.get("lawful_basis") or "") not in ("legitimate_interest", "consent"):
+            errors.append(f"TARA action {action_id or index + 1} needs payload.lawful_basis")
+        if channel == "tara" and not re.match(r"^[A-Za-z]{2}$", str(payload.get("country") or "")):
+            errors.append(f"TARA action {action_id or index + 1} needs an ISO payload.country")
+        if channel == "tara" and not str(payload.get("timezone") or "").strip():
+            errors.append(f"TARA action {action_id or index + 1} needs an IANA payload.timezone")
 
     for channel in channels:
         if channel not in action_channels:

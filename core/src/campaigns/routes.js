@@ -1,5 +1,5 @@
 import { getCampaignCapabilities } from './capabilities.js';
-import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, getCampaign, listCampaigns } from './service.js';
+import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, getCampaign, listCampaigns, reconcileCampaignAction, retryCampaignAction } from './service.js';
 import { processDueCampaignActions } from './worker.js';
 import { campaignWorkerEnabled } from './state.js';
 
@@ -69,6 +69,16 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
       const result = await approveCampaignAction({ prisma, orgId, userId, id: actionApprovalMatch[1], actionId: actionApprovalMatch[2] });
       await audit(prisma, auditLogger, { userId, orgId, action: 'action_approved', campaignId: result.campaignId, metadata: { action_id: result.actionId } });
       if (campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: result.campaignId }).catch(() => {});
+      return jsonResponse(res, result);
+    }
+    const actionControlMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/(retry|reconcile)$/i);
+    if (actionControlMatch && method === 'POST') {
+      const [, id, actionId, command] = actionControlMatch;
+      const result = command.toLowerCase() === 'retry'
+        ? await retryCampaignAction({ prisma, orgId, userId, id, actionId })
+        : await reconcileCampaignAction({ prisma, orgId, userId, id, actionId });
+      await audit(prisma, auditLogger, { userId, orgId, action: `action_${command.toLowerCase()}`, campaignId: id, metadata: { action_id: actionId, result_status: result.status } });
+      if (command.toLowerCase() === 'retry' && campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
       return jsonResponse(res, result);
     }
     return jsonResponse(res, { error: 'not_found', message: 'Campaign route not found' }, 404);

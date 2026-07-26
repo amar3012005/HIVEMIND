@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { getCampaignCapabilities } from './capabilities.js';
 import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 import { buildCampaignKickoff, buildCampaignRoomDispatch } from './contracts.js';
+import { reconcileCampaignAction as reconcileWithAdapter } from './adapters/index.js';
 
 function campaignError(message, status = 400, code = 'invalid_campaign') {
   const error = new Error(message); error.status = status; error.code = code; return error;
@@ -63,6 +64,12 @@ export function validateCampaignBundle(bundle, campaign) {
     if (channel === 'gmail' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(action?.payload?.to || ''))) errors.push(`Gmail action ${id || index + 1} needs a verified recipient`);
     if (channel === 'tara' && !String(action?.payload?.opening || '').trim()) errors.push(`TARA action ${id || index + 1} needs a speak-first opening`);
     if (channel === 'tara' && !/^\+[1-9]\d{6,14}$/.test(String(action?.payload?.to || ''))) errors.push(`TARA action ${id || index + 1} needs a verified E.164 recipient`);
+    if (channel === 'tara' && !['legitimate_interest', 'consent'].includes(String(action?.payload?.lawful_basis || ''))) errors.push(`TARA action ${id || index + 1} needs a recognized lawful basis`);
+    if (channel === 'tara' && !/^[A-Z]{2}$/.test(String(action?.payload?.country || '').toUpperCase())) errors.push(`TARA action ${id || index + 1} needs an ISO country`);
+    if (channel === 'tara') {
+      const timezone = String(action?.payload?.timezone || '');
+      try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); } catch { errors.push(`TARA action ${id || index + 1} needs a valid IANA timezone`); }
+    }
   });
   campaign.requestedChannels.forEach((channel) => { if (!channels.has(channel)) errors.push(`Selected channel ${channel} has no action`); });
   const covered = new Map((Array.isArray(bundle.requirement_coverage) ? bundle.requirement_coverage : []).map((item) => [String(item?.requirement_id || ''), item]));
@@ -341,9 +348,11 @@ export async function approveCampaign({ prisma, orgId, userId, id }) {
   }
   const plan = campaign.planVersions[0];
   if (canonicalHash(plan.bundle) !== plan.canonicalHash) throw campaignError('Campaign plan integrity check failed', 409, 'campaign_plan_changed');
+  const approvedActions = await prisma.campaignAction.findMany({ where: { campaignId: id, planVersionId: plan.id }, select: { id: true, payload: true } });
+  const actionHashes = Object.fromEntries(approvedActions.map((action) => [action.id, canonicalHash(action.payload)]));
   const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
-  const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.executable);
-  if (unavailable.length) throw campaignError(`Reconnect or configure before approval: ${unavailable.join(', ')}`, 409, 'channel_connection_required');
+  const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
+  if (unavailable.length) throw campaignError(`Execution is not ready for: ${unavailable.join(', ')}`, 409, 'channel_execution_unavailable');
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.campaign.updateMany({
       where: { id, orgId, status: 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id },
@@ -354,7 +363,7 @@ export async function approveCampaign({ prisma, orgId, userId, id }) {
     const approval = await tx.campaignApproval.create({ data: {
       campaignId: id, planVersionId: plan.id, actorUserId: userId, canonicalHash: plan.canonicalHash,
       channels: campaign.requestedChannels, recipientCount: Array.isArray(plan.bundle?.actions) ? plan.bundle.actions.filter((item) => item?.payload?.to).length : 0,
-      caps: {}, autonomyMode: campaign.autonomyMode,
+      caps: { action_hashes: actionHashes }, autonomyMode: campaign.autonomyMode,
     } });
     await tx.campaignAction.updateMany({
       where: { campaignId: id, planVersionId: plan.id, status: 'READY' },
@@ -385,6 +394,70 @@ export async function approveCampaignAction({ prisma, orgId, userId, id, actionI
   return { campaignId: id, actionId, status: 'QUEUED' };
 }
 
+async function getActionForControl(prisma, { orgId, userId, id, actionId }) {
+  const campaign = await prisma.campaign.findFirst({ where: { id, orgId } });
+  if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
+  await requireCampaignEditor(prisma, campaign, userId);
+  const action = await prisma.campaignAction.findFirst({
+    where: { id: actionId, campaignId: id }, include: { campaign: true, attempts: { orderBy: { attempt: 'desc' }, take: 5 } },
+  });
+  if (!action) throw campaignError('Campaign action not found', 404, 'campaign_action_not_found');
+  return { campaign, action };
+}
+
+export async function retryCampaignAction({ prisma, orgId, userId, id, actionId }) {
+  requireCampaignsV2(orgId);
+  if (!campaignWorkerEnabled()) throw campaignError('Campaign execution is not enabled for this pilot yet', 409, 'campaign_execution_disabled');
+  const { campaign, action } = await getActionForControl(prisma, { orgId, userId, id, actionId });
+  if (!['FAILED', 'BLOCKED'].includes(action.status)) {
+    throw campaignError('Only definitively failed or blocked actions can be retried', 409, 'campaign_action_not_retryable');
+  }
+  if (!campaign.approvedPlanVersionId || action.planVersionId !== campaign.approvedPlanVersionId) {
+    throw campaignError('The action is not part of the approved plan', 409, 'campaign_action_not_approved');
+  }
+  const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
+  if (!capabilities.channels.find((item) => item.id === action.channel)?.execution_ready) {
+    throw campaignError(`Execution is not ready for ${action.channel}`, 409, 'channel_execution_unavailable');
+  }
+  await prisma.$transaction([
+    prisma.campaignAction.update({ where: { id: action.id }, data: { status: 'QUEUED', lastError: null, leaseOwner: null, leaseExpiresAt: null } }),
+    prisma.campaign.update({ where: { id }, data: { status: 'RUNNING', completedAt: null, lastError: null } }),
+    prisma.campaignChannel.update({ where: { campaignId_channel: { campaignId: id, channel: action.channel } }, data: { status: 'RUNNING', lastError: null } }),
+    prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_action_retry_requested', actorType: 'user', actorId: userId, data: { action_id: action.id } } }),
+  ]);
+  return { campaignId: id, actionId: action.id, status: 'QUEUED' };
+}
+
+export async function reconcileCampaignAction({ prisma, orgId, userId, id, actionId }) {
+  requireCampaignsV2(orgId);
+  const { action } = await getActionForControl(prisma, { orgId, userId, id, actionId });
+  if (action.status !== 'NEEDS_RECONCILIATION') {
+    throw campaignError('Only ambiguous actions can be reconciled', 409, 'campaign_action_reconciliation_unavailable');
+  }
+  const result = await reconcileWithAdapter({ prisma, action });
+  if (result.status === 'SUCCEEDED') {
+    await prisma.$transaction([
+      prisma.campaignAction.update({ where: { id: action.id }, data: { status: 'SUCCEEDED', externalId: result.externalId || null, executedAt: new Date(), lastError: null } }),
+      prisma.campaignActionAttempt.updateMany({ where: { actionId: action.id, status: 'NEEDS_RECONCILIATION' }, data: { status: 'SUCCEEDED', externalId: result.externalId || null, response: result.response || {}, completedAt: new Date() } }),
+      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_action_reconciled', actorType: 'user', actorId: userId, data: { action_id: action.id, status: 'SUCCEEDED', external_id: result.externalId || null } } }),
+    ]);
+    await finishCampaignAfterActionControl(prisma, id);
+  } else {
+    await prisma.$transaction([
+      prisma.campaignAction.update({ where: { id: action.id }, data: { lastError: result.reason || 'Manual provider inspection is required' } }),
+      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_action_reconciliation_pending', actorType: 'user', actorId: userId, data: { action_id: action.id, reason: result.reason } } }),
+    ]);
+  }
+  return { campaignId: id, actionId: action.id, ...result };
+}
+
+async function finishCampaignAfterActionControl(prisma, campaignId) {
+  const remaining = await prisma.campaignAction.count({ where: { campaignId, status: { notIn: ['SUCCEEDED', 'FAILED', 'BLOCKED', 'NEEDS_RECONCILIATION', 'CANCELLED'] } } });
+  if (remaining) return;
+  const failed = await prisma.campaignAction.count({ where: { campaignId, status: { in: ['FAILED', 'BLOCKED', 'NEEDS_RECONCILIATION'] } } });
+  await prisma.campaign.update({ where: { id: campaignId }, data: { status: failed ? 'FAILED' : 'COMPLETED', completedAt: new Date() } });
+}
+
 export async function controlCampaign({ prisma, orgId, userId, id, action }) {
   requireCampaignsV2(orgId);
   const campaign = await prisma.campaign.findFirst({ where: { id, orgId } });
@@ -402,8 +475,8 @@ export async function controlCampaign({ prisma, orgId, userId, id, action }) {
     if (!campaignWorkerEnabled()) throw campaignError('Campaign execution is not enabled for this pilot yet', 409, 'campaign_execution_disabled');
     if (campaign.status !== 'PAUSED') throw campaignError('Only a paused campaign can be resumed', 409, 'campaign_not_paused');
     const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
-    const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.executable);
-    if (unavailable.length) throw campaignError(`Reconnect or configure before resuming: ${unavailable.join(', ')}`, 409, 'channel_connection_required');
+    const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
+    if (unavailable.length) throw campaignError(`Execution is not ready for: ${unavailable.join(', ')}`, 409, 'channel_execution_unavailable');
     await prisma.$transaction([
       prisma.campaign.update({ where: { id }, data: { status: 'RUNNING', pausedAt: null, lastError: null } }),
       prisma.campaignAction.updateMany({ where: { campaignId: id, status: 'PAUSED' }, data: { status: 'QUEUED' } }),

@@ -2380,7 +2380,8 @@ class Director:
             "title:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,evidence:string[]}],"
             "risks:string[],requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
             "For Gmail payload include a verified to email, subject, and recipient_policy. For TARA include a verified "
-            "E.164 to number, opening, goal, context, language, "
+            "E.164 to number, opening, goal, context, language, lawful_basis (consent or legitimate_interest), "
+            "ISO country, IANA timezone, and calling_window; "
             "objections, and strategy; TARA must speak first. For X Organic payload include text. No placeholders. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )

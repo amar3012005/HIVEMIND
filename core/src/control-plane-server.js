@@ -8667,6 +8667,11 @@ Write the persona now.`;
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
       } catch { /* leave undefined */ }
+      const linkedCampaign = await prisma.campaign.findFirst({
+        where: { roomId, orgId: current.session.orgId },
+        select: { id: true },
+      }).catch(() => null);
+      room.campaign_id = linkedCampaign?.id || null;
       // Prewarm the sidecar on room OPEN (fire-and-forget): warms the company brief
       // + the cold MCP connector inspects (~20-30s, the dominant first-turn latency)
       // while the user is still typing — their first message then starts hot. The

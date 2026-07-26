@@ -270,6 +270,14 @@ services:
       - ${TARA_GROK_ENV_FILE:-/opt/tara-grok/.env}
     environment:
       HIVEMIND_CORE_EVENTS_URL: http://core:3000/internal/v1/tara/calls
+      # Live-listen: verify Core-minted session-scoped tokens (same key core signs
+      # with) so the dashboard can hear Grok PSTN calls without the dial key.
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
+      # Dial gate — same shared secret + `x-tara-key` contract as tara-deepgram.
+      # NOTE: the destination allowlist deliberately is NOT set here. Compose
+      # `environment` OVERRIDES env_file, so listing it would blank the value from
+      # /opt/tara-grok/.env and fail-closed every dial.
+      TARA_DG_API_KEY: ${TARA_DG_API_KEY:-}
     ports:
       - "127.0.0.1:${TARA_GROK_PORT:-8092}:8092"
     depends_on:

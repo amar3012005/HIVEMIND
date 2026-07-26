@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 import json
 import logging
 import time
@@ -9,10 +11,10 @@ from collections.abc import Iterable
 
 import httpx
 import websockets
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from . import config
+from . import config, listen, telephony
 from .core_client import consume_capability, emit_event
 from .prompt import SYSTEM_PROMPT
 from .tools import TOOL_SCHEMAS, execute
@@ -144,7 +146,21 @@ def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
     return ""
 
 
-def _session_update(snapshot: dict) -> dict:
+def _session_update(snapshot: dict, media: str = "browser") -> dict:
+    """Session config. `media` selects the audio profile:
+
+    - "browser"   PCM16 @16kHz over binary frames (mic/speaker path).
+    - "telephony" G.711 μ-law @8kHz over JSON frames. Zernio/Telnyx media
+      streaming delivers exactly that, base64 in JSON, and xAI accepts
+      `audio/pcmu` at 8000 Hz natively — so the PSTN bridge is a pure base64
+      re-wrap with NO transcode and no added latency.
+    """
+    if media == "telephony":
+        audio_format = {"type": "audio/pcmu", "rate": 8000}
+        transport = "json"
+    else:
+        audio_format = {"type": "audio/pcm", "rate": 16000}
+        transport = "binary"
     return {
         "type": "session.update",
         "session": {
@@ -160,8 +176,8 @@ def _session_update(snapshot: dict) -> dict:
             "resumption": {"enabled": True},
             "audio": {
                 "input": {
-                    "format": {"type": "audio/pcm", "rate": 16000},
-                    "transport": "binary",
+                    "format": audio_format,
+                    "transport": transport,
                     "transcription": {
                         "model": "grok-transcribe",
                         "language_hint": snapshot.get("language", "en"),
@@ -169,8 +185,8 @@ def _session_update(snapshot: dict) -> dict:
                     },
                 },
                 "output": {
-                    "format": {"type": "audio/pcm", "rate": 16000},
-                    "transport": "binary",
+                    "format": audio_format,
+                    "transport": transport,
                     "speed": snapshot.get("output_speed", 1.0),
                 },
             },
@@ -178,6 +194,23 @@ def _session_update(snapshot: dict) -> dict:
             "tools": TOOL_SCHEMAS,
         },
     }
+
+
+def _telephony_instructions(meta: dict) -> str:
+    """Turn a dial request into the call's operating brief."""
+    parts = []
+    if meta.get("company"):
+        parts.append(f"You are calling {meta['company']}.")
+    if meta.get("contact_name"):
+        parts.append(f"Ask for {meta['contact_name']}.")
+    if meta.get("goal"):
+        parts.append(f"Objective: {meta['goal']}")
+    if meta.get("context"):
+        parts.append(f"Background: {meta['context']}")
+    # Recording is enabled on the carrier number, so disclose it up front.
+    parts.append("State early that the call may be recorded. Keep turns short — "
+                 "this is a phone call, not a document.")
+    return " ".join(parts)
 
 def _browser_event(event: dict) -> dict | None:
     """Normalize xAI events to TARA's provider-neutral widget contract."""
@@ -261,14 +294,14 @@ async def capabilities():
     """What this adapter can actually fulfil, for the Outreach Contract router.
 
     Declared, not guessed: core reads this to decide whether an outreach call can
-    be dialed here or must be handed to the user's browser. `telephony` stays
-    False until the SIP/Telnyx bridge is enabled — dialing an adapter without one
-    404s and kills the campaign target.
+    be dialed here or must be handed to the user's browser. `telephony` is now
+    true once Zernio credentials are present — this adapter dials for itself, so a
+    Grok org gets Grok on the phone instead of parking every target as 'browser'.
     """
     return {
         "provider": "grok",
         "model": config.TARA_GROK_MODEL,
-        "telephony": False,          # no PSTN/SIP bridge yet — see /webhooks/telnyx
+        "telephony": config.telephony_enabled(),   # Zernio (Telnyx-backed) PSTN
         "browser": True,             # realtime browser voice over /voice/{session_id}
         "channels": ["call"],
         "contract_versions": [1],
@@ -412,3 +445,163 @@ async def voice(ws: WebSocket, session_id: str):
 async def telnyx_webhook():
     # Public ingress is intentionally not enabled until Core issues a signed call mapping.
     raise HTTPException(status_code=503, detail="Telnyx Grok bridge not enabled")
+
+
+# ── PSTN telephony ───────────────────────────────────────────────────────────
+
+def _dial_auth_ok(request: Request) -> bool:
+    """Shared-secret gate on the side-effectful dial routes, same contract as
+    tara-deepgram (header `x-tara-key`). Constant-time compare; empty env = open
+    so the route can be deployed before the secret is set on both sides."""
+    expected = config.DIAL_API_KEY
+    if not expected:
+        return True
+    supplied = (request.headers.get("x-tara-key") or "").strip()
+    return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+
+@app.post("/calls/outbound")
+async def calls_outbound(req: telephony.DialRequest, request: Request):
+    """Dial a prospect and bridge the answered call into a Grok session.
+
+    Same path and payload as tara-deepgram's, so core's campaign runner reaches
+    either adapter with one call — it picks by the campaign's snapshotted provider.
+    """
+    if not _dial_auth_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        return await telephony.dial(req)
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    except Exception as error:  # noqa: BLE001
+        log.exception("grok dial failed")
+        return JSONResponse({"error": str(error)[:300]}, status_code=502)
+
+
+@app.post("/calls/outbound/{call_leg_id}/hangup")
+async def calls_hangup(call_leg_id: str, request: Request):
+    if not _dial_auth_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        await telephony.hangup(call_leg_id)
+        return {"ok": True}
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=404)
+
+
+@app.get("/calls/outbound/{call_leg_id}/status")
+async def calls_status(call_leg_id: str):
+    meta = telephony.pending_calls.get(call_leg_id)
+    if not meta:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return {"call_leg_id": call_leg_id, "status": meta.get("status"),
+            "session_id": meta.get("session_id")}
+
+
+@app.websocket("/calls/listen")
+async def calls_listen(ws: WebSocket):
+    """Listen-only browser tap into a live Grok call. Same wire contract as
+    tara-deepgram (binary PCM16 mono 8kHz + JSON control), so the existing
+    dashboard player works unchanged. Auth = Core-minted session-scoped token."""
+    qp = ws.query_params
+    await listen.handle_listen(ws, session_id=qp.get("session_id") or "",
+                               token=qp.get("token") or "")
+
+
+@app.websocket("/telnyx/stream")
+async def telnyx_stream(ws: WebSocket):
+    """Bridge one Zernio/Telnyx media stream to one xAI realtime session.
+
+    Both sides speak G.711 μ-law @8kHz base64-in-JSON, so this is a re-wrap in
+    each direction — no transcode, no resampling. Frames are teed to
+    listen.tee() so the dashboard can hear the call live.
+    """
+    session_id = ws.query_params.get("session_id") or ""
+    meta = telephony.find_by_session(session_id) or {}
+    await ws.accept()
+    if not session_id:
+        await ws.close(code=1008)
+        return
+
+    snapshot = {
+        "voice_id": meta.get("voice_id") or ws.query_params.get("voice_id") or "eve",
+        "language": meta.get("language") or ws.query_params.get("language") or "en",
+        "instructions": _telephony_instructions(meta),
+    }
+    try:
+        xai = await _xai_connect(snapshot, _resume_conversation_id(
+            (str(meta.get("org_id") or ""), str(meta.get("user_id") or ""))))
+        await xai.send(json.dumps(_session_update(snapshot, media="telephony")))
+    except Exception:  # noqa: BLE001
+        log.exception("xAI connect failed for PSTN session=%s", session_id)
+        await ws.close(code=1011)
+        return
+    log.info("grok PSTN bridge open session=%s leg=%s", session_id, meta.get("call_control_id"))
+    listen.tee_json(session_id, {"type": "ready", "session_id": session_id})
+
+    async def pstn_to_xai():
+        """Carrier → model. `media` frames carry base64 μ-law; forward verbatim."""
+        try:
+            while True:
+                raw = await ws.receive_text()
+                msg = json.loads(raw)
+                event = msg.get("event")
+                if event == "media":
+                    payload = (msg.get("media") or {}).get("payload")
+                    if payload:
+                        await xai.send(json.dumps({
+                            "type": "input_audio_buffer.append", "audio": payload,
+                        }))
+                        try:
+                            listen.tee(session_id, "in", base64.b64decode(payload))
+                        except Exception:  # noqa: BLE001
+                            pass
+                elif event == "stop":
+                    break
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        except Exception:  # noqa: BLE001
+            log.exception("pstn_to_xai failed session=%s", session_id)
+
+    async def xai_to_pstn():
+        """Model → carrier. Audio deltas are base64 μ-law; re-wrap as media."""
+        try:
+            async for message in xai:
+                if isinstance(message, bytes):
+                    continue  # telephony profile uses json transport only
+                event = json.loads(message)
+                etype = event.get("type")
+                if etype in ("response.output_audio.delta", "response.audio.delta"):
+                    audio = event.get("delta") or event.get("audio")
+                    if audio:
+                        await ws.send_text(json.dumps({
+                            "event": "media", "media": {"payload": audio},
+                        }))
+                        try:
+                            listen.tee(session_id, "out", base64.b64decode(audio))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
+                if etype == "conversation.created":
+                    _remember_conversation(
+                        (str(meta.get("org_id") or ""), str(meta.get("user_id") or "")),
+                        (event.get("conversation") or {}).get("id"))
+                # Mirror transcripts to dashboard listeners (same shape as deepgram).
+                if etype == "conversation.item.input_audio_transcription.completed":
+                    listen.tee_json(session_id, {"type": "transcript", "role": "user",
+                                                 "content": event.get("transcript") or ""})
+                elif etype == "response.output_audio_transcript.done":
+                    listen.tee_json(session_id, {"type": "transcript", "role": "assistant",
+                                                 "content": event.get("transcript") or ""})
+        except Exception:  # noqa: BLE001
+            log.exception("xai_to_pstn failed session=%s", session_id)
+
+    tasks = [asyncio.create_task(pstn_to_xai()), asyncio.create_task(xai_to_pstn())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        listen.tee_json(session_id, {"type": "ended", "session_id": session_id})
+        await xai.close()
+        log.info("grok PSTN bridge closed session=%s", session_id)

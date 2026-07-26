@@ -238,6 +238,9 @@ services:
       # /opt/tara-deepgram/.env; set TELEPHONY_PROVIDER=telnyx|twilio to switch
       # back without a code change. Not a secret, so it lives in git.
       TELEPHONY_PROVIDER: ${TELEPHONY_PROVIDER:-zernio}
+      # Live-listen: core SIGNS a session-scoped token, this service VERIFIES it,
+      # so the browser never holds the privileged dial key. Value from ../.env.
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
     ports:
       # Loopback-only: hm-caddy (network_mode: host) fronts this at /voice2.
       # Binding all interfaces would expose the voice adapter publicly — this

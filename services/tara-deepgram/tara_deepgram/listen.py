@@ -93,10 +93,53 @@ def _auth_ok(key: str) -> bool:
     return bool(key) and hmac.compare_digest(key.strip(), expected)
 
 
-async def handle_listen(ws: WebSocket, session_id: str, key: str = "") -> None:
+def _verify_listen_token(token: str, session_id: str) -> bool:
+    """Verify a Core-minted, session-scoped live-listen capability.
+
+    Core checks org ownership BEFORE signing, so a valid signature over a
+    matching, unexpired `sid` IS the authorization. This exists so a browser
+    never needs TARA_DG_API_KEY — that key authorizes DIALING and must never
+    leave the server.
+
+    Format: base64url(JSON claims) + "." + base64url(HMAC-SHA256(claims)), both
+    unpadded to match Node's digest('base64url').
+    """
+    import base64
+    import hashlib
+    import json
+    import time
+    secret = (os.environ.get("TARA_DG_LISTEN_SECRET") or "").strip()
+    if not secret or not token or "." not in token:
+        return False
+    claims_b64, _, sig = token.partition(".")
+    if not claims_b64 or not sig:
+        return False
+    mac = hmac.new(secret.encode(), claims_b64.encode(), hashlib.sha256).digest()
+    expected = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+    if not hmac.compare_digest(expected, sig.strip()):
+        return False
+    try:
+        pad = "=" * (-len(claims_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(claims_b64 + pad))
+    except Exception:  # noqa: BLE001
+        return False
+    # Bind the token to THIS session, and honour the expiry (epoch ms).
+    if str(claims.get("sid") or "") != str(session_id):
+        return False
+    return float(claims.get("exp") or 0) > time.time() * 1000
+
+
+async def handle_listen(ws: WebSocket, session_id: str, key: str = "", token: str = "") -> None:
     """Listen-only WS: binary = PCM16 mono 8kHz (both call directions), JSON =
-    {type: ready|transcript|speech_start|ended}."""
-    if not enabled() or not _auth_ok(key):
+    {type: ready|transcript|speech_start|ended}.
+
+    Auth accepts EITHER a Core-minted session-scoped `token` (what the browser
+    uses) OR the legacy shared `key` (server-to-server callers).
+    """
+    authorized = _verify_listen_token(token, session_id) if token else _auth_ok(key)
+    if not enabled() or not authorized:
+        log.warning("listen rejected session=%s (token=%s key=%s)",
+                    session_id, "yes" if token else "no", "yes" if key else "no")
         await ws.close(code=4401)
         return
     await ws.accept()

@@ -278,7 +278,8 @@ if config.TARA_DG_ENABLED:
         from . import listen as _listen
         qp = ws.query_params
         await _listen.handle_listen(ws, session_id=qp.get("session_id") or "",
-                                    key=qp.get("key") or "")
+                                    key=qp.get("key") or "",
+                                    token=qp.get("token") or "")
 
     @app.post("/telnyx/webhook")
     async def telnyx_webhook(request: Request):

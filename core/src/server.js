@@ -7222,6 +7222,33 @@ exit \$RC
         const tOrg = _mOrgId;
         const tUser = _mUserId;
 
+        // ── Live-listen capability ──────────────────────────────────────────
+        // Lets the dashboard hear an IN-FLIGHT call without ever handing the
+        // browser TARA_DG_API_KEY — that key authorizes DIALING, so it must
+        // never leave the server. Instead mint a short-lived token scoped to ONE
+        // session. Tenant isolation is enforced HERE at mint time (you may only
+        // listen to a call your own org owns), so the adapter only has to verify
+        // the signature and expiry — no extra round-trip per listener.
+        if (pathname === '/api/tara/calls/listen-token' && req.method === 'POST') {
+          const sessionId = String(body.session_id || '').trim();
+          if (!sessionId) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const listenSecret = process.env.TARA_DG_LISTEN_SECRET || '';
+          if (!listenSecret) return jsonResponse(res, { error: 'listen_not_configured' }, 503);
+          const call = await prisma.taraCall.findFirst({
+            where: { sessionId, orgId: tOrg }, select: { id: true },
+          }).catch(() => null);
+          // 404 (not 403) so a probe can't enumerate other orgs' session ids.
+          if (!call) return jsonResponse(res, { error: 'not_found' }, 404);
+          const exp = Date.now() + 120_000; // 2 min: enough to open the socket
+          const claims = Buffer.from(JSON.stringify({ sid: sessionId, org: tOrg, uid: tUser, exp }))
+            .toString('base64url');
+          const sig = crypto.createHmac('sha256', listenSecret).update(claims).digest('base64url');
+          return jsonResponse(res, {
+            token: `${claims}.${sig}`,
+            expires_at: new Date(exp).toISOString(),
+          });
+        }
+
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
           const talkLimit = await planEnforcer.checkLimit(tOrg, 'taraSeconds', 1);

@@ -1,0 +1,7 @@
+{
+  "slug": "product",
+  "version": 1,
+  "display_name": "Product",
+  "description": "Discovery, product strategy, requirements, prioritization, and rollout decisions.",
+  "lead_shape": "panel"
+}

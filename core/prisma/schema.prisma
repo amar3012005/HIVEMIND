@@ -2211,6 +2211,9 @@ model HyperRoom {
   goal               String?
   participantIds     String[]     @default([]) @map("participant_ids") @db.Uuid
   template           String       @default("debate") @db.VarChar(40)
+  /// Dedicated expertise pack (general plus versioned SEO, marketing, brand, capital, product, design, legal, and research packs).
+  /// Orthogonal to template: a SEO room may still collaborate via debate/swarm/etc.
+  roomTag            String       @default("general") @map("room_tag") @db.VarChar(40)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid
   permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
   /// Per-character connector grants (legacy P2, superseded by enabledConnectors).

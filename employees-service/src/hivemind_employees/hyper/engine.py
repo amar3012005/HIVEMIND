@@ -32,6 +32,7 @@ import httpx
 
 from ..config import get_settings
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
+from .domains import get_domain_pack
 from ..hivemind_client import (
     campaign_create_emulated,
     connector_exec_emulated,
@@ -1135,6 +1136,7 @@ class Director:
         # caller passed one; catalog goes to the planner, bodies load on demand.
         self.room_kind = (str(room_kind or "").strip().lower()
                           or resolve_room_kind("", room_goal or "", user_message or ""))
+        self.domain_pack = get_domain_pack(self.room_kind)
         self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
         self.skills_used: List[str] = []
         # Room-type learned lessons ("previously effective: X→Y"), written by the
@@ -2172,6 +2174,15 @@ class Director:
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
         )
+        if self.domain_pack:
+            sysp += (
+                f"\n\nDEDICATED ROOM: {self.domain_pack.display_name} "
+                f"(pack v{self.domain_pack.version}). These are standing Director instructions:\n"
+                f"{self.domain_pack.director_prompt}\n\n"
+                f"AVAILABLE DOMAIN TOOLKIT AND TOOL-CALL POLICY:\n{self.domain_pack.toolkit_prompt}\n"
+                "Select tools because they close a named evidence gap. The toolkit describes preferred "
+                "capabilities, but never claim a connector is available unless it appears in the available list."
+            )
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
             sysp += campaign_system_contract()
@@ -2626,12 +2637,14 @@ class Director:
         # email/sheet keeps its own format contract). Existing discipline
         # (citations, UNVERIFIED, Gaps to confirm, owner+metric) still applies
         # inside each section.
-        _skeleton = self._REPORT_SKELETON.get(self.room_kind) if _io in ("answer", "doc", "notion") else None
+        _skeleton = ((self.domain_pack.report_contract if self.domain_pack else None)
+                     or self._REPORT_SKELETON.get(self.room_kind)) if _io in ("answer", "doc", "notion") else None
         if _skeleton:
             sysp += (
-                f"\n\nREPORT STRUCTURE ({self.room_kind.upper()} room — this is a "
+                f"\n\nREPORT CONTRACT ({self.room_kind.upper()} room — this is a "
                 f"{self.room_kind} specialist's deliverable): structure the report under EXACTLY "
-                f"these '## ' headings, in this order (each line = heading + its content contract):\n"
+                f"these '## ' headings, in this order. Fenced interactive elements requested by the "
+                f"contract are part of the deliverable and must contain real output, never placeholders:\n"
                 f"{_skeleton}\n"
                 f"Open with a 2-3 sentence executive summary BEFORE the first heading; close with "
                 f"'## Gaps to confirm' when anything is UNVERIFIED."
@@ -2821,6 +2834,15 @@ class Director:
         # never looks frozen right after the query is sent.
         _lead = self.participants[0].get("slug") if self.participants else "director"
         await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
+        if self.domain_pack:
+            await self.emit({
+                "t": "domain_pack",
+                "room_kind": self.domain_pack.slug,
+                "display_name": self.domain_pack.display_name,
+                "pack_version": self.domain_pack.version,
+                "skills_available": [name for name, _when in self.domain_pack.skill_catalog()],
+                "report_contract": True,
+            })
         await self._init_connector_tools()  # register toggled connectors as read tools
         # PHASE 1 — STRUCTURED GATHER PLAN. One JSON-schema call (NOT native tool-calling)
         # decides what to recall / which connectors to read / web + debate. Replaces the

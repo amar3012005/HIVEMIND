@@ -7309,13 +7309,15 @@ Write the persona now.`;
           if (rids.length) {
             const ph = rids.map((_, i) => `$${i + 1}::uuid`).join(',');
             const prows = await prisma.$queryRawUnsafe(
-              `SELECT id, project_id, goal FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
+              `SELECT id, project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
             );
             const pmap = Object.fromEntries((prows || []).map(x => [x.id, x.project_id]));
             const gmap = Object.fromEntries((prows || []).map(x => [x.id, x.goal]));
+            const tmap = Object.fromEntries((prows || []).map(x => [x.id, x.room_tag]));
             for (const r of rooms) {
               r.projectId = pmap[r.id] || null;
               r.goal = gmap[r.id] || '';
+              r.roomTag = tmap[r.id] || 'general';
             }
           }
         } catch { /* leave projectId undefined */ }
@@ -7358,6 +7360,7 @@ Write the persona now.`;
             name: r.name,
             goal: r.goal || '',
             template: r.template,
+            room_tag: r.roomTag || 'general',
             quality_mode: r.qualityMode || 'auto',
             sim_mode: r.simMode || 'off',
             sim_agents: r.simAgents || 24,
@@ -7410,6 +7413,9 @@ Write the persona now.`;
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
           ? body.template : 'debate';
+        const ALLOWED_ROOM_TAGS = new Set(['general', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+        const roomTag = (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag))
+          ? body.room_tag : 'general';
         let permanentLeadId = null;
         if (typeof body.permanent_lead_id === 'string' && validIds.includes(body.permanent_lead_id)) {
           permanentLeadId = body.permanent_lead_id;
@@ -7445,10 +7451,11 @@ Write the persona now.`;
         // client for newly-added columns during rolling deploys.
         try {
           await prisma.$executeRawUnsafe(
-            'UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid',
-            goal, room.id,
+            'UPDATE "hivemind"."hyper_rooms" SET "goal" = $1, "room_tag" = $2 WHERE "id" = $3::uuid',
+            goal, roomTag, room.id,
           );
           room.goal = goal;
+          room.room_tag = roomTag;
         } catch (e) { console.warn('[hyper-rooms] goal set failed:', e.message); }
         if (projectId) {
           try {
@@ -8661,11 +8668,12 @@ Write the persona now.`;
       if (room) {
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
+          room.roomTag = gr?.[0]?.room_tag || 'general';
         } catch {
           room.goal = '';
         }
@@ -8675,10 +8683,11 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, quality_mode, sim_mode, sim_agents FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, room_tag, quality_mode, sim_mode, sim_agents FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
+        room.room_tag = pr?.[0]?.room_tag || 'general';
         room.quality_mode = pr?.[0]?.quality_mode || 'auto';
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
@@ -8821,6 +8830,16 @@ Write the persona now.`;
           );
           updated.goal = nextGoal;
         } catch (e) { console.warn('[hyper-rooms] goal update failed:', e.message); }
+      }
+      const ALLOWED_ROOM_TAGS = new Set(['general', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+      if (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag)) {
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "room_tag" = $1 WHERE "id" = $2::uuid',
+            body.room_tag, roomId,
+          );
+          updated.room_tag = body.room_tag;
+        } catch (e) { console.warn('[hyper-rooms] room_tag update failed:', e.message); }
       }
       // Scope change (Org ↔ Project) — persisted via raw SQL so it works without a
       // regenerated Prisma client for the project_id column. null clears to org-wide.
@@ -8968,11 +8987,12 @@ Write the persona now.`;
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
+          room.roomTag = gr?.[0]?.room_tag || 'general';
         } catch { room.goal = ''; }
         const turn = await prisma.hyperTurn.findFirst({
           where: { id: turnId, roomId },
@@ -9001,6 +9021,7 @@ Write the persona now.`;
           participant_ids: room.participantIds || [],
           project_id: room.projectId || null,
           room_goal: room.goal || '',
+          task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
           flyby_decision: decision,
           flyby_spec: flybySpec,
           callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -9291,11 +9312,12 @@ Write the persona now.`;
       if (room) {
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
+          room.roomTag = gr?.[0]?.room_tag || 'general';
         } catch { room.goal = ''; }
       }
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -9378,6 +9400,7 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
+            task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
             flyby_decision: decision,
             flyby_spec: flybySpec,
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -9480,6 +9503,7 @@ Write the persona now.`;
                 })]),
               ),
               template: room.template || 'debate',
+              room_kind: room.roomTag || room.room_tag || 'general',
               turn_seq: turn.seq,
               bootstrap: true,
               received_ts: Date.now(),
@@ -9503,6 +9527,7 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
+            task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));

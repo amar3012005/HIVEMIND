@@ -32,6 +32,7 @@ export const SEAM_SCHEMA_VERSION = '1';
 export const ROOM_TURN_FIELDS = [
   'room_id', 'turn_id', 'user_id', 'org_id', 'user_message', 'participant_ids',
   'callback_url', 'flyby_decision', 'flyby_spec', 'project_id', 'room_goal',
+  'task_tag', 'campaign_id', 'campaign_brief', 'display_message', 'execution_context',
   'sim_mode', 'sim_agents', 'evo_mode', 'write_policy', 'agentic_model', 'language',
   'schema_version',
 ];

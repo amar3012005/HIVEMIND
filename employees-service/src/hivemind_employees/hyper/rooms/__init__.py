@@ -18,17 +18,26 @@ from __future__ import annotations
 
 from typing import Dict, List, Any
 
+from ..domains import get_domain_pack
+
 # BE classifier kinds (hyper/skills) → vertical + lead shape.
 KIND_REGISTRY: Dict[str, Dict[str, Any]] = {
     "outreach": {"vertical": "outreach", "lead_shape": "maker"},
     "content":  {"vertical": "content",  "lead_shape": "maker"},
     "market":   {"vertical": "research", "lead_shape": "maker"},
     "research": {"vertical": "research", "lead_shape": "maker"},
+    "product": {"vertical": "product", "lead_shape": "panel"},
+    "design": {"vertical": "design", "lead_shape": "maker"},
+    "legal_finance": {"vertical": "legal_finance", "lead_shape": "panel"},
     "strategy": {"vertical": "strategy", "lead_shape": "panel"},
     "business": {"vertical": "strategy", "lead_shape": "panel"},
     "decision": {"vertical": "strategy", "lead_shape": "panel"},
     "general":  {"vertical": "general",  "lead_shape": "auto"},
     "hq":       {"vertical": "hq",       "lead_shape": "maker"},
+    "seo":      {"vertical": "seo",      "lead_shape": "maker"},
+    "marketing": {"vertical": "marketing", "lead_shape": "maker"},
+    "branding": {"vertical": "branding", "lead_shape": "panel"},
+    "fundraising": {"vertical": "fundraising", "lead_shape": "panel"},
 }
 
 _PRODUCE_OUTPUTS = {"doc", "sheet", "email", "report", "slides"}
@@ -38,7 +47,11 @@ def lead_shape_for(room_kind: str, intended_output: str = "") -> str:
     """maker | panel | auto. A produce output always forces maker."""
     if str(intended_output or "").lower() in _PRODUCE_OUTPUTS:
         return "maker"
-    return (KIND_REGISTRY.get(str(room_kind or "").lower(), {}) or {}).get("lead_shape", "auto")
+    kind = str(room_kind or "").lower()
+    pack = get_domain_pack(kind)
+    if pack:
+        return pack.lead_shape
+    return (KIND_REGISTRY.get(kind, {}) or {}).get("lead_shape", "auto")
 
 
 def shape_debate_members(members: List[Dict[str, Any]], shape: str) -> List[Dict[str, Any]]:

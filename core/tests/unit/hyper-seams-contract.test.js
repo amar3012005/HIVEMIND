@@ -23,6 +23,19 @@ test('buildRoomTurnPayload preserves a caller-supplied schema_version (negotiati
   assert.equal(p.schema_version, '9');
 });
 
+test('buildRoomTurnPayload preserves dedicated room and campaign routing context', () => {
+  const p = buildRoomTurnPayload({
+    room_id: 'r', turn_id: 't', user_id: 'u', org_id: 'o', user_message: 'audit search demand',
+    task_tag: 'ROOM_SEO', campaign_id: 'c', campaign_brief: { goal: 'launch' },
+    display_message: 'Launch campaign', execution_context: 'private contract',
+  });
+  assert.equal(p.task_tag, 'ROOM_SEO');
+  assert.equal(p.campaign_id, 'c');
+  assert.deepEqual(p.campaign_brief, { goal: 'launch' });
+  assert.equal(p.display_message, 'Launch campaign');
+  assert.equal(p.execution_context, 'private contract');
+});
+
 test('buildRoomTurnPayload throws on missing required field (fail fast)', () => {
   assert.throws(() => buildRoomTurnPayload({ room_id: 'r' }), /missing required field/);
 });

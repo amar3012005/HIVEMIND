@@ -27,6 +27,13 @@ import os
 import re
 from typing import Dict, List, Tuple
 
+from ..domains import (
+    default_domain_skill,
+    domain_skill_catalog,
+    get_domain_pack,
+    load_domain_skill,
+)
+
 log = logging.getLogger("hyper.skills")
 
 _DIR = os.path.dirname(__file__)
@@ -63,6 +70,14 @@ _load()
 # task_tag -> room_kind (sidecar task tags: RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY|…)
 _TAG_TO_KIND = {
     "CAMPAIGN": "campaign",
+    "ROOM_SEO": "seo",
+    "ROOM_MARKETING": "marketing",
+    "ROOM_BRANDING": "branding",
+    "ROOM_FUNDRAISING": "fundraising",
+    "ROOM_RESEARCH": "research",
+    "ROOM_PRODUCT": "product",
+    "ROOM_DESIGN": "design",
+    "ROOM_LEGAL_FINANCE": "legal_finance",
     "RESEARCH": "market",
     "MARKETING": "content",
     "OUTREACH": "outreach",
@@ -83,14 +98,14 @@ _KIND_KEYWORDS = [
 def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
     """Map a turn to a room kind: explicit task tag first, then goal/message keywords."""
     kind = _TAG_TO_KIND.get(str(task_tag or "").strip().upper())
-    if kind and kind in METHOD_SKILLS:
+    if kind and (kind in METHOD_SKILLS or get_domain_pack(kind)):
         return kind
     # The TURN MESSAGE outranks the room goal: an HQ/task room's goal often
     # embeds the whole onboarding task list (e.g. contains "Outreach"), which
     # mis-typed a competitor question as an outreach turn. Two passes.
     for hay in (str(message or "").lower(), str(goal or "").lower()):
         for k, words in _KIND_KEYWORDS:
-            if k in METHOD_SKILLS and any(w in hay for w in words):
+            if (k in METHOD_SKILLS or get_domain_pack(k)) and any(w in hay for w in words):
                 return k
     return "general"
 
@@ -98,7 +113,7 @@ def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
 def skill_catalog(room_kind: str) -> List[Tuple[str, str]]:
     """(name, when) pairs for the kind + the general fallbacks — the ONLY part
     the planner prompt pays for."""
-    out: List[Tuple[str, str]] = []
+    out: List[Tuple[str, str]] = list(domain_skill_catalog(room_kind))
     for name, (when, _body) in METHOD_SKILLS.get(room_kind, {}).items():
         out.append((name, when))
     if room_kind != "general":
@@ -112,10 +127,13 @@ def load_method_skill(name: str) -> str:
     for skills in METHOD_SKILLS.values():
         if name in skills:
             return skills[name][1]
-    return ""
+    return load_domain_skill(name)
 
 
 def default_skill_for(room_kind: str) -> str:
     """Auto-load pick when the plan selects none: first kind skill, else evidence-first."""
+    domain_default = default_domain_skill(room_kind)
+    if domain_default:
+        return domain_default
     kind_skills = METHOD_SKILLS.get(room_kind) or {}
     return next(iter(kind_skills), "evidence-first")

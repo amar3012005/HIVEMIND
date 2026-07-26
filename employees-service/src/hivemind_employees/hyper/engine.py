@@ -1106,6 +1106,7 @@ class Director:
         room_instructions: str = "",
         sender_email: str = "",
         out_language: str = "",
+        campaign_brief: Optional[Dict[str, Any]] = None,
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1129,6 +1130,7 @@ class Director:
         # caller passed one; catalog goes to the planner, bodies load on demand.
         self.room_kind = (str(room_kind or "").strip().lower()
                           or resolve_room_kind("", room_goal or "", user_message or ""))
+        self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
         self.skills_used: List[str] = []
         # Room-type learned lessons ("previously effective: X→Y"), written by the
         # post-turn reflection, primed into the planner catalog block. [] = none yet.
@@ -2065,6 +2067,17 @@ class Director:
             log.warning("[hyper-engine] places query composer failed: %s", exc)
             return []
 
+    def _allows_places_discovery(self) -> bool:
+        if self.room_kind != "campaign":
+            return _wants_discovery(self.user_message)
+        policy = self.campaign_brief.get("audiencePolicy") or self.campaign_brief.get("audience_policy") or {}
+        if isinstance(policy, dict) and policy.get("discover_if_insufficient") is False:
+            return False
+        # Campaign kickoff text contains serialized policy keys; only the original
+        # goal may authorize prospect discovery.
+        goal = str(self.campaign_brief.get("goal") or "")
+        return _wants_discovery(goal)
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
@@ -2146,7 +2159,12 @@ class Director:
             "COMPANY CONTEXT — the organisation you are planning for. Ground every query in its identity, "
             "products, customers, and market; do NOT emit generic industry queries:\n" + _org[:1200] + "\n\n"
         ) if _org else ""
-        user = f"{_org_block}{self._room_instr_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        _campaign_policy = ""
+        if self.room_kind == "campaign" and self.campaign_brief:
+            _campaign_policy = (
+                "CAMPAIGN CONTRACT — authoritative structured input; never infer the opposite from TASK prose:\n"
+                + json.dumps(self.campaign_brief, ensure_ascii=False)[:4000] + "\n\n")
+        user = f"{_org_block}{_campaign_policy}{self._room_instr_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                model=self.director_model, temp=0.3, schema=schema, bucket="director")
         self.director_iters.append(self._last_tok)
@@ -2172,7 +2190,7 @@ class Director:
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
-        if (not (isinstance(pq, str) and pq.strip())) and _places_on and _wants_discovery(self.user_message):
+        if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():
             try:
                 composed = await self._compose_places_queries()
                 pq = composed[0] if composed else None
@@ -2184,7 +2202,7 @@ class Director:
         # when THIS turn genuinely asks to source new prospects (not a drafting/
         # strategy turn). Stops the "20 firms every run" noise the user flagged.
         plan["places_query"] = (pq if (isinstance(pq, str) and pq.strip() and _places_on
-                                       and _wants_discovery(self.user_message)) else None)
+                                       and self._allows_places_discovery()) else None)
         # Method skills: keep only real catalog names; auto-load the kind default
         # when the plan picked none (mirrors the polished-email auto-load).
         ms = [s for s in (plan.get("method_skills") or [])
@@ -2748,7 +2766,7 @@ class Director:
         try:
             # Event-driven gate: the planner (LLM) asking for a places_query IS the
             # discovery signal — works in any language; the regex is only a fallback.
-            _wants_contacts = bool(plan.get("places_query")) or _wants_discovery(self.user_message)
+            _wants_contacts = bool(plan.get("places_query")) or self._allows_places_discovery()
             _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
             if _wants_contacts and len(_prospect_rows) < 3:
                 await self.emit({"t": "typing", "agent": "director",
@@ -2860,6 +2878,7 @@ async def run_director(
     room_instructions: str = "",
     sender_email: str = "",
     out_language: str = "",
+    campaign_brief: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -2876,5 +2895,6 @@ async def run_director(
         room_instructions=room_instructions,
         sender_email=sender_email,
         out_language=out_language,
+        campaign_brief=campaign_brief,
     )
     return await director.run()

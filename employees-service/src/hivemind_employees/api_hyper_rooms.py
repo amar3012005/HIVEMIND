@@ -2981,6 +2981,7 @@ async def _orchestrate_single_agent(
             room_kind=_room_kind,
             room_playbook=_room_playbook, room_instructions=_room_instructions,
             sender_email=_sender_email, out_language=(req.language or ""),
+            campaign_brief=req.campaign_brief,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)

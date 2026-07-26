@@ -27,6 +27,17 @@ def test_campaign_submit_plan_is_the_completion_contract():
     assert "actions must not be empty" in errors
 
 
+def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():
+    director = Director(
+        user_message='AUDIENCE_POLICY_JSON: {"discover_if_insufficient": false} run a company campaign',
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign",
+        campaign_brief={"goal": "Build awareness with founders", "audiencePolicy": {"discover_if_insufficient": False}},
+    )
+    assert director._allows_places_discovery() is False
+
+
 def test_tara_campaign_action_requires_speak_first_opening():
     bundle = {
         "strategy": "Call opted-in leads.",

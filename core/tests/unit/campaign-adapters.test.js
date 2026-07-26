@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { gmailAdapter } from '../../src/campaigns/adapters/gmail.js';
 import { taraAdapter } from '../../src/campaigns/adapters/tara.js';
 import { xOrganicAdapter } from '../../src/campaigns/adapters/x-organic.js';
+import { assertCampaignAdapter } from '../../src/campaigns/adapters/contract.js';
 
 const campaign = { id: 'campaign-a', orgId: 'org-a', ownerUserId: 'user-a', roomId: 'room-a', name: 'Pilot', goal: 'Launch' };
 const approval = { id: 'approval-a', campaignId: 'campaign-a', planVersionId: 'plan-a', status: 'ACTIVE', channels: ['x_organic', 'gmail', 'tara'] };
@@ -18,6 +19,25 @@ test('X adapter executes only the approval-bound final text', async () => {
   assert.equal(request.text, 'Approved post');
   assert.equal(request.confirmed, true);
   assert.equal(result.externalId, '123');
+});
+
+test('adapter contract requires capability, validation, execution, pause, reconciliation, and metrics', () => {
+  assert.equal(assertCampaignAdapter(xOrganicAdapter), xOrganicAdapter);
+  assert.throws(() => assertCampaignAdapter({ channel: 'broken', execute() {}, reconcile() {} }), /checkCapability/);
+});
+
+test('X adapter normalizes owned Post metrics without exposing credentials', async () => {
+  const requests = [];
+  const metrics = await xOrganicAdapter.syncMetrics({
+    prisma: {}, action: { ...action('x_organic', { text: 'Approved post' }), externalId: '123' },
+    providers: { async directXRequest(request) {
+      requests.push(request.path);
+      if (request.path.startsWith('/2/tweets/')) return { data: { data: { public_metrics: { like_count: 4, reply_count: 2, retweet_count: 1, quote_count: 1, bookmark_count: 2 }, organic_metrics: { impression_count: 100, url_link_clicks: 5 } } } };
+      return { data: { data: { public_metrics: { followers_count: 42 } } } };
+    } },
+  });
+  assert.equal(requests.length, 2); assert.equal(metrics.impressions, 100); assert.equal(metrics.engagements, 15);
+  assert.equal(metrics.engagement_rate, 0.15); assert.equal(metrics.followers, 42);
 });
 
 test('Gmail adapter writes the outbound ledger and deduplicates a repeated action', async () => {

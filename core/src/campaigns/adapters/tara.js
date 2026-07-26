@@ -29,21 +29,33 @@ async function countCalls(prisma, orgId) {
   return { concurrency, todayCount };
 }
 
+function validateTaraAction(action) {
+  const payload = action?.payload || {};
+  const to = requireValue(payload.to, 'TARA recipient is required', 'tara_recipient_required');
+  if (!E164_RE.test(to)) throw new CampaignAdapterError('TARA recipient must use E.164 format', { code: 'tara_recipient_invalid', outcome: 'BLOCKED' });
+  const opening = requireValue(payload.opening, 'TARA requires a speak-first opening', 'tara_opening_required');
+  const lawfulBasis = requireValue(payload.lawful_basis, 'TARA requires a lawful basis', 'tara_lawful_basis_required');
+  const country = requireValue(payload.country, 'TARA requires an ISO country', 'tara_country_required').toUpperCase();
+  if (!COUNTRY_RE.test(country)) throw new CampaignAdapterError('TARA country must be ISO 3166-1 alpha-2', { code: 'tara_country_invalid', outcome: 'BLOCKED' });
+  const timezone = requireValue(payload.timezone, 'TARA requires the contact timezone', 'tara_timezone_required');
+  try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); } catch {
+    throw new CampaignAdapterError('TARA contact timezone must be a valid IANA timezone', { code: 'tara_timezone_invalid', outcome: 'BLOCKED' });
+  }
+  return { to, opening, lawfulBasis, country, timezone };
+}
+
 export const taraAdapter = {
   channel: 'tara',
+  async checkCapability({ prisma, action }) {
+    const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId }, select: { id: true } });
+    if (!runtime) throw new CampaignAdapterError('TARA is no longer configured for this organization', { code: 'tara_runtime_inactive', outcome: 'BLOCKED' });
+    return { connected: true };
+  },
+  validateAction({ action }) { validateTaraAction(action); return { valid: true }; },
   async execute({ prisma, action, approval, providers = {}, executionAttempt = 1 }) {
     requireApproval(action, approval);
     const payload = action.payload || {};
-    const to = requireValue(payload.to, 'TARA recipient is required', 'tara_recipient_required');
-    if (!E164_RE.test(to)) throw new CampaignAdapterError('TARA recipient must use E.164 format', { code: 'tara_recipient_invalid', outcome: 'BLOCKED' });
-    const opening = requireValue(payload.opening, 'TARA requires a speak-first opening', 'tara_opening_required');
-    const lawfulBasis = requireValue(payload.lawful_basis, 'TARA requires a lawful basis', 'tara_lawful_basis_required');
-    const country = requireValue(payload.country, 'TARA requires an ISO country', 'tara_country_required').toUpperCase();
-    if (!COUNTRY_RE.test(country)) throw new CampaignAdapterError('TARA country must be ISO 3166-1 alpha-2', { code: 'tara_country_invalid', outcome: 'BLOCKED' });
-    const timezone = requireValue(payload.timezone, 'TARA requires the contact timezone', 'tara_timezone_required');
-    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); } catch {
-      throw new CampaignAdapterError('TARA contact timezone must be a valid IANA timezone', { code: 'tara_timezone_invalid', outcome: 'BLOCKED' });
-    }
+    const { to, opening, lawfulBasis, country, timezone } = validateTaraAction(action);
 
     const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId } });
     const { provider, baseUrl } = providerConfig(runtime);
@@ -142,5 +154,27 @@ export const taraAdapter = {
     return { status: 'NEEDS_RECONCILIATION', reason: attempt?.sessionId
       ? 'A TARA session was reserved but no confirmed call-leg and outbound ledger entry exist; inspect provider state before retrying.'
       : 'No TARA session or call-leg ID was recorded.' };
+  },
+  async pause() { return { status: 'PAUSED', scope: 'scheduler', provider_mutation: false }; },
+  async captureBaseline({ prisma, campaign }) {
+    const since = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000);
+    const calls = await prisma.outboundAction.count({ where: { orgId: campaign.orgId, channel: 'call', status: 'sent', sentAt: { gte: since } } });
+    const completed = await prisma.outboundAction.count({ where: { orgId: campaign.orgId, channel: 'call', outcome: 'completed', sentAt: { gte: since } } });
+    return { preceding_28d_calls: calls, preceding_28d_completed: completed, captured_at: new Date().toISOString() };
+  },
+  async syncMetrics({ prisma, action }) {
+    const [rows, attempts] = await Promise.all([
+      prisma.outboundAction.findMany({ where: { campaignActionId: action.id, channel: 'call' } }),
+      prisma.taraCallAttempt.findMany({ where: { actionKey: { startsWith: `campaign:${action.id}:` } } }),
+    ]);
+    return {
+      calls: rows.filter((row) => row.status === 'sent').length,
+      completed: rows.filter((row) => row.outcome === 'completed').length,
+      booked: rows.filter((row) => row.outcome === 'booked').length,
+      no_answer: rows.filter((row) => row.outcome === 'no_answer').length,
+      attempts: attempts.length,
+      blocked: attempts.filter((row) => row.status === 'skipped').length,
+      captured_at: new Date().toISOString(),
+    };
   },
 };

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { canonicalHash } from '../../src/campaigns/service.js';
-import { processDueCampaignActions } from '../../src/campaigns/worker.js';
+import { processDueCampaignActions, quarantineExpiredCampaignLeases } from '../../src/campaigns/worker.js';
 
 function workerPrisma({ providerError = null } = {}) {
   const payload = { text: 'Approved text' };
@@ -14,7 +14,7 @@ function workerPrisma({ providerError = null } = {}) {
   };
   let leased = false; const attempts = []; const events = [];
   const prisma = {
-    async $queryRawUnsafe() { if (leased || action.status !== 'QUEUED') return []; leased = true; action.status = 'EXECUTING'; return [{ id: action.id }]; },
+    async $queryRawUnsafe(sql) { if (String(sql).includes("status = 'NEEDS_RECONCILIATION'")) return []; if (leased || action.status !== 'QUEUED') return []; leased = true; action.status = 'EXECUTING'; return [{ id: action.id }]; },
     async $transaction(values) { return Promise.all(values); },
     campaignAction: {
       async findUnique() { return { ...action, attempts: [...attempts].reverse().slice(0, 1) }; },
@@ -29,6 +29,7 @@ function workerPrisma({ providerError = null } = {}) {
       async update({ where, data }) { const row = attempts.find((item) => item.id === where.id); Object.assign(row, data); return row; },
     },
     campaignApproval: { async findFirst() { return { id: 'approval-a', campaignId: action.campaignId, planVersionId: action.planVersionId, status: 'ACTIVE', channels: ['x_organic'], caps: { action_hashes: { [action.id]: canonicalHash(payload) } } }; } },
+    xAdsCredential: { async findUnique() { return { status: 'active' }; } },
     campaign: { async update({ data }) { return { ...action.campaign, ...data }; } },
     campaignChannel: { async updateMany() { return { count: 1 }; } },
     campaignEvent: { async create({ data }) { events.push(data); return data; } },
@@ -51,6 +52,23 @@ test('worker leases and publishes one approval-bound action exactly once', async
     if (oldWorker === undefined) delete process.env.CAMPAIGNS_V2_WORKER_ENABLED; else process.env.CAMPAIGNS_V2_WORKER_ENABLED = oldWorker;
     if (oldChannels === undefined) delete process.env.CAMPAIGNS_V2_EXECUTION_CHANNELS; else process.env.CAMPAIGNS_V2_EXECUTION_CHANNELS = oldChannels;
   }
+});
+
+test('expired executing leases are quarantined instead of replayed', async () => {
+  const attempts = []; const events = [];
+  const prisma = {
+    async $queryRawUnsafe() { return [{ id: 'action-a', campaign_id: 'campaign-a' }]; },
+    campaign: { async findUnique() { return { orgId: 'org-a' }; }, async update() { return { orgId: 'org-a' }; } },
+    campaignAction: { async count({ where }) { return where.status?.notIn ? 0 : 1; } },
+    campaignChannel: { async updateMany() { return { count: 1 }; } },
+    campaignActionAttempt: { async updateMany({ data }) { attempts.push(data); return { count: 1 }; } },
+    campaignEvent: { async create({ data }) { events.push(data); return data; } },
+    async $transaction(values) { return Promise.all(values); },
+  };
+  const result = await quarantineExpiredCampaignLeases(prisma);
+  assert.equal(result.quarantined, 1);
+  assert.equal(attempts[0].status, 'NEEDS_RECONCILIATION');
+  assert.equal(events[0].data.automatic_retry, false);
 });
 
 test('ambiguous provider writes stop at reconciliation and are not replayed', async () => {

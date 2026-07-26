@@ -1,5 +1,5 @@
 import { getCampaignCapabilities } from './capabilities.js';
-import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, getCampaign, listCampaigns, reconcileCampaignAction, retryCampaignAction } from './service.js';
+import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, editCampaignAction, getCampaign, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics } from './service.js';
 import { processDueCampaignActions } from './worker.js';
 import { campaignWorkerEnabled } from './state.js';
 
@@ -50,9 +50,24 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
     }
     const match = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})$/i);
     if (match && method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, id: match[1] }) });
-    const actionMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/(approve|pause|resume)$/i);
+    const regenerateMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/regenerate$/i);
+    if (regenerateMatch && method === 'POST') {
+      const result = await regenerateCampaign({ prisma, orgId, userId, id: regenerateMatch[1], feedback: body?.feedback });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'regenerated', campaignId: result.campaignId });
+      dispatchRoom(result.dispatch).catch(async (error) => {
+        const { handleCampaignDispatchError } = await import('./pipeline.js');
+        await handleCampaignDispatchError({ prisma, campaignId: result.campaignId, error }).catch(() => {});
+      });
+      return jsonResponse(res, { campaignId: result.campaignId, status: 'GENERATING' }, 202);
+    }
+    const actionMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/(approve|pause|resume|sync)$/i);
     if (actionMatch && method === 'POST') {
       const id = actionMatch[1]; const action = actionMatch[2].toLowerCase();
+      if (action === 'sync') {
+        const campaign = await syncCampaignMetrics({ prisma, orgId, userId, id });
+        await audit(prisma, auditLogger, { userId, orgId, action: 'metrics_synced', campaignId: id });
+        return jsonResponse(res, { campaign });
+      }
       if (action === 'approve') {
         const result = await approveCampaign({ prisma, orgId, userId, id });
         await audit(prisma, auditLogger, { userId, orgId, action: 'approved', campaignId: id, metadata: { approval_id: result.approval.id } });
@@ -69,6 +84,12 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
       const result = await approveCampaignAction({ prisma, orgId, userId, id: actionApprovalMatch[1], actionId: actionApprovalMatch[2] });
       await audit(prisma, auditLogger, { userId, orgId, action: 'action_approved', campaignId: result.campaignId, metadata: { action_id: result.actionId } });
       if (campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: result.campaignId }).catch(() => {});
+      return jsonResponse(res, result);
+    }
+    const actionEditMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})$/i);
+    if (actionEditMatch && ['PATCH', 'DELETE'].includes(method)) {
+      const result = await editCampaignAction({ prisma, orgId, userId, id: actionEditMatch[1], actionId: actionEditMatch[2], body: method === 'DELETE' ? { remove: true } : body });
+      await audit(prisma, auditLogger, { userId, orgId, action: result.removed ? 'action_removed' : 'action_edited', campaignId: result.campaignId, metadata: { action_id: result.actionId, plan_version_id: result.planVersionId } });
       return jsonResponse(res, result);
     }
     const actionControlMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/(retry|reconcile)$/i);

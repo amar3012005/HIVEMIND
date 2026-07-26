@@ -33,3 +33,11 @@ export function publicProviderResponse(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
   return Object.fromEntries(Object.entries(source).filter(([key]) => !/token|secret|authorization|credential/i.test(key)));
 }
+
+export function assertCampaignAdapter(adapter) {
+  if (!adapter || typeof adapter !== 'object' || !String(adapter.channel || '').trim()) throw new Error('Campaign adapter needs a channel');
+  for (const method of ['checkCapability', 'validateAction', 'execute', 'reconcile', 'pause', 'syncMetrics']) {
+    if (typeof adapter[method] !== 'function') throw new Error(`Campaign adapter ${adapter.channel} needs ${method}()`);
+  }
+  return adapter;
+}

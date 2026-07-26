@@ -34,6 +34,27 @@ async function leaseAction(prisma, { campaignId, workerId, leaseSeconds }) {
   return rows?.[0]?.id || null;
 }
 
+export async function quarantineExpiredCampaignLeases(prisma) {
+  const rows = await prisma.$queryRawUnsafe(
+    `UPDATE "hivemind"."campaign_actions"
+        SET status = 'NEEDS_RECONCILIATION',
+            "last_error" = 'Worker lease expired during an external write; provider reconciliation is required',
+            "lease_owner" = NULL, "lease_expires_at" = NULL, "updated_at" = now()
+      WHERE status = 'EXECUTING' AND "lease_expires_at" < now()
+      RETURNING id, "campaign_id"`,
+  );
+  for (const row of rows || []) {
+    const campaign = await prisma.campaign.findUnique({ where: { id: row.campaign_id }, select: { orgId: true } });
+    if (!campaign) continue;
+    await prisma.$transaction([
+      prisma.campaignActionAttempt.updateMany({ where: { actionId: row.id, status: 'RUNNING' }, data: { status: 'NEEDS_RECONCILIATION', error: 'Worker lease expired; automatic replay prohibited', completedAt: new Date() } }),
+      prisma.campaignEvent.create({ data: { campaignId: row.campaign_id, orgId: campaign.orgId, eventType: 'campaign_action_lease_expired', data: { action_id: row.id, status: 'NEEDS_RECONCILIATION', automatic_retry: false } } }),
+    ]);
+    await finishCampaignIfDone(prisma, row.campaign_id);
+  }
+  return { quarantined: rows?.length || 0 };
+}
+
 async function finishCampaignIfDone(prisma, campaignId) {
   const remaining = await prisma.campaignAction.count({ where: { campaignId, status: { notIn: [...TERMINAL] } } });
   if (remaining) return;
@@ -45,6 +66,7 @@ async function finishCampaignIfDone(prisma, campaignId) {
 
 export async function processDueCampaignActions({ prisma, campaignId = null, limit = 10, workerId = `campaign-${crypto.randomUUID()}`, providers = {} }) {
   if (!prisma) return { processed: 0 };
+  await quarantineExpiredCampaignLeases(prisma);
   let processed = 0;
   while (processed < Math.max(1, Math.min(Number(limit) || 10, 50))) {
     const actionId = await leaseAction(prisma, { campaignId, workerId, leaseSeconds: 120 });

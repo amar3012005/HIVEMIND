@@ -1,10 +1,12 @@
 import { gmailAdapter } from './gmail.js';
 import { taraAdapter } from './tara.js';
-import { CampaignAdapterError } from './contract.js';
+import { assertCampaignAdapter, CampaignAdapterError } from './contract.js';
 import { xOrganicAdapter } from './x-organic.js';
 import { campaignChannelExecutionEnabled } from '../state.js';
 
-const ADAPTERS = new Map([xOrganicAdapter, gmailAdapter, taraAdapter].map((adapter) => [adapter.channel, adapter]));
+const ADAPTERS = new Map([xOrganicAdapter, gmailAdapter, taraAdapter].map((adapter) => {
+  assertCampaignAdapter(adapter); return [adapter.channel, adapter];
+}));
 
 export function getCampaignAdapter(channel) {
   const adapter = ADAPTERS.get(channel);
@@ -18,11 +20,27 @@ export async function executeCampaignAction(context) {
       code: 'campaign_channel_execution_disabled', outcome: 'BLOCKED',
     });
   }
-  return getCampaignAdapter(context.action.channel).execute(context);
+  const adapter = getCampaignAdapter(context.action.channel);
+  await adapter.checkCapability(context);
+  adapter.validateAction(context);
+  return adapter.execute(context);
 }
 
 export async function reconcileCampaignAction(context) {
   const adapter = getCampaignAdapter(context.action.channel);
   if (!adapter.reconcile) return { status: 'NEEDS_RECONCILIATION', reason: 'This adapter does not support reconciliation.' };
   return adapter.reconcile(context);
+}
+
+export async function syncCampaignActionMetrics(context) {
+  return getCampaignAdapter(context.action.channel).syncMetrics(context);
+}
+
+export async function captureCampaignChannelBaseline(context) {
+  const adapter = getCampaignAdapter(context.channel);
+  return typeof adapter.captureBaseline === 'function' ? adapter.captureBaseline(context) : {};
+}
+
+export async function pauseCampaignAction(context) {
+  return getCampaignAdapter(context.action.channel).pause(context);
 }

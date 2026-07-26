@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { getCampaignCapabilities } from './capabilities.js';
 import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 import { buildCampaignKickoff, buildCampaignRoomDispatch } from './contracts.js';
-import { reconcileCampaignAction as reconcileWithAdapter } from './adapters/index.js';
+import { captureCampaignChannelBaseline, reconcileCampaignAction as reconcileWithAdapter, syncCampaignActionMetrics } from './adapters/index.js';
 
 function campaignError(message, status = 400, code = 'invalid_campaign') {
   const error = new Error(message); error.status = status; error.code = code; return error;
@@ -161,7 +161,7 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         campaignId: run.campaignId, planVersionId: plan.id, audienceMemberId, channel: action.channel,
         actionType: actionType(action.channel), position, status: 'READY',
         scheduledAt: new Date(now + action.scheduled_offset_minutes * 60_000),
-        payload: { ...action.payload, final_copy: action.final_copy, title: action.title || action.id, evidence: action.evidence || [] },
+        payload: { ...action.payload, final_copy: action.final_copy, title: action.title || action.id, evidence: action.evidence || [], source_action_id: String(action.id), scheduled_offset_minutes: action.scheduled_offset_minutes },
         rationale: String(action.rationale || ''), successMetric: String(action.success_metric || '').slice(0, 200) || null,
         idempotencyKey: `plan:${version}:action:${String(action.id).slice(0, 100)}`,
       } });
@@ -353,10 +353,15 @@ export async function approveCampaign({ prisma, orgId, userId, id }) {
   const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
   const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
   if (unavailable.length) throw campaignError(`Execution is not ready for: ${unavailable.join(', ')}`, 409, 'channel_execution_unavailable');
+  const baselineEntries = await Promise.all(campaign.requestedChannels.map(async (channel) => {
+    try { return [channel, await captureCampaignChannelBaseline({ prisma, channel, campaign })]; }
+    catch (error) { return [channel, { unavailable: true, reason: String(error?.code || error?.message || 'baseline_unavailable').slice(0, 200) }]; }
+  }));
+  const baseline = { ...(campaign.baseline || {}), channels: Object.fromEntries(baselineEntries), captured_at: new Date().toISOString() };
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.campaign.updateMany({
       where: { id, orgId, status: 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id },
-      data: { status: 'RUNNING', approvedPlanVersionId: plan.id, startedAt: new Date(), lastError: null },
+      data: { status: 'RUNNING', approvedPlanVersionId: plan.id, startedAt: new Date(), lastError: null, baseline },
     });
     if (!claimed.count) throw campaignError('Campaign approval was already processed', 409, 'campaign_approval_conflict');
     await tx.campaignApproval.updateMany({ where: { campaignId: id, status: 'ACTIVE' }, data: { status: 'REVOKED', revokedAt: new Date() } });
@@ -392,6 +397,149 @@ export async function approveCampaignAction({ prisma, orgId, userId, id, actionI
   if (!updated.count) throw campaignError('Action is not waiting for approval', 409, 'action_not_awaiting_approval');
   await prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_action_approved', actorType: 'user', actorId: userId, data: { action_id: actionId } } });
   return { campaignId: id, actionId, status: 'QUEUED' };
+}
+
+function sourceActionId(action) {
+  const stored = String(action?.payload?.source_action_id || '').trim();
+  if (stored) return stored;
+  const match = String(action?.idempotencyKey || '').match(/:action:(.+)$/);
+  return match?.[1] || String(action?.id || '');
+}
+
+export function applyCampaignActionEdit(bundle, targetSourceId, patch = {}) {
+  const next = structuredClone(bundle || {});
+  const actions = Array.isArray(next.actions) ? next.actions : [];
+  const index = actions.findIndex((item) => String(item?.id || '') === String(targetSourceId));
+  if (index < 0) throw campaignError('The action is not present in the campaign bundle', 409, 'campaign_action_bundle_mismatch');
+  if (patch.remove === true) {
+    actions.splice(index, 1);
+    next.actions = actions;
+    next.requirement_coverage = (Array.isArray(next.requirement_coverage) ? next.requirement_coverage : []).map((item) => ({
+      ...item,
+      action_ids: (Array.isArray(item?.action_ids) ? item.action_ids : []).filter((id) => String(id) !== String(targetSourceId)),
+    }));
+    return next;
+  }
+  const current = actions[index];
+  const payloadPatch = patch.payload && typeof patch.payload === 'object' && !Array.isArray(patch.payload) ? patch.payload : {};
+  const finalCopy = patch.final_copy === undefined ? current.final_copy : cleanText(patch.final_copy, 20000, 'Final copy', true);
+  const offset = patch.scheduled_offset_minutes === undefined ? current.scheduled_offset_minutes : Number(patch.scheduled_offset_minutes);
+  if (!Number.isInteger(offset) || offset < 0 || offset > 525600) throw campaignError('Schedule offset must be between 0 and 525600 minutes', 400, 'invalid_schedule_offset');
+  actions[index] = {
+    ...current,
+    final_copy: finalCopy,
+    payload: { ...(current.payload || {}), ...payloadPatch },
+    scheduled_offset_minutes: offset,
+    rationale: patch.rationale === undefined ? current.rationale : cleanText(patch.rationale, 8000, 'Rationale', true),
+    success_metric: patch.success_metric === undefined ? current.success_metric : cleanText(patch.success_metric, 200, 'Success metric'),
+  };
+  if (actions[index].channel === 'x_organic') actions[index].payload.text = finalCopy;
+  if (actions[index].channel === 'gmail') actions[index].payload.body = finalCopy;
+  if (actions[index].channel === 'tara' && payloadPatch.opening === undefined && patch.final_copy !== undefined) actions[index].payload.opening = finalCopy;
+  next.actions = actions;
+  return next;
+}
+
+export async function editCampaignAction({ prisma, orgId, userId, id, actionId, body }) {
+  requireCampaignsV2(orgId);
+  const campaign = await prisma.campaign.findFirst({
+    where: { id, orgId },
+    include: {
+      planVersions: { where: { status: 'READY' }, orderBy: { version: 'desc' }, take: 1 },
+      actions: { where: { id: actionId }, take: 1 },
+    },
+  });
+  if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
+  await requireCampaignEditor(prisma, campaign, userId);
+  if (campaign.status !== 'READY_FOR_APPROVAL' || !campaign.currentPlanVersionId) {
+    throw campaignError('Pause or regenerate the campaign before editing its plan', 409, 'campaign_plan_not_editable');
+  }
+  const plan = campaign.planVersions[0]; const target = campaign.actions[0];
+  if (!plan || plan.id !== campaign.currentPlanVersionId || !target || target.planVersionId !== plan.id || target.status !== 'READY') {
+    throw campaignError('Only a ready action in the current plan can be edited', 409, 'campaign_action_not_editable');
+  }
+  if (canonicalHash(plan.bundle) !== plan.canonicalHash) throw campaignError('Campaign plan integrity check failed', 409, 'campaign_plan_changed');
+  const removing = body?.remove === true;
+  const bundle = applyCampaignActionEdit(plan.bundle, sourceActionId(target), body);
+  const errors = validateCampaignBundle(bundle, campaign);
+  if (errors.length) throw campaignError(errors.join('; '), 400, 'campaign_action_edit_invalid');
+  const hash = canonicalHash(bundle);
+  const allActions = await prisma.campaignAction.findMany({ where: { campaignId: id, planVersionId: plan.id }, orderBy: { position: 'asc' } });
+  const result = await prisma.$transaction(async (tx) => {
+    const latest = await tx.campaignPlanVersion.findFirst({ where: { campaignId: id }, orderBy: { version: 'desc' }, select: { version: true } });
+    const version = (latest?.version || plan.version) + 1;
+    const nextPlan = await tx.campaignPlanVersion.create({ data: {
+      campaignId: id, version, status: 'READY', canonicalHash: hash, bundle,
+      reportMarkdown: renderBundleReport(bundle), validation: { valid: true, errors: [], [removing ? 'removed_action_id' : 'edited_action_id']: actionId },
+      createdBy: userId, readyAt: new Date(),
+    } });
+    const bundleActions = new Map(bundle.actions.map((item) => [String(item.id), item]));
+    for (const oldAction of allActions) {
+      const sourceId = sourceActionId(oldAction); const nextAction = bundleActions.get(sourceId);
+      if (!nextAction) continue;
+      await tx.campaignAction.create({ data: {
+        campaignId: id, planVersionId: nextPlan.id, audienceMemberId: oldAction.audienceMemberId,
+        channel: nextAction.channel, actionType: actionType(nextAction.channel), position: oldAction.position, status: 'READY',
+        scheduledAt: new Date(Date.now() + nextAction.scheduled_offset_minutes * 60_000), expiresAt: oldAction.expiresAt,
+        payload: { ...nextAction.payload, final_copy: nextAction.final_copy, title: nextAction.title || nextAction.id, evidence: nextAction.evidence || [], source_action_id: sourceId, scheduled_offset_minutes: nextAction.scheduled_offset_minutes },
+        rationale: String(nextAction.rationale || ''), successMetric: String(nextAction.success_metric || oldAction.successMetric || '').slice(0, 200) || null,
+        idempotencyKey: `plan:${version}:action:${sourceId.slice(0, 100)}`,
+      } });
+    }
+    await tx.campaignPlanVersion.update({ where: { id: plan.id }, data: { status: 'SUPERSEDED' } });
+    await tx.campaignAction.updateMany({ where: { campaignId: id, planVersionId: plan.id, status: 'READY' }, data: { status: 'CANCELLED' } });
+    await tx.campaignApproval.updateMany({ where: { campaignId: id, status: 'ACTIVE' }, data: { status: 'REVOKED', revokedAt: new Date() } });
+    await tx.campaign.update({ where: { id }, data: { currentPlanVersionId: nextPlan.id, approvedPlanVersionId: null, status: 'READY_FOR_APPROVAL', lastError: null } });
+    await tx.campaignEvent.create({ data: { campaignId: id, orgId, eventType: removing ? 'campaign_action_removed' : 'campaign_action_edited', actorType: 'user', actorId: userId, data: { action_id: actionId, previous_plan_version_id: plan.id, plan_version_id: nextPlan.id, version, canonical_hash: hash } } });
+    return { planVersionId: nextPlan.id, version };
+  });
+  return { campaignId: id, actionId, removed: removing, ...result };
+}
+
+export async function regenerateCampaign({ prisma, orgId, userId, id, feedback = '' }) {
+  requireCampaignsV2(orgId);
+  const campaign = await prisma.campaign.findFirst({ where: { id, orgId } });
+  if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
+  await requireCampaignEditor(prisma, campaign, userId);
+  if (!['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'].includes(campaign.status) || !campaign.roomId) {
+    throw campaignError('This campaign cannot be regenerated in its current state', 409, 'campaign_regeneration_unavailable');
+  }
+  const room = await prisma.hyperRoom.findUnique({ where: { id: campaign.roomId } });
+  if (!room) throw campaignError('Campaign Room not found', 409, 'campaign_room_missing');
+  const participantIds = Array.isArray(room.participantIds) ? room.participantIds : [];
+  if (!participantIds.length) throw campaignError('Campaign Room has no active agents', 409, 'campaign_team_required');
+  const cleanFeedback = cleanText(feedback, 4000, 'Regeneration feedback');
+  const result = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.campaign.updateMany({
+      where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'] } },
+      data: { status: 'GENERATING', currentPlanVersionId: null, approvedPlanVersionId: null, lastError: null },
+    });
+    if (!claimed.count) throw campaignError('Campaign regeneration was already started', 409, 'campaign_regeneration_conflict');
+    const lastTurn = await tx.hyperTurn.findFirst({ where: { roomId: room.id }, orderBy: { seq: 'desc' }, select: { seq: true } });
+    const kickoff = buildCampaignKickoff(campaign, cleanFeedback);
+    const turn = await tx.hyperTurn.create({ data: {
+      roomId: room.id, seq: (lastTurn?.seq || 0) + 1, userMessage: kickoff, status: 'live',
+      idempotencyKey: `campaign-regenerate-${id}-${crypto.randomUUID()}`, lines: [],
+    } });
+    const briefSnapshot = {
+      name: campaign.name, goal: campaign.goal, objective: campaign.objective, channels: campaign.requestedChannels,
+      autonomyMode: campaign.autonomyMode, requirements: campaign.requirements, brief: campaign.brief,
+      audiencePolicy: campaign.audiencePolicy, schedulePolicy: campaign.schedulePolicy, campaign_id: id,
+    };
+    const run = await tx.campaignRun.create({ data: { campaignId: id, roomId: room.id, turnId: turn.id, status: 'DISPATCHING', briefSnapshot, startedAt: new Date() } });
+    if (campaign.currentPlanVersionId) {
+      await tx.campaignPlanVersion.updateMany({ where: { id: campaign.currentPlanVersionId, campaignId: id }, data: { status: 'SUPERSEDED' } });
+      await tx.campaignAction.updateMany({ where: { campaignId: id, planVersionId: campaign.currentPlanVersionId, status: 'READY' }, data: { status: 'CANCELLED' } });
+    }
+    await tx.campaignApproval.updateMany({ where: { campaignId: id, status: 'ACTIVE' }, data: { status: 'REVOKED', revokedAt: new Date() } });
+    await tx.campaignChannel.updateMany({ where: { campaignId: id }, data: { status: 'PLANNING', lastError: null } });
+    await tx.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_regeneration_started', actorType: 'user', actorId: userId, data: { turn_id: turn.id, feedback: cleanFeedback || null } } });
+    return { turn, run, briefSnapshot };
+  });
+  return {
+    campaignId: id,
+    dispatch: buildCampaignRoomDispatch({ campaign, room, turn: result.turn, participantIds, briefSnapshot: result.briefSnapshot }),
+  };
 }
 
 async function getActionForControl(prisma, { orgId, userId, id, actionId }) {
@@ -449,6 +597,48 @@ export async function reconcileCampaignAction({ prisma, orgId, userId, id, actio
     ]);
   }
   return { campaignId: id, actionId: action.id, ...result };
+}
+
+function sumMetricRows(rows) {
+  const totals = {};
+  for (const row of rows) {
+    for (const [key, value] of Object.entries(row || {})) {
+      if (typeof value === 'number' && Number.isFinite(value)) totals[key] = (totals[key] || 0) + value;
+    }
+  }
+  return totals;
+}
+
+export async function syncCampaignMetrics({ prisma, orgId, userId, id }) {
+  requireCampaignsV2(orgId);
+  const campaign = await prisma.campaign.findFirst({
+    where: { id, orgId }, include: { actions: { where: { status: 'SUCCEEDED' }, orderBy: { position: 'asc' } } },
+  });
+  if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
+  await requireCampaignEditor(prisma, campaign, userId);
+  const actions = campaign.currentPlanVersionId ? campaign.actions.filter((action) => action.planVersionId === campaign.currentPlanVersionId) : [];
+  const byChannel = new Map(); const errors = [];
+  for (const row of actions) {
+    const action = { ...row, campaign };
+    try {
+      const metrics = await syncCampaignActionMetrics({ prisma, action });
+      await prisma.campaignMetricSnapshot.create({ data: { campaignId: id, channel: action.channel, actionId: action.id, period: 'TOTAL', metrics } });
+      if (!byChannel.has(action.channel)) byChannel.set(action.channel, []);
+      byChannel.get(action.channel).push(metrics);
+    } catch (error) {
+      errors.push({ action_id: action.id, channel: action.channel, code: String(error?.code || 'metric_sync_failed'), message: String(error?.message || error).slice(0, 300) });
+    }
+  }
+  for (const [channel, rows] of byChannel) {
+    const totals = sumMetricRows(rows);
+    const baseline = campaign.baseline?.channels?.[channel] || {};
+    if (channel === 'x_organic') totals.followers = Number(rows.at(-1)?.followers || 0);
+    if (channel === 'x_organic' && typeof totals.followers === 'number' && typeof baseline.followers === 'number') totals.follower_delta = totals.followers - baseline.followers;
+    if (channel === 'x_organic' && totals.impressions > 0) totals.engagement_rate = (totals.engagements || 0) / totals.impressions;
+    await prisma.campaignChannel.update({ where: { campaignId_channel: { campaignId: id, channel } }, data: { metrics: { ...totals, synced_at: new Date().toISOString() }, lastError: null } });
+  }
+  await prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_metrics_synced', actorType: 'user', actorId: userId, data: { action_count: actions.length, channels: [...byChannel.keys()], errors } } });
+  return getCampaign({ prisma, orgId, id });
 }
 
 async function finishCampaignAfterActionControl(prisma, campaignId) {

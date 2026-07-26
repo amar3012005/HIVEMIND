@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { campaignAgentWhere, canonicalHash, normalizeCampaignInput, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignAgentWhere, canonicalHash, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
@@ -51,6 +51,51 @@ test('bundle gate requires every channel, recipient, and requirement', () => {
   assert.deepEqual(validateCampaignBundle(bundle, campaign), []);
   const broken = structuredClone(bundle); delete broken.actions[1].payload.opening;
   assert.match(validateCampaignBundle(broken, campaign).join(' '), /speak-first opening/);
+});
+
+test('action edits create a valid cloned bundle without mutating the approved source', () => {
+  const source = {
+    strategy: 'Launch with one approved post.', audience: { rationale: 'Current followers.' }, content_pillars: ['Proof'],
+    kpis: [{ name: 'Reach', target: '100', source: 'X' }],
+    actions: [{ id: 'x-1', channel: 'x_organic', title: 'Launch', final_copy: 'Old copy', payload: { text: 'Old copy' }, scheduled_offset_minutes: 0, rationale: 'Launch now' }],
+    requirement_coverage: [{ requirement_id: 'goal', action_ids: ['x-1'] }, { requirement_id: 'channel:x_organic', action_ids: ['x-1'] }],
+  };
+  const edited = applyCampaignActionEdit(source, 'x-1', { final_copy: 'New approved copy', scheduled_offset_minutes: 30 });
+  assert.equal(source.actions[0].final_copy, 'Old copy');
+  assert.equal(edited.actions[0].final_copy, 'New approved copy');
+  assert.equal(edited.actions[0].payload.text, 'New approved copy');
+  assert.equal(edited.actions[0].scheduled_offset_minutes, 30);
+  assert.deepEqual(validateCampaignBundle(edited, { requestedChannels: ['x_organic'], requirements: [{ id: 'goal' }, { id: 'channel:x_organic' }] }), []);
+});
+
+test('action removal creates a cloned bundle and preserves the source plan', () => {
+  const bundle = {
+    strategy: 'Launch with two approved posts.', audience: { rationale: 'Current followers.' }, content_pillars: ['Proof'],
+    kpis: [{ name: 'Reach', target: '100', source: 'X' }],
+    actions: [{ id: 'x-1', channel: 'x_organic', title: 'Launch', final_copy: 'Old copy', payload: { text: 'Old copy' }, scheduled_offset_minutes: 0, rationale: 'Launch now' }],
+    requirement_coverage: [{ requirement_id: 'goal', action_ids: ['x-1'] }, { requirement_id: 'channel:x_organic', action_ids: ['x-1'] }],
+  };
+  bundle.actions.push({ ...bundle.actions[0], id: 'x-2', title: 'Follow-up', scheduled_offset_minutes: 60 });
+  bundle.requirement_coverage = bundle.requirement_coverage.map((item) => ({ ...item, action_ids: ['x-1', 'x-2'] }));
+  const next = applyCampaignActionEdit(bundle, 'x-1', { remove: true });
+  assert.deepEqual(next.actions.map((item) => item.id), ['x-2']);
+  assert.deepEqual(next.requirement_coverage[0].action_ids, ['x-2']);
+  assert.deepEqual(bundle.actions.map((item) => item.id), ['x-1', 'x-2']);
+  assert.deepEqual(validateCampaignBundle(next, { requestedChannels: ['x_organic'], requirements: [{ id: 'goal' }, { id: 'channel:x_organic' }] }), []);
+});
+
+test('campaign edit, regeneration, and metric commands are tenant scoped', async () => {
+  const oldEnabled = process.env.CAMPAIGNS_V2_ENABLED; const oldOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
+  process.env.CAMPAIGNS_V2_ENABLED = 'true'; process.env.CAMPAIGNS_V2_ORG_IDS = 'other-org';
+  try {
+    const prisma = { campaign: { async findFirst() { return null; } } };
+    await assert.rejects(() => editCampaignAction({ prisma, orgId: 'other-org', userId: 'user-a', id: 'campaign-a', actionId: 'action-a', body: {} }), { code: 'campaign_not_found', status: 404 });
+    await assert.rejects(() => regenerateCampaign({ prisma, orgId: 'other-org', userId: 'user-a', id: 'campaign-a' }), { code: 'campaign_not_found', status: 404 });
+    await assert.rejects(() => syncCampaignMetrics({ prisma, orgId: 'other-org', userId: 'user-a', id: 'campaign-a' }), { code: 'campaign_not_found', status: 404 });
+  } finally {
+    if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;
+    if (oldOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = oldOrgs;
+  }
 });
 
 test('state and rollout gates reject unsafe transitions', () => {

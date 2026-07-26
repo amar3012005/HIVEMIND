@@ -2449,23 +2449,34 @@ class Director:
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:5000]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:3000]}\n\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:5000] if forced_debate else '(not forced)'}")
         errors = ["bundle was not generated"]
-        bundle: Optional[Dict[str, Any]] = None
+        previous_candidate: Optional[Dict[str, Any]] = None
         visual_skill = ""
-        for attempt in range(3):
+        # Campaign bundles are larger than ordinary synthesis output. Keep the
+        # repair loop bounded, but give the compiler enough passes to preserve
+        # good copy while repairing deterministic contract failures.
+        for attempt in range(6):
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             if attempt:
-                messages.append({"role": "user", "content": "Repair every validation error and return the full JSON object again:\n- " + "\n- ".join(errors)})
+                previous = json.dumps(previous_candidate, ensure_ascii=False)[:12000] if previous_candidate else "(no parseable prior draft)"
+                messages.append({"role": "user", "content":
+                                 "Repair every validation error below. Preserve valid strategy, evidence, and copy from the prior draft; "
+                                 "return the complete JSON object, never a patch. Count actions per channel before returning and ensure every "
+                                 "action appears exactly once in timeline and requirement_coverage.\n\n"
+                                 "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
+                                 "\n\nCURRENT INVALID BUNDLE:\n" + previous})
             msg = await self._groq(messages, force_text=True, model=self.synth_model, bucket="synth", temp=0.2)
             raw = str((msg or {}).get("content") or "").strip()
             try:
                 raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
-                bundle = json.loads(raw)
+                candidate = json.loads(raw)
             except Exception:
-                bundle = None
-            visual_actions = [action for action in (bundle.get("actions") or [])
+                candidate = None
+            if isinstance(candidate, dict):
+                previous_candidate = candidate
+            visual_actions = [action for action in (candidate.get("actions") or [])
                               if isinstance(action, dict)
                               and isinstance(action.get("creative_brief"), dict)
-                              and action["creative_brief"].get("required") is True] if isinstance(bundle, dict) else []
+                              and action["creative_brief"].get("required") is True] if isinstance(candidate, dict) else []
             if visual_actions and not visual_skill:
                 visual_skill = load_method_skill("visual-prompt-architecture")
                 if visual_skill:
@@ -2476,8 +2487,8 @@ class Director:
                     errors = ["The image gate selected visual actions. Apply this visual-prompt skill to those actions only, then return the complete bundle again:\n" + visual_skill]
                     continue
             from .campaign_contract import campaign__submit_plan
-            bundle, errors = campaign__submit_plan(
-                bundle,
+            accepted, errors = campaign__submit_plan(
+                candidate,
                 channels=channels,
                 requirements=requirements,
                 minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
@@ -2485,10 +2496,10 @@ class Director:
             )
             if not errors:
                 await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
-                return bundle, []
+                return accepted, []
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
                              "errors": errors[:12], "attempt": attempt + 1})
-        return bundle, errors
+        return None, errors
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:

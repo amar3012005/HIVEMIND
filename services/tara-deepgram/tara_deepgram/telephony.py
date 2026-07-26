@@ -248,6 +248,24 @@ def verify_zernio_signature(raw_body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature.strip().lower())
 
 
+def zernio_signature_debug(raw_body: bytes) -> str:
+    """What OUR secret would produce, in both plausible encodings — prefixes only.
+
+    Lets a signature mismatch be triaged from one log line: if the received value
+    matches `hex…` we have a bug; if it matches `b64…` Zernio encodes differently
+    than documented; if it matches neither, the secret in the Zernio dashboard is
+    not the one in ZERNIO_WEBHOOK_SECRET.
+    """
+    import base64
+    import hashlib
+    import hmac
+    if not config.ZERNIO_WEBHOOK_SECRET:
+        return "no_secret_configured"
+    mac = hmac.new(config.ZERNIO_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256)
+    return (f"expect_hex={mac.hexdigest()[:12]}… "
+            f"expect_b64={base64.b64encode(mac.digest()).decode()[:12]}…")
+
+
 def zernio_event_is_new(event_id: str) -> bool:
     """True the first time an event id is seen. Replay/duplicate guard."""
     import time as _time

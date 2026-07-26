@@ -298,7 +298,15 @@ if config.TARA_DG_ENABLED:
         raw = await request.body()
         signature = request.headers.get("x-zernio-signature", "")
         if not telephony.verify_zernio_signature(raw, signature):
-            log.warning("zernio webhook REJECTED: bad/missing signature (bytes=%d)", len(raw))
+            # Diagnostic: distinguish "wrong secret" from "wrong scheme" without
+            # leaking anything usable. Zernio's docs say lowercase-hex HMAC-SHA256
+            # over the raw body; if the received value is base64 or a different
+            # length, the scheme differs. Prefixes only.
+            log.warning(
+                "zernio webhook REJECTED: signature mismatch bytes=%d recv_len=%d recv=%s… %s",
+                len(raw), len(signature), signature[:12] or "(none)",
+                telephony.zernio_signature_debug(raw),
+            )
             raise HTTPException(status_code=401, detail="invalid signature")
         try:
             event = _json_mod.loads(raw or b"{}")

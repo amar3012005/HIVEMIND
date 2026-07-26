@@ -1,4 +1,5 @@
 from hivemind_employees.hyper.engine import Director
+from hivemind_employees.hyper.campaign_contract import campaign__submit_plan
 from hivemind_employees.hyper.skills import resolve_room_kind
 
 
@@ -14,6 +15,16 @@ def test_campaign_bundle_cannot_pass_as_generic_report():
     assert "actions must not be empty" in errors
     assert "selected channel gmail has no action" in errors
     assert "requirement goal is not covered by actions" in errors
+
+
+def test_campaign_submit_plan_is_the_completion_contract():
+    accepted, errors = campaign__submit_plan(
+        {"strategy": "Only prose"},
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+    )
+    assert accepted is None
+    assert "actions must not be empty" in errors
 
 
 def test_tara_campaign_action_requires_speak_first_opening():

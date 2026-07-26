@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { getCampaignCapabilities } from './capabilities.js';
 import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
+import { buildCampaignKickoff, buildCampaignRoomDispatch } from './contracts.js';
 
 function campaignError(message, status = 400, code = 'invalid_campaign') {
   const error = new Error(message); error.status = status; error.code = code; return error;
@@ -91,6 +92,10 @@ function audienceIdentity(action) {
   if (action.channel === 'gmail') return { dedupeKey: `email:${value.toLowerCase()}`, email: value.toLowerCase(), phone: null };
   if (action.channel === 'tara') return { dedupeKey: `phone:${value.replace(/[\s()/-]/g, '')}`, email: null, phone: value.replace(/[\s()/-]/g, '') };
   return null;
+}
+
+export function campaignAgentWhere(orgId) {
+  return { orgId, archivedAt: null, status: { not: 'paused' } };
 }
 
 export async function persistCampaignBundle({ prisma, turnId, bundle }) {
@@ -222,18 +227,6 @@ export function normalizeCampaignInput(body = {}) {
   };
 }
 
-function kickoffFor(campaign) {
-  return [
-    `CAMPAIGN_ID: ${campaign.id}`,
-    `GOAL: ${campaign.goal}`,
-    `OBJECTIVE: ${campaign.objective}`,
-    `CHANNELS: ${campaign.requestedChannels.join(', ')}`,
-    `BRIEF_JSON: ${JSON.stringify(campaign.brief)}`,
-    `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy)}`,
-    'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and submit the complete plan with campaign__submit_plan. Do not send any external action.',
-  ].join('\n');
-}
-
 export async function createCampaign({ prisma, userId, orgId, body }) {
   requireCampaignsV2(orgId);
   const input = normalizeCampaignInput(body);
@@ -248,7 +241,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   if (unavailable.length) throw campaignError(`Connect or configure: ${unavailable.join(', ')}`, 409, 'channel_connection_required');
 
   const participants = await prisma.digitalEmployee.findMany({
-    where: { orgId, archivedAt: null, status: { in: ['running', 'active'] } },
+    where: campaignAgentWhere(orgId),
     select: { id: true }, orderBy: { createdAt: 'asc' }, take: 5,
   });
   if (!participants.length) throw campaignError('Complete company onboarding before creating a campaign', 409, 'campaign_team_required');
@@ -268,7 +261,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
       enabledConnectors: input.channels.includes('gmail') ? ['gmail'] : [], qualityMode: 'best',
     } });
     const withRoom = await tx.campaign.update({ where: { id: campaign.id }, data: { roomId: room.id, status: 'GENERATING' } });
-    const kickoff = kickoffFor(withRoom);
+    const kickoff = buildCampaignKickoff(withRoom);
     const turn = await tx.hyperTurn.create({ data: {
       roomId: room.id, seq: 1, userMessage: kickoff, status: 'live',
       idempotencyKey: `campaign-kickoff-${campaign.id}`, lines: [],
@@ -284,13 +277,10 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   return {
     campaign: { ...result.campaign, channels: input.channels.map((channel) => ({ channel, status: 'PLANNING' })), runs: [result.run] },
     created: true,
-    dispatch: {
-      room_id: result.room.id, turn_id: result.turn.id, user_id: userId, org_id: orgId,
-      user_message: result.kickoff, participant_ids: participantIds, room_goal: result.room.goal,
-      task_tag: 'CAMPAIGN', campaign_id: result.campaign.id,
-      campaign_brief: { ...input, campaign_id: result.campaign.id }, write_policy: 'ask',
-      callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-    },
+    dispatch: buildCampaignRoomDispatch({
+      campaign: result.campaign, room: result.room, turn: result.turn, participantIds,
+      briefSnapshot: { ...input, campaign_id: result.campaign.id },
+    }),
   };
 }
 
@@ -312,6 +302,7 @@ export async function getCampaign({ prisma, orgId, id }) {
       audience: { orderBy: { createdAt: 'asc' } }, assets: true,
       approvals: { orderBy: { approvedAt: 'desc' }, take: 10 },
       metricSnapshots: { orderBy: { capturedAt: 'desc' }, take: 100 },
+      events: { orderBy: { id: 'desc' }, take: 100 },
     },
   });
   if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
@@ -319,7 +310,15 @@ export async function getCampaign({ prisma, orgId, id }) {
     where: { roomId: campaign.roomId }, orderBy: { seq: 'asc' }, take: 20,
     select: { id: true, seq: true, userMessage: true, status: true, lines: true, startedAt: true, sealedAt: true },
   }) : [];
-  return { ...campaign, roomTranscript };
+  const currentActions = campaign.currentPlanVersionId
+    ? campaign.actions.filter((action) => action.planVersionId === campaign.currentPlanVersionId)
+    : [];
+  return {
+    ...campaign,
+    actions: currentActions,
+    events: campaign.events.map((event) => ({ ...event, id: String(event.id) })),
+    roomTranscript,
+  };
 }
 
 async function requireCampaignEditor(prisma, campaign, userId) {

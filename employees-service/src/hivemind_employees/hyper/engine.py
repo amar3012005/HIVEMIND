@@ -2348,50 +2348,8 @@ class Director:
 
     @staticmethod
     def _campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[str]) -> List[str]:
-        if not isinstance(bundle, dict):
-            return ["bundle must be an object"]
-        errors: List[str] = []
-        if not str(bundle.get("strategy") or "").strip(): errors.append("strategy is required")
-        if not isinstance(bundle.get("audience"), dict) or not str(bundle["audience"].get("rationale") or "").strip():
-            errors.append("audience.rationale is required")
-        if not isinstance(bundle.get("content_pillars"), list) or not bundle.get("content_pillars"):
-            errors.append("content_pillars must not be empty")
-        if not isinstance(bundle.get("kpis"), list) or not bundle.get("kpis"):
-            errors.append("kpis must not be empty")
-        actions = bundle.get("actions")
-        if not isinstance(actions, list) or not actions:
-            errors.append("actions must not be empty")
-            actions = []
-        seen_ids, action_channels = set(), set()
-        for index, action in enumerate(actions):
-            if not isinstance(action, dict):
-                errors.append(f"action {index + 1} must be an object"); continue
-            action_id = str(action.get("id") or "").strip()
-            channel = str(action.get("channel") or "").strip().lower()
-            if not action_id or action_id in seen_ids: errors.append(f"action {index + 1} needs a unique id")
-            seen_ids.add(action_id)
-            if channel not in channels: errors.append(f"action {action_id or index + 1} has an unrequested channel")
-            action_channels.add(channel)
-            if not str(action.get("final_copy") or "").strip(): errors.append(f"action {action_id or index + 1} needs final_copy")
-            if not isinstance(action.get("payload"), dict): errors.append(f"action {action_id or index + 1} needs payload")
-            offset = action.get("scheduled_offset_minutes")
-            if not isinstance(offset, int) or offset < 0: errors.append(f"action {action_id or index + 1} needs a non-negative schedule offset")
-            if not str(action.get("rationale") or "").strip(): errors.append(f"action {action_id or index + 1} needs rationale")
-            if channel == "gmail" and not str((action.get("payload") or {}).get("subject") or "").strip():
-                errors.append(f"Gmail action {action_id or index + 1} needs payload.subject")
-            if channel == "gmail" and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str((action.get("payload") or {}).get("to") or "")):
-                errors.append(f"Gmail action {action_id or index + 1} needs a verified payload.to email")
-            if channel == "tara" and not str((action.get("payload") or {}).get("opening") or "").strip():
-                errors.append(f"TARA action {action_id or index + 1} needs a speak-first payload.opening")
-            if channel == "tara" and not re.match(r"^\+[1-9]\d{6,14}$", str((action.get("payload") or {}).get("to") or "")):
-                errors.append(f"TARA action {action_id or index + 1} needs a verified E.164 payload.to")
-        for channel in channels:
-            if channel not in action_channels: errors.append(f"selected channel {channel} has no action")
-        coverage = bundle.get("requirement_coverage")
-        covered = {str(x.get("requirement_id") or "") for x in coverage or [] if isinstance(x, dict) and x.get("action_ids")}
-        for requirement in requirements:
-            if requirement not in covered: errors.append(f"requirement {requirement} is not covered by actions")
-        return errors
+        from .campaign_contract import campaign_bundle_errors
+        return campaign_bundle_errors(bundle, channels, requirements)
 
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
@@ -2423,9 +2381,13 @@ class Director:
                 bundle = json.loads(raw)
             except Exception:
                 bundle = None
-            errors = self._campaign_bundle_errors(bundle, channels, requirements)
+            from .campaign_contract import campaign__submit_plan
+            bundle, errors = campaign__submit_plan(bundle, channels=channels, requirements=requirements)
             if not errors:
+                await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
                 return bundle, []
+            await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
+                             "errors": errors[:12], "attempt": attempt + 1})
         return bundle, errors
 
     @staticmethod

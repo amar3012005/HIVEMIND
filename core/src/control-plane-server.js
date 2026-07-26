@@ -9554,14 +9554,8 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
-        if (body.event.t === 'campaign_bundle' || body.event.t === 'campaign_bundle_invalid') {
-          const { persistCampaignBundle, markCampaignNeedsInput } = await import('./campaigns/service.js');
-          if (body.event.t === 'campaign_bundle') {
-            await persistCampaignBundle({ prisma, turnId: body.turn_id, bundle: body.event.bundle });
-          } else {
-            await markCampaignNeedsInput({ prisma, turnId: body.turn_id, errors: body.event.errors });
-          }
-        }
+        const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
+        await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
         if (body.event.t === 'seal') {
           // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
           // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.

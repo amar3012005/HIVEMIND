@@ -14,7 +14,9 @@ async function dispatchRoom(dispatch) {
   const response = await fetch(`${base}/internal/hyper/room-turn`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': key }, body: JSON.stringify(dispatch),
   });
-  if (!response.ok) throw Object.assign(new Error(`Campaign room dispatch failed (${response.status})`), { status: 502, code: 'campaign_dispatch_failed' });
+  if (!response.ok) throw Object.assign(new Error(`Campaign room dispatch failed (${response.status})`), {
+    status: 502, code: 'campaign_dispatch_failed', definitive: true,
+  });
 }
 
 async function audit(prisma, auditLogger, { userId, orgId, action, campaignId, metadata = {} }) {
@@ -39,8 +41,8 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
       const result = await createCampaign({ prisma, userId, orgId, body });
       if (result.dispatch) {
         dispatchRoom(result.dispatch).catch(async (error) => {
-          await prisma.campaign.update({ where: { id: result.campaign.id }, data: { status: 'FAILED', lastError: error.message } }).catch(() => {});
-          await prisma.campaignRun.updateMany({ where: { campaignId: result.campaign.id, status: 'DISPATCHING' }, data: { status: 'FAILED', error: error.message, completedAt: new Date() } }).catch(() => {});
+          const { handleCampaignDispatchError } = await import('./pipeline.js');
+          await handleCampaignDispatchError({ prisma, campaignId: result.campaign.id, error }).catch(() => {});
         });
       }
       if (result.created) await audit(prisma, auditLogger, { userId, orgId, action: 'created', campaignId: result.campaign.id });

@@ -233,6 +233,11 @@ services:
     environment:
       HIVEMIND_API_KEY: ${HIVEMIND_MASTER_API_KEY}
       HIVEMIND_TARA_STREAM_URL: http://core:3000/api/tara/stream
+      # Telephony carrier toggle — the sideline switch. zernio (Telnyx-backed)
+      # replaces twilio, whose credentials 401'd. Overrides the value in
+      # /opt/tara-deepgram/.env; set TELEPHONY_PROVIDER=telnyx|twilio to switch
+      # back without a code change. Not a secret, so it lives in git.
+      TELEPHONY_PROVIDER: ${TELEPHONY_PROVIDER:-zernio}
     ports:
       # Loopback-only: hm-caddy (network_mode: host) fronts this at /voice2.
       # Binding all interfaces would expose the voice adapter publicly — this

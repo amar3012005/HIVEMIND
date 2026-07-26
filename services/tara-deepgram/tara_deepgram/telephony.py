@@ -89,6 +89,59 @@ async def _dial_twilio(req: DialRequest) -> dict:
     return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
 
 
+async def _zernio(method: str, path: str, extra_headers: Optional[dict] = None, **kwargs) -> dict:
+    headers = {"Authorization": f"Bearer {config.ZERNIO_API_KEY}",
+               "Content-Type": "application/json", **(extra_headers or {})}
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await getattr(c, method)(f"{config.ZERNIO_API_BASE}{path}", headers=headers, **kwargs)
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+
+async def _dial_zernio(req: DialRequest) -> dict:
+    """Dial via Zernio (a Telnyx reseller).
+
+    `forwardTo` carries our media-WS URL at dial time, so there is no
+    call.answered → streaming_start round-trip like Telnyx-direct; Zernio bridges
+    the answered callee straight into the socket, bidirectionally. Query params on
+    the URL survive verbatim (verified live), so the existing /telnyx/stream
+    handler picks session_id up exactly as it does for Telnyx.
+
+    NOTE: media only bridges AFTER the callee answers — an unanswered call ends
+    `no_answer` and the socket is never opened. That is provider behaviour, not a
+    bug in the bridge.
+    """
+    qs = urlencode({k: v for k, v in {
+        "session_id": req.session_id,
+        "user_id": req.user_id or "",
+        "org_id": req.org_id or "",
+        "language": req.language,
+        "voice_id": req.voice_id or "",
+    }.items() if v})
+    body = {"to": req.to, "forwardTo": f"{config.PUBLIC_WS_BASE}/telnyx/stream?{qs}"}
+    if config.ZERNIO_FROM_NUMBER:
+        body["fromNumber"] = config.ZERNIO_FROM_NUMBER
+    if config.ZERNIO_GREETING:
+        body["greeting"] = config.ZERNIO_GREETING
+    # Idempotency-Key keyed on our session: a retried dial can never double-ring
+    # a prospect.
+    result = await _zernio("post", "/voice/calls", json=body,
+                           extra_headers={"Idempotency-Key": f"tara-{req.session_id}"})
+    leg = str(result.get("callId") or "")
+    if not leg:
+        raise ValueError(f"Zernio returned no callId: {str(result)[:200]}")
+    pending_calls[leg] = {
+        "call_control_id": leg,
+        "provider": "zernio",
+        # Kept for support/debugging — Zernio exposes the underlying Telnyx leg.
+        "telnyx_call_control_id": result.get("telnyxCallControlId"),
+        "status": result.get("status") or "dialing",
+        **req.model_dump(),
+    }
+    log.info("zernio dial leg=%s session=%s to=%s", leg, req.session_id, req.to)
+    return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
+
+
 _E164 = re.compile(r"^\+[1-9]\d{7,14}$")
 
 
@@ -109,6 +162,8 @@ async def dial(req: DialRequest) -> dict:
         raise ValueError(f"Number {req.to!r} not in the configured allowlist.")
     if config.TELEPHONY_PROVIDER == "twilio":
         return await _dial_twilio(req)
+    if config.TELEPHONY_PROVIDER == "zernio":
+        return await _dial_zernio(req)
     result = await _telnyx("post", "/calls", json={
         "connection_id": config.TELNYX_APP_ID,
         "to": req.to,
@@ -131,7 +186,9 @@ async def hangup(call_leg_id: str) -> None:
     meta = pending_calls.get(call_leg_id)
     if not meta:
         raise ValueError(f"Call {call_leg_id!r} not found or already ended")
-    if meta.get("provider") == "twilio":
+    if meta.get("provider") == "zernio":
+        await _zernio("post", f"/voice/calls/{meta['call_control_id']}/end")
+    elif meta.get("provider") == "twilio":
         sid = config.TWILIO_ACCOUNT_SID
         async with httpx.AsyncClient(timeout=15) as c:
             await c.post(
@@ -169,6 +226,75 @@ async def handle_webhook(event: dict) -> None:
         if meta:
             meta["status"] = "ended"
         log.info("hangup leg=%s", leg)
+
+
+# ── Zernio webhooks ──────────────────────────────────────────────────────────
+# Zernio signs the RAW body with HMAC-SHA256 (lowercase hex) in X-Zernio-Signature
+# and sends NO timestamp — so a captured webhook is replayable forever. The
+# event-id dedupe below is therefore a SECURITY control, not just idempotency.
+# Delivery is at-least-once with up to 7 retries, so duplicates are normal.
+_ZERNIO_SEEN_EVENTS: dict[str, float] = {}
+_ZERNIO_SEEN_MAX = 5000
+
+
+def verify_zernio_signature(raw_body: bytes, signature: str) -> bool:
+    """Constant-time HMAC-SHA256 check. Fails closed when no secret is set."""
+    import hashlib
+    import hmac
+    if not config.ZERNIO_WEBHOOK_SECRET or not signature:
+        return False
+    expected = hmac.new(config.ZERNIO_WEBHOOK_SECRET.encode(),
+                        raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature.strip().lower())
+
+
+def zernio_event_is_new(event_id: str) -> bool:
+    """True the first time an event id is seen. Replay/duplicate guard."""
+    import time as _time
+    if not event_id:
+        return True  # nothing to dedupe on; handler stays idempotent anyway
+    if event_id in _ZERNIO_SEEN_EVENTS:
+        return False
+    if len(_ZERNIO_SEEN_EVENTS) >= _ZERNIO_SEEN_MAX:
+        for stale, _ in sorted(_ZERNIO_SEEN_EVENTS.items(), key=lambda kv: kv[1])[:1000]:
+            _ZERNIO_SEEN_EVENTS.pop(stale, None)
+    _ZERNIO_SEEN_EVENTS[event_id] = _time.monotonic()
+    return True
+
+
+def _zernio_leg(call: dict) -> str:
+    """Zernio's call id field name varies by event; accept the documented set."""
+    for key in ("callId", "_id", "id"):
+        value = call.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+async def handle_zernio_webhook(event: dict) -> None:
+    """Terminal-state bookkeeping. There is no `answered` event to act on —
+    `forwardTo` already opened the media socket at dial time."""
+    etype = str(event.get("event") or "")
+    call = event.get("call") or {}
+    leg = _zernio_leg(call)
+    meta = pending_calls.get(leg) if leg else None
+    if etype == "call.ended":
+        if meta:
+            meta["status"] = "ended"
+            meta["end_reason"] = call.get("endReason")
+            meta["duration_seconds"] = call.get("durationSeconds")
+        log.info("zernio call.ended leg=%s reason=%s dur=%ss",
+                 leg, call.get("endReason"), call.get("durationSeconds"))
+    elif etype == "call.failed":
+        if meta:
+            meta["status"] = "failed"
+            meta["failure_code"] = call.get("code")
+        log.warning("zernio call.failed leg=%s code=%s msg=%s",
+                    leg, call.get("code"), str(call.get("message"))[:200])
+    else:
+        # Log unknown/inbound events once so the real payload shape is learnable
+        # from production rather than guessed (the docs omit full schemas).
+        log.info("zernio webhook event=%s leg=%s keys=%s", etype, leg, sorted(call.keys())[:12])
 
 
 def find_by_session(session_id: str) -> Optional[dict]:

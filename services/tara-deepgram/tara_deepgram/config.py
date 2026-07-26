@@ -51,8 +51,8 @@ THINK_SHIM_SECRET = os.getenv("TARA_DG_SHIM_SECRET", "")
 
 # ── Telephony ────────────────────────────────────────────────────────────────
 TARA_DG_ENABLED   = os.getenv("TARA_DG_ENABLED", "false").lower() == "true"
-# Provider switch: "telnyx" (default) | "twilio". Both bridge to the same
-# Deepgram media loop (mulaw@8k); only dial + stream-start differ.
+# Provider switch: "telnyx" (default) | "twilio" | "zernio". All bridge to the
+# SAME Deepgram media loop (mulaw@8k); only dial + stream-start differ.
 TELEPHONY_PROVIDER = os.getenv("TELEPHONY_PROVIDER", "telnyx").lower()
 
 TELNYX_API_KEY     = os.getenv("TELNYX_API_KEY", "")
@@ -62,6 +62,21 @@ TELNYX_FROM_NUMBER = os.getenv("TELNYX_FROM_NUMBER", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
+
+# ── Zernio (TELEPHONY_PROVIDER=zernio) ───────────────────────────────────────
+# Zernio resells Telnyx: its create-call response returns `telnyxCallControlId`
+# and its numbers carry `telnyxPhoneNumberId`, so the media stream IS Telnyx
+# Media Streaming and reuses our existing /telnyx/stream bridge unchanged.
+# Unlike Telnyx-direct there is NO call.answered → streaming_start round-trip:
+# `forwardTo` carries the media-WS URL at dial time (same shape as Twilio's
+# <Connect><Stream>), and query params on it survive verbatim (verified live).
+ZERNIO_API_BASE       = os.getenv("ZERNIO_API_BASE", "https://zernio.com/api/v1")
+ZERNIO_API_KEY        = os.getenv("ZERNIO_API_KEY", "")
+ZERNIO_FROM_NUMBER    = os.getenv("ZERNIO_FROM_NUMBER", "")
+ZERNIO_WEBHOOK_SECRET = os.getenv("ZERNIO_WEBHOOK_SECRET", "")
+# Spoken to the callee BEFORE bridging. Empty = omit, so TARA opens the
+# conversation herself (a provider greeting would talk over her first turn).
+ZERNIO_GREETING       = os.getenv("ZERNIO_GREETING", "")
 
 # Unified comma-separated E.164 allowlist. Empty = ALL outbound dialing blocked
 # (safe default). TELNYX_ALLOWED_NUMBERS kept as an alias for back-compat.

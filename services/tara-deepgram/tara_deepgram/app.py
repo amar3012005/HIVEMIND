@@ -8,13 +8,14 @@ proxies /api/tara/stream (recall-grounded, skill-prompted, external-hardened).
 from __future__ import annotations
 
 import asyncio
+import json as _json_mod
 import logging
 import os
 
 import httpx
 import re
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -283,6 +284,30 @@ if config.TARA_DG_ENABLED:
     async def telnyx_webhook(request: Request):
         event = await request.json()
         asyncio.get_event_loop().create_task(telephony.handle_webhook(event))
+        return {"ok": True}
+
+    @app.post("/zernio/webhook")
+    async def zernio_webhook(request: Request):
+        """Zernio call events. Fails CLOSED on a bad/missing signature.
+
+        The HMAC covers the RAW body, so it is read before any parsing. Zernio
+        sends no timestamp, so replays/duplicates are rejected by event id
+        (X-Zernio-Event-Id / payload.id). Zernio needs a 2xx within 5s or it
+        retries, so the handler runs in the background.
+        """
+        raw = await request.body()
+        signature = request.headers.get("x-zernio-signature", "")
+        if not telephony.verify_zernio_signature(raw, signature):
+            log.warning("zernio webhook REJECTED: bad/missing signature (bytes=%d)", len(raw))
+            raise HTTPException(status_code=401, detail="invalid signature")
+        try:
+            event = _json_mod.loads(raw or b"{}")
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="invalid json")
+        event_id = request.headers.get("x-zernio-event-id") or str(event.get("id") or "")
+        if not telephony.zernio_event_is_new(event_id):
+            return {"ok": True, "duplicate": True}
+        asyncio.get_event_loop().create_task(telephony.handle_zernio_webhook(event))
         return {"ok": True}
 
     @app.websocket("/telnyx/stream")

@@ -1701,6 +1701,11 @@ class RoomTurnRequest(BaseModel):
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
     room_goal: Optional[str] = None
+    # Typed task context. Campaign callers require this to bypass generic report
+    # routing; campaign_id/brief are metadata only and never authorize a write.
+    task_tag: Optional[str] = None
+    campaign_id: Optional[str] = None
+    campaign_brief: Optional[Dict[str, Any]] = None
     # Additional Population-Sim toggle ("on" runs it). Per-turn override; else the room's
     # stored sim_mode is read. Optional so existing callers are unaffected (additive).
     sim_mode: Optional[str] = None
@@ -2959,6 +2964,8 @@ async def _orchestrate_single_agent(
         _sender_email = await get_connected_gmail(req.user_id, req.org_id)
     except Exception:  # noqa: BLE001
         _sender_email = ""
+    from .hyper.skills import resolve_room_kind
+    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -2971,6 +2978,7 @@ async def _orchestrate_single_agent(
             sim_mode=_sim_mode, sim_agents=_sim_agents,
             evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
             company_brief=_company_brief, intended_output=intended_output,
+            room_kind=_room_kind,
             room_playbook=_room_playbook, room_instructions=_room_instructions,
             sender_email=_sender_email, out_language=(req.language or ""),
         )
@@ -3063,7 +3071,9 @@ async def _orchestrate_single_agent(
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
     _gv = _vp.get("verification") or {}
     status = "complete"
-    if _vp.get("dead_end"):
+    if result.get("room_kind") == "campaign" and not result.get("campaign_bundle"):
+        status = "blocked"
+    elif _vp.get("dead_end"):
         status = "blocked"
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"

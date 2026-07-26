@@ -7,6 +7,7 @@ import {
 } from './service.js';
 import { disconnectX, startOAuth1, startOAuth2 } from './oauth.js';
 import { X_AUTH_OAUTH1, X_AUTH_OAUTH2 } from './x-auth-store.js';
+import { campaignsV2Enabled } from '../campaigns/state.js';
 
 function jsonResult(result) {
   return result?.content?.find((item) => item.type === 'json')?.data || null;
@@ -27,7 +28,7 @@ export async function handleXAdsRequest({ pathname, method, body, url, req, res,
   if (!pathname.startsWith('/api/x-ads/')) return false;
   try {
     if (pathname === '/api/x-ads/oauth/oauth2/start' && method === 'POST') {
-      if (!xAdsBetaEnabled(orgId)) return jsonResponse(res, { error: 'x_ads_beta_disabled', message: 'X Ads beta is not enabled for this organization' }, 403);
+      if (!xAdsBetaEnabled(orgId) && !campaignsV2Enabled(orgId)) return jsonResponse(res, { error: 'x_organic_disabled', message: 'X Organic is not enabled for this organization' }, 403);
       return jsonResponse(res, await startOAuth2({ prisma, userId, orgId }));
     }
     if (pathname === '/api/x-ads/oauth/oauth1/start' && method === 'POST') {

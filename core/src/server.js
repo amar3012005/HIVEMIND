@@ -36,6 +36,8 @@ import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
+import { handleCampaignRequest } from './campaigns/routes.js';
+import { processDueCampaignActions } from './campaigns/worker.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -346,6 +348,17 @@ if (usageTracker) setUsageTracker(usageTracker); // expose to deep chokepoints v
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  scheduleRecurringMaintenanceJob({
+    enabled: ['1', 'true', 'yes', 'on'].includes(String(process.env.CAMPAIGNS_V2_WORKER_ENABLED || '').toLowerCase()),
+    prisma,
+    jobName: 'campaign-actions',
+    initialDelayMs: 15_000,
+    intervalMs: 30_000,
+    singleton: false,
+    run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
+  });
+}
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run
 // after 10min warm-up, then hourly. Best-effort; no-ops when PQC keys absent.
 if (auditLogger && shouldRunRecurringMaintenanceJobs()) {
@@ -8078,6 +8091,14 @@ exit \$RC
       // Effective container: explicit request > single-scoped key default > null
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
+
+      if (pathname === '/api/campaigns' || pathname.startsWith('/api/campaigns/')) {
+        await handleCampaignRequest({
+          pathname, method: req.method, body, url, req, res, prisma, userId, orgId,
+          jsonResponse, auditLogger,
+        });
+        return;
+      }
 
       // Standalone X paid-campaign workspace. It shares the authenticated
       // control-plane proxy but is intentionally outside HyperAgents/TARA.

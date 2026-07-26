@@ -9554,6 +9554,14 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
+        if (body.event.t === 'campaign_bundle' || body.event.t === 'campaign_bundle_invalid') {
+          const { persistCampaignBundle, markCampaignNeedsInput } = await import('./campaigns/service.js');
+          if (body.event.t === 'campaign_bundle') {
+            await persistCampaignBundle({ prisma, turnId: body.turn_id, bundle: body.event.bundle });
+          } else {
+            await markCampaignNeedsInput({ prisma, turnId: body.turn_id, errors: body.event.errors });
+          }
+        }
         if (body.event.t === 'seal') {
           // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
           // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.
@@ -10592,6 +10600,21 @@ Write the persona now.`;
       session: current.session,
       method: req.method,
       path: pathname === '/v1/tara/runtime-config' ? '/api/tara/runtime-config' : '/api/tara/voice-sessions',
+      body,
+      query: url.search || '',
+    });
+  }
+
+  // Unified AI Campaigns. Keep the public route stable while Core owns tenant
+  // validation, idempotency, room creation, and all campaign state changes.
+  if (pathname === '/v1/campaigns' || pathname.startsWith('/v1/campaigns/')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : await parseBody(req);
+    return proxyToCore(req, res, {
+      session: current.session,
+      method: req.method,
+      path: pathname.replace('/v1/campaigns', '/api/campaigns'),
       body,
       query: url.search || '',
     });

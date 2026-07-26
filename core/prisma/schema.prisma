@@ -443,6 +443,8 @@ model OutboundAction {
   orgId      String    @map("org_id") @db.Uuid
   userId     String?   @map("user_id") @db.Uuid
   roomId     String?   @map("room_id") @db.Uuid // hyper_rooms.id when sent from a room
+  campaignId String?   @map("campaign_id") @db.Uuid
+  campaignActionId String? @map("campaign_action_id") @db.Uuid
   approvalId String?   @map("approval_id") @db.VarChar(80)
   channel    String    @db.VarChar(20) // email | call
   recipient  String?   @db.VarChar(320) // email address or E.164 number
@@ -458,7 +460,303 @@ model OutboundAction {
   @@index([orgId, sentAt])
   @@index([orgId, threadId])
   @@index([orgId, outcome, sentAt])
+  @@index([campaignId, sentAt])
+  @@index([campaignActionId])
   @@map("outbound_actions")
+}
+
+/// Organization-owned person or company identity used across campaigns.
+/// Campaign memberships snapshot this row so approved plans remain immutable.
+model AudienceContact {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  createdBy      String?  @map("created_by") @db.Uuid
+  lifecycle      String   @default("PROSPECT") @db.VarChar(24)
+  displayName    String?  @map("display_name") @db.VarChar(255)
+  company        String?  @db.VarChar(300)
+  email          String?  @db.VarChar(320)
+  phone          String?  @db.VarChar(40)
+  website        String?  @db.VarChar(500)
+  address        String?  @db.VarChar(500)
+  country        String?  @db.VarChar(2)
+  timezone       String?  @db.VarChar(80)
+  dedupeKey      String   @map("dedupe_key") @db.VarChar(700)
+  sourceType     String   @default("manual") @map("source_type") @db.VarChar(40)
+  sourceRef      String?  @map("source_ref") @db.VarChar(200)
+  provenance     Json     @default("{}") @db.JsonB
+  consent        Json     @default("{}") @db.JsonB
+  enrichment     Json     @default("{}") @db.JsonB
+  lastContactedAt DateTime? @map("last_contacted_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaignMembers CampaignAudienceMember[]
+
+  @@unique([orgId, dedupeKey])
+  @@index([orgId, lifecycle, updatedAt(sort: Desc)])
+  @@index([orgId, email])
+  @@index([orgId, phone])
+  @@map("audience_contacts")
+}
+
+/// Channel-independent campaign source of truth. Provider-specific campaigns
+/// remain separate and link back through unifiedCampaignId columns.
+model Campaign {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  ownerUserId          String    @map("owner_user_id") @db.Uuid
+  creationKey          String?   @map("creation_key") @db.VarChar(160)
+  name                 String    @db.VarChar(255)
+  objective            String    @db.VarChar(40)
+  goal                 String
+  brief                Json      @default("{}") @db.JsonB
+  requirements         Json      @default("[]") @db.JsonB
+  requestedChannels    String[]  @default([]) @map("requested_channels")
+  audiencePolicy       Json      @default("{}") @map("audience_policy") @db.JsonB
+  schedulePolicy       Json      @default("{}") @map("schedule_policy") @db.JsonB
+  autonomyMode         String    @default("APPROVE_PLAN_ONCE") @map("autonomy_mode") @db.VarChar(32)
+  status               String    @default("DRAFT") @db.VarChar(32)
+  roomId               String?   @unique(map: "campaigns_room_id_key") @map("room_id") @db.Uuid
+  currentPlanVersionId String?   @map("current_plan_version_id") @db.Uuid
+  approvedPlanVersionId String?  @map("approved_plan_version_id") @db.Uuid
+  sourceType           String?   @map("source_type") @db.VarChar(40)
+  sourceId             String?   @map("source_id") @db.Uuid
+  baseline             Json      @default("{}") @db.JsonB
+  lastError            String?   @map("last_error") @db.Text
+  startedAt            DateTime? @map("started_at") @db.Timestamptz(6)
+  pausedAt             DateTime? @map("paused_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+  cancelledAt          DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  channels             CampaignChannel[]
+  runs                 CampaignRun[]
+  planVersions         CampaignPlanVersion[]
+  actions              CampaignAction[]
+  audience             CampaignAudienceMember[]
+  assets               CampaignAsset[]
+  approvals            CampaignApproval[]
+  events               CampaignEvent[]
+  metricSnapshots      CampaignMetricSnapshot[]
+
+  @@unique([orgId, sourceType, sourceId], map: "campaigns_legacy_source_key")
+  @@unique([orgId, ownerUserId, creationKey], map: "campaigns_creation_key")
+  @@index([orgId, status, createdAt(sort: Desc)])
+  @@index([ownerUserId, createdAt(sort: Desc)])
+  @@map("campaigns")
+}
+
+model CampaignChannel {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String   @map("campaign_id") @db.Uuid
+  channel       String   @db.VarChar(40)
+  status        String   @default("DRAFT") @db.VarChar(24)
+  connectionRef Json     @default("{}") @map("connection_ref") @db.JsonB
+  config        Json     @default("{}") @db.JsonB
+  metrics       Json     @default("{}") @db.JsonB
+  lastError     String?  @map("last_error") @db.Text
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, channel])
+  @@index([campaignId, status])
+  @@map("campaign_channels")
+}
+
+model CampaignRun {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String    @map("campaign_id") @db.Uuid
+  roomId        String?   @map("room_id") @db.Uuid
+  turnId        String?   @unique(map: "campaign_runs_turn_id_key") @map("turn_id") @db.Uuid
+  status        String    @default("QUEUED") @db.VarChar(24)
+  briefSnapshot Json      @map("brief_snapshot") @db.JsonB
+  validation    Json      @default("{}") @db.JsonB
+  error         String?   @db.Text
+  startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("campaign_runs")
+}
+
+model CampaignPlanVersion {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId     String    @map("campaign_id") @db.Uuid
+  version        Int
+  status         String    @default("GENERATING") @db.VarChar(24)
+  canonicalHash  String?   @map("canonical_hash") @db.VarChar(64)
+  bundle         Json      @default("{}") @db.JsonB
+  reportMarkdown String?   @map("report_markdown") @db.Text
+  validation     Json      @default("{}") @db.JsonB
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  readyAt        DateTime? @map("ready_at") @db.Timestamptz(6)
+  campaign       Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  actions        CampaignAction[]
+  approvals      CampaignApproval[]
+
+  @@unique([campaignId, version])
+  @@index([campaignId, status])
+  @@map("campaign_plan_versions")
+}
+
+model CampaignAudienceMember {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String    @map("campaign_id") @db.Uuid
+  contactId   String?   @map("contact_id") @db.Uuid
+  sourceType  String    @map("source_type") @db.VarChar(40)
+  sourceRef   String?   @map("source_ref") @db.VarChar(200)
+  dedupeKey   String    @map("dedupe_key") @db.VarChar(700)
+  status      String    @default("PROPOSED") @db.VarChar(24)
+  snapshot    Json      @db.JsonB
+  evidence    Json      @default("{}") @db.JsonB
+  approvedAt  DateTime? @map("approved_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact     AudienceContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  actions     CampaignAction[]
+
+  @@unique([campaignId, dedupeKey])
+  @@index([campaignId, status])
+  @@index([contactId])
+  @@map("campaign_audience_members")
+}
+
+model CampaignAction {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId       String    @map("campaign_id") @db.Uuid
+  planVersionId    String    @map("plan_version_id") @db.Uuid
+  audienceMemberId String?   @map("audience_member_id") @db.Uuid
+  channel          String    @db.VarChar(40)
+  actionType       String    @map("action_type") @db.VarChar(40)
+  position         Int
+  status           String    @default("DRAFT") @db.VarChar(24)
+  scheduledAt      DateTime? @map("scheduled_at") @db.Timestamptz(6)
+  expiresAt        DateTime? @map("expires_at") @db.Timestamptz(6)
+  payload          Json      @db.JsonB
+  rationale        String?   @db.Text
+  successMetric    String?   @map("success_metric") @db.VarChar(200)
+  idempotencyKey   String    @map("idempotency_key") @db.VarChar(160)
+  externalId       String?   @map("external_id") @db.VarChar(200)
+  leaseOwner       String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt   DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  lastError        String?   @map("last_error") @db.Text
+  executedAt       DateTime? @map("executed_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  planVersion      CampaignPlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  audienceMember   CampaignAudienceMember? @relation(fields: [audienceMemberId], references: [id], onDelete: SetNull)
+  attempts         CampaignActionAttempt[]
+  assets           CampaignAsset[]
+
+  @@unique([campaignId, idempotencyKey])
+  @@index([status, scheduledAt, leaseExpiresAt])
+  @@index([campaignId, status, position])
+  @@index([planVersionId])
+  @@map("campaign_actions")
+}
+
+model CampaignActionAttempt {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actionId    String    @map("action_id") @db.Uuid
+  attempt     Int
+  status      String    @default("RUNNING") @db.VarChar(24)
+  requestHash String?   @map("request_hash") @db.VarChar(64)
+  externalId  String?   @map("external_id") @db.VarChar(200)
+  response    Json?     @db.JsonB
+  error       String?   @db.Text
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  action      CampaignAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@unique([actionId, attempt])
+  @@index([actionId, status])
+  @@map("campaign_action_attempts")
+}
+
+model CampaignApproval {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId     String   @map("campaign_id") @db.Uuid
+  planVersionId  String   @map("plan_version_id") @db.Uuid
+  actorUserId    String   @map("actor_user_id") @db.Uuid
+  canonicalHash  String   @map("canonical_hash") @db.VarChar(64)
+  channels       String[] @default([])
+  recipientCount Int      @default(0) @map("recipient_count")
+  caps           Json     @default("{}") @db.JsonB
+  autonomyMode   String   @map("autonomy_mode") @db.VarChar(32)
+  status         String   @default("ACTIVE") @db.VarChar(20)
+  approvedAt     DateTime @default(now()) @map("approved_at") @db.Timestamptz(6)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  planVersion    CampaignPlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status, approvedAt(sort: Desc)])
+  @@index([planVersionId])
+  @@map("campaign_approvals")
+}
+
+model CampaignAsset {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String    @map("campaign_id") @db.Uuid
+  actionId      String?   @map("action_id") @db.Uuid
+  kind          String    @db.VarChar(32)
+  status        String    @default("GENERATING") @db.VarChar(24)
+  storageKey    String?   @map("storage_key") @db.VarChar(1000)
+  contentHash   String?   @map("content_hash") @db.VarChar(64)
+  contentType   String?   @map("content_type") @db.VarChar(80)
+  sizeBytes     Int?      @map("size_bytes")
+  width         Int?
+  height        Int?
+  provider      String?   @db.VarChar(60)
+  model         String?   @db.VarChar(120)
+  prompt        String?   @db.Text
+  metadata      Json      @default("{}") @db.JsonB
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  action        CampaignAction? @relation(fields: [actionId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, status])
+  @@index([actionId])
+  @@map("campaign_assets")
+}
+
+model CampaignEvent {
+  id         BigInt   @id @default(autoincrement())
+  campaignId String   @map("campaign_id") @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  eventType  String   @map("event_type") @db.VarChar(60)
+  actorType  String   @default("system") @map("actor_type") @db.VarChar(24)
+  actorId    String?  @map("actor_id") @db.Uuid
+  data       Json     @default("{}") @db.JsonB
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, id])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@map("campaign_events")
+}
+
+model CampaignMetricSnapshot {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId String   @map("campaign_id") @db.Uuid
+  channel    String?  @db.VarChar(40)
+  actionId   String?  @map("action_id") @db.Uuid
+  period     String   @db.VarChar(24)
+  metrics    Json     @db.JsonB
+  capturedAt DateTime @default(now()) @map("captured_at") @db.Timestamptz(6)
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, capturedAt(sort: Desc)])
+  @@index([campaignId, channel, capturedAt(sort: Desc)])
+  @@map("campaign_metric_snapshots")
 }
 
 /// OutreachCampaign — one durable batch-outreach run created when the user clicks
@@ -470,6 +768,7 @@ model OutreachCampaign {
   turnId      String           @map("turn_id") @db.Uuid
   userId      String           @map("user_id") @db.Uuid
   orgId       String           @map("org_id") @db.Uuid
+  unifiedCampaignId String?     @map("unified_campaign_id") @db.Uuid
   channel     String           @db.VarChar(8) // email | call
   voiceProvider String?        @map("voice_provider") @db.VarChar(32)
   voiceConfigSnapshot Json     @default("{}") @map("voice_config_snapshot")
@@ -485,6 +784,7 @@ model OutreachCampaign {
   @@index([userId, status, createdAt])
   @@index([orgId, status])
   @@index([turnId])
+  @@index([unifiedCampaignId])
   @@map("outreach_campaigns")
 }
 
@@ -559,6 +859,7 @@ model XAdsCampaign {
   id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId                 String             @map("org_id") @db.Uuid
   userId                String             @map("user_id") @db.Uuid
+  unifiedCampaignId     String?            @map("unified_campaign_id") @db.Uuid
   adAccountId           String?            @map("ad_account_id") @db.VarChar(64)
   adAccountName         String?            @map("ad_account_name") @db.VarChar(255)
   fundingInstrumentId   String?            @map("funding_instrument_id") @db.VarChar(64)
@@ -602,6 +903,7 @@ model XAdsCampaign {
   @@unique([orgId, xCampaignId])
   @@index([orgId, status, createdAt(sort: Desc)])
   @@index([userId, createdAt(sort: Desc)])
+  @@index([unifiedCampaignId])
   @@map("x_ads_campaigns")
 }
 
@@ -2187,6 +2489,7 @@ model TaraCampaign {
   id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String   @map("org_id") @db.Uuid
   userId           String   @map("user_id") @db.Uuid
+  unifiedCampaignId String? @map("unified_campaign_id") @db.Uuid
   name             String   @db.VarChar(200)
   status           String   @default("draft") @db.VarChar(20) // draft | active | paused | completed
   agentSkill       String?  @map("agent_skill") @db.VarChar(120)
@@ -2206,6 +2509,7 @@ model TaraCampaign {
   @@index([orgId])
   @@index([userId])
   @@index([orgId, status])
+  @@index([unifiedCampaignId])
   @@map("tara_campaigns")
 }
 

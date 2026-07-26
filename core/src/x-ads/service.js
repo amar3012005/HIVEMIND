@@ -34,6 +34,15 @@ function requireBeta(orgId) {
   }
 }
 
+function requireOrganicAccess(orgId) {
+  if (xAdsBetaEnabled(orgId)) return;
+  const campaignsEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.CAMPAIGNS_V2_ENABLED || '').toLowerCase());
+  const allowed = String(process.env.CAMPAIGNS_V2_ORG_IDS || '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (campaignsEnabled && (allowed.includes('*') || allowed.includes(String(orgId)))) return;
+  const error = new Error('X Organic is not enabled for this organization');
+  error.status = 403; error.code = 'x_organic_disabled'; throw error;
+}
+
 function requireAdsApproval() {
   if (process.env.X_ADS_API_APPROVED !== 'true') {
     const error = new Error('X Ads API access is not approved for customer publishing');
@@ -117,7 +126,7 @@ export function validateOrganicPostText(value) {
 }
 
 export async function createOrganicPost({ prisma, userId, orgId, text, confirmed }) {
-  requireBeta(orgId);
+  requireOrganicAccess(orgId);
   if (confirmed !== true) { const e = new Error('Explicit confirmation is required before publishing'); e.status = 409; e.code = 'confirmation_required'; throw e; }
   const normalizedText = validateOrganicPostText(text);
   const ids = await connectionIds(prisma, userId, orgId);
@@ -129,7 +138,7 @@ export async function createOrganicPost({ prisma, userId, orgId, text, confirmed
 }
 
 export async function deleteOrganicPost({ prisma, userId, orgId, postId, confirmed }) {
-  requireBeta(orgId);
+  requireOrganicAccess(orgId);
   if (confirmed !== true) { const e = new Error('Explicit confirmation is required before deleting'); e.status = 409; e.code = 'confirmation_required'; throw e; }
   if (!/^[0-9]{1,19}$/.test(String(postId || ''))) { const e = new Error('A valid X Post ID is required'); e.status = 400; e.code = 'invalid_post_id'; throw e; }
   const ids = await connectionIds(prisma, userId, orgId);

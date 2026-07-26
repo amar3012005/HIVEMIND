@@ -2294,6 +2294,11 @@ class Director:
     # can render known row-cards (known-heading parse — synth stays text-only,
     # no JSON contract). general = today's structure, untouched fallback.
     _REPORT_SKELETON = {
+        "campaign": (
+            "## Campaign Strategy — objective, audience, offer, proof, and CTA\n"
+            "## Channel Plan — ready actions and coordinated timing by channel\n"
+            "## Audience & Safety — selection rationale, consent constraints, and exclusions\n"
+            "## Measurement — baseline, KPIs, guardrails, and attribution limits"),
         "market": (
             "## Competitive Landscape — ranked competitor rows (one per REAL competitor), source per row\n"
             "## Where We Win — the 2-4 sharpest asymmetries, each tied to evidence\n"
@@ -2333,6 +2338,105 @@ class Director:
             f"{self.out_lang}, even though the task, context, and gathered facts are in another language. "
             f"Do NOT mix languages. Keep proper nouns, brand names (SINGULANCE, TARA, HIVEMIND, "
             f"HYPERAGENTS), URLs, and email addresses verbatim.")
+
+    def _campaign_requirements(self) -> Tuple[List[str], List[str]]:
+        channels: List[str] = []
+        match = re.search(r"^CHANNELS:\s*(.+)$", self.user_message or "", re.M | re.I)
+        if match:
+            channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
+        return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
+
+    @staticmethod
+    def _campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[str]) -> List[str]:
+        if not isinstance(bundle, dict):
+            return ["bundle must be an object"]
+        errors: List[str] = []
+        if not str(bundle.get("strategy") or "").strip(): errors.append("strategy is required")
+        if not isinstance(bundle.get("audience"), dict) or not str(bundle["audience"].get("rationale") or "").strip():
+            errors.append("audience.rationale is required")
+        if not isinstance(bundle.get("content_pillars"), list) or not bundle.get("content_pillars"):
+            errors.append("content_pillars must not be empty")
+        if not isinstance(bundle.get("kpis"), list) or not bundle.get("kpis"):
+            errors.append("kpis must not be empty")
+        actions = bundle.get("actions")
+        if not isinstance(actions, list) or not actions:
+            errors.append("actions must not be empty")
+            actions = []
+        seen_ids, action_channels = set(), set()
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                errors.append(f"action {index + 1} must be an object"); continue
+            action_id = str(action.get("id") or "").strip()
+            channel = str(action.get("channel") or "").strip().lower()
+            if not action_id or action_id in seen_ids: errors.append(f"action {index + 1} needs a unique id")
+            seen_ids.add(action_id)
+            if channel not in channels: errors.append(f"action {action_id or index + 1} has an unrequested channel")
+            action_channels.add(channel)
+            if not str(action.get("final_copy") or "").strip(): errors.append(f"action {action_id or index + 1} needs final_copy")
+            if not isinstance(action.get("payload"), dict): errors.append(f"action {action_id or index + 1} needs payload")
+            offset = action.get("scheduled_offset_minutes")
+            if not isinstance(offset, int) or offset < 0: errors.append(f"action {action_id or index + 1} needs a non-negative schedule offset")
+            if not str(action.get("rationale") or "").strip(): errors.append(f"action {action_id or index + 1} needs rationale")
+            if channel == "gmail" and not str((action.get("payload") or {}).get("subject") or "").strip():
+                errors.append(f"Gmail action {action_id or index + 1} needs payload.subject")
+            if channel == "gmail" and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str((action.get("payload") or {}).get("to") or "")):
+                errors.append(f"Gmail action {action_id or index + 1} needs a verified payload.to email")
+            if channel == "tara" and not str((action.get("payload") or {}).get("opening") or "").strip():
+                errors.append(f"TARA action {action_id or index + 1} needs a speak-first payload.opening")
+            if channel == "tara" and not re.match(r"^\+[1-9]\d{6,14}$", str((action.get("payload") or {}).get("to") or "")):
+                errors.append(f"TARA action {action_id or index + 1} needs a verified E.164 payload.to")
+        for channel in channels:
+            if channel not in action_channels: errors.append(f"selected channel {channel} has no action")
+        coverage = bundle.get("requirement_coverage")
+        covered = {str(x.get("requirement_id") or "") for x in coverage or [] if isinstance(x, dict) and x.get("action_ids")}
+        for requirement in requirements:
+            if requirement not in covered: errors.append(f"requirement {requirement} is not covered by actions")
+        return errors
+
+    async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+        channels, requirements = self._campaign_requirements()
+        board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
+        system = (
+            "You are the final campaign plan compiler. Return one JSON object only. The room may research and draft, "
+            "but it must never send. Preserve the user's goal, use only selected channels, and provide complete final "
+            "content. Required shape: {strategy:string,audience:{rationale:string,segments:array,safety_notes:array},"
+            "content_pillars:string[],kpis:[{name:string,target:string,source:string}],actions:[{id:string,channel:string,"
+            "title:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,evidence:string[]}],"
+            "risks:string[],requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
+            "For Gmail payload include a verified to email, subject, and recipient_policy. For TARA include a verified "
+            "E.164 to number, opening, goal, context, language, "
+            "objections, and strategy; TARA must speak first. For X Organic payload include text. No placeholders. "
+            f"Selected channels: {channels}. Required requirement ids: {requirements}."
+        )
+        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n\n"
+                f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:5000] if forced_debate else '(not forced)'}")
+        errors = ["bundle was not generated"]
+        bundle: Optional[Dict[str, Any]] = None
+        for attempt in range(2):
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            if attempt:
+                messages.append({"role": "user", "content": "Repair every validation error and return the full JSON object again:\n- " + "\n- ".join(errors)})
+            msg = await self._groq(messages, force_text=True, model=self.synth_model, bucket="synth", temp=0.2)
+            raw = str((msg or {}).get("content") or "").strip()
+            try:
+                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
+                bundle = json.loads(raw)
+            except Exception:
+                bundle = None
+            errors = self._campaign_bundle_errors(bundle, channels, requirements)
+            if not errors:
+                return bundle, []
+        return bundle, errors
+
+    @staticmethod
+    def _render_campaign_report(bundle: Dict[str, Any]) -> str:
+        actions = bundle.get("actions") or []
+        action_lines = [f"- **{a.get('title') or a.get('id')}** ({a.get('channel')}): {a.get('rationale')}" for a in actions]
+        kpi_lines = [f"- **{k.get('name')}**: {k.get('target')} ({k.get('source')})" for k in bundle.get("kpis") or []]
+        return (f"## Campaign Strategy\n{bundle.get('strategy', '')}\n\n## Channel Plan\n" + "\n".join(action_lines) +
+                f"\n\n## Audience & Safety\n{(bundle.get('audience') or {}).get('rationale', '')}\n\n"
+                "## Measurement\n" + "\n".join(kpi_lines) +
+                "\n\n## Gaps to confirm\n" + ("\n".join(f"- {x}" for x in bundle.get("risks") or []) or "- None identified."))
 
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
@@ -2709,7 +2813,19 @@ class Director:
         _lead_p = self.participants[0] if self.participants else {}
         await self.emit({"t": "typing", "agent": _lead_p.get("slug") or "director",
                          "note": f"{_lead_p.get('name') or 'The lead'} — drafting the final deliverable from the team's board…"})
-        final_text = await self._synthesize(forced_debate, transcript_json)
+        campaign_bundle = None
+        campaign_bundle_errors: List[str] = []
+        if self.room_kind == "campaign":
+            campaign_bundle, campaign_bundle_errors = await self._synthesize_campaign_bundle(forced_debate, transcript_json)
+            if campaign_bundle and not campaign_bundle_errors:
+                await self.emit({"t": "campaign_bundle", "bundle": campaign_bundle})
+                final_text = self._render_campaign_report(campaign_bundle)
+            else:
+                await self.emit({"t": "campaign_bundle_invalid", "errors": campaign_bundle_errors})
+                final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
+                    f"- {error}" for error in campaign_bundle_errors)
+        else:
+            final_text = await self._synthesize(forced_debate, transcript_json)
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.
             final_text = ("(The room could not produce a grounded answer this turn — "
@@ -2751,6 +2867,8 @@ class Director:
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)
             "room_kind": self.room_kind,
+            "campaign_bundle": campaign_bundle,
+            "campaign_bundle_errors": campaign_bundle_errors,
         }
 
 

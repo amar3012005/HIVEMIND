@@ -131,6 +131,9 @@ services:
             X_ADS_CALLBACK_BASE_URL: '${X_ADS_CALLBACK_BASE_URL:-https://core.singulancelabs.com}'
             X_ADS_FRONTEND_URL: '${X_ADS_FRONTEND_URL:-https://next.singulancelabs.com/hivemind/app/employees/campaigns}'
             X_ADS_BASE_URL: '${X_ADS_BASE_URL:-https://ads-api.x.com}'
+            CAMPAIGNS_V2_ENABLED: '${CAMPAIGNS_V2_ENABLED:-false}'
+            CAMPAIGNS_V2_ORG_IDS: '${CAMPAIGNS_V2_ORG_IDS:-}'
+            CAMPAIGNS_V2_WORKER_ENABLED: '${CAMPAIGNS_V2_WORKER_ENABLED:-false}'
             DOCLING_URL: 'http://docling:5001'
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             COOLIFY_BRANCH: '"main"'
@@ -241,6 +244,9 @@ services:
         environment:
             NODE_ENV: production
             HIVEMIND_RUNTIME_ROLE: maintenance
+            CAMPAIGNS_V2_ENABLED: '${CAMPAIGNS_V2_ENABLED:-false}'
+            CAMPAIGNS_V2_ORG_IDS: '${CAMPAIGNS_V2_ORG_IDS:-}'
+            CAMPAIGNS_V2_WORKER_ENABLED: '${CAMPAIGNS_V2_WORKER_ENABLED:-false}'
             HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS: 'true'
             PORT: '3000'
             HOST: 0.0.0.0

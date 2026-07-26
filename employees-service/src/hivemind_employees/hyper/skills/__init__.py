@@ -62,6 +62,7 @@ _load()
 
 # task_tag -> room_kind (sidecar task tags: RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY|…)
 _TAG_TO_KIND = {
+    "CAMPAIGN": "campaign",
     "RESEARCH": "market",
     "MARKETING": "content",
     "OUTREACH": "outreach",
@@ -70,6 +71,7 @@ _TAG_TO_KIND = {
 }
 
 _KIND_KEYWORDS = [
+    ("campaign", ("campaign id", "campaign goal", "multichannel campaign", "multi-channel campaign")),
     ("outreach", ("outreach", "cold email", "prospect", "lead gen", "sales call", "book meeting")),
     ("market", ("competitor", "market research", "landscape", "icp", "market size", "segment")),
     ("content", ("content", "blog", "social", "post", "campaign", "newsletter", "seo")),

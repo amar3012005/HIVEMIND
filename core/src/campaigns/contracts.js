@@ -22,6 +22,7 @@ export function buildCampaignExecutionContext(campaign, feedback = '') {
     `BRIEF_JSON: ${JSON.stringify(campaign.brief || {})}`,
     `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy || {})}`,
     feedback ? `USER_FEEDBACK: ${String(feedback).slice(0, 4000)}` : null,
+    'For X, create exactly one Post per x_organic action. payload.text and final_copy must match and be 280 characters or fewer. Represent a thread as separate ordered actions, one action per Post.',
     'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and submit the complete plan with campaign__submit_plan. Do not send any external action.',
   ].filter(Boolean).join('\n');
 }

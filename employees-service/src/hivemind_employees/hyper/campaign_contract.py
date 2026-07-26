@@ -17,6 +17,8 @@ def campaign_system_contract() -> str:
         "- Debate material strategic conflicts. Record the conflict, chosen decision, rationale, and meaningful "
         "dissent; state explicitly when no material conflict remains.\n"
         "- Agents may research, challenge, and draft, but must never publish or send during Room generation.\n"
+        "- Every x_organic action is exactly one X Post: payload.text and final_copy must match and each must be "
+        "280 characters or fewer. Represent a thread as separate ordered x_organic actions, one action per Post.\n"
         "- A Campaign Room is complete ONLY when the final compiler calls campaign__submit_plan and its "
         "deterministic contract accepts the full CampaignBundle. A generic final_report, prose summary, or "
         "partial draft can never complete campaign work.\n"
@@ -84,6 +86,18 @@ def campaign_bundle_errors(
         if not str(action.get("rationale") or "").strip():
             errors.append(f"action {action_id or index + 1} needs rationale")
         payload = action.get("payload") or {}
+        if channel == "x_organic":
+            post_text = str(payload.get("text") or "").strip()
+            final_copy = str(action.get("final_copy") or "").strip()
+            if not post_text:
+                errors.append(f"X action {action_id or index + 1} needs payload.text")
+            elif len(post_text) > 280:
+                errors.append(
+                    f"X action {action_id or index + 1} payload.text must be 280 characters or fewer; "
+                    "split threads into separate actions"
+                )
+            if post_text and final_copy and post_text != final_copy:
+                errors.append(f"X action {action_id or index + 1} payload.text must match final_copy")
         if channel == "gmail" and not str(payload.get("subject") or "").strip():
             errors.append(f"Gmail action {action_id or index + 1} needs payload.subject")
         if channel == "gmail" and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str(payload.get("to") or "")):

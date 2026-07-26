@@ -77,6 +77,13 @@ export function validateCampaignBundle(bundle, campaign) {
     if (!String(action?.rationale || '').trim()) errors.push(`Action ${id || index + 1} needs a rationale`);
     if (!action?.payload || typeof action.payload !== 'object' || Array.isArray(action.payload)) errors.push(`Action ${id || index + 1} needs a payload`);
     if (!Number.isInteger(action?.scheduled_offset_minutes) || action.scheduled_offset_minutes < 0) errors.push(`Action ${id || index + 1} has an invalid schedule`);
+    if (channel === 'x_organic') {
+      const postText = String(action?.payload?.text || '').trim();
+      const finalCopy = String(action?.final_copy || '').trim();
+      if (!postText) errors.push(`X action ${id || index + 1} needs payload.text`);
+      else if (Array.from(postText).length > 280) errors.push(`X action ${id || index + 1} payload.text must be 280 characters or fewer; split threads into separate actions`);
+      if (postText && finalCopy && postText !== finalCopy) errors.push(`X action ${id || index + 1} payload.text must match final copy`);
+    }
     if (channel === 'gmail' && !String(action?.payload?.subject || '').trim()) errors.push(`Gmail action ${id || index + 1} needs a subject`);
     if (channel === 'gmail' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(action?.payload?.to || ''))) errors.push(`Gmail action ${id || index + 1} needs a verified recipient`);
     if (channel === 'tara' && !String(action?.payload?.opening || '').trim()) errors.push(`TARA action ${id || index + 1} needs a speak-first opening`);

@@ -128,6 +128,33 @@ def test_v2_campaign_contract_accepts_complete_operating_plan():
     assert accepted == _valid_v2_bundle()
 
 
+def test_x_posts_must_fit_provider_limit_and_threads_use_separate_actions():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["final_copy"] = "x" * 281
+    bundle["actions"][0]["payload"]["text"] = "x" * 281
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+    assert accepted is None
+    assert any("280 characters or fewer" in error for error in errors)
+
+
+def test_x_post_payload_must_match_user_visible_final_copy():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["payload"]["text"] = "Different provider text"
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+    assert accepted is None
+    assert any("must match final_copy" in error for error in errors)
+
+
 def test_v2_campaign_records_debate_decisions_when_conflicts_exist():
     bundle = _valid_v2_bundle()
     bundle["debate_decisions"] = []

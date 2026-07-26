@@ -53,6 +53,19 @@ test('bundle gate requires every channel, recipient, and requirement', () => {
   assert.match(validateCampaignBundle(broken, campaign).join(' '), /speak-first opening/);
 });
 
+test('bundle gate rejects oversized or mismatched X provider text', () => {
+  const campaign = { requestedChannels: ['x_organic'], requirements: [{ id: 'goal' }, { id: 'channel:x_organic' }] };
+  const bundle = {
+    strategy: 'Publish a concise launch sequence.', audience: { rationale: 'Current followers.' }, content_pillars: ['Proof'],
+    kpis: [{ name: 'Reach', target: 'Track from baseline', source: 'X' }],
+    actions: [{ id: 'x-1', channel: 'x_organic', final_copy: 'x'.repeat(281), payload: { text: 'x'.repeat(281) }, scheduled_offset_minutes: 0, rationale: 'Launch now' }],
+    requirement_coverage: [{ requirement_id: 'goal', action_ids: ['x-1'] }, { requirement_id: 'channel:x_organic', action_ids: ['x-1'] }],
+  };
+  assert.match(validateCampaignBundle(bundle, campaign).join(' '), /280 characters or fewer/);
+  bundle.actions[0].final_copy = 'Visible copy'; bundle.actions[0].payload.text = 'Different provider copy';
+  assert.match(validateCampaignBundle(bundle, campaign).join(' '), /must match final copy/);
+});
+
 test('action edits create a valid cloned bundle without mutating the approved source', () => {
   const source = {
     strategy: 'Launch with one approved post.', audience: { rationale: 'Current followers.' }, content_pillars: ['Proof'],

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignAgentWhere, canonicalHash, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
@@ -111,6 +111,48 @@ test('state and rollout gates reject unsafe transitions', () => {
 
 test('campaign rooms use configured draft agents but exclude paused agents', () => {
   assert.deepEqual(campaignAgentWhere('org-a'), { orgId: 'org-a', archivedAt: null, status: { not: 'paused' } });
+});
+
+test('campaign creation uses an atomic batch without an interactive update transaction', async () => {
+  const previous = process.env.CAMPAIGNS_V2_ENABLED;
+  const previousOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
+  process.env.CAMPAIGNS_V2_ENABLED = 'true';
+  process.env.CAMPAIGNS_V2_ORG_IDS = 'org-a';
+  const calls = []; let batch = null;
+  const prisma = {
+    campaign: {
+      async findUnique() { return null; },
+      create({ data }) { calls.push(['campaign.create', data]); return Promise.resolve({ ...data, createdAt: new Date() }); },
+      update() { throw new Error('campaign.update must not run during creation'); },
+    },
+    hyperRoom: { create({ data }) { calls.push(['hyperRoom.create', data]); return Promise.resolve(data); } },
+    hyperTurn: { create({ data }) { calls.push(['hyperTurn.create', data]); return Promise.resolve(data); } },
+    campaignRun: { create({ data }) { calls.push(['campaignRun.create', data]); return Promise.resolve({ id: 'run-a', ...data }); } },
+    campaignChannel: { createMany({ data }) { calls.push(['campaignChannel.createMany', data]); return Promise.resolve({ count: data.length }); } },
+    campaignEvent: { create({ data }) { calls.push(['campaignEvent.create', data]); return Promise.resolve(data); } },
+    digitalEmployee: { async findMany() { return [{ id: 'agent-a' }, { id: 'agent-b' }, { id: 'agent-c' }]; } },
+    xAdsCredential: { async findUnique() { return { status: 'active', xUserId: 'x-a', xUsername: 'company' }; } },
+    nangoConnection: { async findFirst() { return null; } },
+    platformIntegration: { async findFirst() { return null; } },
+    taraRuntimeConfig: { async findUnique() { return null; } },
+    async $transaction(operations) { batch = operations; return Promise.all(operations); },
+  };
+  try {
+    const result = await createCampaign({ prisma, userId: 'user-a', orgId: 'org-a', body: baseInput });
+    assert.equal(Array.isArray(batch), true);
+    assert.equal(batch.length, 6);
+    assert.deepEqual(calls.map(([name]) => name), [
+      'hyperRoom.create', 'campaign.create', 'hyperTurn.create', 'campaignRun.create',
+      'campaignChannel.createMany', 'campaignEvent.create',
+    ]);
+    assert.equal(result.campaign.status, 'GENERATING');
+    assert.equal(result.campaign.roomId, result.dispatch.room_id);
+    assert.doesNotMatch(result.dispatch.user_message, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
+    assert.match(result.dispatch.execution_context, /campaign__submit_plan/);
+  } finally {
+    if (previous === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = previous;
+    if (previousOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = previousOrgs;
+  }
 });
 
 test('campaign room contract carries the campaign identity and completion tool', () => {

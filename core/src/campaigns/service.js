@@ -271,39 +271,52 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   if (!participants.length) throw campaignError('Complete company onboarding before creating a campaign', 409, 'campaign_team_required');
   const participantIds = participants.map((item) => item.id);
 
-  const result = await prisma.$transaction(async (tx) => {
-    const campaign = await tx.campaign.create({ data: {
-      orgId, ownerUserId: userId, creationKey: input.creationKey, name: input.name,
-      objective: input.objective, goal: input.goal, brief: input.brief, requirements: input.requirements,
-      requestedChannels: input.channels, audiencePolicy: input.audiencePolicy,
-      schedulePolicy: input.schedulePolicy, autonomyMode: input.autonomyMode, status: 'DRAFT',
-    } });
-    const roomGoal = `Campaign ${campaign.name}\nCompany campaign objective: ${campaign.goal}`.slice(0, 8000);
-    const room = await tx.hyperRoom.create({ data: {
-      userId, orgId, name: campaign.name.slice(0, 120), goal: roomGoal,
+  const campaignId = crypto.randomUUID();
+  const roomId = crypto.randomUUID();
+  const turnId = crypto.randomUUID();
+  const roomGoal = `Campaign ${input.name}\nCompany campaign objective: ${input.goal}`.slice(0, 8000);
+  const campaignDraft = {
+    id: campaignId, orgId, ownerUserId: userId, name: input.name, goal: input.goal,
+    objective: input.objective, requestedChannels: input.channels, brief: input.brief,
+    audiencePolicy: input.audiencePolicy,
+  };
+  const kickoff = buildCampaignDisplayMessage(campaignDraft);
+  const briefSnapshot = { ...input, campaign_id: campaignId };
+  const [room, campaign, turn, run] = await prisma.$transaction([
+    prisma.hyperRoom.create({ data: {
+      id: roomId, userId, orgId, name: input.name.slice(0, 120), goal: roomGoal,
       participantIds, template: 'auto', permanentLeadId: participantIds[0],
       enabledConnectors: input.channels.includes('gmail') ? ['gmail'] : [], qualityMode: 'best',
-    } });
-    const withRoom = await tx.campaign.update({ where: { id: campaign.id }, data: { roomId: room.id, status: 'GENERATING' } });
-    const kickoff = buildCampaignDisplayMessage(withRoom);
-    const turn = await tx.hyperTurn.create({ data: {
-      roomId: room.id, seq: 1, userMessage: kickoff, status: 'live',
-      idempotencyKey: `campaign-kickoff-${campaign.id}`, lines: [],
-    } });
-    const run = await tx.campaignRun.create({ data: {
-      campaignId: campaign.id, roomId: room.id, turnId: turn.id, status: 'DISPATCHING',
-      briefSnapshot: { ...input, campaign_id: campaign.id }, startedAt: new Date(),
-    } });
-    await tx.campaignChannel.createMany({ data: input.channels.map((channel) => ({ campaignId: campaign.id, channel, status: 'PLANNING' })) });
-    await tx.campaignEvent.create({ data: { campaignId: campaign.id, orgId, eventType: 'campaign_created', actorType: 'user', actorId: userId, data: { room_id: room.id, turn_id: turn.id, channels: input.channels } } });
-    return { campaign: withRoom, room, turn, run, kickoff };
-  });
+    } }),
+    prisma.campaign.create({ data: {
+      id: campaignId, orgId, ownerUserId: userId, creationKey: input.creationKey, name: input.name,
+      objective: input.objective, goal: input.goal, brief: input.brief, requirements: input.requirements,
+      requestedChannels: input.channels, audiencePolicy: input.audiencePolicy,
+      schedulePolicy: input.schedulePolicy, autonomyMode: input.autonomyMode,
+      roomId, status: 'GENERATING',
+    } }),
+    prisma.hyperTurn.create({ data: {
+      id: turnId, roomId, seq: 1, userMessage: kickoff, status: 'live',
+      idempotencyKey: `campaign-kickoff-${campaignId}`, lines: [],
+    } }),
+    prisma.campaignRun.create({ data: {
+      campaignId, roomId, turnId, status: 'DISPATCHING', briefSnapshot, startedAt: new Date(),
+    } }),
+    prisma.campaignChannel.createMany({
+      data: input.channels.map((channel) => ({ campaignId, channel, status: 'PLANNING' })),
+    }),
+    prisma.campaignEvent.create({ data: {
+      campaignId, orgId, eventType: 'campaign_created', actorType: 'user', actorId: userId,
+      data: { room_id: roomId, turn_id: turnId, channels: input.channels },
+    } }),
+  ]);
+  const result = { campaign, room, turn, run, kickoff };
   return {
     campaign: { ...result.campaign, channels: input.channels.map((channel) => ({ channel, status: 'PLANNING' })), runs: [result.run] },
     created: true,
     dispatch: buildCampaignRoomDispatch({
       campaign: result.campaign, room: result.room, turn: result.turn, participantIds,
-      briefSnapshot: { ...input, campaign_id: result.campaign.id },
+      briefSnapshot,
     }),
   };
 }

@@ -13,6 +13,7 @@
 
 import { currentApiKey } from '../db/prisma.js';
 import { getOrgCounts } from '../memory/org-counts.js';
+import { countQuotaHyperRooms } from '../employees/domain-rooms.js';
 
 /**
  * Plan-tier ladder for upgrade suggestions.
@@ -343,7 +344,7 @@ export class PlanEnforcer {
       const limit = limits.maxHyperRooms;
       if (!limit || limit === -1) return { allowed: true };
       try {
-        const count = await this.prisma.hyperRoom.count({ where: { orgId, archivedAt: null } });
+        const count = await countQuotaHyperRooms(this.prisma, orgId);
         if (count + amount > limit) {
           return {
             allowed: false,
@@ -457,7 +458,7 @@ export class PlanEnforcer {
     // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
     let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
     try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizations: { some: { orgId, isActive: true } } }, isActive: true } }); } catch { /* display zero */ }
-    try { hyperRoomsUsed = await this.prisma.hyperRoom.count({ where: { orgId, archivedAt: null } }); } catch { /* display zero */ }
+    try { hyperRoomsUsed = await countQuotaHyperRooms(this.prisma, orgId); } catch { /* display zero */ }
     try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId, isActive: true } }); } catch { /* display zero */ }
 
     // memories = TOTAL live memory count for the org (lifetime cap vs maxMemories),

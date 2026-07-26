@@ -34,6 +34,7 @@ import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './b
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
+import { countQuotaHyperRooms, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -223,7 +224,7 @@ async function createHyperRoomWithinPlan(data) {
     const { plan } = await getEffectivePlan(tx, data.orgId);
     const limit = plan.limits?.maxHyperRooms ?? -1;
     if (limit > 0) {
-      const current = await tx.hyperRoom.count({ where: { orgId: data.orgId, archivedAt: null } });
+      const current = await countQuotaHyperRooms(tx, data.orgId);
       if (current >= limit) throw new PlanCapacityError('HyperAgents room', plan, limit, current);
     }
     return tx.hyperRoom.create({ data });
@@ -7309,15 +7310,19 @@ Write the persona now.`;
           if (rids.length) {
             const ph = rids.map((_, i) => `$${i + 1}::uuid`).join(',');
             const prows = await prisma.$queryRawUnsafe(
-              `SELECT id, project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
+              `SELECT id, project_id, goal, room_tag,
+                      (agent_connectors->>'_domain_home' = 'true') AS is_domain_home
+                 FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
             );
             const pmap = Object.fromEntries((prows || []).map(x => [x.id, x.project_id]));
             const gmap = Object.fromEntries((prows || []).map(x => [x.id, x.goal]));
             const tmap = Object.fromEntries((prows || []).map(x => [x.id, x.room_tag]));
+            const dmap = Object.fromEntries((prows || []).map(x => [x.id, x.is_domain_home]));
             for (const r of rooms) {
               r.projectId = pmap[r.id] || null;
               r.goal = gmap[r.id] || '';
               r.roomTag = tmap[r.id] || 'general';
+              r.isDomainHome = dmap[r.id] === true;
             }
           }
         } catch { /* leave projectId undefined */ }
@@ -7361,6 +7366,7 @@ Write the persona now.`;
             goal: r.goal || '',
             template: r.template,
             room_tag: r.roomTag || 'general',
+            is_domain_home: r.isDomainHome === true,
             quality_mode: r.qualityMode || 'auto',
             sim_mode: r.simMode || 'off',
             sim_agents: r.simAgents || 24,
@@ -7382,6 +7388,38 @@ Write the persona now.`;
         });
       } catch (err) {
         console.warn('[hyper-rooms] list failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper/domain-rooms/ensure — idempotently backfill the nine
+    // permanent expertise homes for an already-onboarded organization.
+    if (pathname === '/v1/hyper/domain-rooms/ensure' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const hqRows = await prisma.$queryRawUnsafe(
+          `SELECT user_id, participant_ids, agent_connectors->'_company' AS company
+             FROM "hivemind"."hyper_rooms"
+            WHERE org_id = $1::uuid
+              AND archived_at IS NULL
+              AND agent_connectors ? '_company'
+            ORDER BY created_at DESC LIMIT 1`,
+          current.session.orgId,
+        );
+        const hq = hqRows?.[0];
+        if (!hq) return jsonResponse(res, { ok: true, onboarded: false, rooms: [] });
+        const company = typeof hq.company === 'string' ? JSON.parse(hq.company) : hq.company;
+        const rooms = await ensureDomainRooms({
+          prisma,
+          orgId: current.session.orgId,
+          userId: hq.user_id || current.session.userId,
+          participantIds: hq.participant_ids || [],
+          company,
+        });
+        return jsonResponse(res, { ok: true, onboarded: true, rooms });
+      } catch (err) {
+        console.warn('[hyper-domain-rooms] ensure failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
     }
@@ -8099,6 +8137,18 @@ Write the persona now.`;
             room_name: room.name,
             onboarded_at: new Date().toISOString(),
           };
+          try {
+            resultPayload.domain_rooms = await ensureDomainRooms({
+              prisma,
+              orgId,
+              userId,
+              participantIds,
+              company: resultPayload,
+            });
+          } catch (e) {
+            console.warn('[hyper-onboarding] domain rooms failed:', e.message);
+            resultPayload.domain_rooms = [];
+          }
           // Persist the company state on the HQ room (agent_connectors is a
           // legacy jsonb — we namespace under _company). Central for ALL org
           // types (rooms never live on the self-host agent), zero-migration,
@@ -8576,6 +8626,16 @@ Write the persona now.`;
           `SELECT 1 FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid AND "agent_connectors" ? '_company'`,
           roomId,
         ).catch(() => []);
+        const domainRows = await prisma.$queryRawUnsafe(
+          `SELECT 1 FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid AND "agent_connectors" ? '_domain_home'`,
+          roomId,
+        ).catch(() => []);
+        if (domainRows?.length) {
+          return jsonResponse(res, {
+            error: 'This is a permanent company Room. It stays available for this expertise area.',
+            code: 'DOMAIN_HOME_ROOM',
+          }, 409);
+        }
         if (hqRows?.length && !force) {
           return jsonResponse(res, {
             error: 'This is your company HQ — it holds your company profile, mission, tasks and deliverables. Deleting it clears the dashboard and you will need to onboard again.',
@@ -8747,6 +8807,7 @@ Write the persona now.`;
       return jsonResponse(res, {
         room: {
           ...room,
+          is_domain_home: room.agentConnectors?._domain_home === true,
           swarm_instructions: (room.agentConnectors && typeof room.agentConnectors === 'object'
             ? String(room.agentConnectors._swarm_instructions || '') : ''),
           participants: enrichedParticipants.map(e => ({ ...e, lane: deriveCsiLane(e) })),
@@ -8766,6 +8827,13 @@ Write the persona now.`;
         where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (room.agentConnectors?._domain_home === true
+          && (Object.prototype.hasOwnProperty.call(body, 'name') || Object.prototype.hasOwnProperty.call(body, 'room_tag'))) {
+        return jsonResponse(res, {
+          error: 'Permanent company Room names and expertise types cannot be changed.',
+          code: 'DOMAIN_HOME_ROOM',
+        }, 409);
+      }
       const data = {};
       if (typeof body.name === 'string' && body.name.trim()) data.name = body.name.trim().slice(0, 120);
       const hasGoalPatch = Object.prototype.hasOwnProperty.call(body, 'goal');

@@ -16,6 +16,10 @@ export function campaignsV2Enabled(orgId, env = process.env) {
   return allowlist.includes('*') || allowlist.includes(String(orgId));
 }
 
+export function campaignWorkerEnabled(env = process.env) {
+  return ['1', 'true', 'yes', 'on'].includes(String(env.CAMPAIGNS_V2_WORKER_ENABLED || '').toLowerCase());
+}
+
 export function requireCampaignsV2(orgId) {
   if (campaignsV2Enabled(orgId)) return;
   const error = new Error('AI Campaigns is not enabled for this organization');

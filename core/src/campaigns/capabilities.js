@@ -1,5 +1,5 @@
 import { X_AUTH_OAUTH2 } from '../x-ads/x-auth-store.js';
-import { campaignsV2Enabled } from './state.js';
+import { campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
 
 async function hasGmailConnection(prisma, userId, orgId) {
   const [native, legacy] = await Promise.all([
@@ -26,7 +26,7 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
   const xConnected = x?.status === 'active';
   const adsApproved = process.env.X_ADS_API_APPROVED === 'true';
   return {
-    enabled,
+    enabled, execution_enabled: enabled && campaignWorkerEnabled(),
     channels: [
       { id: 'x_organic', connected: xConnected, executable: enabled && xConnected, reason: xConnected ? null : 'connect_x', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null },
       { id: 'gmail', connected: gmail, executable: enabled && gmail, reason: gmail ? null : 'connect_gmail' },

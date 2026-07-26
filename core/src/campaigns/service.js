@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getCampaignCapabilities } from './capabilities.js';
-import { EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
+import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 
 function campaignError(message, status = 400, code = 'invalid_campaign') {
   const error = new Error(message); error.status = status; error.code = code; return error;
@@ -331,6 +331,7 @@ async function requireCampaignEditor(prisma, campaign, userId) {
 
 export async function approveCampaign({ prisma, orgId, userId, id }) {
   requireCampaignsV2(orgId);
+  if (!campaignWorkerEnabled()) throw campaignError('Campaign execution is not enabled for this pilot yet', 409, 'campaign_execution_disabled');
   const campaign = await prisma.campaign.findFirst({
     where: { id, orgId }, include: { planVersions: { where: { status: 'READY' }, orderBy: { version: 'desc' }, take: 1 } },
   });
@@ -399,6 +400,7 @@ export async function controlCampaign({ prisma, orgId, userId, id, action }) {
       prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_paused', actorType: 'user', actorId: userId } }),
     ]);
   } else if (action === 'resume') {
+    if (!campaignWorkerEnabled()) throw campaignError('Campaign execution is not enabled for this pilot yet', 409, 'campaign_execution_disabled');
     if (campaign.status !== 'PAUSED') throw campaignError('Only a paused campaign can be resumed', 409, 'campaign_not_paused');
     const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
     const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.executable);

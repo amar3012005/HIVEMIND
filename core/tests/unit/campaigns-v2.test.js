@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { canonicalHash, normalizeCampaignInput, validateCampaignBundle } from '../../src/campaigns/service.js';
-import { assertTransition, campaignsV2Enabled } from '../../src/campaigns/state.js';
+import { assertTransition, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 
 const baseInput = {
   idempotency_key: 'create-1', objective: 'LEAD_GENERATION',
@@ -53,6 +53,8 @@ test('bundle gate requires every channel, recipient, and requirement', () => {
 
 test('state and rollout gates reject unsafe transitions', () => {
   assert.equal(campaignsV2Enabled('org-a', { CAMPAIGNS_V2_ENABLED: 'true', CAMPAIGNS_V2_ORG_IDS: 'org-a' }), true);
+  assert.equal(campaignWorkerEnabled({ CAMPAIGNS_V2_WORKER_ENABLED: 'false' }), false);
+  assert.equal(campaignWorkerEnabled({ CAMPAIGNS_V2_WORKER_ENABLED: 'true' }), true);
   assert.equal(assertTransition('READY_FOR_APPROVAL', 'RUNNING'), true);
   assert.throws(() => assertTransition('DRAFT', 'RUNNING'), { code: 'invalid_campaign_transition' });
 });

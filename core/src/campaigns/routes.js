@@ -1,6 +1,7 @@
 import { getCampaignCapabilities } from './capabilities.js';
 import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, getCampaign, listCampaigns } from './service.js';
 import { processDueCampaignActions } from './worker.js';
+import { campaignWorkerEnabled } from './state.js';
 
 function sendError(res, jsonResponse, error) {
   return jsonResponse(res, { error: error.code || 'campaign_error', message: error.message }, error.status || 500);
@@ -53,19 +54,19 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
       if (action === 'approve') {
         const result = await approveCampaign({ prisma, orgId, userId, id });
         await audit(prisma, auditLogger, { userId, orgId, action: 'approved', campaignId: id, metadata: { approval_id: result.approval.id } });
-        processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
+        if (campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
         return jsonResponse(res, result);
       }
       const campaign = await controlCampaign({ prisma, orgId, userId, id, action });
       await audit(prisma, auditLogger, { userId, orgId, action, campaignId: id });
-      if (action === 'resume') processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
+      if (action === 'resume' && campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
       return jsonResponse(res, { campaign });
     }
     const actionApprovalMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/actions\/([0-9a-f-]{36})\/approve$/i);
     if (actionApprovalMatch && method === 'POST') {
       const result = await approveCampaignAction({ prisma, orgId, userId, id: actionApprovalMatch[1], actionId: actionApprovalMatch[2] });
       await audit(prisma, auditLogger, { userId, orgId, action: 'action_approved', campaignId: result.campaignId, metadata: { action_id: result.actionId } });
-      processDueCampaignActions({ prisma, campaignId: result.campaignId }).catch(() => {});
+      if (campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: result.campaignId }).catch(() => {});
       return jsonResponse(res, result);
     }
     return jsonResponse(res, { error: 'not_found', message: 'Campaign route not found' }, 404);

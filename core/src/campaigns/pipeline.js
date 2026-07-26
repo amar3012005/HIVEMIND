@@ -3,6 +3,58 @@ import { normalizeCampaignRoomEvent } from './contracts.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
 
+function campaignReadyDisplay(campaign, bundle) {
+  return {
+    title: String(campaign.name || 'Campaign').slice(0, 255),
+    objective: String(campaign.objective || 'CUSTOM').slice(0, 40),
+    channels: Array.isArray(campaign.requestedChannels) ? campaign.requestedChannels.slice(0, 10) : [],
+    action_count: Array.isArray(bundle?.actions) ? bundle.actions.length : 0,
+    status: 'READY_FOR_APPROVAL',
+    message: 'Your campaign plan is ready to review.',
+  };
+}
+
+export async function persistCampaignReadyHandoff({ prisma, run, result, bundle }) {
+  if (!result?.ok || !result.planVersionId) return null;
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: run.campaignId },
+    select: { currentPlanVersionId: true, status: true },
+  });
+  if (campaign?.status !== 'READY_FOR_APPROVAL' || campaign.currentPlanVersionId !== result.planVersionId) return null;
+
+  const existing = await prisma.campaignEvent.findFirst({
+    where: {
+      campaignId: run.campaignId,
+      eventType: 'campaign_ready',
+      data: { path: ['plan_version_id'], equals: result.planVersionId },
+    },
+    orderBy: { id: 'desc' },
+  });
+  if (existing) return existing;
+
+  let version = result.version;
+  if (!Number.isInteger(version)) {
+    const plan = await prisma.campaignPlanVersion.findUnique({
+      where: { id: result.planVersionId }, select: { version: true },
+    });
+    version = plan?.version || null;
+  }
+  return prisma.campaignEvent.create({ data: {
+    campaignId: run.campaignId,
+    orgId: run.campaign.orgId,
+    eventType: 'campaign_ready',
+    data: {
+      campaign_id: run.campaignId,
+      room_id: run.roomId,
+      turn_id: run.turnId,
+      plan_version_id: result.planVersionId,
+      plan_version: version,
+      display: campaignReadyDisplay(run.campaign, bundle),
+    },
+  } });
+}
+
 async function markGenerationStarted(prisma, run) {
   const claimed = await prisma.campaignRun.updateMany({
     where: { id: run.id, status: 'DISPATCHING' },
@@ -46,7 +98,9 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
 
   if (!FINAL_RUN_STATES.has(run.status) && normalized.t !== 'seal') await markGenerationStarted(prisma, run);
   if (normalized.t === 'campaign_bundle') {
-    return persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle });
+    const result = await persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle });
+    const readyEvent = await persistCampaignReadyHandoff({ prisma, run, result, bundle: normalized.bundle });
+    return readyEvent ? { ...result, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : result;
   }
   if (normalized.t === 'campaign_bundle_invalid') {
     return markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });

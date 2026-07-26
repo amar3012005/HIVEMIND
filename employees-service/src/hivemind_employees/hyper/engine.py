@@ -1810,13 +1810,18 @@ class Director:
             need_line = (" If ONE missing fact or method blocks your take, reply with ONLY a first line "
                          "'NEED: web_search <query>' or 'NEED: skill <name>' and nothing else; "
                          "otherwise answer normally.")
+        campaign_contract = ""
+        if self.room_kind == "campaign":
+            from .campaign_contract import campaign_system_contract
+            campaign_contract = campaign_system_contract()
         _messages = [
             {"role": "system", "content": (
                 _now_block() +
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}{self._room_instr_block}"
                 f"\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
-                f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}")},
+                f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}"
+                f"{campaign_contract}")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
         ]
         _temp = min(0.7, 0.45 + 0.1 * round_no)
@@ -1963,7 +1968,7 @@ class Director:
         tmpl = (f"\nThis is a '{self.room_template}' room — frame the discussion and the final output to "
                 f"fit that mode (debate=argued conclusion; decision=DACI; brainstorm=options; "
                 f"council=vote; lean_coffee=per-topic; retrospective=worked/didn't/change; standup=status).")
-        return (
+        prompt = (
             _now_block() +
             "You are the facilitator of a HIVEMIND hyperagent room — sentinel agents that live inside the "
             "company brain and grow smarter over time. Your team: " + roster + "." + goal + tmpl + "\n"
@@ -2001,6 +2006,10 @@ class Director:
             "• Cut filler. Every sentence must carry a fact, a judgement, or an action — delete anything that only "
             "restates the goal or narrates process."
         )
+        if self.room_kind == "campaign":
+            from .campaign_contract import campaign_system_contract
+            prompt += campaign_system_contract()
+        return prompt
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
     def _relevant_connector_names(self, all_names: List[str], topic: str) -> List[str]:
@@ -2142,6 +2151,9 @@ class Director:
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
         )
+        if self.room_kind == "campaign":
+            from .campaign_contract import campaign_system_contract
+            sysp += campaign_system_contract()
         # Progressive-disclosure skill catalog: the planner pays only for names +
         # one-liners; a chosen skill's full method body loads during gather.
         if _METHOD_SKILLS_ENABLED:
@@ -2358,10 +2370,13 @@ class Director:
             f"HYPERAGENTS), URLs, and email addresses verbatim.")
 
     def _campaign_requirements(self) -> Tuple[List[str], List[str]]:
-        channels: List[str] = []
-        match = re.search(r"^CHANNELS:\s*(.+)$", self.user_message or "", re.M | re.I)
-        if match:
-            channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
+        source = self.campaign_brief.get("channels") or self.campaign_brief.get("requestedChannels") or []
+        channels = [str(value).strip().lower() for value in source if str(value).strip()] if isinstance(source, list) else []
+        # Compatibility for non-control-plane campaign callers during rollout.
+        if not channels:
+            match = re.search(r"^CHANNELS:\s*(.+)$", self.user_message or "", re.M | re.I)
+            if match:
+                channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
         return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
 
     @staticmethod
@@ -2372,13 +2387,27 @@ class Director:
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
+        from .campaign_contract import CAMPAIGN_CONTRACT_VERSION, campaign_system_contract
         system = (
+            campaign_system_contract() + "\n\n"
             "You are the final campaign plan compiler. Return one JSON object only. The room may research and draft, "
             "but it must never send. Preserve the user's goal, use only selected channels, and provide complete final "
-            "content. Required shape: {strategy:string,audience:{rationale:string,segments:array,safety_notes:array},"
+            f"content. Set contract_version to {CAMPAIGN_CONTRACT_VERSION}. Required shape: "
+            "{contract_version:2,objective:string,strategy:string,"
+            "positioning:{statement:string,proof_points:string[]},"
+            "audience:{rationale:string,segments:array,safety_notes:array},"
             "content_pillars:string[],kpis:[{name:string,target:string,source:string}],actions:[{id:string,channel:string,"
             "title:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,evidence:string[]}],"
-            "risks:string[],requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
+            "timeline:[{action_id:string,phase:string,scheduled_offset_minutes:integer}],"
+            "safety:{guardrails:string[],prohibited_claims:string[]},"
+            "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},"
+            "debate_conflicts_present:boolean,"
+            "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
+            "assumptions:string[],launch_checklist:string[],risks:string[],"
+            "requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
+            "Every action must appear in timeline with the same scheduled offset. Set debate_conflicts_present from "
+            "the transcript; when true, record every material conflict and resolution in debate_decisions. Use an "
+            "empty debate_decisions array only when no material conflict exists. "
             "For Gmail payload include a verified to email, subject, and recipient_policy. For TARA include a verified "
             "E.164 to number, opening, goal, context, language, lawful_basis (consent or legitimate_interest), "
             "ISO country, IANA timezone, and calling_window; "
@@ -2401,7 +2430,12 @@ class Director:
             except Exception:
                 bundle = None
             from .campaign_contract import campaign__submit_plan
-            bundle, errors = campaign__submit_plan(bundle, channels=channels, requirements=requirements)
+            bundle, errors = campaign__submit_plan(
+                bundle,
+                channels=channels,
+                requirements=requirements,
+                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+            )
             if not errors:
                 await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
                 return bundle, []
@@ -2422,6 +2456,8 @@ class Director:
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
+        if self.room_kind == "campaign":
+            raise RuntimeError("Campaign Rooms may complete only through campaign__submit_plan")
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")

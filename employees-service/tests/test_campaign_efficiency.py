@@ -1,0 +1,107 @@
+import pytest
+
+from hivemind_employees import api_hyper_rooms
+
+
+def _employee(employee_id, lane, *, name=None, persona=""):
+    return {
+        "id": employee_id,
+        "slug": employee_id,
+        "name": name or employee_id.title(),
+        "_lane": lane,
+        "persona": persona,
+    }
+
+
+def test_campaign_roster_uses_exactly_three_distinct_primary_roles():
+    participants = [
+        _employee("sales", "Communicator"),
+        _employee("review", "Skeptic"),
+        _employee("ops", "Builder"),
+        _employee("strategy", "Strategist"),
+        _employee("research", "Researcher"),
+    ]
+
+    roster = api_hyper_rooms._campaign_primary_roster(participants)
+
+    assert len(roster) == 3
+    assert len({employee["id"] for employee in roster}) == 3
+    assert [employee["_campaign_role"] for employee in roster] == [
+        "strategist", "creative_lead", "critical_reviewer",
+    ]
+    assert [employee["_lane"] for employee in roster] == [
+        "Strategist", "Builder", "Skeptic",
+    ]
+    assert roster[0]["id"] == "strategy"
+    assert roster[2]["id"] == "review"
+
+
+def test_campaign_roster_does_not_mutate_room_participants():
+    participants = [
+        _employee("strategy", "Strategist"),
+        _employee("creative", "Communicator"),
+        _employee("review", "Skeptic"),
+    ]
+
+    roster = api_hyper_rooms._campaign_primary_roster(participants)
+
+    assert "_campaign_role" not in participants[0]
+    assert participants[1]["_lane"] == "Communicator"
+    assert roster[1]["_lane"] == "Builder"
+
+
+def test_campaign_roster_requires_all_three_roles_to_run():
+    with pytest.raises(ValueError, match="at least three"):
+        api_hyper_rooms._campaign_primary_roster([
+            _employee("strategy", "Strategist"),
+            _employee("review", "Skeptic"),
+        ])
+
+
+def test_campaign_debate_defaults_to_one_round():
+    assert api_hyper_rooms._campaign_debate_rounds({
+        "goal": "Introduce the product",
+        "brief": {"brand_constraints": "Accurate and concise"},
+    }) == 1
+
+
+@pytest.mark.parametrize("brief", [
+    {"strategic_conflicts": ["awareness versus conversion"]},
+    {"brief": {"strategy_conflicts": {"message": "technical versus accessible"}}},
+    {"risks": ["regulated audience"]},
+    {"brief": {"risk_flags": ["unverified claim"]}},
+    {"brief": {"prohibited_claims": "Guaranteed growth"}},
+])
+def test_campaign_debate_escalates_only_for_declared_conflict_or_risk(brief):
+    assert api_hyper_rooms._campaign_debate_rounds(brief) == 2
+
+
+def test_campaign_models_keep_synthesis_and_repair_on_120b(monkeypatch):
+    monkeypatch.setenv("HYPER_CAMPAIGN_GATHER_MODEL", "economical/gather")
+    monkeypatch.setenv("HYPER_CAMPAIGN_DEBATE_MODEL", "economical/debate")
+    monkeypatch.setenv("HYPER_CAMPAIGN_SYNTH_MODEL", "unsafe/override")
+
+    assert api_hyper_rooms._campaign_models() == (
+        "economical/gather",
+        "economical/debate",
+        "openai/gpt-oss-120b",
+    )
+
+
+def test_campaign_director_receives_bounded_round_policy(monkeypatch):
+    captured = {}
+
+    class FakeDirector:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(api_hyper_rooms, "Director", FakeDirector)
+    result = api_hyper_rooms._build_campaign_director(
+        {"room_kind": "campaign", "synth_model": "openai/gpt-oss-120b"},
+        {"brief": {"prohibited_claims": "Guaranteed results"}},
+    )
+
+    assert isinstance(result, FakeDirector)
+    assert captured["room_kind"] == "campaign"
+    assert captured["synth_model"] == "openai/gpt-oss-120b"
+    assert captured["debate_max_rounds"] == 2

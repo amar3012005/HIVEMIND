@@ -60,7 +60,7 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
       });
       return jsonResponse(res, { campaignId: result.campaignId, status: 'GENERATING' }, 202);
     }
-    const actionMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/(approve|pause|resume|sync)$/i);
+    const actionMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/(approve|launch|pause|resume|sync)$/i);
     if (actionMatch && method === 'POST') {
       const id = actionMatch[1]; const action = actionMatch[2].toLowerCase();
       if (action === 'sync') {
@@ -68,9 +68,9 @@ export async function handleCampaignRequest({ pathname, method, body, res, prism
         await audit(prisma, auditLogger, { userId, orgId, action: 'metrics_synced', campaignId: id });
         return jsonResponse(res, { campaign });
       }
-      if (action === 'approve') {
+      if (['approve', 'launch'].includes(action)) {
         const result = await approveCampaign({ prisma, orgId, userId, id });
-        await audit(prisma, auditLogger, { userId, orgId, action: 'approved', campaignId: id, metadata: { approval_id: result.approval.id } });
+        await audit(prisma, auditLogger, { userId, orgId, action: action === 'launch' ? 'launched' : 'approved', campaignId: id, metadata: { approval_id: result.approval.id, launched_at: result.launch.launched_at } });
         if (campaignWorkerEnabled()) processDueCampaignActions({ prisma, campaignId: id }).catch(() => {});
         return jsonResponse(res, result);
       }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { applyCampaignActionEdit, campaignAgentWhere, canonicalHash, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
-import { buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
+import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
 
 const baseInput = {
@@ -116,14 +116,19 @@ test('campaign rooms use configured draft agents but exclude paused agents', () 
 test('campaign room contract carries the campaign identity and completion tool', () => {
   const campaign = { id: 'campaign-a', ownerUserId: 'user-a', orgId: 'org-a', goal: 'Launch', objective: 'PRODUCT_LAUNCH', requestedChannels: ['x_organic'], brief: {}, audiencePolicy: {} };
   const kickoff = buildCampaignKickoff(campaign);
+  const displayMessage = buildCampaignDisplayMessage(campaign);
   const dispatch = buildCampaignRoomDispatch({
     campaign,
     room: { id: 'room-a', goal: 'Launch room' },
-    turn: { id: 'turn-a', userMessage: kickoff },
+    turn: { id: 'turn-a', userMessage: displayMessage },
     participantIds: ['agent-a'],
     briefSnapshot: { campaign_id: 'campaign-a' },
   });
   assert.match(kickoff, /campaign__submit_plan/);
+  assert.doesNotMatch(displayMessage, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
+  assert.equal(dispatch.user_message, displayMessage);
+  assert.equal(dispatch.display_message, displayMessage);
+  assert.match(dispatch.execution_context, /CAMPAIGN_ID: campaign-a/);
   assert.equal(dispatch.task_tag, 'CAMPAIGN');
   assert.equal(dispatch.campaign_id, 'campaign-a');
   assert.equal(normalizeCampaignRoomEvent({ t: 'campaign_bundle', bundle: {} }).t, 'campaign_bundle');

@@ -87,7 +87,7 @@ from .hivemind_client import (
     org_members_emulated,
     recall_emulated,
 )
-from .hyper.engine import (_openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
+from .hyper.engine import (Director, _openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
                            _persona_fields, _evo_recall)
 
 log = logging.getLogger(__name__)
@@ -1693,6 +1693,10 @@ class RoomTurnRequest(BaseModel):
     user_id: str
     org_id: str
     user_message: str = Field(min_length=1, max_length=8000)
+    # Campaign callers keep the Room-visible request human-readable. The
+    # orchestration contract stays private and is never rendered as a user turn.
+    display_message: Optional[str] = Field(default=None, max_length=8000)
+    execution_context: Optional[str] = Field(default=None, max_length=16000)
     participant_ids: List[str] = Field(default_factory=list)
     callback_url: Optional[str] = None
     flyby_decision: Optional[str] = None
@@ -2755,6 +2759,95 @@ def _quality_models(mode: str) -> tuple:
     )
 
 
+_CAMPAIGN_PRIMARY_ROLES = (
+    ("strategist", "Strategist", ("strategist", "researcher", "investigator", "strategy")),
+    ("creative_lead", "Builder", ("creative", "content", "builder", "maker", "communicator", "writer")),
+    ("critical_reviewer", "Skeptic", ("skeptic", "reviewer", "critic", "risk", "compliance")),
+)
+_CAMPAIGN_SYNTH_MODEL = "openai/gpt-oss-120b"
+
+
+def _campaign_models() -> tuple:
+    """Cheap campaign research/debate, with the contract compiler on 120B.
+
+    Campaign Rooms intentionally ignore the room's generic ``best`` quality mode:
+    contract validation and repair still use the strongest model, while the much
+    larger gather/persona call volume stays on economical models.
+    """
+    return (
+        os.environ.get("HYPER_CAMPAIGN_GATHER_MODEL", "openai/gpt-oss-20b"),
+        os.environ.get("HYPER_CAMPAIGN_DEBATE_MODEL", "openai/gpt-oss-20b"),
+        _CAMPAIGN_SYNTH_MODEL,
+    )
+
+
+def _campaign_employee_text(employee: Dict[str, Any]) -> str:
+    values = (
+        employee.get("_lane"), employee.get("role_archetype"), employee.get("name"),
+        employee.get("slug"), employee.get("title"), employee.get("persona"),
+    )
+    return " ".join(str(value or "").lower() for value in values)
+
+
+def _campaign_primary_roster(participants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Select exactly three distinct Campaign Room employees and bind clear roles."""
+    if len(participants) < len(_CAMPAIGN_PRIMARY_ROLES):
+        raise ValueError("Campaign Rooms require at least three eligible employees")
+
+    remaining = list(enumerate(participants))
+    selected: List[Dict[str, Any]] = []
+    for role, lane, terms in _CAMPAIGN_PRIMARY_ROLES:
+        ranked = sorted(
+            remaining,
+            key=lambda item: (
+                -sum(4 if term == str(item[1].get("_lane") or "").lower() else 1
+                     for term in terms if term in _campaign_employee_text(item[1])),
+                item[0],
+            ),
+        )
+        original_index, employee = ranked[0]
+        remaining = [item for item in remaining if item[0] != original_index]
+        bound = dict(employee)
+        bound["_campaign_role"] = role
+        bound["_lane"] = lane
+        selected.append(bound)
+    return selected
+
+
+def _campaign_debate_rounds(campaign_brief: Optional[Dict[str, Any]]) -> int:
+    """One round by default; a second only for declared conflict or material risk."""
+    brief = campaign_brief if isinstance(campaign_brief, dict) else {}
+    nested_brief = brief.get("brief") if isinstance(brief.get("brief"), dict) else {}
+    conflict_values = (
+        brief.get("strategic_conflicts"), brief.get("strategy_conflicts"),
+        nested_brief.get("strategic_conflicts"), nested_brief.get("strategy_conflicts"),
+    )
+    risk_values = (
+        brief.get("risks"), brief.get("risk_flags"),
+        nested_brief.get("risks"), nested_brief.get("risk_flags"),
+        nested_brief.get("prohibited_claims"),
+    )
+
+    def _present(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, dict)):
+            return bool(value)
+        return value is not None and bool(value)
+
+    return 2 if any(_present(value) for value in (*conflict_values, *risk_values)) else 1
+
+
+def _build_campaign_director(
+    director_kwargs: Dict[str, Any], campaign_brief: Optional[Dict[str, Any]],
+) -> Director:
+    """Single construction seam used by runtime and provider-free policy tests."""
+    return Director(
+        **director_kwargs,
+        debate_max_rounds=_campaign_debate_rounds(campaign_brief),
+    )
+
+
 # Each connector-backed artifact kind → the connector id(s) that can produce it. A doc/
 # sheet needs the Google bridge (any connected google* shares one token); email needs
 # Gmail; notion needs Notion. answer/decision need no connector. Used to gate production:
@@ -2827,6 +2920,8 @@ async def _orchestrate_single_agent(
     swarm — only the executor changes. Reuses _produce_output / _verify_and_emit /
     _register_and_emit_approvals so dead-end, recipient resolution and HITL are intact."""
     conns = [str(c) for c in (enabled_connectors or [])]
+    from .hyper.skills import resolve_room_kind
+    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     _m_recon = (getattr(req, "agentic_model", None)
                 or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
 
@@ -2838,7 +2933,10 @@ async def _orchestrate_single_agent(
     # gather model barely affects the deliverable — proven by the combo A/B). req.
     # agentic_model (eval) overrides all. All models env-tunable.
     _eval_model = getattr(req, "agentic_model", None)
-    if _eval_model:
+    if _room_kind == "campaign":
+        _qmode = "campaign-efficient"
+        _dir_m, _per_m, _syn_m = _campaign_models()
+    elif _eval_model:
         _qmode, _dir_m, _per_m, _syn_m = "eval", _eval_model, _eval_model, _eval_model
     else:
         try:
@@ -2964,25 +3062,27 @@ async def _orchestrate_single_agent(
         _sender_email = await get_connected_gmail(req.user_id, req.org_id)
     except Exception:  # noqa: BLE001
         _sender_email = ""
-    from .hyper.skills import resolve_room_kind
-    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
-        result = await run_director(
-            user_message=req.user_message,
-            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
-            participants=participants, room_template=room_template,
-            room_goal=req.room_goal, enabled_connectors=conns, emit=_emit,
-            director_model=_dir_m, persona_model=_per_m, synth_model=_syn_m,
-            sim_mode=_sim_mode, sim_agents=_sim_agents,
-            evo_mode=_evo_mode, evo_playbooks=_evo_playbooks,
-            company_brief=_company_brief, intended_output=intended_output,
-            room_kind=_room_kind,
-            room_playbook=_room_playbook, room_instructions=_room_instructions,
-            sender_email=_sender_email, out_language=(req.language or ""),
-            campaign_brief=req.campaign_brief,
-        )
+        director_kwargs = {
+            "user_message": req.user_message,
+            "user_id": req.user_id, "org_id": req.org_id, "project_id": req.project_id,
+            "participants": participants, "room_template": room_template,
+            "room_goal": req.room_goal, "enabled_connectors": conns, "emit": _emit,
+            "director_model": _dir_m, "persona_model": _per_m, "synth_model": _syn_m,
+            "sim_mode": _sim_mode, "sim_agents": _sim_agents,
+            "evo_mode": _evo_mode, "evo_playbooks": _evo_playbooks,
+            "company_brief": _company_brief, "intended_output": intended_output,
+            "room_kind": _room_kind,
+            "room_playbook": _room_playbook, "room_instructions": _room_instructions,
+            "sender_email": _sender_email, "out_language": (req.language or ""),
+            "campaign_brief": req.campaign_brief,
+        }
+        if _room_kind == "campaign":
+            result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()
+        else:
+            result = await run_director(**director_kwargs)
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
         await _emit({"t": "seal", "cost_tokens": 0, "status": "failed",
@@ -3225,6 +3325,20 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         )
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
 
+    from .hyper.skills import resolve_room_kind
+    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
+    if _room_kind == "campaign":
+        try:
+            participants = _campaign_primary_roster(participants)
+        except ValueError as exc:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "error", "code": "campaign_team_required", "message": str(exc),
+            })
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "cost_tokens": 0, "status": "failed",
+            })
+            return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+
     # ── Router ───────────────────────────────────────────────────────
     # @mention override — if user wrote "@slug ..." force that one as lead.
     mention = re.match(r"\s*@([a-z0-9-]+)\b", req.user_message)
@@ -3256,8 +3370,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # not a Skeptic, so a deliverable room writes instead of convening a tribunal.
     try:
         from .hyper.rooms import lead_shape_for
-        from .hyper.skills import resolve_room_kind
-        _rk = resolve_room_kind(getattr(req, "task_tag", "") or "", req.room_goal or "", req.user_message or "")
+        _rk = _room_kind
         _io = _derive_intended_output(req.user_message or "")
         _prefer_maker = lead_shape_for(_rk, _io) == "maker"
     except Exception:  # noqa: BLE001

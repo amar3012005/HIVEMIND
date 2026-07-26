@@ -19,6 +19,10 @@ from .core_client import consume_capability, emit_event
 from .prompt import SYSTEM_PROMPT
 from .tools import TOOL_SCHEMAS, execute
 
+# Without this, `tara_grok` has no handler and logging.lastResort drops anything
+# below WARNING — every log.info in this service was silently discarded, which
+# made the PSTN bridge impossible to diagnose. tara-deepgram has always done this.
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tara_grok")
 app = FastAPI(title="TARA Grok Voice", version="1.0.0")
 

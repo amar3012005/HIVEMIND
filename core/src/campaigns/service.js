@@ -30,6 +30,38 @@ function validateDestinationUrl(value) {
   return parsed.toString();
 }
 
+const CAMPAIGN_INTENSITIES = new Set(['LIGHT', 'FOCUSED', 'HIGH']);
+const CONTENT_ACTION_RANGES = {
+  LIGHT: [[3, 4], [4, 6], [8, 12]],
+  FOCUSED: [[4, 6], [6, 8], [12, 16]],
+  HIGH: [[6, 8], [9, 12], [18, 24]],
+};
+const DIRECT_ACTION_RANGES = {
+  LIGHT: [[1, 2], [2, 3], [3, 5]],
+  FOCUSED: [[2, 3], [3, 5], [5, 8]],
+  HIGH: [[3, 5], [5, 8], [8, 12]],
+};
+
+export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED', channels = [] } = {}) {
+  const normalizedIntensity = String(intensity || 'FOCUSED').trim().toUpperCase();
+  if (!CAMPAIGN_INTENSITIES.has(normalizedIntensity)) throw campaignError('Unknown campaign intensity', 400, 'invalid_campaign_intensity');
+  const horizonIndex = Number(durationDays) <= 7 ? 0 : Number(durationDays) <= 14 ? 1 : 2;
+  const expected = {};
+  for (const channel of channels) {
+    const range = channel === 'x_organic'
+      ? CONTENT_ACTION_RANGES[normalizedIntensity][horizonIndex]
+      : DIRECT_ACTION_RANGES[normalizedIntensity][horizonIndex];
+    expected[channel] = { minimum: range[0], maximum: range[1] };
+  }
+  return {
+    preset: normalizedIntensity.toLowerCase(),
+    duration_days: Number(durationDays),
+    expected_actions_by_channel: expected,
+    total_minimum: Object.values(expected).reduce((total, range) => total + range.minimum, 0),
+    total_maximum: Object.values(expected).reduce((total, range) => total + range.maximum, 0),
+  };
+}
+
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -96,12 +128,49 @@ export function validateCampaignBundle(bundle, campaign) {
     }
   });
   campaign.requestedChannels.forEach((channel) => { if (!channels.has(channel)) errors.push(`Selected channel ${channel} has no action`); });
+  const storedCadence = campaign?.brief?.cadence && typeof campaign.brief.cadence === 'object' ? campaign.brief.cadence : {};
+  const effectiveCadence = Object.keys(storedCadence.expected_actions_by_channel || {}).length
+    ? storedCadence
+    : Number(bundle.contract_version || 1) >= 3 ? campaignActionRanges({
+      durationDays: campaign?.brief?.duration_days || 14,
+      intensity: storedCadence.preset || 'FOCUSED',
+      channels: campaign?.requestedChannels || [],
+    }) : {};
+  const expectedByChannel = effectiveCadence.expected_actions_by_channel || {};
+  for (const channel of campaign.requestedChannels || []) {
+    const expected = expectedByChannel[channel];
+    if (!expected) continue;
+    const count = actions.filter((action) => String(action?.channel || '').toLowerCase() === channel).length;
+    if (count < Number(expected.minimum || 0) || count > Number(expected.maximum || Number.MAX_SAFE_INTEGER)) {
+      errors.push(`Channel ${channel} needs ${expected.minimum}-${expected.maximum} actions for this campaign pace; received ${count}`);
+    }
+  }
   const covered = new Map((Array.isArray(bundle.requirement_coverage) ? bundle.requirement_coverage : []).map((item) => [String(item?.requirement_id || ''), item]));
   for (const requirement of Array.isArray(campaign.requirements) ? campaign.requirements : []) {
     const row = covered.get(String(requirement.id));
     if (!row || !Array.isArray(row.action_ids) || !row.action_ids.length || row.action_ids.some((id) => !ids.has(String(id)))) {
       errors.push(`Requirement ${requirement.id} is not covered by valid actions`);
     }
+  }
+  if (Number(bundle.contract_version || 1) >= 3) {
+    const options = Array.isArray(bundle.strategy_options) ? bundle.strategy_options : [];
+    if (options.length < 3) errors.push('Contract v3 needs at least three strategy options');
+    const optionIds = new Set(options.map((option) => String(option?.id || '')).filter(Boolean));
+    if (!optionIds.has(String(bundle.selected_strategy_id || ''))) errors.push('Contract v3 selected_strategy_id must reference a strategy option');
+    if (!bundle.company_grounding || typeof bundle.company_grounding !== 'object' || !String(bundle.company_grounding.company_name || '').trim()) errors.push('Contract v3 needs company grounding');
+    if (!Array.isArray(bundle.evidence) || !bundle.evidence.length) errors.push('Contract v3 evidence must not be empty');
+    const horizon = bundle.campaign_horizon;
+    if (!horizon || Number(horizon.duration_days) !== Number(campaign?.brief?.duration_days || 14)) errors.push('Contract v3 campaign horizon must match the approved brief');
+    if (!horizon || String(horizon.intensity || '').toLowerCase() !== String(campaign?.brief?.cadence?.preset || 'focused').toLowerCase()) errors.push('Contract v3 campaign intensity must match the approved brief');
+    actions.forEach((action, index) => {
+      if (!action?.creative_brief || typeof action.creative_brief !== 'object') errors.push(`Action ${action?.id || index + 1} needs a creative brief`);
+      if (!['verified', 'assumption', 'no_claim'].includes(String(action?.claim_status || ''))) errors.push(`Action ${action?.id || index + 1} needs a valid claim status`);
+      if (action?.claim_status === 'verified' && (!Array.isArray(action?.evidence_ids) || !action.evidence_ids.length)) errors.push(`Action ${action?.id || index + 1} needs evidence for a verified claim`);
+    });
+    const quality = bundle.quality_gate;
+    const requiredChecks = ['goal_alignment', 'company_grounding', 'channel_completeness', 'provider_validity', 'schedule_completeness'];
+    if (!quality || quality.ready !== true) errors.push('Contract v3 quality gate must be ready');
+    requiredChecks.forEach((check) => { if (quality?.checks?.[check] !== 'passed') errors.push(`Contract v3 quality check ${check} must pass`); });
   }
   return [...new Set(errors)];
 }
@@ -241,6 +310,7 @@ export function normalizeCampaignInput(body = {}) {
     { id: 'goal', text: goal, source: 'user' },
     ...channels.map((channel) => ({ id: `channel:${channel}`, text: `Produce executable ${channel} actions`, source: 'channel' })),
   ];
+  const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels });
   return {
     name, goal, objective, channels, autonomyMode, creationKey, requirements,
     brief: {
@@ -248,7 +318,7 @@ export function normalizeCampaignInput(body = {}) {
       destination_url: validateDestinationUrl(cleanText(body.destination_url, 2048, 'Destination URL')),
       geography: cleanStringList(body.geography, 100, 160, 'Geography'),
       languages: cleanStringList(body.languages, 50, 80, 'Languages'),
-      duration_days: durationDays, cadence: body.cadence && typeof body.cadence === 'object' ? body.cadence : {},
+      duration_days: durationDays, cadence,
       brand_constraints: cleanText(body.brand_constraints, 4000, 'Brand constraints'),
       prohibited_claims: cleanText(body.prohibited_claims, 4000, 'Prohibited claims'),
       success_metrics: cleanStringList(body.success_metrics, 30, 160, 'Success metrics'),
@@ -576,6 +646,19 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
   const participantIds = Array.isArray(room.participantIds) ? room.participantIds : [];
   if (!participantIds.length) throw campaignError('Campaign Room has no active agents', 409, 'campaign_team_required');
   const cleanFeedback = cleanText(feedback, 4000, 'Regeneration feedback');
+  const existingBrief = campaign.brief && typeof campaign.brief === 'object' ? campaign.brief : {};
+  const existingCadence = existingBrief.cadence && typeof existingBrief.cadence === 'object' ? existingBrief.cadence : {};
+  const normalizedBrief = {
+    ...existingBrief,
+    duration_days: Number(existingBrief.duration_days || 14),
+    cadence: Object.keys(existingCadence.expected_actions_by_channel || {}).length
+      ? existingCadence
+      : campaignActionRanges({
+        durationDays: existingBrief.duration_days || 14,
+        intensity: existingCadence.preset || 'FOCUSED',
+        channels: campaign.requestedChannels,
+      }),
+  };
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.campaign.updateMany({
       where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'] } },
@@ -590,7 +673,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
     } });
     const briefSnapshot = {
       name: campaign.name, goal: campaign.goal, objective: campaign.objective, channels: campaign.requestedChannels,
-      autonomyMode: campaign.autonomyMode, requirements: campaign.requirements, brief: campaign.brief,
+      autonomyMode: campaign.autonomyMode, requirements: campaign.requirements, brief: normalizedBrief,
       audiencePolicy: campaign.audiencePolicy, schedulePolicy: campaign.schedulePolicy, campaign_id: id,
       feedback: cleanFeedback || undefined,
     };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
@@ -22,6 +22,33 @@ test('campaign input requires caller idempotency and validates time boundaries',
 
 test('campaign input rejects roadmap-only channels', () => {
   assert.throws(() => normalizeCampaignInput({ ...baseInput, channels: ['linkedin'] }), { code: 'channel_not_executable' });
+});
+
+test('campaign horizon and intensity produce an authoritative per-channel action range', () => {
+  assert.deepEqual(campaignActionRanges({ durationDays: 14, intensity: 'focused', channels: ['x_organic'] }), {
+    preset: 'focused', duration_days: 14,
+    expected_actions_by_channel: { x_organic: { minimum: 6, maximum: 8 } },
+    total_minimum: 6, total_maximum: 8,
+  });
+  const input = normalizeCampaignInput({ ...baseInput, intensity: 'high', channels: ['x_organic', 'tara'] });
+  assert.deepEqual(input.brief.cadence.expected_actions_by_channel, {
+    x_organic: { minimum: 9, maximum: 12 }, tara: { minimum: 5, maximum: 8 },
+  });
+  assert.throws(() => campaignActionRanges({ durationDays: 14, intensity: 'chaotic', channels: ['x_organic'] }), { code: 'invalid_campaign_intensity' });
+});
+
+test('bundle gate enforces the normalized campaign action range', () => {
+  const campaign = {
+    requestedChannels: ['x_organic'], requirements: [{ id: 'goal' }, { id: 'channel:x_organic' }],
+    brief: { cadence: { expected_actions_by_channel: { x_organic: { minimum: 3, maximum: 4 } } } },
+  };
+  const action = { id: 'x-1', channel: 'x_organic', final_copy: 'Ready copy', payload: { text: 'Ready copy' }, scheduled_offset_minutes: 0, rationale: 'Launch' };
+  const bundle = {
+    strategy: 'Launch with a sequence.', audience: { rationale: 'Current followers.' }, content_pillars: ['Proof'],
+    kpis: [{ name: 'Reach' }], actions: [action],
+    requirement_coverage: [{ requirement_id: 'goal', action_ids: ['x-1'] }, { requirement_id: 'channel:x_organic', action_ids: ['x-1'] }],
+  };
+  assert.match(validateCampaignBundle(bundle, campaign).join(' '), /needs 3-4 actions/);
 });
 
 test('canonical campaign hash is stable across object key order', () => {

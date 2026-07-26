@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 
 import pytest
 
@@ -48,6 +49,10 @@ def _valid_v1_bundle():
             "payload": {"text": "Run your company with an AI team that plans before it acts."},
             "scheduled_offset_minutes": 0,
             "rationale": "Lead with the product outcome.",
+            "format": "single_post",
+            "creative_brief": {"required": True, "concept": "Show the campaign operating board."},
+            "claim_status": "verified",
+            "evidence_ids": ["evidence-1"],
         }],
         "requirement_coverage": [
             {"requirement_id": "goal", "action_ids": ["x-1"]},
@@ -60,6 +65,18 @@ def _valid_v2_bundle():
     return {
         **_valid_v1_bundle(),
         "contract_version": CAMPAIGN_CONTRACT_VERSION,
+        "strategy_options": [
+            {"id": "proof", "name": "Proof led", "thesis": "Show the finished work.", "tradeoff": "Requires product evidence."},
+            {"id": "speed", "name": "Speed led", "thesis": "Lead with coordination speed.", "tradeoff": "Avoid unsupported timing claims."},
+            {"id": "control", "name": "Control led", "thesis": "Lead with approval and governance.", "tradeoff": "Less emotionally direct."},
+        ],
+        "selected_strategy_id": "proof",
+        "company_grounding": {
+            "company_name": "Singulance",
+            "facts_used": ["Campaign Rooms return structured executable plans."],
+            "unknowns": [],
+        },
+        "campaign_horizon": {"duration_days": 14, "intensity": "focused", "rationale": "Enough time to establish a baseline."},
         "objective": "Build awareness among founders.",
         "positioning": {
             "statement": "Singulance coordinates AI teams into approval-ready campaigns.",
@@ -89,6 +106,11 @@ def _valid_v2_bundle():
         }],
         "assumptions": ["The connected X identity is approved before launch."],
         "launch_checklist": ["Confirm final copy and connected X identity."],
+        "evidence": [{"id": "evidence-1", "claim": "Campaign Rooms return structured plans.", "source": "Product workflow", "status": "verified", "url": ""}],
+        "quality_gate": {"ready": True, "checks": {
+            "goal_alignment": "passed", "company_grounding": "passed", "channel_completeness": "passed",
+            "provider_validity": "passed", "schedule_completeness": "passed",
+        }},
         "risks": ["No performance baseline exists yet."],
     }
 
@@ -111,7 +133,7 @@ def test_new_campaign_compilation_requires_v2_operating_sections():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
     assert accepted is None
-    assert "contract_version must be at least 2" in errors
+    assert "contract_version must be at least 3" in errors
     assert "positioning.statement is required for contract v2" in errors
     assert "timeline must not be empty for contract v2" in errors
     assert "measurement.primary_kpi is required for contract v2" in errors
@@ -126,6 +148,46 @@ def test_v2_campaign_contract_accepts_complete_operating_plan():
     )
     assert errors == []
     assert accepted == _valid_v2_bundle()
+
+
+def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
+    bundle = _valid_v2_bundle()
+    brief = {"brief": {"duration_days": 14, "cadence": {
+        "preset": "focused",
+        "expected_actions_by_channel": {"x_organic": {"minimum": 6, "maximum": 8}},
+    }}}
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief=brief,
+    )
+    assert accepted is None
+    assert "channel x_organic needs 6-8 actions for this campaign pace; received 1" in errors
+
+    complete = deepcopy(bundle)
+    for index in range(2, 7):
+        action = deepcopy(bundle["actions"][0])
+        action["id"] = f"x-{index}"
+        action["title"] = f"Campaign post {index}"
+        action["scheduled_offset_minutes"] = (index - 1) * 1440
+        complete["actions"].append(action)
+        complete["timeline"].append({
+            "action_id": action["id"], "phase": "sustain",
+            "scheduled_offset_minutes": action["scheduled_offset_minutes"],
+        })
+        for row in complete["requirement_coverage"]:
+            row["action_ids"].append(action["id"])
+    accepted, errors = campaign__submit_plan(
+        complete,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief=brief,
+    )
+    assert errors == []
+    assert accepted is not None
 
 
 def test_x_posts_must_fit_provider_limit_and_threads_use_separate_actions():

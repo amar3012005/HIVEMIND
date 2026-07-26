@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-CAMPAIGN_CONTRACT_VERSION = 2
+CAMPAIGN_CONTRACT_VERSION = 3
 
 
 def campaign_system_contract() -> str:
@@ -17,6 +17,10 @@ def campaign_system_contract() -> str:
         "- Debate material strategic conflicts. Record the conflict, chosen decision, rationale, and meaningful "
         "dissent; state explicitly when no material conflict remains.\n"
         "- Agents may research, challenge, and draft, but must never publish or send during Room generation.\n"
+        "- The active organisation and supplied company context are ground truth. Never substitute a different "
+        "company or invent audiences, URLs, quotes, budgets, proof, customer results, or performance.\n"
+        "- Produce the complete campaign sequence required by the brief's horizon and pace; one sample action is "
+        "never a complete campaign unless the normalized brief explicitly permits one.\n"
         "- Every x_organic action is exactly one X Post: payload.text and final_copy must match and each must be "
         "280 characters or fewer. Represent a thread as separate ordered x_organic actions, one action per Post.\n"
         "- A Campaign Room is complete ONLY when the final compiler calls campaign__submit_plan and its "
@@ -41,6 +45,7 @@ def campaign_bundle_errors(
     requirements: list[str],
     *,
     minimum_contract_version: int = 1,
+    campaign_brief: dict[str, Any] | None = None,
 ) -> list[str]:
     if not isinstance(bundle, dict):
         return ["bundle must be an object"]
@@ -116,6 +121,19 @@ def campaign_bundle_errors(
     for channel in channels:
         if channel not in action_channels:
             errors.append(f"selected channel {channel} has no action")
+    brief = campaign_brief if isinstance(campaign_brief, dict) else {}
+    brief_payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    cadence = brief_payload.get("cadence") if isinstance(brief_payload.get("cadence"), dict) else {}
+    expected_by_channel = cadence.get("expected_actions_by_channel") if isinstance(cadence.get("expected_actions_by_channel"), dict) else {}
+    for channel in channels:
+        expected = expected_by_channel.get(channel)
+        if not isinstance(expected, dict):
+            continue
+        count = sum(1 for action in actions if isinstance(action, dict) and str(action.get("channel") or "").lower() == channel)
+        minimum = int(expected.get("minimum") or 0)
+        maximum = int(expected.get("maximum") or 1_000_000)
+        if count < minimum or count > maximum:
+            errors.append(f"channel {channel} needs {minimum}-{maximum} actions for this campaign pace; received {count}")
     coverage = bundle.get("requirement_coverage")
     coverage_rows = coverage if isinstance(coverage, list) else []
     covered = {str(row.get("requirement_id") or ""): row for row in coverage_rows if isinstance(row, dict)}
@@ -132,8 +150,8 @@ def campaign_bundle_errors(
     if declared_version < minimum_contract_version:
         errors.append(f"contract_version must be at least {minimum_contract_version}")
 
-    # Existing V1 bundles remain valid. New Campaign Room synthesis requests V2
-    # and is held to the richer operating-report contract below.
+    # Existing bundles remain readable. New Campaign Room synthesis requests the
+    # latest contract and is held to the richer operating-board contract below.
     if max(declared_version, minimum_contract_version) >= CAMPAIGN_CONTRACT_VERSION:
         if not _non_empty_string(bundle.get("objective")):
             errors.append("objective is required for contract v2")
@@ -205,6 +223,76 @@ def campaign_bundle_errors(
             errors.append("assumptions must be an array for contract v2")
         if not _non_empty_list(bundle.get("launch_checklist")):
             errors.append("launch_checklist must not be empty for contract v2")
+
+    if max(declared_version, minimum_contract_version) >= 3:
+        strategy_options = bundle.get("strategy_options")
+        if not isinstance(strategy_options, list) or len(strategy_options) < 3:
+            errors.append("strategy_options must contain at least three options for contract v3")
+            strategy_options = []
+        option_ids = {str(option.get("id") or "") for option in strategy_options if isinstance(option, dict)}
+        if str(bundle.get("selected_strategy_id") or "") not in option_ids:
+            errors.append("selected_strategy_id must reference a strategy option for contract v3")
+        for index, option in enumerate(strategy_options):
+            if not isinstance(option, dict):
+                errors.append(f"strategy option {index + 1} must be an object")
+                continue
+            for field in ("id", "name", "thesis", "tradeoff"):
+                if not _non_empty_string(option.get(field)):
+                    errors.append(f"strategy option {index + 1} needs {field}")
+
+        grounding = bundle.get("company_grounding")
+        if not isinstance(grounding, dict) or not _non_empty_string(grounding.get("company_name")):
+            errors.append("company_grounding.company_name is required for contract v3")
+        if not isinstance(grounding, dict) or not _non_empty_list(grounding.get("facts_used")):
+            errors.append("company_grounding.facts_used must not be empty for contract v3")
+
+        evidence = bundle.get("evidence")
+        if not isinstance(evidence, list):
+            errors.append("evidence must be an array for contract v3")
+            evidence = []
+        elif not evidence:
+            errors.append("evidence must not be empty for contract v3")
+        evidence_ids = {str(item.get("id") or "") for item in evidence if isinstance(item, dict)}
+        for index, item in enumerate(evidence):
+            if not isinstance(item, dict):
+                errors.append(f"evidence item {index + 1} must be an object")
+                continue
+            if str(item.get("status") or "") not in ("verified", "assumption", "missing"):
+                errors.append(f"evidence item {index + 1} needs a valid status")
+            for field in ("id", "claim", "source"):
+                if not _non_empty_string(item.get(field)):
+                    errors.append(f"evidence item {index + 1} needs {field}")
+
+        horizon = bundle.get("campaign_horizon")
+        expected_duration = int(brief_payload.get("duration_days") or 14)
+        expected_intensity = str(cadence.get("preset") or "focused").lower()
+        if not isinstance(horizon, dict) or horizon.get("duration_days") != expected_duration:
+            errors.append("campaign_horizon.duration_days must match the brief for contract v3")
+        if not isinstance(horizon, dict) or str(horizon.get("intensity") or "").lower() != expected_intensity:
+            errors.append("campaign_horizon.intensity must match the brief for contract v3")
+
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                continue
+            if not isinstance(action.get("creative_brief"), dict):
+                errors.append(f"action {action.get('id') or index + 1} needs creative_brief for contract v3")
+            if str(action.get("claim_status") or "") not in ("verified", "assumption", "no_claim"):
+                errors.append(f"action {action.get('id') or index + 1} needs a valid claim_status for contract v3")
+            action_evidence = action.get("evidence_ids")
+            if not isinstance(action_evidence, list):
+                errors.append(f"action {action.get('id') or index + 1} evidence_ids must be an array for contract v3")
+            elif any(str(item) not in evidence_ids for item in action_evidence):
+                errors.append(f"action {action.get('id') or index + 1} references unknown evidence for contract v3")
+            elif str(action.get("claim_status") or "") == "verified" and not action_evidence:
+                errors.append(f"action {action.get('id') or index + 1} needs evidence for a verified claim")
+
+        quality = bundle.get("quality_gate")
+        checks = quality.get("checks") if isinstance(quality, dict) and isinstance(quality.get("checks"), dict) else {}
+        if not isinstance(quality, dict) or quality.get("ready") is not True:
+            errors.append("quality_gate.ready must be true for contract v3")
+        for check in ("goal_alignment", "company_grounding", "channel_completeness", "provider_validity", "schedule_completeness"):
+            if checks.get(check) != "passed":
+                errors.append(f"quality_gate.checks.{check} must pass for contract v3")
     return list(dict.fromkeys(errors))
 
 
@@ -214,6 +302,7 @@ def campaign__submit_plan(
     channels: list[str],
     requirements: list[str],
     minimum_contract_version: int = 1,
+    campaign_brief: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Accept a CampaignBundle only when every deterministic contract passes."""
     errors = campaign_bundle_errors(
@@ -221,5 +310,6 @@ def campaign__submit_plan(
         channels,
         requirements,
         minimum_contract_version=minimum_contract_version,
+        campaign_brief=campaign_brief,
     )
     return (bundle if not errors else None), errors

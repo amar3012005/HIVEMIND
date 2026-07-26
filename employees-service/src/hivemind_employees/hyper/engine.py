@@ -2393,17 +2393,23 @@ class Director:
             "You are the final campaign plan compiler. Return one JSON object only. The room may research and draft, "
             "but it must never send. Preserve the user's goal, use only selected channels, and provide complete final "
             f"content. Set contract_version to {CAMPAIGN_CONTRACT_VERSION}. Required shape: "
-            "{contract_version:2,objective:string,strategy:string,"
+            "{contract_version:3,objective:string,strategy:string,"
+            "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
+            "company_grounding:{company_name:string,facts_used:string[],unknowns:string[]},"
+            "campaign_horizon:{duration_days:integer,intensity:string,rationale:string},"
             "positioning:{statement:string,proof_points:string[]},"
             "audience:{rationale:string,segments:array,safety_notes:array},"
             "content_pillars:string[],kpis:[{name:string,target:string,source:string}],actions:[{id:string,channel:string,"
-            "title:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,evidence:string[]}],"
+            "title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
+            "creative_brief:{required:boolean,concept:string},claim_status:verified|assumption|no_claim,evidence_ids:string[]}],"
             "timeline:[{action_id:string,phase:string,scheduled_offset_minutes:integer}],"
             "safety:{guardrails:string[],prohibited_claims:string[]},"
             "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},"
             "debate_conflicts_present:boolean,"
             "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
+            "evidence:[{id:string,claim:string,source:string,status:verified|assumption|missing,url:string}],"
             "assumptions:string[],launch_checklist:string[],risks:string[],"
+            "quality_gate:{ready:true,checks:{goal_alignment:passed,company_grounding:passed,channel_completeness:passed,provider_validity:passed,schedule_completeness:passed}},"
             "requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
             "Every action must appear in timeline with the same scheduled offset. Set debate_conflicts_present from "
             "the transcript; when true, record every material conflict and resolution in debate_decisions. Use an "
@@ -2412,13 +2418,15 @@ class Director:
             "E.164 to number, opening, goal, context, language, lawful_basis (consent or legitimate_interest), "
             "ISO country, IANA timezone, and calling_window; "
             "objections, and strategy; TARA must speak first. For X Organic payload include text. No placeholders. "
+            "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
+            "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
-        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n\n"
+        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:5000]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:3000]}\n\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:5000] if forced_debate else '(not forced)'}")
         errors = ["bundle was not generated"]
         bundle: Optional[Dict[str, Any]] = None
-        for attempt in range(2):
+        for attempt in range(3):
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             if attempt:
                 messages.append({"role": "user", "content": "Repair every validation error and return the full JSON object again:\n- " + "\n- ".join(errors)})
@@ -2435,6 +2443,7 @@ class Director:
                 channels=channels,
                 requirements=requirements,
                 minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+                campaign_brief=self.campaign_brief,
             )
             if not errors:
                 await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})

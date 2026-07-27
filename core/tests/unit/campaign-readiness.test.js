@@ -46,6 +46,14 @@ test('readiness blocks paid plans without account execution, budget, currency, a
   const result = assessCampaignReadiness(input);
   assert.equal(result.decision, 'blocked');
   assert.deepEqual(result.blockers.map((item) => item.id).filter((id) => ['channels', 'budget'].includes(id)), ['channels', 'budget']);
+  assert.equal(result.blockers.find((item) => item.id === 'channels').detail, 'Execution is unavailable for meta.');
+});
+
+test('readiness presents X channels with distinct product labels', () => {
+  const input = fixture('x_ads');
+  input.capabilities.channels[0].execution_ready = false;
+  const result = assessCampaignReadiness(input);
+  assert.equal(result.blockers.find((item) => item.id === 'channels').detail, 'Execution is unavailable for Paid X Ads.');
 });
 
 test('readiness requires selected hash-bound assets only for visual actions', () => {

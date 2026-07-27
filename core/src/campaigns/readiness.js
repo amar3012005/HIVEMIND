@@ -2,6 +2,11 @@ const PAID_CHANNELS = new Set([
   'x_ads', 'google_ads', 'meta', 'linkedin', 'youtube_ads', 'tiktok_ads',
   'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
 ]);
+const CHANNEL_LABELS = { x_organic: 'X Organic Posts', x_ads: 'Paid X Ads', gmail: 'Email', tara: 'TARA' };
+
+function channelLabel(value) {
+  return CHANNEL_LABELS[value] || String(value || '').replaceAll('_', ' ');
+}
 
 function text(value) {
   return String(value || '').trim();
@@ -58,8 +63,8 @@ export function assessCampaignReadiness({ campaign, plan, actions = [], assets =
     const unavailable = requestedChannels.filter((channel) => !capabilityRows.find((item) => item.id === channel)?.execution_ready);
     checks.push(check(
       'channels', 'Publishing channels', unavailable.length ? 'blocked' : 'passed',
-      unavailable.length ? `Execution is unavailable for ${unavailable.join(', ')}.` : 'Every selected channel has a connected, enabled publishing adapter.',
-      unavailable.length ? 'Connect the account and enable a tested publishing adapter for every blocked channel.' : null,
+      unavailable.length ? `Execution is unavailable for ${unavailable.map(channelLabel).join(', ')}.` : 'Every selected channel has a connected, enabled publishing adapter.',
+      unavailable.length ? 'Complete account approval and enable a tested publishing adapter for every blocked channel.' : null,
       { channels: unavailable },
     ));
   } else {

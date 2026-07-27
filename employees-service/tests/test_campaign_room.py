@@ -553,6 +553,35 @@ def test_campaign_room_cannot_call_generic_synthesis():
         asyncio.run(director._synthesize(False, ""))
 
 
+def test_campaign_synthesizer_submits_with_the_canonical_contract_version(monkeypatch):
+    emitted = []
+
+    async def emit(event):
+        emitted.append(event)
+
+    async def synthesize(*args, **kwargs):
+        return {"content": "{}"}
+
+    def accept(candidate, **kwargs):
+        assert kwargs["minimum_contract_version"] == CAMPAIGN_CONTRACT_VERSION
+        return candidate, []
+
+    director = Director(
+        user_message="Create an awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit,
+        room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
+    )
+    monkeypatch.setattr(director, "_groq", synthesize)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__submit_plan", accept)
+
+    bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+
+    assert errors == []
+    assert bundle["contract_version"] == CAMPAIGN_CONTRACT_VERSION
+    assert emitted[-1] == {"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"}
+
+
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():
     director = Director(
         user_message='AUDIENCE_POLICY_JSON: {"discover_if_insufficient": false} run a company campaign',

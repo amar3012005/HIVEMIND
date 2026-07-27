@@ -2494,7 +2494,12 @@ class Director:
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
-        from .campaign_contract import assemble_campaign_bundle, campaign_system_contract, classify_campaign_errors
+        from .campaign_contract import (
+            CAMPAIGN_CONTRACT_VERSION,
+            assemble_campaign_bundle,
+            campaign_system_contract,
+            classify_campaign_errors,
+        )
         system = (
             campaign_system_contract() + "\n\n"
             "You are the campaign judgment synthesizer. Return one compact JSON object only; never publish. "

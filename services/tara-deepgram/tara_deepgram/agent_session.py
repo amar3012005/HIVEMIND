@@ -180,11 +180,12 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
             return
         try:
             dtmf_active.set()
-            clr = {"event": "clear"}
-            if stream_id:
-                clr["streamSid"] = stream_id
-            await telnyx_ws.send_text(json.dumps(clr))
-            await asyncio.sleep(0.25)  # let the far end settle into silence
+            # NO `clear` here. It is a Twilio Media Streams primitive; on Telnyx
+            # it is at best a no-op and at worst resets the outbound stream,
+            # which would drop the very frames we send next. The mute above
+            # already gives us true silence, so `clear` bought nothing and risked
+            # everything. (Barge-in still uses it on the Twilio path.)
+            await asyncio.sleep(0.25)  # let the leg settle into silence
             for payload in dtmf.digits_to_media_frames(digits):
                 out = {"event": "media", "media": {"payload": payload}}
                 if stream_id:  # Twilio requires streamSid; Telnyx omits it

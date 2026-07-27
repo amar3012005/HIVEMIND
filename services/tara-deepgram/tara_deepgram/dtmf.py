@@ -98,6 +98,13 @@ def digits_to_media_frames(digits: str, frame_ms: int = 20) -> List[str]:
     payload = digits_to_ulaw(digits)
     if not payload:
         return []
-    size = int(SAMPLE_RATE * frame_ms / 1000)
+    size = int(SAMPLE_RATE * frame_ms / 1000)  # 160 bytes @ 8kHz/20ms
+    # Pad to a WHOLE number of frames. A ragged final frame (ours was 80 bytes,
+    # half a packet) is not a valid 20ms μ-law packet — carriers may drop it or
+    # let it desync the playout, corrupting the tail of the tone. Pad with μ-law
+    # silence so every frame the carrier sees is exactly one packet.
+    remainder = len(payload) % size
+    if remainder:
+        payload += b"\xff" * (size - remainder)
     return [base64.b64encode(payload[i:i + size]).decode()
             for i in range(0, len(payload), size)]

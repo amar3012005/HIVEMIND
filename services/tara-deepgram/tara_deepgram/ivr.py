@@ -38,8 +38,17 @@ _PRESS_RE = re.compile(
 # connected to reception", "press 9 to reach an operator" — so match the
 # introducer, not just "for".
 _LABEL_AFTER_RE = re.compile(
-    r"^\s*(?:for|to\s+be\s+connected\s+to|to\s+be\s+transferred\s+to|to\s+reach|"
-    r"to\s+speak\s+(?:with|to)|to\s+contact)\s+(?:the\s+|an?\s+)?([^,.;]{3,60})",
+    r"^\s*(?:for|to\s+be\s+connected(?:\s+to)?|to\s+be\s+transferred(?:\s+to)?|to\s+reach|"
+    r"to\s+speak\s+(?:with|to)|to\s+contact|to\s+connect)\s*(?:the\s+|an?\s+)?([^,.;]{0,60})",
+    re.I,
+)
+# "press 1 to be connected", "press 0 to speak with someone" — the INTRODUCER
+# itself means "this option reaches a human", whatever the label says (often
+# nothing, or a generic "the party you're calling"). Live-call evidence: Romano
+# Law's tree offered exactly "press 1 to be connected to the party you're
+# calling" and a label-only matcher declined it. Intent lives in the verb.
+_CONNECT_INTRO_RE = re.compile(
+    r"^\s*to\s+(?:be\s+)?(?:connect|connected|transferred|transfer|reach|speak|contact)",
     re.I,
 )
 # The backward window ENDS just before the "press" token, so this must not
@@ -94,15 +103,17 @@ def parse_options(text: str) -> Dict[str, str]:
         digit = _normalise_digit(press.group(1))
         nxt = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         prev_end = matches[idx - 1].end() if idx else 0
-        label = ""
-        after = _LABEL_AFTER_RE.search(text[press.end():nxt])
+        window = text[press.end():nxt]
+        label, connects = "", bool(_CONNECT_INTRO_RE.search(window))
+        after = _LABEL_AFTER_RE.search(window)
         if after:
             label = after.group(1)
         else:
             before = _LABEL_BEFORE_RE.search(text[prev_end:press.start()])
             if before:
                 label = before.group(1)
-        options.setdefault(digit, label.strip().lower())
+        if digit not in options:
+            options[digit] = {"label": label.strip().lower(), "connects": connects}
     return options
 
 
@@ -113,14 +124,21 @@ def choose_digit(options: Dict[str, str]) -> Optional[str]:
     because a wrong branch usually lands in voicemail with no way back.
     """
     best, best_score = None, 0
-    for digit, label in options.items():
-        if not label:
-            continue
+    for digit, opt in options.items():
+        label = opt.get("label") or ""
         if any(neg in label for neg in _NEGATIVE):
             continue
-        for score, words in _GOAL_KEYWORDS:
-            if any(w in label for w in words) and score > best_score:
-                best, best_score = digit, score
+        score = 0
+        for weight, words in _GOAL_KEYWORDS:
+            if label and any(w in label for w in words):
+                score = max(score, weight)
+        # "to be connected/transferred/speak with" IS the reach-a-human option,
+        # even with an empty or generic label. Ranked just under an explicit
+        # "operator" but above a department match.
+        if opt.get("connects"):
+            score = max(score, 90)
+        if score > best_score:
+            best, best_score = digit, score
     if best:
         return best
     # Unlabeled menu: 0 is the near-universal operator escape.
@@ -151,7 +169,7 @@ class IvrNavigator:
             log.info("ivr session=%s menu=%s -> no confident option", self.session_id, options)
             return None
         self.presses += 1
-        self.seen.append(f"{digit}:{options.get(digit, '')}")
+        self.seen.append(f"{digit}:{(options.get(digit) or {}).get('label', '')}")
         log.info("ivr session=%s menu=%s -> pressing %s (%d/%d)",
                  self.session_id, options, digit, self.presses, self.MAX_PRESSES)
         return digit

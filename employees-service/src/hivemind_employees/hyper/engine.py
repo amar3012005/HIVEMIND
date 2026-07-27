@@ -1973,7 +1973,11 @@ class Director:
         )
 
     def _campaign_recall_query_is_grounded(self, query: str) -> bool:
-        active_context = f"{self.company_brief} {self.user_message}".casefold()
+        # The broad company brief can contain imported client/project memories.
+        # Treat only the active campaign contract and current request as the
+        # identity allowlist, otherwise legacy brands can authorize themselves.
+        campaign_brief = getattr(self, "campaign_brief", {})
+        active_context = f"{json.dumps(campaign_brief, ensure_ascii=False)} {self.user_message}".casefold()
         common_terms = {"AI", "API", "B2B", "B2C", "CRM", "GDPR", "ICP", "SEO", "X"}
         identifiers = set(re.findall(r"\b[A-Z][A-Z0-9_-]{3,}\b", query or ""))
         return all(token in common_terms or token.casefold() in active_context for token in identifiers)
@@ -2280,6 +2284,9 @@ class Director:
         plan["connector_calls"] = ccs[:4]
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        if self.room_kind == "campaign" and plan["web_query"]:
+            if not self._campaign_recall_query_is_grounded(plan["web_query"]):
+                plan["web_query"] = None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():

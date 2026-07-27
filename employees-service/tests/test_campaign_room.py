@@ -63,6 +63,16 @@ def test_campaign_recall_queries_reject_foreign_brand_identifiers():
     assert director._campaign_recall_query_is_grounded("SINGULANCE x_organic channel capabilities") is False
 
 
+def test_campaign_recall_does_not_trust_foreign_brand_in_company_brief():
+    director = object.__new__(Director)
+    director.company_brief = "B&B. Markenagentur GmbH. Imported notes mention SINGULANCE."
+    director.user_message = "Build awareness for B&B. Markenagentur GmbH."
+    director.campaign_brief = {"goal": "Build awareness for B&B. Markenagentur GmbH."}
+
+    assert director._campaign_recall_query_is_grounded("B&B target audience") is True
+    assert director._campaign_recall_query_is_grounded("SINGULANCE mission and products") is False
+
+
 def test_campaign_compiler_normalizes_cta_aliases_without_regeneration():
     bundle = {
         "creative_system": {"hypotheses": [

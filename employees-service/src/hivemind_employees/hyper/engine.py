@@ -2826,6 +2826,12 @@ class Director:
             evidence_ids = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
             if (
                 str(action.get("claim_status") or "") == "assumption"
+                and evidence_ids
+                and all(evidence_status.get(str(item)) == "verified" for item in evidence_ids)
+            ):
+                action["claim_status"] = "verified"
+            if (
+                str(action.get("claim_status") or "") == "assumption"
                 and not copy_contains_outcome_claim(action.get("final_copy"))
             ):
                 action["claim_status"] = "no_claim"

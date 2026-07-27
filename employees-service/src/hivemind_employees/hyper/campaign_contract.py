@@ -181,9 +181,24 @@ def assemble_campaign_bundle(
             kept.append(action)
             seen_by_channel[channel] = seen + 1
         actions = kept
+    primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")
+    while len(hypotheses) < 2 and actions:
+        source = actions[len(hypotheses) % len(actions)]
+        title = str(source.get("title") or f"Campaign action {len(hypotheses) + 1}").strip()
+        copy_text = str(source.get("final_copy") or source.get("copy") or "").strip()
+        hypotheses.append({
+            "id": f"compiled_hypothesis_{len(hypotheses) + 1}",
+            "insight": str(source.get("rationale") or title).strip(),
+            "promise": title,
+            "hook": copy_text[:180] or title,
+            "cta": str((source.get("payload") or {}).get("cta") or title).strip(),
+            "channels": [str(source.get("channel") or (channels[0] if len(channels) == 1 else "")).lower()],
+            "experiment_hypothesis": f"Evaluate {title} against {primary_metric}.",
+        })
+    creative["hypotheses"] = hypotheses
+    plan["creative_system"] = creative
     final_offset = max(0, (duration - 1) * 1440)
     hypothesis_ids = [row["id"] for row in hypotheses]
-    primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")
     for index, action in enumerate(actions):
         action["id"] = str(action.get("id") or f"action_{index + 1}")
         if len(channels) == 1:
@@ -748,8 +763,14 @@ def campaign_bundle_errors(
                 for item in evidence
                 if isinstance(item, dict) and item.get("status") == "verified"
             ).lower()
+            proposed_targets = " ".join(
+                str(item.get("target") or "")
+                for item in (bundle.get("kpis") or [])
+                if isinstance(item, dict) and item.get("target_type") == "proposed"
+            ).lower()
             for number in re.findall(r"\b\d+(?:[.,]\d+)?\s*%", report):
-                if number.lower() in verified_claims:
+                compact_number = re.sub(r"\s+", "", number.lower())
+                if compact_number in re.sub(r"\s+", "", verified_claims) or compact_number in re.sub(r"\s+", "", proposed_targets):
                     continue
                 context_match = re.search(rf"[^.\n]{{0,80}}{re.escape(number)}[^.\n]{{0,80}}", report, re.I)
                 context = context_match.group(0).lower() if context_match else ""

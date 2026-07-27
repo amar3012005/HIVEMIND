@@ -98,6 +98,8 @@ def test_campaign_compiler_applies_authoritative_action_maximum():
 
     assert [action["id"] for action in bundle["actions"]] == [f"x-{index}" for index in range(1, 7)]
     assert len(bundle["timeline"]) == 6
+    assert len(bundle["creative_system"]["hypotheses"]) == 2
+    assert all(action["hypothesis_id"] for action in bundle["actions"])
 
 
 def test_campaign_derivations_normalize_only_claim_safe_assumptions():
@@ -107,6 +109,7 @@ def test_campaign_derivations_normalize_only_claim_safe_assumptions():
         "actions": [
             {"id": "safe", "claim_status": "assumption", "final_copy": "Explore a shared company memory."},
             {"id": "outcome", "claim_status": "assumption", "final_copy": "Our customers improve performance."},
+            {"id": "grounded", "claim_status": "assumption", "final_copy": "SINGULANCE has a company memory product.", "evidence_ids": ["company-1"]},
         ],
     }
 
@@ -115,6 +118,23 @@ def test_campaign_derivations_normalize_only_claim_safe_assumptions():
     assert bundle["company_grounding"]["facts_used"] == ["SINGULANCE has a company memory product."]
     assert bundle["actions"][0]["claim_status"] == "no_claim"
     assert bundle["actions"][1]["claim_status"] == "assumption"
+    assert bundle["actions"][2]["claim_status"] == "verified"
+
+
+def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
+    bundle = _valid_v2_bundle()
+    bundle["kpis"][0].update({"target": "2% engagement rate", "target_type": "proposed"})
+    bundle["report_markdown"] = bundle["report_markdown"].replace(
+        "Establish a baseline.", "The campaign target is a 2% engagement rate.",
+    )
+
+    accepted, errors = campaign__submit_plan(
+        bundle, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+
+    assert errors == []
+    assert accepted is not None
 
 
 def test_campaign_validation_errors_are_typed_for_targeted_repair():

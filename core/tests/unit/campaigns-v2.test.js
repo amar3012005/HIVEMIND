@@ -271,20 +271,25 @@ test('campaign rooms use configured draft agents but exclude paused agents', () 
   assert.deepEqual(campaignAgentWhere('org-a'), { orgId: 'org-a', archivedAt: null, status: { not: 'paused' } });
 });
 
-test('campaign creation uses an atomic batch without an interactive update transaction', async () => {
+test('campaign creation reuses the permanent Campaign Intelligence room and batches campaign records', async () => {
   const previous = process.env.CAMPAIGNS_V2_ENABLED;
   const previousOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
   process.env.CAMPAIGNS_V2_ENABLED = 'true';
   process.env.CAMPAIGNS_V2_ORG_IDS = 'org-a';
   const calls = []; let batch = null;
+  const fixedRoom = { id: 'room-fixed', orgId: 'org-a', agentConnectors: { _domain_home: true } };
   const prisma = {
     campaign: {
       async findUnique() { return null; },
       create({ data }) { calls.push(['campaign.create', data]); return Promise.resolve({ ...data, createdAt: new Date() }); },
       update() { throw new Error('campaign.update must not run during creation'); },
     },
-    hyperRoom: { create({ data }) { calls.push(['hyperRoom.create', data]); return Promise.resolve(data); } },
-    hyperTurn: { create({ data }) { calls.push(['hyperTurn.create', data]); return Promise.resolve(data); } },
+    hyperRoom: {
+      async findFirst() { return fixedRoom; },
+      create({ data }) { calls.push(['hyperRoom.create', data]); return Promise.resolve(data); },
+      update({ data }) { calls.push(['hyperRoom.update', data]); return Promise.resolve({ ...fixedRoom, ...data }); },
+    },
+    hyperTurn: { async findFirst() { return { seq: 4 }; }, create({ data }) { calls.push(['hyperTurn.create', data]); return Promise.resolve(data); } },
     campaignRun: { create({ data }) { calls.push(['campaignRun.create', data]); return Promise.resolve({ id: 'run-a', ...data }); } },
     campaignChannel: { createMany({ data }) { calls.push(['campaignChannel.createMany', data]); return Promise.resolve({ count: data.length }); } },
     campaignEvent: { create({ data }) { calls.push(['campaignEvent.create', data]); return Promise.resolve(data); } },
@@ -293,19 +298,25 @@ test('campaign creation uses an atomic batch without an interactive update trans
     nangoConnection: { async findFirst() { return null; } },
     platformIntegration: { async findFirst() { return null; } },
     taraRuntimeConfig: { async findUnique() { return null; } },
-    async $transaction(operations) { batch = operations; return Promise.all(operations); },
+    async $executeRawUnsafe() { return 1; },
+    async $transaction(operations) {
+      if (typeof operations === 'function') return operations(this);
+      batch = operations;
+      return Promise.all(operations);
+    },
   };
   try {
     const result = await createCampaign({ prisma, userId: 'user-a', orgId: 'org-a', body: baseInput });
     assert.equal(Array.isArray(batch), true);
     assert.equal(batch.length, 6);
     assert.deepEqual(calls.map(([name]) => name), [
-      'hyperRoom.create', 'campaign.create', 'hyperTurn.create', 'campaignRun.create',
+      'hyperRoom.update', 'hyperRoom.update', 'campaign.create', 'hyperTurn.create', 'campaignRun.create',
       'campaignChannel.createMany', 'campaignEvent.create',
     ]);
     assert.equal(result.campaign.status, 'GENERATING');
     assert.equal(result.campaign.roomId, result.dispatch.room_id);
-    assert.equal(calls.find(([name]) => name === 'hyperRoom.create')[1].roomTag, 'campaign');
+    assert.equal(result.campaign.roomId, 'room-fixed');
+    assert.equal(calls.find(([name]) => name === 'hyperTurn.create')[1].seq, 5);
     assert.doesNotMatch(result.dispatch.user_message, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
     assert.match(result.dispatch.execution_context, /campaign__submit_plan/);
   } finally {

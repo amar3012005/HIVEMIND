@@ -494,9 +494,31 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   const participantIds = participants.map((item) => item.id);
 
   const campaignId = crypto.randomUUID();
-  const roomId = crypto.randomUUID();
+  const room = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `campaign-intelligence-room:${orgId}`);
+    let fixedRoom = await tx.hyperRoom.findFirst({
+      where: { orgId, roomTag: 'campaign', archivedAt: null, agentConnectors: { path: ['_domain_home'], equals: true } },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!fixedRoom) {
+      fixedRoom = await tx.hyperRoom.findFirst({ where: { orgId, roomTag: 'campaign', archivedAt: null }, orderBy: { updatedAt: 'desc' } });
+    }
+    const roomData = {
+      name: 'Campaign Intelligence',
+      goal: 'Turn company truth into debated, channel-ready campaigns with explicit launch approval and measurement.',
+      participantIds,
+      permanentLeadId: participantIds[0],
+      roomTag: 'campaign',
+      qualityMode: 'best',
+      agentConnectors: { ...(fixedRoom?.agentConnectors || {}), _domain_home: true, _domain_version: 1 },
+    };
+    return fixedRoom
+      ? tx.hyperRoom.update({ where: { id: fixedRoom.id }, data: roomData })
+      : tx.hyperRoom.create({ data: { id: crypto.randomUUID(), userId, orgId, template: 'auto', enabledConnectors: [], ...roomData } });
+  }, { timeout: 15000 });
+  const roomId = room.id;
   const turnId = crypto.randomUUID();
-  const roomGoal = `Campaign ${input.name}\nCompany campaign objective: ${input.goal}`.slice(0, 8000);
+  const lastTurn = await prisma.hyperTurn.findFirst({ where: { roomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
   const campaignDraft = {
     id: campaignId, orgId, ownerUserId: userId, name: input.name, goal: input.goal,
     objective: input.objective, requestedChannels: input.channels, brief: input.brief,
@@ -511,13 +533,12 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
       .map(campaignCapabilitySnapshot),
     capabilities_checked_at: capabilities.checked_at,
   };
-  const [room, campaign, turn, run] = await prisma.$transaction([
-    prisma.hyperRoom.create({ data: {
-      id: roomId, userId, orgId, name: input.name.slice(0, 120), goal: roomGoal,
-      participantIds, template: 'auto', permanentLeadId: participantIds[0],
-      roomTag: 'campaign',
-      enabledConnectors: input.channels.includes('gmail') ? ['gmail'] : [], qualityMode: 'best',
-    } }),
+  const enabledConnectors = Array.from(new Set([
+    ...(Array.isArray(room.enabledConnectors) ? room.enabledConnectors : []),
+    ...(input.channels.includes('gmail') ? ['gmail'] : []),
+  ]));
+  const [, campaign, turn, run] = await prisma.$transaction([
+    prisma.hyperRoom.update({ where: { id: roomId }, data: { enabledConnectors } }),
     prisma.campaign.create({ data: {
       id: campaignId, orgId, ownerUserId: userId, creationKey: input.creationKey, name: input.name,
       objective: input.objective, goal: input.goal, brief: input.brief, requirements: input.requirements,
@@ -526,7 +547,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
       roomId, status: 'GENERATING',
     } }),
     prisma.hyperTurn.create({ data: {
-      id: turnId, roomId, seq: 1, userMessage: kickoff, status: 'live',
+      id: turnId, roomId, seq: (lastTurn?.seq || 0) + 1, userMessage: kickoff, status: 'live',
       idempotencyKey: `campaign-kickoff-${campaignId}`, lines: [],
     } }),
     prisma.campaignRun.create({ data: {
@@ -573,8 +594,9 @@ export async function getCampaign({ prisma, orgId, userId = null, id }) {
     },
   });
   if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
-  const roomTranscript = campaign.roomId ? await prisma.hyperTurn.findMany({
-    where: { roomId: campaign.roomId }, orderBy: { seq: 'asc' }, take: 20,
+  const campaignTurnIds = campaign.runs.map((run) => run.turnId).filter(Boolean);
+  const roomTranscript = campaign.roomId && campaignTurnIds.length ? await prisma.hyperTurn.findMany({
+    where: { roomId: campaign.roomId, id: { in: campaignTurnIds } }, orderBy: { seq: 'asc' }, take: 20,
     select: { id: true, seq: true, status: true, lines: true, startedAt: true, sealedAt: true },
   }) : [];
   const currentActions = campaign.currentPlanVersionId

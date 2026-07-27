@@ -29,7 +29,7 @@ async function hasGmailConnection(prisma, userId, orgId) {
 
 function isUnexpired(connection, now) {
   return Boolean(connection?.status === 'active' && (
-    connection.refreshToken || !connection.expiresAt || connection.expiresAt.getTime() > now.getTime()
+    connection.refreshTokenEncrypted || !connection.expiresAt || connection.expiresAt.getTime() > now.getTime()
   ));
 }
 
@@ -57,7 +57,7 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
   const [x, xAds, gmail, tara] = await Promise.all([
     prisma.xAdsCredential.findUnique({
       where: { orgId_userId_authKind: { orgId, userId, authKind: X_AUTH_OAUTH2 } },
-      select: { status: true, xUserId: true, xUsername: true, scopes: true, expiresAt: true, connectedAt: true, updatedAt: true, refreshToken: true },
+      select: { status: true, xUserId: true, xUsername: true, scopes: true, expiresAt: true, connectedAt: true, updatedAt: true, refreshTokenEncrypted: true },
     }).catch(() => null),
     prisma.xAdsCredential.findUnique({
       where: { orgId_userId_authKind: { orgId, userId, authKind: X_AUTH_OAUTH1 } },

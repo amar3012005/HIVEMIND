@@ -115,7 +115,7 @@ test('campaign capabilities keep X connected when a refresh token can renew an e
     xAdsCredential: {
       async findUnique({ where }) {
         if (where.orgId_userId_authKind.authKind !== 'OAUTH2') return null;
-        return { status: 'active', xUserId: 'x-1', xUsername: 'connected', scopes: ['tweet.write'], expiresAt: expired, refreshToken: 'encrypted', connectedAt: new Date(), updatedAt: new Date() };
+        return { status: 'active', xUserId: 'x-1', xUsername: 'connected', scopes: ['tweet.write'], expiresAt: expired, refreshTokenEncrypted: 'encrypted', connectedAt: new Date(), updatedAt: new Date() };
       },
     },
     nangoConnection: { async findFirst() { return null; } },
@@ -126,7 +126,7 @@ test('campaign capabilities keep X connected when a refresh token can renew an e
   const x = capabilities.channels.find((channel) => channel.id === 'x_organic');
   assert.equal(x.connected, true);
   assert.equal(x.identity.username, 'connected');
-  assert.equal('refreshToken' in x.evidence, false);
+  assert.equal('refreshTokenEncrypted' in x.evidence, false);
 });
 
 test('campaign horizon and intensity produce an authoritative per-channel action range', () => {

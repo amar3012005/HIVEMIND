@@ -2493,55 +2493,34 @@ class Director:
 
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
-        full_auto = str(self.campaign_brief.get("autonomyMode") or self.campaign_brief.get("autonomy_mode") or "").upper() == "FULL_AUTO"
         board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
-        from .campaign_contract import CAMPAIGN_CONTRACT_VERSION, campaign_system_contract
+        from .campaign_contract import assemble_campaign_bundle, campaign_system_contract, classify_campaign_errors
         system = (
             campaign_system_contract() + "\n\n"
-            "You are the final campaign plan compiler. Return one JSON object only. The room may research and draft, "
-            "but it must never send. Preserve the user's goal, use only selected channels, and provide complete final "
-            f"content. Set contract_version to {CAMPAIGN_CONTRACT_VERSION}. Required shape: "
-            f"{{contract_version:{CAMPAIGN_CONTRACT_VERSION},objective:string,strategy:string,"
+            "You are the campaign judgment synthesizer. Return one compact JSON object only; never publish. "
+            "Decide strategy, evidence, copy, creative hypotheses, and measurement. Product code adds identifiers, "
+            "timeline rows, payload mirrors, schedule defaults, safety scaffolding, launch controls, and requirement coverage. "
+            "Required semantic shape: {objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
             "company_grounding:{company_name:string,facts_used:string[],unknowns:string[]},"
-            "campaign_horizon:{duration_days:integer,intensity:string,rationale:string},"
             "positioning:{statement:string,proof_points:string[]},"
             "audience:{rationale:string,segments:array,safety_notes:array},"
-            "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],actions:[{id:string,channel:string,"
-            "title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
+            "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],"
+            "actions:[{id:string,channel:string,title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
             "creative_brief:{required:boolean,objective:string,subject:string,composition:string,brand_style:string,audience:string,"
             "aspect_ratio:1:1|16:9|9:16|4:3|3:4,text_policy:string,required_elements:string[],forbidden_elements:string[],"
             "unsupported_claims:string[],alt_text:string,generation_prompt:string,rationale:string,lighting:string,camera:string,color_direction:string,emotional_tone:string,visual_references:string[]},"
-            "claim_status:verified|assumption|no_claim,evidence_ids:string[]}],"
-            "timeline:[{action_id:string,phase:string,scheduled_offset_minutes:integer}],"
-            "safety:{guardrails:string[],prohibited_claims:string[]},"
-            "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},"
-            "debate_conflicts_present:boolean,"
+            "claim_status:verified|assumption|no_claim,evidence_ids:string[],hypothesis_id:string}],"
+            "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},debate_conflicts_present:boolean,"
             "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
-            "evidence:[{id:string,claim:string,source:string,status:verified|assumption|missing,url:string}],"
-            "media_plan:{currency:string|null,channels:[{channel:string,role:string,rationale:string,budget_amount:number|null,prerequisites:string[],exclusions:string[]}]},"
+            "evidence:[{id:string,claim:string,source:string,status:verified|assumption|missing,url:string,source_type:string,confidence:string}],"
             "creative_system:{approved_claim_ids:string[],hypotheses:[{id:string,insight:string,promise:string,hook:string,cta:string,channels:string[],experiment_hypothesis:string}]},"
-            "launch_plan:{mode:draft_only,approval_mode:string,prerequisites:string[],blocked_by:string[],ceilings:array,verification_steps:string[],rollback_steps:string[]},"
-            f"monitoring_plan:{{baseline:string,primary_outcome:string,attribution_limit:string,checkpoints:[{{timing:string,metrics:string[],decision_rule:string}}],optimization_requires_approval:{str(not full_auto).lower()}}},"
-            "assumptions:string[],launch_checklist:string[],risks:string[],"
-            "quality_gate:{ready:true,checks:{goal_alignment:passed,company_grounding:passed,channel_completeness:passed,provider_validity:passed,schedule_completeness:passed,evidence_integrity:passed,creative_completeness:passed,launch_safety:passed,measurement_readiness:passed}},"
-            "requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
-            "Every action must appear in timeline with the same scheduled offset. Set debate_conflicts_present from "
-            "the transcript; when true, record every material conflict and resolution in debate_decisions. Use an "
-            "empty debate_decisions array only when no material conflict exists. "
-            "For Gmail payload include a verified to email, subject, and recipient_policy. For TARA include a verified "
-            "E.164 to number, opening, goal, context, language, lawful_basis (consent or legitimate_interest), "
-            "ISO country, IANA timezone, and calling_window; "
-            "objections, and strategy; TARA must speak first. For X Organic payload include text. No placeholders. "
-            "Each evidence row also requires source_type (company, connector, web, user, provider, or derived) and "
-            "confidence (high, medium, low, or none). Each action requires hypothesis_id, dependencies, success_measure, "
-            "and rollback_or_exit. Every action must reference one declared hypothesis. A verified action claim and every "
-            "creative_system.approved_claim_id may reference only evidence rows whose status is verified. Assumptions and "
-            "missing evidence must never be promoted into approved public claims. launch_plan is draft_only because "
-            "Every KPI must label its target_type. Use baseline when the campaign must establish a baseline, proposed for "
-            "an owner-reviewable goal, and verified only when its evidence_ids point to verified historical evidence. Never "
-            "present a proposed numerical target as observed performance or a sourced benchmark. "
-            "the Room cannot publish; list missing connections, approvals, ceilings, evidence, or tracking in blocked_by. "
+            "assumptions:string[],risks:string[]}. "
+            "Record material debate decisions. Generate the full action range for every selected channel. Every action "
+            "must reference a declared hypothesis. Verified claims may reference only verified evidence; assumptions must "
+            "never appear as factual public copy. Every KPI must label its target_type. No placeholders or invented URLs. "
+            "For Gmail payload include verified to, subject, and recipient_policy. For TARA include verified E.164 to, "
+            "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
@@ -2579,10 +2558,13 @@ class Director:
                 uncapped=True,
             )
             raw = str((msg or {}).get("content") or "").strip()
-            candidate = _first_json_object(raw)
+            semantic_candidate = _first_json_object(raw)
+            candidate = assemble_campaign_bundle(
+                semantic_candidate, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
+            )
             if isinstance(candidate, dict):
                 self._repair_campaign_derivations(candidate)
-                previous_candidate = candidate
+                previous_candidate = semantic_candidate if isinstance(semantic_candidate, dict) else {}
             visual_actions = [action for action in (candidate.get("actions") or [])
                               if isinstance(action, dict)
                               and isinstance(action.get("creative_brief"), dict)
@@ -2608,7 +2590,7 @@ class Director:
                 await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
                 return accepted, []
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
-                             "errors": errors[:12], "attempt": attempt + 1})
+                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": attempt + 1})
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Contract checks found gaps",
                              "detail": f"The lead is repairing {len(errors)} validation issue(s) before acceptance.",

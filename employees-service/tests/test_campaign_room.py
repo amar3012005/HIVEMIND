@@ -5,7 +5,9 @@ import pytest
 
 from hivemind_employees.hyper.campaign_contract import (
     CAMPAIGN_CONTRACT_VERSION,
+    assemble_campaign_bundle,
     campaign__submit_plan,
+    classify_campaign_errors,
 )
 from hivemind_employees.hyper.engine import Director
 from hivemind_employees.hyper.skills import resolve_room_kind
@@ -33,6 +35,60 @@ def test_campaign_submit_plan_is_the_completion_contract():
     )
     assert accepted is None
     assert "actions must not be empty" in errors
+
+
+def test_semantic_campaign_plan_is_assembled_into_execution_contract():
+    semantic = {
+        "objective": "AWARENESS",
+        "strategy": "Build trust with an evidence-led sequence.",
+        "strategy_options": [
+            {"id": "evidence", "name": "Evidence", "thesis": "Lead with proof", "tradeoff": "Slower hook"},
+            {"id": "story", "name": "Story", "thesis": "Lead with narrative", "tradeoff": "Less technical"},
+            {"id": "community", "name": "Community", "thesis": "Lead with participation", "tradeoff": "Needs engagement"},
+        ],
+        "selected_strategy_id": "evidence",
+        "company_grounding": {"company_name": "Example", "facts_used": ["The event is on August 5"], "unknowns": []},
+        "positioning": {"statement": "A practical event for design leaders.", "proof_points": ["Event date supplied by the user"]},
+        "audience": {"rationale": "Design leaders", "segments": [{"name": "Design leaders"}], "safety_notes": []},
+        "content_pillars": ["Practical design leadership"],
+        "kpis": [{"name": "Engagement", "target": "Establish baseline", "source": "X", "target_type": "baseline", "evidence_ids": []}],
+        "evidence": [{"id": "event", "claim": "The event is on August 5", "source": "User brief", "status": "verified"}],
+        "creative_system": {"approved_claim_ids": ["event"], "hypotheses": [
+            {"id": "date", "insight": "Timing matters", "promise": "Plan ahead", "hook": "Save the date", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Date-led copy earns engagement"},
+            {"id": "value", "insight": "Practical value matters", "promise": "Useful discussion", "hook": "What will you learn?", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Value-led copy earns engagement"},
+        ]},
+        "actions": [{"channel": "x_organic", "title": "Save the date", "final_copy": "Save the date for a practical conversation about design leadership.", "claim_status": "no_claim", "evidence_ids": [], "hypothesis_id": "date"}],
+        "measurement": {"primary_kpi": "Engagement", "attribution_limit": "Engagement is not attendance.", "review_cadence": "After each post"},
+        "debate_conflicts_present": False, "debate_decisions": [], "assumptions": [], "risks": [],
+    }
+    bundle = assemble_campaign_bundle(
+        semantic, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        campaign_brief={"objective": "AWARENESS", "autonomyMode": "FULL_AUTO", "brief": {"duration_days": 7, "cadence": {"preset": "focused"}}},
+    )
+
+    assert bundle["contract_version"] == CAMPAIGN_CONTRACT_VERSION
+    assert bundle["actions"][0]["payload"]["text"] == bundle["actions"][0]["final_copy"]
+    assert bundle["timeline"][0]["action_id"] == bundle["actions"][0]["id"]
+    assert bundle["monitoring_plan"]["optimization_requires_approval"] is False
+    assert bundle["requirement_coverage"][1]["action_ids"] == [bundle["actions"][0]["id"]]
+    accepted, errors = campaign__submit_plan(
+        bundle, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief={"objective": "AWARENESS", "autonomyMode": "FULL_AUTO", "brief": {"duration_days": 7, "cadence": {"preset": "focused"}}},
+    )
+    assert errors == []
+    assert accepted == bundle
+
+
+def test_campaign_validation_errors_are_typed_for_targeted_repair():
+    grouped = classify_campaign_errors([
+        "action a1 dependencies must be an array for contract v4",
+        "action a1 contains claims not present in its evidence: 30%",
+        "Gmail action a1 needs a verified payload.to email",
+    ])
+    assert len(grouped["structural"]) == 1
+    assert len(grouped["semantic"]) == 1
+    assert len(grouped["operational"]) == 1
 
 
 def test_permanent_campaign_room_debates_the_active_run_goal():

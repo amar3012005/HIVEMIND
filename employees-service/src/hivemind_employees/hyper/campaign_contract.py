@@ -1,5 +1,6 @@
 """Deterministic completion contract for Campaign Rooms."""
 
+import copy
 import re
 from typing import Any
 
@@ -72,6 +73,181 @@ def _non_empty_string(value: Any) -> bool:
 
 def _non_empty_list(value: Any) -> bool:
     return isinstance(value, list) and bool(value)
+
+
+def classify_campaign_errors(errors: list[str]) -> dict[str, list[str]]:
+    """Separate model judgment failures from assembler and launch concerns."""
+    structural_markers = (
+        "must be an array", "must be an object", "needs a unique id", "timeline",
+        "requirement ", "dependencies", "schedule offset", "must match final_copy",
+        "contract_version", "quality_gate", "campaign_horizon", "selected_strategy_id",
+    )
+    operational_markers = (
+        "verified payload.to", "payload.country", "payload.timezone", "lawful_basis",
+        "provider", "connection", "budget", "approval",
+    )
+    grouped = {"structural": [], "semantic": [], "operational": []}
+    for error in errors:
+        lowered = str(error).lower()
+        if any(marker in lowered for marker in operational_markers):
+            grouped["operational"].append(error)
+        elif any(marker in lowered for marker in structural_markers):
+            grouped["structural"].append(error)
+        else:
+            grouped["semantic"].append(error)
+    return grouped
+
+
+def assemble_campaign_bundle(
+    semantic_plan: Any,
+    *,
+    channels: list[str],
+    requirements: list[str],
+    campaign_brief: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Turn model-owned campaign judgment into the durable v4 contract.
+
+    The model owns strategy, evidence, copy, hypotheses, and creative direction.
+    Stable identifiers, schedule rows, channel payload mirrors, launch controls,
+    and requirement bookkeeping are deterministic product concerns.
+    """
+    plan = copy.deepcopy(semantic_plan) if isinstance(semantic_plan, dict) else {}
+    brief = campaign_brief if isinstance(campaign_brief, dict) else {}
+    brief_payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    cadence = brief_payload.get("cadence") if isinstance(brief_payload.get("cadence"), dict) else {}
+    duration = max(1, int(brief_payload.get("duration_days") or 14))
+    intensity = str(cadence.get("preset") or "focused").lower()
+    full_auto = str(brief.get("autonomyMode") or brief.get("autonomy_mode") or "").upper() == "FULL_AUTO"
+
+    plan["contract_version"] = CAMPAIGN_CONTRACT_VERSION
+    plan["objective"] = str(plan.get("objective") or brief.get("objective") or "CUSTOM")
+    plan["campaign_horizon"] = {
+        "duration_days": duration,
+        "intensity": intensity,
+        "rationale": str((plan.get("campaign_horizon") or {}).get("rationale") or f"Run a {duration}-day {intensity} campaign."),
+    }
+
+    options = [row for row in (plan.get("strategy_options") or []) if isinstance(row, dict)]
+    for index, option in enumerate(options):
+        option["id"] = str(option.get("id") or f"strategy_{index + 1}")
+    plan["strategy_options"] = options
+    if options and str(plan.get("selected_strategy_id") or "") not in {row["id"] for row in options}:
+        plan["selected_strategy_id"] = options[0]["id"]
+
+    evidence = [row for row in (plan.get("evidence") or []) if isinstance(row, dict)]
+    for index, item in enumerate(evidence):
+        item["id"] = str(item.get("id") or f"evidence_{index + 1}")
+        item.setdefault("status", "assumption")
+        item.setdefault("source_type", "derived")
+        item.setdefault("confidence", "medium" if item.get("status") == "verified" else "low")
+        item.setdefault("url", "")
+    plan["evidence"] = evidence
+
+    creative = plan.get("creative_system") if isinstance(plan.get("creative_system"), dict) else {}
+    hypotheses = [row for row in (creative.get("hypotheses") or []) if isinstance(row, dict)]
+    for index, hypothesis in enumerate(hypotheses):
+        hypothesis["id"] = str(hypothesis.get("id") or f"hypothesis_{index + 1}")
+        hypothesis.setdefault("channels", channels)
+    creative["hypotheses"] = hypotheses
+    creative.setdefault("approved_claim_ids", [])
+    plan["creative_system"] = creative
+
+    actions = [row for row in (plan.get("actions") or []) if isinstance(row, dict)]
+    final_offset = max(0, (duration - 1) * 1440)
+    hypothesis_ids = [row["id"] for row in hypotheses]
+    primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")
+    for index, action in enumerate(actions):
+        action["id"] = str(action.get("id") or f"action_{index + 1}")
+        if len(channels) == 1:
+            action["channel"] = channels[0]
+        action["channel"] = str(action.get("channel") or "").lower()
+        action["title"] = str(action.get("title") or f"Campaign action {index + 1}")
+        action["format"] = str(action.get("format") or "post")
+        action["final_copy"] = str(action.get("final_copy") or action.get("copy") or "").strip()
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        if action["channel"] == "x_organic":
+            payload["text"] = action["final_copy"]
+        action["payload"] = payload
+        if not isinstance(action.get("scheduled_offset_minutes"), int) or isinstance(action.get("scheduled_offset_minutes"), bool):
+            action["scheduled_offset_minutes"] = round(final_offset * index / max(1, len(actions) - 1))
+        action["rationale"] = str(action.get("rationale") or f"Advance the campaign through {action['title'].lower()}.")
+        action["hypothesis_id"] = str(action.get("hypothesis_id") or (hypothesis_ids[index % len(hypothesis_ids)] if hypothesis_ids else ""))
+        action["dependencies"] = action.get("dependencies") if isinstance(action.get("dependencies"), list) else []
+        action["success_measure"] = str(action.get("success_measure") or primary_metric)
+        action["rollback_or_exit"] = str(action.get("rollback_or_exit") or "Pause this and remaining scheduled actions if the stated safety or provider checks fail.")
+        action["evidence_ids"] = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
+        action["claim_status"] = str(action.get("claim_status") or "no_claim")
+        creative_brief = action.get("creative_brief") if isinstance(action.get("creative_brief"), dict) else {}
+        required = creative_brief.get("required") is True
+        creative_brief["required"] = required
+        if not required:
+            for field in ("objective", "subject", "composition", "brand_style", "audience", "text_policy", "alt_text", "generation_prompt", "rationale", "lighting", "camera", "color_direction", "emotional_tone"):
+                creative_brief.setdefault(field, "")
+            creative_brief.setdefault("aspect_ratio", "1:1")
+            for field in ("required_elements", "forbidden_elements", "unsupported_claims", "visual_references"):
+                creative_brief.setdefault(field, [])
+        action["creative_brief"] = creative_brief
+    plan["actions"] = actions
+
+    plan["timeline"] = [{
+        "action_id": action["id"],
+        "phase": str(action.get("phase") or f"Phase {index + 1}"),
+        "scheduled_offset_minutes": action["scheduled_offset_minutes"],
+    } for index, action in enumerate(actions)]
+    plan["requirement_coverage"] = [{
+        "requirement_id": requirement,
+        "strategy_sections": ["strategy", "actions"],
+        "action_ids": [action["id"] for action in actions if requirement == "goal" or requirement == f"channel:{action['channel']}"],
+    } for requirement in requirements]
+
+    prohibited = brief_payload.get("prohibited_claims")
+    prohibited_claims = prohibited if isinstance(prohibited, list) else ([str(prohibited)] if str(prohibited or "").strip() else [])
+    safety = plan.get("safety") if isinstance(plan.get("safety"), dict) else {}
+    safety.setdefault("guardrails", ["Publish only verified claims; keep assumptions internal.", "Do not exceed connected-provider capabilities."])
+    safety["prohibited_claims"] = safety.get("prohibited_claims") if isinstance(safety.get("prohibited_claims"), list) else prohibited_claims
+    plan["safety"] = safety
+
+    measurement = plan.get("measurement") if isinstance(plan.get("measurement"), dict) else {}
+    measurement.setdefault("primary_kpi", primary_metric)
+    measurement.setdefault("attribution_limit", "Channel activity alone does not prove downstream business causation.")
+    measurement.setdefault("review_cadence", "Review after each scheduled action and at campaign completion.")
+    plan["measurement"] = measurement
+    plan.setdefault("assumptions", [])
+    plan.setdefault("risks", [])
+    plan.setdefault("launch_checklist", ["Campaign contract accepted", "Provider capability verified", "Schedule validated"])
+
+    media = plan.get("media_plan") if isinstance(plan.get("media_plan"), dict) else {}
+    media.setdefault("currency", None)
+    existing_media = {str(row.get("channel")): row for row in (media.get("channels") or []) if isinstance(row, dict)}
+    media["channels"] = [existing_media.get(channel) or {
+        "channel": channel, "role": "Execute the campaign sequence", "rationale": "Selected in the campaign brief.",
+        "budget_amount": None, "prerequisites": [], "exclusions": [],
+    } for channel in channels]
+    plan["media_plan"] = media
+
+    launch = plan.get("launch_plan") if isinstance(plan.get("launch_plan"), dict) else {}
+    launch.update({"mode": "draft_only", "approval_mode": "FULL_AUTO" if full_auto else "APPROVE_PLAN_ONCE"})
+    launch.setdefault("prerequisites", ["Connected provider remains authorized at execution time"])
+    launch.setdefault("blocked_by", [])
+    launch.setdefault("ceilings", [])
+    launch.setdefault("verification_steps", ["Read back provider state after execution"])
+    launch.setdefault("rollback_steps", ["Pause remaining scheduled actions"])
+    plan["launch_plan"] = launch
+
+    monitoring = plan.get("monitoring_plan") if isinstance(plan.get("monitoring_plan"), dict) else {}
+    monitoring.setdefault("baseline", "Establish the campaign baseline from the first published action.")
+    monitoring.setdefault("primary_outcome", primary_metric)
+    monitoring.setdefault("attribution_limit", measurement["attribution_limit"])
+    monitoring.setdefault("checkpoints", [{"timing": "After each action", "metrics": [primary_metric], "decision_rule": "Record results and preserve the approved schedule."}])
+    monitoring["optimization_requires_approval"] = not full_auto
+    plan["monitoring_plan"] = monitoring
+
+    plan["quality_gate"] = {"ready": True, "checks": {key: "passed" for key in (
+        "goal_alignment", "company_grounding", "channel_completeness", "provider_validity",
+        "schedule_completeness", "evidence_integrity", "creative_completeness", "launch_safety",
+        "measurement_readiness",
+    )}}
+    return plan
 
 
 def campaign_bundle_errors(

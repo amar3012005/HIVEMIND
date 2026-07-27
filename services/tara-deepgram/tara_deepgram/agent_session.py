@@ -155,18 +155,23 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     call_start = time.monotonic()
     events = CallEventLog(session_id)
     ivr_nav = ivr.IvrNavigator(session_id)
+    # Set while DTMF plays so the agent-audio forwarder yields the carrier
+    # socket — a tone must be the ONLY thing on the wire or it reads as noise.
+    dtmf_active = asyncio.Event()
     stream_id: Optional[str] = None  # Twilio streamSid (echoed in outbound frames)
 
     async def _send_dtmf(digits: str) -> None:
-        """Push in-band DTMF to the carrier leg, paced like real audio.
+        """Push in-band DTMF to the carrier leg over an EXCLUSIVE audio path.
 
-        CRITICAL: flush TARA's queued TTS first. Live evidence — the first
-        Romano Law test sent a correct tone while she was mid-greeting, the two
-        signals mixed on the same leg, and the tree heard noise and re-prompted.
-        A phone tree needs the tone in near-silence, exactly as a human presses
-        a key without talking over the menu.
+        Two things are required and both were missing at first:
+          1. flush TARA's already-queued TTS (`clear`), and
+          2. stop dg_to_telnyx from writing agent frames while the tone plays —
+             otherwise the two tasks interleave on one socket and the far end
+             hears alternating 20ms slices of tone and speech, i.e. noise.
+        A handset sends a digit into silence; so must we.
         """
         try:
+            dtmf_active.set()
             clr = {"event": "clear"}
             if stream_id:
                 clr["streamSid"] = stream_id
@@ -179,20 +184,25 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                 await telnyx_ws.send_text(json.dumps(out))
                 await asyncio.sleep(0.02)  # 20ms frames == real-time cadence
             log.info("ivr dtmf sent session=%s digits=%s", session_id, digits)
-            # BYPASS: the tone alone does not reach the far end today, so also
-            # SAY the escape word. Sequential, never simultaneous — overlapping
-            # signals are what made the first attempt read as noise. Speech is
-            # the one channel we fully control, and most trees honour a spoken
-            # "operator" even when they are DTMF-driven.
-            await asyncio.sleep(0.45)
-            await dg.send(json.dumps({
-                "type": "InjectAgentMessage",
-                "message": ivr.spoken_escape(ivr_nav.presses - 1),
-            }))
-            log.info("ivr spoken escape session=%s phrase=%r",
-                     session_id, ivr.spoken_escape(ivr_nav.presses - 1))
         except Exception:  # noqa: BLE001
             log.exception("ivr dtmf send failed session=%s", session_id)
+        finally:
+            # Restore the agent's audio path BEFORE the spoken fallback, else the
+            # escape word would be dropped by the very mute that protected the
+            # tone. Always runs — leaving this set would silence TARA for the
+            # rest of the call.
+            dtmf_active.clear()
+        # SPOKEN FALLBACK, after the tone and after unmuting: most trees are
+        # speech-enabled and almost every DTMF-only one still routes a spoken
+        # "operator" to reception. Strictly sequential with the tone — never
+        # simultaneous.
+        try:
+            await asyncio.sleep(0.3)
+            phrase = ivr.spoken_escape(ivr_nav.presses - 1)
+            await dg.send(json.dumps({"type": "InjectAgentMessage", "message": phrase}))
+            log.info("ivr spoken escape session=%s phrase=%r", session_id, phrase)
+        except Exception:  # noqa: BLE001
+            log.exception("ivr spoken escape failed session=%s", session_id)
     if seed_start:  # start event already consumed by the caller (Twilio peek)
         st = seed_start.get("start", {}) or {}
         stream_id = (seed_start.get("streamSid") or st.get("streamSid")
@@ -285,6 +295,17 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                     except websockets.ConnectionClosed:
                         break
                     if isinstance(frame, bytes):
+                        # EXCLUSIVE AUDIO PATH during DTMF. This task and
+                        # _send_dtmf write to the SAME carrier socket from
+                        # different tasks, so without this the far end receives
+                        # [tone][agent][tone][agent]… interleaved at 20ms — which
+                        # is noise, not a digit. That, not the carrier, is why
+                        # correct tones at correct level were ignored: speech
+                        # works because it is one continuous source. Drop (never
+                        # buffer) agent frames here — we want real silence around
+                        # the tone, exactly as a handset produces.
+                        if dtmf_active.is_set():
+                            continue
                         out = {"event": "media",
                                "media": {"payload": base64.b64encode(frame).decode()}}
                         if stream_id:  # Twilio requires streamSid; Telnyx omits it

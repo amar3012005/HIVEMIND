@@ -7272,7 +7272,11 @@ exit \$RC
           }
           try {
             const call = await prisma.taraCall.upsert({
-              where: { sessionId: String(body.session_id) },
+              // Uniqueness is (org_id, session_id) — the single-column unique on
+              // session_id was dropped by the tara_grok migration. A bare
+              // { sessionId } here throws "needs at least one of id or
+              // orgId_sessionId" and every call record is silently lost.
+              where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } },
               update: { mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en', status: 'active' },
               create: { orgId: tOrg, userId: tUser, sessionId: String(body.session_id), mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en' },
             });
@@ -7292,7 +7296,7 @@ exit \$RC
             return jsonResponse(res, { ok: true });
           }
           try {
-            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
             if (call && call.orgId === tOrg) await prisma.taraCall.update({ where: { id: call.id }, data: { promptTokens: { increment: pt }, completionTokens: { increment: ct } } });
           } catch { /* best-effort */ }
           return jsonResponse(res, { ok: true });
@@ -7316,7 +7320,7 @@ exit \$RC
             } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
           }
           try {
-            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
             const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
             try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
@@ -7399,7 +7403,7 @@ exit \$RC
             } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
           }
           try {
-            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
             if (call.status === 'completed') {
               return jsonResponse(res, { ok: true, already_completed: true, duration_ms: call.durationMs || 0, turns: call.turnCount || 0 });

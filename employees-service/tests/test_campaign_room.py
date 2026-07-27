@@ -101,6 +101,17 @@ def test_campaign_compiler_replaces_unsupported_historical_baseline():
     assert bundle["monitoring_plan"]["baseline"] == "Establish the campaign baseline from the first published action."
 
 
+def test_campaign_compiler_replaces_unsupported_named_account_baseline():
+    bundle = {
+        "kpis": [{"target_type": "proposed", "evidence_ids": []}],
+        "monitoring_plan": {"baseline": "Current X account average reach for similar posts."},
+    }
+
+    Director._repair_campaign_derivations(bundle)
+
+    assert bundle["monitoring_plan"]["baseline"] == "Establish the campaign baseline from the first published action."
+
+
 def test_campaign_contract_rejects_assumptions_in_executable_copy():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["claim_status"] = "assumption"

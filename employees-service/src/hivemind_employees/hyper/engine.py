@@ -1976,8 +1976,7 @@ class Director:
         # The broad company brief can contain imported client/project memories.
         # Treat only the active campaign contract and current request as the
         # identity allowlist, otherwise legacy brands can authorize themselves.
-        campaign_brief = getattr(self, "campaign_brief", {})
-        active_context = f"{json.dumps(campaign_brief, ensure_ascii=False)} {self.user_message}".casefold()
+        active_context = (self.user_message or "").casefold()
         common_terms = {"AI", "API", "B2B", "B2C", "CRM", "GDPR", "ICP", "SEO", "X"}
         identifiers = set(re.findall(r"\b[A-Z][A-Z0-9_-]{3,}\b", query or ""))
         return all(token in common_terms or token.casefold() in active_context for token in identifiers)
@@ -2633,7 +2632,7 @@ class Director:
                 and bool(kpi.get("evidence_ids"))
                 for kpi in (bundle.get("kpis") or [])
             )
-            if baseline and not grounded_kpi and re.search(r"\d|%|percent|approximately|historical", baseline, re.I):
+            if baseline and not grounded_kpi:
                 monitoring["baseline"] = "Establish the campaign baseline from the first published action."
 
     @staticmethod

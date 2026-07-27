@@ -515,7 +515,7 @@ model Campaign {
   schedulePolicy       Json      @default("{}") @map("schedule_policy") @db.JsonB
   autonomyMode         String    @default("APPROVE_PLAN_ONCE") @map("autonomy_mode") @db.VarChar(32)
   status               String    @default("DRAFT") @db.VarChar(32)
-  roomId               String?   @unique(map: "campaigns_room_id_key") @map("room_id") @db.Uuid
+  roomId               String?   @map("room_id") @db.Uuid
   currentPlanVersionId String?   @map("current_plan_version_id") @db.Uuid
   approvedPlanVersionId String?  @map("approved_plan_version_id") @db.Uuid
   sourceType           String?   @map("source_type") @db.VarChar(40)
@@ -540,6 +540,7 @@ model Campaign {
 
   @@unique([orgId, sourceType, sourceId], map: "campaigns_legacy_source_key")
   @@unique([orgId, ownerUserId, creationKey], map: "campaigns_creation_key")
+  @@index([roomId], map: "campaigns_room_id_idx")
   @@index([orgId, status, createdAt(sort: Desc)])
   @@index([ownerUserId, createdAt(sort: Desc)])
   @@map("campaigns")

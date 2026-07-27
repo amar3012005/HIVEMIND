@@ -17,6 +17,21 @@ This preserves one campaign ID, one evidence board, one approval history, one sc
 7. Return the plan to Your Campaigns for review.
 8. Allow launch only when every requested channel is execution-ready and the existing approval, capability, audit, idempotency, verification, and rollback controls pass.
 
+Campaign Intelligence owns this sequence end to end. It runs one visible Room
+orchestration and one targeted compiler repair when needed; it does not enter the
+general Room goalkeeper loop. An accepted contract returns directly to Your
+Campaigns. Manual Review stops once for approval, while Full Auto continues into
+the existing launch path without another generic approval gate.
+
+## Shared Room Foundation
+
+The campaign pipeline specializes the work and output contract, not the durable
+Room substrate. It continues to use the common Room journal, turn provenance,
+agent learnings, company memory, participant discussion events, event-driven
+connector toolkit, artifacts, audit events, and final seal lifecycle. General and
+the other domain Rooms retain their own directors, skills, reports, and retry
+policies.
+
 ## Planning Versus Execution
 
 `planning_ready` means the Campaign Room can produce a source-grounded strategy, creative system, media plan, schedule, measurement plan, and explicit prerequisites for a channel.

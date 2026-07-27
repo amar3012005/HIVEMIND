@@ -105,3 +105,10 @@ def test_campaign_director_receives_bounded_round_policy(monkeypatch):
     assert captured["room_kind"] == "campaign"
     assert captured["synth_model"] == "openai/gpt-oss-120b"
     assert captured["debate_max_rounds"] == 3
+
+
+def test_campaign_turn_uses_one_orchestration_round(monkeypatch):
+    monkeypatch.setenv("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS", "5")
+
+    assert api_hyper_rooms._goalkeeper_rounds_for_room("campaign") == 1
+    assert api_hyper_rooms._goalkeeper_rounds_for_room("general") == 5

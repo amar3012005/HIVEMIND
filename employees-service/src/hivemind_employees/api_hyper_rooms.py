@@ -3636,6 +3636,11 @@ def _goalkeeper_max_rounds() -> int:
         return 3
 
 
+def _goalkeeper_rounds_for_room(room_kind: str) -> int:
+    """Campaign contracts own their repair pass; other Rooms use the goalkeeper."""
+    return 1 if str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
+
+
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     """Phase 6 — decide whether to run another round. Loop ONLY when the
     done-criterion is unmet AND the gap is re-plannable: the artifact was never
@@ -3741,7 +3746,13 @@ async def post_room_turn(
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back
     # into the turn message and re-plan, up to a round cap. Same shape as the
     # Claude `/goal` keep-working-toward-the-goal loop.
-    max_rounds = _goalkeeper_max_rounds()
+    from .hyper.skills import resolve_room_kind
+    room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
+    # Campaign Intelligence already performs its own compile/validate/repair pass.
+    # Re-running the general goalkeeper duplicates research, debate and synthesis,
+    # burns tokens, and can replace a nearly-complete campaign with a later draft.
+    # Every other specialist Room keeps its independent goalkeeper policy.
+    max_rounds = _goalkeeper_rounds_for_room(room_kind)
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None

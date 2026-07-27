@@ -2551,10 +2551,10 @@ class Director:
         errors = ["bundle was not generated"]
         previous_candidate: Optional[Dict[str, Any]] = None
         visual_skill = ""
-        # Campaign bundles are larger than ordinary synthesis output. Keep the
-        # repair loop bounded, but give the compiler enough passes to preserve
-        # good copy while repairing deterministic contract failures.
-        for attempt in range(6):
+        # Campaign Intelligence owns its contract compilation. One focused repair
+        # is enough after the initial synthesis; the general Room goalkeeper must
+        # not rerun research, debate, and synthesis for schema-level defects.
+        for attempt in range(2):
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             if attempt:
                 previous = json.dumps(previous_candidate, ensure_ascii=False)[:12000] if previous_candidate else "(no parseable prior draft)"

@@ -82,6 +82,41 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
     assert accepted == bundle
 
 
+def test_campaign_compiler_applies_authoritative_action_maximum():
+    semantic = {
+        "actions": [
+            {"id": f"x-{index}", "channel": "x_organic", "final_copy": f"Post {index}"}
+            for index in range(1, 8)
+        ],
+    }
+    bundle = assemble_campaign_bundle(
+        semantic, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        campaign_brief={"brief": {"duration_days": 7, "cadence": {
+            "expected_actions_by_channel": {"x_organic": {"minimum": 4, "maximum": 6}},
+        }}},
+    )
+
+    assert [action["id"] for action in bundle["actions"]] == [f"x-{index}" for index in range(1, 7)]
+    assert len(bundle["timeline"]) == 6
+
+
+def test_campaign_derivations_normalize_only_claim_safe_assumptions():
+    bundle = {
+        "company_grounding": {"facts_used": []},
+        "evidence": [{"id": "company-1", "status": "verified", "claim": "SINGULANCE has a company memory product."}],
+        "actions": [
+            {"id": "safe", "claim_status": "assumption", "final_copy": "Explore a shared company memory."},
+            {"id": "outcome", "claim_status": "assumption", "final_copy": "Our customers improve performance."},
+        ],
+    }
+
+    Director._repair_campaign_derivations(bundle)
+
+    assert bundle["company_grounding"]["facts_used"] == ["SINGULANCE has a company memory product."]
+    assert bundle["actions"][0]["claim_status"] == "no_claim"
+    assert bundle["actions"][1]["claim_status"] == "assumption"
+
+
 def test_campaign_validation_errors_are_typed_for_targeted_repair():
     grouped = classify_campaign_errors([
         "action a1 dependencies must be an array for contract v4",

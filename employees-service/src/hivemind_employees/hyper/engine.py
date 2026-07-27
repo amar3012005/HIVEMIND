@@ -2815,8 +2815,20 @@ class Director:
             for item in (bundle.get("evidence") or [])
             if isinstance(item, dict)
         }
+        grounding = bundle.get("company_grounding")
+        if isinstance(grounding, dict) and not grounding.get("facts_used"):
+            grounding["facts_used"] = [
+                str(item.get("claim") or "").strip()
+                for item in (bundle.get("evidence") or [])
+                if isinstance(item, dict) and item.get("status") == "verified" and str(item.get("claim") or "").strip()
+            ][:8]
         for action in valid_actions:
             evidence_ids = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
+            if (
+                str(action.get("claim_status") or "") == "assumption"
+                and not copy_contains_outcome_claim(action.get("final_copy"))
+            ):
+                action["claim_status"] = "no_claim"
             if (
                 str(action.get("claim_status") or "") == "no_claim"
                 and copy_contains_outcome_claim(action.get("final_copy"))

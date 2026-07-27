@@ -168,6 +168,19 @@ def assemble_campaign_bundle(
     plan["creative_system"] = creative
 
     actions = [row for row in (plan.get("actions") or []) if isinstance(row, dict)]
+    expected = cadence.get("expected_actions_by_channel") if isinstance(cadence.get("expected_actions_by_channel"), dict) else {}
+    if expected:
+        kept: list[dict[str, Any]] = []
+        seen_by_channel: dict[str, int] = {}
+        for action in actions:
+            channel = str(action.get("channel") or (channels[0] if len(channels) == 1 else "")).lower()
+            maximum = int(((expected.get(channel) or {}).get("maximum") or len(actions))) if isinstance(expected.get(channel), dict) else len(actions)
+            seen = seen_by_channel.get(channel, 0)
+            if seen >= maximum:
+                continue
+            kept.append(action)
+            seen_by_channel[channel] = seen + 1
+        actions = kept
     final_offset = max(0, (duration - 1) * 1440)
     hypothesis_ids = [row["id"] for row in hypotheses]
     primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")

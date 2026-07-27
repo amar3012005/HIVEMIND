@@ -52,7 +52,7 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
         "audience": {"rationale": "Design leaders", "segments": [{"name": "Design leaders"}], "safety_notes": []},
         "content_pillars": ["Practical design leadership"],
         "kpis": [{"name": "Engagement", "target": "Establish baseline", "source": "X", "target_type": "baseline", "evidence_ids": []}],
-        "evidence": [{"id": "event", "claim": "The event is on August 5", "source": "User brief", "status": "verified"}],
+        "evidence": [{"id": "event", "claim": "The event is on August 5", "source": "User brief", "source_type": "user_brief", "status": "verified"}],
         "creative_system": {"approved_claim_ids": ["event"], "hypotheses": [
             {"id": "date", "insight": "Timing matters", "promise": "Plan ahead", "hook": "Save the date", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Date-led copy earns engagement"},
             {"id": "value", "insight": "Practical value matters", "promise": "Useful discussion", "hook": "What will you learn?", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Value-led copy earns engagement"},
@@ -67,6 +67,7 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
     )
 
     assert bundle["contract_version"] == CAMPAIGN_CONTRACT_VERSION
+    assert bundle["evidence"][0]["source_type"] == "user"
     assert bundle["actions"][0]["payload"]["text"] == bundle["actions"][0]["final_copy"]
     assert bundle["timeline"][0]["action_id"] == bundle["actions"][0]["id"]
     assert bundle["monitoring_plan"]["optimization_requires_approval"] is False

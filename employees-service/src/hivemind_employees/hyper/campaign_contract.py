@@ -8,6 +8,19 @@ CAMPAIGN_CONTRACT_VERSION = 4
 
 _HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant", "proprietary")
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s)\]}>]+", re.I)
+_EVIDENCE_SOURCE_TYPES = {"company", "connector", "web", "user", "provider", "derived"}
+_EVIDENCE_SOURCE_ALIASES = {
+    "company_memory": "company",
+    "company_knowledge": "company",
+    "memory": "company",
+    "knowledge_base": "company",
+    "web_search": "web",
+    "research": "web",
+    "user_brief": "user",
+    "campaign_brief": "user",
+    "connected_provider": "provider",
+    "inference": "derived",
+}
 _NO_CLAIM_OUTCOME_RE = re.compile(
     r"\b(?:case\s+stud(?:y|ies)|(?:we|our\s+(?:team|platform|clients?|customers?))\s+"
     r"(?:help(?:ed|s|ing)?|deliver(?:ed|s|ing)?|accelerat\w*|driv(?:e|es|en|ing)|improv\w*|"
@@ -138,7 +151,9 @@ def assemble_campaign_bundle(
     for index, item in enumerate(evidence):
         item["id"] = str(item.get("id") or f"evidence_{index + 1}")
         item.setdefault("status", "assumption")
-        item.setdefault("source_type", "derived")
+        source_type = str(item.get("source_type") or "derived").strip().lower().replace("-", "_").replace(" ", "_")
+        source_type = _EVIDENCE_SOURCE_ALIASES.get(source_type, source_type)
+        item["source_type"] = source_type if source_type in _EVIDENCE_SOURCE_TYPES else "derived"
         item.setdefault("confidence", "medium" if item.get("status") == "verified" else "low")
         item.setdefault("url", "")
     plan["evidence"] = evidence

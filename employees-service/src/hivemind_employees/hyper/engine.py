@@ -2522,6 +2522,8 @@ class Director:
             "Record material debate decisions. Generate the full action range for every selected channel. Every action "
             "must reference a declared hypothesis. Verified claims may reference only verified evidence; assumptions must "
             "never appear as factual public copy. Every KPI must label its target_type. No placeholders or invented URLs. "
+            "NON-NEGOTIABLE COMPLETENESS: include at least three genuinely different strategy_options, set selected_strategy_id "
+            "to one of them, give every creative hypothesis a CTA, and include every required action before returning. "
             "For Gmail payload include verified to, subject, and recipient_policy. For TARA include verified E.164 to, "
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
@@ -2545,19 +2547,20 @@ class Director:
                 # which multiplied validation errors and could leave a provider
                 # generating indefinitely.
                 previous = json.dumps(previous_candidate, ensure_ascii=False) if previous_candidate else "(no parseable prior draft)"
-                messages.append({"role": "user", "content":
-                                 "Repair every validation error below. Preserve valid strategy, evidence, and copy from the prior draft; "
-                                 "return the complete JSON object, never a patch. Count actions per channel before returning and ensure every "
-                                 "action appears exactly once in timeline and requirement_coverage. For an assumption or no_claim outcome "
-                                 "error, either cite directly supporting verified evidence and label the action verified, or rewrite the public "
-                                 "copy so it makes no customer, performance, or outcome assertion.\n\n"
-                                 "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
-                                 "\n\nCURRENT INVALID BUNDLE:\n" + previous})
+                messages = [{"role": "system", "content":
+                             "You repair a campaign semantic plan. Return the complete corrected JSON object only, never a patch. "
+                             "Preserve every valid strategy, evidence item, action, and exact piece of copy. Change only what the listed "
+                             "errors require. Never invent facts, URLs, claims, recipients, or provider capabilities."},
+                            {"role": "user", "content":
+                             "Repair every validation error. Keep all valid actions and count them before returning. For an assumption "
+                             "outcome error, cite directly supporting verified evidence or rewrite only that public copy as no_claim.\n\n"
+                             "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
+                             "\n\nCURRENT SEMANTIC PLAN:\n" + previous}]
             synthesis_round += 1
             msg = await self._groq(
                 messages,
                 force_text=True,
-                model=self.synth_model if validation_attempt == 0 else self.director_model,
+                model=self.synth_model,
                 bucket="synth",
                 temp=0.2,
                 uncapped=True,

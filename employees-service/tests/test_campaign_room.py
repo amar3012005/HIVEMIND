@@ -612,8 +612,9 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
     assert calls == [director.synth_model]
 
 
-def test_campaign_validation_repair_uses_fast_model(monkeypatch):
+def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
     models = []
+    message_sets = []
     submissions = 0
 
     async def emit(event):
@@ -621,6 +622,7 @@ def test_campaign_validation_repair_uses_fast_model(monkeypatch):
 
     async def synthesize(*args, **kwargs):
         models.append(kwargs["model"])
+        message_sets.append(args[0])
         return {"content": "{}"}
 
     def submit(candidate, **kwargs):
@@ -640,7 +642,10 @@ def test_campaign_validation_repair_uses_fast_model(monkeypatch):
     _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
     assert errors == []
-    assert models == [director.synth_model, director.director_model]
+    assert models == [director.synth_model, director.synth_model]
+    assert len(message_sets[1]) == 2
+    assert "GATHERED BOARD" not in message_sets[1][1]["content"]
+    assert "CURRENT SEMANTIC PLAN" in message_sets[1][1]["content"]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

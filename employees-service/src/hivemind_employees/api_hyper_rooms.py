@@ -2815,7 +2815,7 @@ def _campaign_primary_roster(participants: List[Dict[str, Any]]) -> List[Dict[st
 
 
 def _campaign_debate_rounds(campaign_brief: Optional[Dict[str, Any]]) -> int:
-    """One round by default; a second only for declared conflict or material risk."""
+    """Campaigns always need an independent proposal round and a peer challenge round."""
     brief = campaign_brief if isinstance(campaign_brief, dict) else {}
     nested_brief = brief.get("brief") if isinstance(brief.get("brief"), dict) else {}
     conflict_values = (
@@ -2835,7 +2835,7 @@ def _campaign_debate_rounds(campaign_brief: Optional[Dict[str, Any]]) -> int:
             return bool(value)
         return value is not None and bool(value)
 
-    return 2 if any(_present(value) for value in (*conflict_values, *risk_values)) else 1
+    return 3 if any(_present(value) for value in (*conflict_values, *risk_values)) else 2
 
 
 def _build_campaign_director(
@@ -3180,15 +3180,32 @@ async def _orchestrate_single_agent(
     # 4. VERIFY + grounding gate (reuse; the inner _produce_output is idempotent — a cold
     #    first produce that skipped is re-attempted here). Pass the gathered facts (recall +
     #    connector/Gmail reads) so the verifier doesn't flag connector-sourced claims.
-    try:
-        await _verify_and_emit(req, lead, final_text=final_text,
-                               blackboard={"hit_count": gather_count,
-                                           "facts": result.get("gather_facts") or []},
-                               model=_m_recon,
-                               company_name=_company_name,
-                               company_context_missing=_company_ctx_missing)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[single] verify failed: %s", exc)
+    if _room_kind == "campaign":
+        accepted = bool(result.get("campaign_bundle"))
+        verdict = {
+            "met": accepted,
+            "artifact_ok": accepted,
+            "assignments_ok": bool(contributions),
+            "grounded_ok": accepted,
+            "gaps": [] if accepted else ["The deterministic Campaign Contract was not accepted."],
+            "note": "Campaign Contract accepted." if accepted else "Campaign Contract needs repair.",
+            "produced_artifacts": [],
+            "pending_writes": [],
+            "intended_output": "campaign_contract",
+            "done_criterion": done_txt,
+        }
+        _PLAN_BY_TURN[req.turn_id]["verification"] = verdict
+        await _emit({"t": "verify", **verdict})
+    else:
+        try:
+            await _verify_and_emit(req, lead, final_text=final_text,
+                                   blackboard={"hit_count": gather_count,
+                                               "facts": result.get("gather_facts") or []},
+                                   model=_m_recon,
+                                   company_name=_company_name,
+                                   company_context_missing=_company_ctx_missing)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
     # idempotent retry is still counted. Non-destructive snapshots; post_room_turn emits.
     artifacts = drain_artifacts()

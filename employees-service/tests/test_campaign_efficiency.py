@@ -58,11 +58,11 @@ def test_campaign_roster_requires_all_three_roles_to_run():
         ])
 
 
-def test_campaign_debate_defaults_to_one_round():
+def test_campaign_debate_defaults_to_proposal_and_peer_challenge_rounds():
     assert api_hyper_rooms._campaign_debate_rounds({
         "goal": "Introduce the product",
         "brief": {"brand_constraints": "Accurate and concise"},
-    }) == 1
+    }) == 2
 
 
 @pytest.mark.parametrize("brief", [
@@ -72,8 +72,8 @@ def test_campaign_debate_defaults_to_one_round():
     {"brief": {"risk_flags": ["unverified claim"]}},
     {"brief": {"prohibited_claims": "Guaranteed growth"}},
 ])
-def test_campaign_debate_escalates_only_for_declared_conflict_or_risk(brief):
-    assert api_hyper_rooms._campaign_debate_rounds(brief) == 2
+def test_campaign_debate_adds_decision_round_for_declared_conflict_or_risk(brief):
+    assert api_hyper_rooms._campaign_debate_rounds(brief) == 3
 
 
 def test_campaign_models_keep_synthesis_and_repair_on_120b(monkeypatch):
@@ -104,4 +104,4 @@ def test_campaign_director_receives_bounded_round_policy(monkeypatch):
     assert isinstance(result, FakeDirector)
     assert captured["room_kind"] == "campaign"
     assert captured["synth_model"] == "openai/gpt-oss-120b"
-    assert captured["debate_max_rounds"] == 2
+    assert captured["debate_max_rounds"] == 3

@@ -35,6 +35,13 @@ export class ProfileStore {
     this._cacheTTL = 60_000; // 1 minute
   }
 
+  invalidateOrg(orgId) {
+    const marker = `:${orgId || ''}:`;
+    for (const key of this._cache.keys()) {
+      if (key.includes(marker)) this._cache.delete(key);
+    }
+  }
+
   /**
    * Get all profile facts for a user, with caching.
    */

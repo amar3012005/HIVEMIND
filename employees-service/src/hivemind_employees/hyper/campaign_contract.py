@@ -8,8 +8,9 @@ CAMPAIGN_CONTRACT_VERSION = 4
 _HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant", "proprietary")
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s)\]}>]+", re.I)
 _NO_CLAIM_OUTCOME_RE = re.compile(
-    r"\b(?:case\s+stud(?:y|ies)|help(?:ed|s|ing)?|deliver(?:ed|s|ing)?|accelerat\w*|deepen\w*|"
-    r"driv(?:e|es|en|ing)|improv\w*|increas\w*|reduc\w*|revamp\w*|refresh\w*|achiev\w*)\b",
+    r"\b(?:case\s+stud(?:y|ies)|(?:we|our\s+(?:team|platform|clients?|customers?))\s+"
+    r"(?:help(?:ed|s|ing)?|deliver(?:ed|s|ing)?|accelerat\w*|driv(?:e|es|en|ing)|improv\w*|"
+    r"increas\w*|reduc\w*|achiev\w*)|(?:clients?|customers?)\s+(?:report|see|saw|achiev\w*))\b",
     re.I,
 )
 

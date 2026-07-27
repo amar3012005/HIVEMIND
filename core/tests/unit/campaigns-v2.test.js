@@ -109,6 +109,26 @@ test('campaign capabilities expose safe account evidence without credentials', a
   }
 });
 
+test('campaign capabilities keep X connected when a refresh token can renew an expired access token', async () => {
+  const expired = new Date(Date.now() - 60_000);
+  const prisma = {
+    xAdsCredential: {
+      async findUnique({ where }) {
+        if (where.orgId_userId_authKind.authKind !== 'OAUTH2') return null;
+        return { status: 'active', xUserId: 'x-1', xUsername: 'connected', scopes: ['tweet.write'], expiresAt: expired, refreshToken: 'encrypted', connectedAt: new Date(), updatedAt: new Date() };
+      },
+    },
+    nangoConnection: { async findFirst() { return null; } },
+    platformIntegration: { async findFirst() { return null; } },
+    taraRuntimeConfig: { async findUnique() { return null; } },
+  };
+  const capabilities = await getCampaignCapabilities({ prisma, userId: 'user-1', orgId: 'org-1' });
+  const x = capabilities.channels.find((channel) => channel.id === 'x_organic');
+  assert.equal(x.connected, true);
+  assert.equal(x.identity.username, 'connected');
+  assert.equal('refreshToken' in x.evidence, false);
+});
+
 test('campaign horizon and intensity produce an authoritative per-channel action range', () => {
   assert.deepEqual(campaignActionRanges({ durationDays: 14, intensity: 'focused', channels: ['x_organic'] }), {
     preset: 'focused', duration_days: 14,

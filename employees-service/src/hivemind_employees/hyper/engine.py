@@ -2009,6 +2009,9 @@ class Director:
         m = re.search(r"Company:\s*([A-Z][A-Za-z0-9&.\- ]{1,40}?)(?:\s+[—–-]|\.|,|$)", self.room_goal or "")
         name = (m.group(1).strip() if m else "").strip()
         if not name:
+            m = re.search(r"(?:^|\n)Company:\s*([^\n—–]+)", self.company_brief or "", re.I)
+            name = (m.group(1).strip(" .,-") if m else "").strip()
+        if not name:
             return ""
         return (
             f"\nCOMPANY IDENTITY — WE ARE {name}. Every plan, prospect list, email and report this room "

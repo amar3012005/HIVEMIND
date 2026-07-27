@@ -615,6 +615,57 @@ function removeCompanyVisual(orgId) {
   }
 }
 
+async function clearHyperCompanyContext({ orgId, userId }) {
+  if (!orgId || !userId) throw new Error('organization and user are required for company reset');
+
+  // Core owns canonical memory deletion because it must purge relational rows,
+  // source documents, and Qdrant points together. Fail closed: onboarding must
+  // never continue with a mixture of the previous and replacement company.
+  const memoryResponse = await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/delete-all?all_users=true`, {
+    method: 'DELETE',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': getInternalApiKey(),
+      'x-hm-user-id': userId,
+      'x-hm-org-id': orgId,
+    },
+  });
+  const memoryResult = await memoryResponse.json().catch(() => ({}));
+  if (!memoryResponse.ok) {
+    throw new Error(memoryResult.message || memoryResult.error || `company memory reset failed (${memoryResponse.status})`);
+  }
+
+  const resetAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(
+      `UPDATE "hivemind"."hyper_rooms"
+          SET archived_at = COALESCE(archived_at, now()),
+              agent_connectors = agent_connectors - '_company'
+        WHERE org_id = $1::uuid`,
+      orgId,
+    );
+    await tx.digitalEmployee.updateMany({
+      where: { orgId, archivedAt: null },
+      data: { archivedAt: resetAt, status: 'paused' },
+    });
+    await tx.userProfile.updateMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        OR: [{ key: 'company' }, { key: { startsWith: 'company:' } }],
+      },
+      data: { deletedAt: resetAt },
+    });
+  }, { timeout: 15000, maxWait: 8000 });
+
+  try {
+    const { getSharedProfileStore } = await import('./memory/profile-store.js');
+    getSharedProfileStore(prisma)?.invalidateOrg(orgId);
+  } catch { /* cache expires naturally if the store is unavailable */ }
+  removeCompanyVisual(orgId);
+  return memoryResult;
+}
+
 function decodeHtmlAttribute(value) {
   return String(value || '')
     .replace(/&amp;/gi, '&')
@@ -7628,27 +7679,7 @@ Write the persona now.`;
         // the new company. Archive (not delete) — recoverable via archived_at.
         // These writes are the isolation boundary for a replacement onboarding.
         // Fail closed if either cannot complete; continuing would mix companies.
-        await prisma.$executeRawUnsafe(
-          `UPDATE "hivemind"."hyper_rooms" SET archived_at = now()
-             WHERE org_id = $1::uuid AND archived_at IS NULL`,
-          orgId,
-        );
-        await prisma.digitalEmployee.updateMany({
-          where: { orgId, archivedAt: null },
-          data: { archivedAt: new Date(), status: 'paused' },
-        });
-        try {
-          await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/bulk-delete-by-tag`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-API-Key': getInternalApiKey(),
-              'x-hm-user-id': userId,
-              'x-hm-org-id': orgId,
-            },
-            body: JSON.stringify({ tags: ['source:hyperagents-onboarding'], dry_run: false }),
-          });
-        } catch { /* best-effort */ }
+        await clearHyperCompanyContext({ orgId, userId });
       };
       const stripHtml = (html) => html
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -7875,6 +7906,10 @@ Write the persona now.`;
           // active roster, hires 3 new specialists, and the HQ room seats only
           // this company's agents (no cross-company leak). Recoverable (archived).
           await clearPriorOnboarding();
+          await prisma.organization.update({
+            where: { id: orgId },
+            data: { name: companyName },
+          });
           const store = await _getEmployeeStore();
           let team = await prisma.digitalEmployee.findMany({ where: { orgId, archivedAt: null }, select: { id: true, name: true, roleArchetype: true }, take: 20 }).catch(() => []);
           // Legacy auto-hired generics (bare archetypes / the old Nova-Atlas-Vega
@@ -8174,37 +8209,20 @@ Write the persona now.`;
       return jsonResponse(res, { ok: true, started: true });
     }
 
-    // POST /v1/hyper/onboarding/reset — clear the onboarding artifacts so the
-    // user can start fresh: strips the persisted _company state from every HQ
-    // room and deletes the homepage screenshot. ROOMS ARE LEFT INTACT (the user
-    // deletes those manually) — this only resets the company profile/mission/
-    // tasks/research shown on the hero.
+    // POST /v1/hyper/onboarding/reset — replace-company reset. Prior Rooms and
+    // employees are archived, organization memories/vectors are purged, and
+    // structured company profile facts are retired. Identity, membership,
+    // billing, connector credentials, and immutable audit history are retained.
     if (pathname === '/v1/hyper/onboarding/reset' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
       try {
-        await prisma.$executeRawUnsafe(
-          `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" - '_company'
-             WHERE org_id = $1::uuid AND "agent_connectors" ? '_company'`,
-          current.session.orgId,
-        );
-        removeCompanyVisual(current.session.orgId);
-        // Also delete the filed onboarding memories (company profile/mission/
-        // positioning/etc.) so "start fresh" truly clears them. Rooms untouched.
-        try {
-          await fetch(`${CONFIG.coreApiBaseUrl}/api/memories/bulk-delete-by-tag`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-API-Key': getInternalApiKey(),
-              'x-hm-user-id': current.session.userId,
-              'x-hm-org-id': current.session.orgId,
-            },
-            body: JSON.stringify({ tags: ['source:hyperagents-onboarding'], dry_run: false }),
-          });
-        } catch { /* best-effort */ }
+        const reset = await clearHyperCompanyContext({
+          orgId: current.session.orgId,
+          userId: current.session.userId,
+        });
         _hyperOnboardJobs.delete(current.session.orgId);
-        return jsonResponse(res, { ok: true });
+        return jsonResponse(res, { ok: true, reset });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

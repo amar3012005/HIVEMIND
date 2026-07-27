@@ -17177,7 +17177,18 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              const ownerWhere = { userId, ...(orgId ? { orgId } : {}) };
+              const allUsers = url.searchParams.get('all_users') === 'true' || body.all_users === true;
+              if (allUsers && !principal?.master) {
+                return jsonResponse(res, { error: 'all_users=true requires the internal master key' }, 403);
+              }
+              if (allUsers && !orgId) {
+                return jsonResponse(res, { error: 'organization scope is required' }, 400);
+              }
+              // Re-onboarding replaces the company for the whole tenant. The
+              // control plane uses the master-only all_users mode so memories
+              // written by other organization members cannot leak into the new
+              // company context. Normal callers remain scoped to themselves.
+              const ownerWhere = allUsers ? { orgId } : { userId, ...(orgId ? { orgId } : {}) };
               const memoryWhere = { ...ownerWhere, ...(project ? { project } : {}) };
               const [allMemories, documents] = await Promise.all([
                 prisma.memory.findMany({ where: memoryWhere, select: { id: true } }),
@@ -17252,6 +17263,7 @@ exit \$RC
               invalidateAggregateCache({ userId, orgId, project: null });
               return jsonResponse(res, {
                 success: true,
+                organization_wide: allUsers,
                 deleted: memoryIds.length,
                 deleted_documents: documentIds.length,
                 deleted_segments: segmentIds.length,

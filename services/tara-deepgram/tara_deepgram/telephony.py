@@ -127,6 +127,14 @@ async def _dial_zernio(req: DialRequest) -> dict:
         body["fromNumber"] = config.ZERNIO_FROM_NUMBER
     if config.ZERNIO_GREETING:
         body["greeting"] = config.ZERNIO_GREETING
+    # Answering-machine detection. Zernio DEFERS the bridge until it decides
+    # human vs machine, so TARA no longer burns her opener into a voicemail
+    # beep — the single biggest source of wasted minutes in the first campaign
+    # (one answering-service call ran 10m23s). Records come back with
+    # `answered_machine` so a target can be requeued for a direct-dial retry
+    # instead of being scored as a real conversation.
+    if config.ZERNIO_AMD:
+        body["amd"] = True
     # Idempotency-Key keyed on our session: a retried dial can never double-ring
     # a prospect.
     result = await _zernio("post", "/voice/calls", json=body,
@@ -301,12 +309,19 @@ async def handle_zernio_webhook(event: dict) -> None:
     leg = _zernio_leg(call)
     meta = pending_calls.get(leg) if leg else None
     if etype == "call.ended":
+        # AMD verdict. A machine pickup is NOT a conversation — surfacing it lets
+        # the campaign requeue for a direct-dial retry instead of scoring a
+        # voicemail as a reached prospect.
+        machine = call.get("answered_machine")
+        if machine is None:
+            machine = call.get("answeredMachine")
         if meta:
             meta["status"] = "ended"
             meta["end_reason"] = call.get("endReason")
             meta["duration_seconds"] = call.get("durationSeconds")
-        log.info("zernio call.ended leg=%s reason=%s dur=%ss",
-                 leg, call.get("endReason"), call.get("durationSeconds"))
+            meta["answered_machine"] = bool(machine)
+        log.info("zernio call.ended leg=%s reason=%s dur=%ss answered_machine=%s",
+                 leg, call.get("endReason"), call.get("durationSeconds"), machine)
     elif etype == "call.failed":
         if meta:
             meta["status"] = "failed"

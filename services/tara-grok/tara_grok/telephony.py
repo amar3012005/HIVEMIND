@@ -89,6 +89,10 @@ async def dial(req: DialRequest) -> dict:
         # socket at dial time — there is no answered→streaming_start round-trip.
         "forwardTo": f"{config.PUBLIC_WS_BASE}/telnyx/stream?{qs}",
     }
+    # Answering-machine detection: Zernio defers the bridge until it decides
+    # human vs machine, so the model never opens into a voicemail beep.
+    if config.ZERNIO_AMD:
+        body["amd"] = True
     result = await _zernio("post", "/voice/calls", json=body,
                            extra_headers={"Idempotency-Key": f"tara-grok-{req.session_id}"})
     leg = str(result.get("callId") or "")

@@ -77,6 +77,10 @@ ZERNIO_WEBHOOK_SECRET = os.getenv("ZERNIO_WEBHOOK_SECRET", "")
 # Spoken to the callee BEFORE bridging. Empty = omit, so TARA opens the
 # conversation herself (a provider greeting would talk over her first turn).
 ZERNIO_GREETING       = os.getenv("ZERNIO_GREETING", "")
+# Answering-machine detection. Defers the bridge until human/machine is decided,
+# so TARA never opens into a voicemail beep. Default ON for outbound campaigns;
+# set ZERNIO_AMD=false to disable (it does add a short pre-bridge delay).
+ZERNIO_AMD            = os.getenv("ZERNIO_AMD", "true").lower() not in ("0", "false", "no")
 
 # Unified comma-separated E.164 allowlist. Empty = ALL outbound dialing blocked
 # (safe default). TELNYX_ALLOWED_NUMBERS kept as an alias for back-compat.

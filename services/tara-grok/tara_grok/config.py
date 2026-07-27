@@ -15,6 +15,9 @@ SERVICE_TOKEN = os.environ.get("TARA_GROK_SERVICE_TOKEN", "").strip()
 ZERNIO_API_BASE = os.environ.get("ZERNIO_API_BASE", "https://zernio.com/api/v1").rstrip("/")
 ZERNIO_API_KEY = os.environ.get("ZERNIO_API_KEY", "").strip()
 ZERNIO_FROM_NUMBER = os.environ.get("ZERNIO_FROM_NUMBER", "").strip()
+# Answering-machine detection — defers the bridge until human/machine is known,
+# so the model never opens into a voicemail beep. ZERNIO_AMD=false to disable.
+ZERNIO_AMD = os.environ.get("ZERNIO_AMD", "true").lower() not in ("0", "false", "no")
 # Public wss base Zernio dials back into (Caddy: /voice-grok/* -> :8092).
 PUBLIC_WS_BASE = os.environ.get("TARA_GROK_PUBLIC_WS", "wss://core.singulancelabs.com/voice-grok").rstrip("/")
 # Shared secret on side-effectful dial routes (same contract as tara-deepgram's

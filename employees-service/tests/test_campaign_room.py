@@ -40,7 +40,7 @@ def _valid_v1_bundle():
         "strategy": "Build founder awareness with concise, grounded proof.",
         "audience": {"rationale": "Existing founder audience"},
         "content_pillars": ["AI coordination proof"],
-        "kpis": [{"name": "Engagements", "target": "Establish baseline", "source": "X"}],
+        "kpis": [{"name": "Engagements", "target": "Establish baseline", "source": "X", "target_type": "baseline", "evidence_ids": []}],
         "actions": [{
             "id": "x-1",
             "channel": "x_organic",
@@ -53,6 +53,10 @@ def _valid_v1_bundle():
             "creative_brief": {"required": True, "concept": "Show the campaign operating board."},
             "claim_status": "verified",
             "evidence_ids": ["evidence-1"],
+            "hypothesis_id": "outcome-proof",
+            "dependencies": ["Approved X connection"],
+            "success_measure": "Establish an organic engagement baseline.",
+            "rollback_or_exit": "Pause the remaining sequence if provider validation fails.",
         }],
         "requirement_coverage": [
             {"requirement_id": "goal", "action_ids": ["x-1"]},
@@ -106,10 +110,39 @@ def _valid_v2_bundle():
         }],
         "assumptions": ["The connected X identity is approved before launch."],
         "launch_checklist": ["Confirm final copy and connected X identity."],
-        "evidence": [{"id": "evidence-1", "claim": "Campaign Rooms return structured plans.", "source": "Product workflow", "status": "verified", "url": ""}],
+        "evidence": [{"id": "evidence-1", "claim": "Campaign Rooms return structured plans.", "source": "Product workflow", "source_type": "company", "confidence": "high", "status": "verified", "url": ""}],
+        "media_plan": {
+            "currency": None,
+            "channels": [{
+                "channel": "x_organic", "role": "Organic awareness and message learning",
+                "rationale": "The brief selects X for this campaign.", "budget_amount": 0,
+                "prerequisites": ["Approved X connection"], "exclusions": ["No paid promotion"],
+            }],
+        },
+        "creative_system": {
+            "approved_claim_ids": ["evidence-1"],
+            "hypotheses": [
+                {"id": "outcome-proof", "insight": "Founders need completed work, not agent theatre.", "promise": "Show an approval-ready campaign plan.", "hook": "Run your company with an AI team.", "cta": "Inspect the result.", "channels": ["x_organic"], "experiment_hypothesis": "Outcome-led copy earns qualified engagement."},
+                {"id": "control-proof", "insight": "Teams need control over external AI actions.", "promise": "Keep launch approval-bound.", "hook": "AI can plan without publishing.", "cta": "Review the operating model.", "channels": ["x_organic"], "experiment_hypothesis": "Control-led copy earns trust-oriented replies."},
+            ],
+        },
+        "launch_plan": {
+            "mode": "draft_only", "approval_mode": "APPROVE_PLAN_ONCE",
+            "prerequisites": ["Confirm the connected X identity"], "blocked_by": [], "ceilings": [],
+            "verification_steps": ["Read back the published Post"],
+            "rollback_steps": ["Pause all remaining scheduled actions"],
+        },
+        "monitoring_plan": {
+            "baseline": "Capture the pre-launch X account baseline.",
+            "primary_outcome": "Qualified organic engagement",
+            "attribution_limit": "Engagement does not prove revenue causation.",
+            "checkpoints": [{"timing": "24 hours after each Post", "metrics": ["impressions", "engagements"], "decision_rule": "Review message resonance; do not auto-optimize."}],
+            "optimization_requires_approval": True,
+        },
         "quality_gate": {"ready": True, "checks": {
             "goal_alignment": "passed", "company_grounding": "passed", "channel_completeness": "passed",
-            "provider_validity": "passed", "schedule_completeness": "passed",
+            "provider_validity": "passed", "schedule_completeness": "passed", "evidence_integrity": "passed",
+            "creative_completeness": "passed", "launch_safety": "passed", "measurement_readiness": "passed",
         }},
         "risks": ["No performance baseline exists yet."],
     }
@@ -133,7 +166,7 @@ def test_new_campaign_compilation_requires_v2_operating_sections():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
     assert accepted is None
-    assert "contract_version must be at least 3" in errors
+    assert "contract_version must be at least 4" in errors
     assert "positioning.statement is required for contract v2" in errors
     assert "timeline must not be empty for contract v2" in errors
     assert "measurement.primary_kpi is required for contract v2" in errors

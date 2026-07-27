@@ -8,7 +8,7 @@ from hivemind_employees.hyper.skills import (
 )
 
 
-EXPECTED = {"seo", "marketing", "branding", "fundraising", "research", "product", "design", "legal_finance"}
+EXPECTED = {"seo", "marketing", "branding", "fundraising", "research", "product", "design", "legal_finance", "campaign"}
 
 
 def test_initial_domain_packs_are_complete_and_versioned():
@@ -48,4 +48,20 @@ def test_domain_pack_controls_room_lead_shape():
     assert lead_shape_for("marketing") == "maker"
     assert lead_shape_for("branding") == "panel"
     assert lead_shape_for("fundraising") == "panel"
+    assert lead_shape_for("campaign") == "maker"
     assert lead_shape_for("fundraising", "doc") == "maker"
+
+
+def test_campaign_intelligence_pack_exposes_bounded_specialist_methods():
+    catalog = dict(skill_catalog("campaign"))
+    assert "campaign-operating-system" in catalog
+    assert "media-plan-and-budget" in catalog
+    assert "creative-hypothesis-system" in catalog
+    assert "channel-preflight" in catalog
+    assert "launch-safety" in catalog
+    assert "measurement-and-experimentation" in catalog
+    assert "account-evidence-audit" in catalog
+    assert "paid-social-platforms" in catalog
+    assert "intent-and-marketplace-ads" in catalog
+    assert "organic-and-direct-channels" in catalog
+    assert default_skill_for("campaign") == "campaign-operating-system"

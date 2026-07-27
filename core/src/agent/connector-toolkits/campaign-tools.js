@@ -17,7 +17,7 @@ const uuidSchema = { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' };
 const toolDefinitions = [
   {
     name: 'campaign_capabilities', readOnly: true,
-    description: 'Check which campaign channels are connected and executable for the current user and organization.',
+    description: 'Audit which campaign channels are connected, what non-secret account evidence was verified, and which adapters are executable for the current user and organization.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -29,7 +29,7 @@ const toolDefinitions = [
         goal: { type: 'string', description: 'The concrete business outcome the campaign must accomplish.' },
         name: { type: 'string', description: 'Optional concise campaign name.' },
         objective: { type: 'string', enum: ['AWARENESS', 'PRODUCT_LAUNCH', 'LEAD_GENERATION', 'WEBSITE_TRAFFIC', 'THOUGHT_LEADERSHIP', 'EVENT_PROMOTION', 'RE_ENGAGEMENT', 'CUSTOM'] },
-        channels: { type: 'array', items: { type: 'string', enum: ['x_organic', 'gmail', 'tara'] }, description: 'Requested channels. Omit to use every currently executable campaign channel.' },
+        channels: { type: 'array', items: { type: 'string', enum: ['x_organic', 'gmail', 'tara', 'x_ads', 'google_ads', 'meta', 'linkedin', 'youtube_ads', 'tiktok_ads', 'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads'] }, description: 'Requested planning channels. Omit to use currently connected channels. Plan-only channels remain blocked from launch until their adapter and account are ready.' },
         duration_days: { type: 'integer', minimum: 1, maximum: 365, description: 'Campaign horizon in days. Usually 7, 14, or 30.' },
         intensity: { type: 'string', enum: ['LIGHT', 'FOCUSED', 'HIGH'] },
         autonomy_mode: { type: 'string', enum: ['APPROVE_PLAN_ONCE', 'REVIEW_EVERY_ACTION'] },
@@ -166,7 +166,7 @@ async function executeCampaignTool(name, args, { prisma, userId, orgId, ctx }) {
     return { campaigns: campaigns.map((campaign) => ({ ...compactCampaign(campaign), ...navigation(campaign) })) };
   }
   if (name === 'campaign_get') {
-    const campaign = await getCampaign({ prisma, orgId, id: args.campaign_id });
+    const campaign = await getCampaign({ prisma, orgId, userId, id: args.campaign_id });
     return { campaign: { ...compactCampaign(campaign), ...navigation(campaign), current_plan_version_id: campaign.currentPlanVersionId || null } };
   }
   if (name === 'campaign_create') {
@@ -190,7 +190,7 @@ async function executeCampaignTool(name, args, { prisma, userId, orgId, ctx }) {
         await dispatchCampaignRoomSafely({ prisma, campaignId: result.campaign.id, dispatch: result.dispatch });
       } catch (error) {
         dispatchError = error;
-        campaign = await getCampaign({ prisma, orgId, id: result.campaign.id }).catch(() => result.campaign);
+        campaign = await getCampaign({ prisma, orgId, userId, id: result.campaign.id }).catch(() => result.campaign);
       }
     }
     return {
@@ -214,7 +214,7 @@ async function executeCampaignTool(name, args, { prisma, userId, orgId, ctx }) {
     const result = await regenerateCampaign({ prisma, orgId, userId, id: args.campaign_id, feedback: args.feedback });
     await dispatchCampaignRoomSafely({ prisma, campaignId: result.campaignId, dispatch: result.dispatch });
     await auditCampaignTool(prisma, { userId, orgId, campaignId: result.campaignId, action: 'regenerated', ctx });
-    const campaign = await getCampaign({ prisma, orgId, id: result.campaignId });
+    const campaign = await getCampaign({ prisma, orgId, userId, id: result.campaignId });
     return { tool: name, campaign: { ...compactCampaign(campaign), ...navigation(campaign) }, handoff: 'The Campaign Room is rebuilding the plan. Nothing has been published.' };
   }
   if (name === 'campaign_pause') {

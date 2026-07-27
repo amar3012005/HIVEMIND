@@ -36,6 +36,7 @@ KIND_REGISTRY: Dict[str, Dict[str, Any]] = {
     "hq":       {"vertical": "hq",       "lead_shape": "maker"},
     "seo":      {"vertical": "seo",      "lead_shape": "maker"},
     "marketing": {"vertical": "marketing", "lead_shape": "maker"},
+    "campaign": {"vertical": "campaign", "lead_shape": "maker"},
     "branding": {"vertical": "branding", "lead_shape": "panel"},
     "fundraising": {"vertical": "fundraising", "lead_shape": "panel"},
 }

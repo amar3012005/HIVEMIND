@@ -1,11 +1,12 @@
 import crypto from 'node:crypto';
-import { getCampaignCapabilities } from './capabilities.js';
-import { campaignWorkerEnabled, EXECUTABLE_V1_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
+import { campaignCapabilitySnapshot, getCampaignCapabilities } from './capabilities.js';
+import { campaignWorkerEnabled, KNOWN_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 import { buildCampaignDisplayMessage, buildCampaignRoomDispatch } from './contracts.js';
 import { captureCampaignChannelBaseline, reconcileCampaignAction as reconcileWithAdapter, syncCampaignActionMetrics } from './adapters/index.js';
 import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
 import { buildCampaignImagePrompt, creativeBriefErrors, normalizeCreativeBrief } from './visual-prompt.js';
 import { campaignError } from './errors.js';
+import { assessCampaignReadiness } from './readiness.js';
 
 function cleanText(value, max, label, required = false) {
   const text = String(value || '').trim();
@@ -172,6 +173,95 @@ export function validateCampaignBundle(bundle, campaign) {
     if (!quality || quality.ready !== true) errors.push('Contract v3 quality gate must be ready');
     requiredChecks.forEach((check) => { if (quality?.checks?.[check] !== 'passed') errors.push(`Contract v3 quality check ${check} must pass`); });
   }
+  if (Number(bundle.contract_version || 1) >= 4) {
+    const evidenceRows = Array.isArray(bundle.evidence) ? bundle.evidence : [];
+    const evidenceIds = new Set(evidenceRows.map((item) => String(item?.id || '')).filter(Boolean));
+    const evidenceStatuses = new Map(evidenceRows.map((item) => [String(item?.id || ''), String(item?.status || '')]));
+    bundle.kpis.forEach((kpi, index) => {
+      const targetType = String(kpi?.target_type || '');
+      if (!['baseline', 'proposed', 'verified'].includes(targetType)) errors.push(`Contract v4 KPI ${index + 1} needs a valid target type`);
+      if (!Array.isArray(kpi?.evidence_ids)) errors.push(`Contract v4 KPI ${index + 1} evidence ids must be an array`);
+      else if (kpi.evidence_ids.some((id) => !evidenceIds.has(String(id)))) errors.push(`Contract v4 KPI ${index + 1} references unknown evidence`);
+      else if (targetType === 'verified' && (!kpi.evidence_ids.length || kpi.evidence_ids.some((id) => evidenceStatuses.get(String(id)) !== 'verified'))) errors.push(`Contract v4 KPI ${index + 1} verified target must reference verified evidence`);
+    });
+
+    const mediaPlan = bundle.media_plan;
+    const mediaChannels = Array.isArray(mediaPlan?.channels) ? mediaPlan.channels : [];
+    if (!mediaPlan || typeof mediaPlan !== 'object' || Array.isArray(mediaPlan)) errors.push('Contract v4 needs a media plan');
+    if (!mediaChannels.length) errors.push('Contract v4 media plan needs channels');
+    const plannedChannels = new Set();
+    mediaChannels.forEach((row, index) => {
+      const channel = String(row?.channel || '').trim().toLowerCase();
+      if (!channel || plannedChannels.has(channel)) errors.push(`Contract v4 media channel ${index + 1} needs a unique channel`);
+      else if (!campaign.requestedChannels.includes(channel)) errors.push(`Contract v4 media channel ${channel} was not selected`);
+      else plannedChannels.add(channel);
+      if (!String(row?.role || '').trim()) errors.push(`Contract v4 media channel ${channel || index + 1} needs a role`);
+      if (!String(row?.rationale || '').trim()) errors.push(`Contract v4 media channel ${channel || index + 1} needs a rationale`);
+      if (row?.budget_amount != null && (typeof row.budget_amount !== 'number' || !Number.isFinite(row.budget_amount) || row.budget_amount < 0)) errors.push(`Contract v4 media channel ${channel || index + 1} has an invalid budget`);
+      if (!Array.isArray(row?.prerequisites)) errors.push(`Contract v4 media channel ${channel || index + 1} prerequisites must be an array`);
+      if (!Array.isArray(row?.exclusions)) errors.push(`Contract v4 media channel ${channel || index + 1} exclusions must be an array`);
+    });
+    campaign.requestedChannels.forEach((channel) => { if (!plannedChannels.has(channel)) errors.push(`Contract v4 media plan is missing ${channel}`); });
+    if (mediaPlan?.currency != null && !/^[A-Z]{3}$/.test(String(mediaPlan.currency))) errors.push('Contract v4 media currency must be a three-letter code or null');
+
+    const creativeSystem = bundle.creative_system;
+    const hypotheses = Array.isArray(creativeSystem?.hypotheses) ? creativeSystem.hypotheses : [];
+    if (!creativeSystem || typeof creativeSystem !== 'object' || Array.isArray(creativeSystem)) errors.push('Contract v4 needs a creative system');
+    if (hypotheses.length < 2) errors.push('Contract v4 needs at least two creative hypotheses');
+    const hypothesisIds = new Set();
+    hypotheses.forEach((hypothesis, index) => {
+      const id = String(hypothesis?.id || '').trim();
+      if (!id || hypothesisIds.has(id)) errors.push(`Contract v4 creative hypothesis ${index + 1} needs a unique id`); else hypothesisIds.add(id);
+      for (const field of ['insight', 'promise', 'hook', 'cta', 'experiment_hypothesis']) {
+        if (!String(hypothesis?.[field] || '').trim()) errors.push(`Contract v4 creative hypothesis ${id || index + 1} needs ${field}`);
+      }
+      if (!Array.isArray(hypothesis?.channels) || !hypothesis.channels.length) errors.push(`Contract v4 creative hypothesis ${id || index + 1} needs channels`);
+      else if (hypothesis.channels.some((channel) => !campaign.requestedChannels.includes(String(channel).toLowerCase()))) errors.push(`Contract v4 creative hypothesis ${id || index + 1} uses an unselected channel`);
+    });
+    if (!Array.isArray(creativeSystem?.approved_claim_ids)) errors.push('Contract v4 approved claim ids must be an array');
+    else if (creativeSystem.approved_claim_ids.some((id) => !evidenceIds.has(String(id)))) errors.push('Contract v4 approved claim ids reference unknown evidence');
+    else if (creativeSystem.approved_claim_ids.some((id) => evidenceStatuses.get(String(id)) !== 'verified')) errors.push('Contract v4 approved claim ids must reference only verified evidence');
+    actions.forEach((action, index) => {
+      const id = String(action?.id || index + 1);
+      const hypothesisId = String(action?.hypothesis_id || '');
+      if (!hypothesisIds.has(hypothesisId)) errors.push(`Contract v4 action ${id} must reference a creative hypothesis`);
+      if (!Array.isArray(action?.dependencies)) errors.push(`Contract v4 action ${id} dependencies must be an array`);
+      if (!String(action?.success_measure || '').trim()) errors.push(`Contract v4 action ${id} needs a success measure`);
+      if (!String(action?.rollback_or_exit || '').trim()) errors.push(`Contract v4 action ${id} needs a rollback or exit condition`);
+      if (action?.claim_status === 'verified' && (!Array.isArray(action.evidence_ids) || action.evidence_ids.some((evidenceId) => evidenceStatuses.get(String(evidenceId)) !== 'verified'))) errors.push(`Contract v4 action ${id} verified claims must reference only verified evidence`);
+    });
+
+    const launchPlan = bundle.launch_plan;
+    if (!launchPlan || typeof launchPlan !== 'object' || Array.isArray(launchPlan)) errors.push('Contract v4 needs a launch plan');
+    else {
+      if (launchPlan.mode !== 'draft_only') errors.push('Contract v4 launch plan must remain draft only');
+      if (!String(launchPlan.approval_mode || '').trim()) errors.push('Contract v4 launch plan needs an approval mode');
+      for (const field of ['prerequisites', 'blocked_by', 'ceilings']) if (!Array.isArray(launchPlan[field])) errors.push(`Contract v4 launch plan ${field} must be an array`);
+      for (const field of ['verification_steps', 'rollback_steps']) if (!Array.isArray(launchPlan[field]) || !launchPlan[field].length) errors.push(`Contract v4 launch plan ${field} must not be empty`);
+    }
+
+    const monitoringPlan = bundle.monitoring_plan;
+    if (!monitoringPlan || typeof monitoringPlan !== 'object' || Array.isArray(monitoringPlan)) errors.push('Contract v4 needs a monitoring plan');
+    else {
+      for (const field of ['baseline', 'primary_outcome', 'attribution_limit']) if (!String(monitoringPlan[field] || '').trim()) errors.push(`Contract v4 monitoring plan needs ${field}`);
+      const checkpoints = Array.isArray(monitoringPlan.checkpoints) ? monitoringPlan.checkpoints : [];
+      if (!checkpoints.length) errors.push('Contract v4 monitoring plan needs checkpoints');
+      checkpoints.forEach((checkpoint, index) => {
+        if (!String(checkpoint?.timing || '').trim()) errors.push(`Contract v4 monitoring checkpoint ${index + 1} needs timing`);
+        if (!Array.isArray(checkpoint?.metrics) || !checkpoint.metrics.length) errors.push(`Contract v4 monitoring checkpoint ${index + 1} needs metrics`);
+        if (!String(checkpoint?.decision_rule || '').trim()) errors.push(`Contract v4 monitoring checkpoint ${index + 1} needs a decision rule`);
+      });
+      if (monitoringPlan.optimization_requires_approval !== true) errors.push('Contract v4 optimization must require approval');
+    }
+
+    evidenceRows.forEach((item, index) => {
+      if (!['company', 'connector', 'web', 'user', 'provider', 'derived'].includes(String(item?.source_type || ''))) errors.push(`Contract v4 evidence ${index + 1} needs a valid source type`);
+      if (!['high', 'medium', 'low', 'none'].includes(String(item?.confidence || ''))) errors.push(`Contract v4 evidence ${index + 1} needs valid confidence`);
+    });
+    for (const check of ['evidence_integrity', 'creative_completeness', 'launch_safety', 'measurement_readiness']) {
+      if (bundle.quality_gate?.checks?.[check] !== 'passed') errors.push(`Contract v4 quality check ${check} must pass`);
+    }
+  }
   return [...new Set(errors)];
 }
 
@@ -256,8 +346,21 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         campaignId: run.campaignId, planVersionId: plan.id, audienceMemberId, channel: action.channel,
         actionType: actionType(action.channel), position, status: 'READY',
         scheduledAt: new Date(now + action.scheduled_offset_minutes * 60_000),
-        payload: { ...action.payload, final_copy: action.final_copy, title: action.title || action.id, evidence: action.evidence || [], creative_brief: creativeBrief, source_action_id: String(action.id), scheduled_offset_minutes: action.scheduled_offset_minutes },
-        rationale: String(action.rationale || ''), successMetric: String(action.success_metric || '').slice(0, 200) || null,
+        payload: {
+          ...action.payload,
+          final_copy: action.final_copy,
+          title: action.title || action.id,
+          evidence: action.evidence || [],
+          evidence_ids: action.evidence_ids || [],
+          claim_status: action.claim_status || 'no_claim',
+          hypothesis_id: action.hypothesis_id || null,
+          dependencies: action.dependencies || [],
+          rollback_or_exit: action.rollback_or_exit || null,
+          creative_brief: creativeBrief,
+          source_action_id: String(action.id),
+          scheduled_offset_minutes: action.scheduled_offset_minutes,
+        },
+        rationale: String(action.rationale || ''), successMetric: String(action.success_measure || action.success_metric || '').slice(0, 200) || null,
         idempotencyKey: `plan:${version}:action:${String(action.id).slice(0, 100)}`,
       } });
       if (creativeBrief.required) {
@@ -279,7 +382,17 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
     } });
     await tx.campaignEvent.create({ data: {
       campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_plan_ready',
-      data: { plan_version_id: plan.id, version, canonical_hash: bundleHash, action_count: bundle.actions.length, visual_action_count: visualActionCount },
+      data: {
+        plan_version_id: plan.id,
+        version,
+        canonical_hash: bundleHash,
+        contract_version: Number(bundle.contract_version || 1),
+        action_count: bundle.actions.length,
+        visual_action_count: visualActionCount,
+        hypothesis_count: Array.isArray(bundle.creative_system?.hypotheses) ? bundle.creative_system.hypotheses.length : 0,
+        evidence_count: Array.isArray(bundle.evidence) ? bundle.evidence.length : 0,
+        launch_blocker_count: Array.isArray(bundle.launch_plan?.blocked_by) ? bundle.launch_plan.blocked_by.length : 0,
+      },
     } });
     if (visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_asset_generation_queued', data: { plan_version_id: plan.id, action_count: visualActionCount, source: 'campaign_room' } } });
     return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', visualActionCount };
@@ -304,8 +417,8 @@ export function normalizeCampaignInput(body = {}) {
   if (!OBJECTIVES.has(objective)) throw campaignError('Unknown campaign objective', 400, 'invalid_objective');
   const channels = [...new Set((Array.isArray(body.channels) ? body.channels : []).map((value) => String(value).trim().toLowerCase()).filter(Boolean))];
   if (!channels.length) throw campaignError('Select at least one campaign channel', 400, 'channels_required');
-  const unsupported = channels.filter((channel) => !EXECUTABLE_V1_CHANNELS.has(channel));
-  if (unsupported.length) throw campaignError(`Channels are not executable in V1: ${unsupported.join(', ')}`, 409, 'channel_not_executable');
+  const unsupported = channels.filter((channel) => !KNOWN_CHANNELS.has(channel));
+  if (unsupported.length) throw campaignError(`Unknown campaign channels: ${unsupported.join(', ')}`, 400, 'unknown_campaign_channel');
   const autonomyMode = String(body.autonomy_mode || 'APPROVE_PLAN_ONCE').trim().toUpperCase();
   if (!['APPROVE_PLAN_ONCE', 'REVIEW_EVERY_ACTION'].includes(autonomyMode)) throw campaignError('Unknown approval mode');
   const creationKey = cleanText(body.idempotency_key, 160, 'Idempotency key', true);
@@ -320,7 +433,7 @@ export function normalizeCampaignInput(body = {}) {
   }
   const requirements = [
     { id: 'goal', text: goal, source: 'user' },
-    ...channels.map((channel) => ({ id: `channel:${channel}`, text: `Produce executable ${channel} actions`, source: 'channel' })),
+    ...channels.map((channel) => ({ id: `channel:${channel}`, text: `Produce approval-ready ${channel} actions and state every launch prerequisite`, source: 'channel' })),
   ];
   const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels });
   return {
@@ -350,8 +463,8 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   if (existing) return { campaign: existing, created: false, dispatch: null };
 
   const capabilities = await getCampaignCapabilities({ prisma, userId, orgId });
-  const unavailable = input.channels.filter((id) => !capabilities.channels.find((item) => item.id === id)?.executable);
-  if (unavailable.length) throw campaignError(`Connect or configure: ${unavailable.join(', ')}`, 409, 'channel_connection_required');
+  const unavailable = input.channels.filter((id) => !capabilities.channels.find((item) => item.id === id)?.planning_ready);
+  if (unavailable.length) throw campaignError(`Campaign planning is unavailable for: ${unavailable.join(', ')}`, 409, 'channel_planning_unavailable');
 
   const participants = await prisma.digitalEmployee.findMany({
     where: campaignAgentWhere(orgId),
@@ -370,7 +483,14 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
     audiencePolicy: input.audiencePolicy,
   };
   const kickoff = buildCampaignDisplayMessage(campaignDraft);
-  const briefSnapshot = { ...input, campaign_id: campaignId };
+  const briefSnapshot = {
+    ...input,
+    campaign_id: campaignId,
+    channel_capabilities: capabilities.channels
+      .filter((channel) => input.channels.includes(channel.id))
+      .map(campaignCapabilitySnapshot),
+    capabilities_checked_at: capabilities.checked_at,
+  };
   const [room, campaign, turn, run] = await prisma.$transaction([
     prisma.hyperRoom.create({ data: {
       id: roomId, userId, orgId, name: input.name.slice(0, 120), goal: roomGoal,
@@ -418,7 +538,7 @@ export async function listCampaigns({ prisma, orgId }) {
   });
 }
 
-export async function getCampaign({ prisma, orgId, id }) {
+export async function getCampaign({ prisma, orgId, userId = null, id }) {
   requireCampaignsV2(orgId);
   const campaign = await prisma.campaign.findFirst({
     where: { id, orgId }, include: {
@@ -439,6 +559,17 @@ export async function getCampaign({ prisma, orgId, id }) {
   const currentActions = campaign.currentPlanVersionId
     ? campaign.actions.filter((action) => action.planVersionId === campaign.currentPlanVersionId)
     : [];
+  const currentPlan = campaign.currentPlanVersionId
+    ? campaign.planVersions.find((plan) => plan.id === campaign.currentPlanVersionId)
+    : null;
+  const capabilities = userId ? await getCampaignCapabilities({ prisma, userId, orgId }).catch(() => null) : null;
+  const planIntegrity = currentPlan
+    ? canonicalHash(currentPlan.bundle) === currentPlan.canonicalHash && validateCampaignBundle(currentPlan.bundle, campaign).length === 0
+    : false;
+  const readiness = assessCampaignReadiness({
+    campaign, plan: currentPlan, actions: currentActions, assets: campaign.assets,
+    capabilities, planIntegrity,
+  });
   const safeAsset = (asset) => {
     const { storageKey, ...safe } = asset;
     return { ...safe, content_url: storageKey && !asset.deletedAt ? `/v1/campaigns/${asset.campaignId}/assets/${asset.id}/content` : null };
@@ -449,6 +580,7 @@ export async function getCampaign({ prisma, orgId, id }) {
     actions: currentActions.map((action) => ({ ...action, assets: action.assets.map(safeAsset) })),
     events: campaign.events.map((event) => ({ ...event, id: String(event.id) })),
     roomTranscript,
+    readiness,
   };
 }
 
@@ -481,7 +613,10 @@ export async function approveCampaign({ prisma, orgId, userId, id, clock = () =>
   const visualActions = approvedActions.filter((action) => action.payload?.creative_brief?.required === true);
   const selectedAssetIds = visualActions.map((action) => String(action.payload?.asset_id || '')).filter(Boolean);
   if (selectedAssetIds.length !== visualActions.length) throw campaignError('Every required campaign visual must have a selected image before launch', 409, 'campaign_assets_not_ready');
-  const selectedAssets = selectedAssetIds.length ? await prisma.campaignAsset.findMany({ where: { id: { in: selectedAssetIds }, campaignId: id, status: 'READY', deletedAt: null }, select: { id: true, actionId: true, contentHash: true } }) : [];
+  const selectedAssets = selectedAssetIds.length ? await prisma.campaignAsset.findMany({
+    where: { id: { in: selectedAssetIds }, campaignId: id, status: 'READY', deletedAt: null },
+    select: { id: true, actionId: true, kind: true, status: true, contentHash: true, contentType: true, sizeBytes: true, width: true, height: true, metadata: true, deletedAt: true },
+  }) : [];
   const assetsById = new Map(selectedAssets.map((asset) => [asset.id, asset]));
   for (const action of visualActions) {
     const asset = assetsById.get(String(action.payload.asset_id));
@@ -491,6 +626,17 @@ export async function approveCampaign({ prisma, orgId, userId, id, clock = () =>
   const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
   const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
   if (unavailable.length) throw campaignError(`Execution is not ready for: ${unavailable.join(', ')}`, 409, 'channel_execution_unavailable');
+  const readiness = assessCampaignReadiness({
+    campaign, plan, actions: approvedActions, assets: selectedAssets, capabilities, planIntegrity: true,
+  });
+  if (readiness.decision !== 'ready') {
+    throw campaignError(
+      readiness.blockers.map((item) => item.detail).join(' '),
+      409,
+      'campaign_readiness_blocked',
+      readiness,
+    );
+  }
   const baselineEntries = await Promise.all(campaign.requestedChannels.map(async (channel) => {
     try { return [channel, await captureCampaignChannelBaseline({ prisma, channel, campaign })]; }
     catch (error) { return [channel, { unavailable: true, reason: String(error?.code || error?.message || 'baseline_unavailable').slice(0, 200) }]; }
@@ -686,6 +832,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
         channels: campaign.requestedChannels,
       }),
   };
+  const capabilities = await getCampaignCapabilities({ prisma, userId, orgId });
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.campaign.updateMany({
       where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'] } },
@@ -703,6 +850,10 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
       autonomyMode: campaign.autonomyMode, requirements: campaign.requirements, brief: normalizedBrief,
       audiencePolicy: campaign.audiencePolicy, schedulePolicy: campaign.schedulePolicy, campaign_id: id,
       feedback: cleanFeedback || undefined,
+      channel_capabilities: capabilities.channels
+        .filter((channel) => campaign.requestedChannels.includes(channel.id))
+        .map(campaignCapabilitySnapshot),
+      capabilities_checked_at: capabilities.checked_at,
     };
     const run = await tx.campaignRun.create({ data: { campaignId: id, roomId: room.id, turnId: turn.id, status: 'DISPATCHING', briefSnapshot, startedAt: new Date() } });
     if (campaign.currentPlanVersionId) {
@@ -816,7 +967,7 @@ export async function syncCampaignMetrics({ prisma, orgId, userId, id }) {
     await prisma.campaignChannel.update({ where: { campaignId_channel: { campaignId: id, channel } }, data: { metrics: { ...totals, synced_at: new Date().toISOString() }, lastError: null } });
   }
   await prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_metrics_synced', actorType: 'user', actorId: userId, data: { action_count: actions.length, channels: [...byChannel.keys()], errors } } });
-  return getCampaign({ prisma, orgId, id });
+  return getCampaign({ prisma, orgId, userId, id });
 }
 
 async function finishCampaignAfterActionControl(prisma, campaignId) {
@@ -854,5 +1005,5 @@ export async function controlCampaign({ prisma, orgId, userId, id, action }) {
   } else {
     throw campaignError('Unknown campaign control action', 404, 'unknown_campaign_action');
   }
-  return getCampaign({ prisma, orgId, id });
+  return getCampaign({ prisma, orgId, userId, id });
 }

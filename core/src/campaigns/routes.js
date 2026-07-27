@@ -9,7 +9,7 @@ import {
 } from './image-service.js';
 
 function sendError(res, jsonResponse, error) {
-  return jsonResponse(res, { error: error.code || 'campaign_error', message: error.message }, error.status || 500);
+  return jsonResponse(res, { error: error.code || 'campaign_error', message: error.message, ...(error.details != null ? { details: error.details } : {}) }, error.status || 500);
 }
 
 async function audit(prisma, auditLogger, { userId, orgId, action, campaignId, metadata = {}, platformType = 'dashboard' }) {
@@ -82,7 +82,7 @@ export async function handleCampaignRequest({ pathname, method, body, req, res, 
       return jsonResponse(res, { campaign: result.campaign, created: result.created }, result.created ? 201 : 200);
     }
     const match = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})$/i);
-    if (match && method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, id: match[1] }) });
+    if (match && method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, userId, id: match[1] }) });
     const assetContentMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/assets\/([0-9a-f-]{36})\/content$/i);
     if (assetContentMatch && method === 'GET') {
       const result = await getCampaignAssetContent({ prisma, orgId, campaignId: assetContentMatch[1], assetId: assetContentMatch[2] });

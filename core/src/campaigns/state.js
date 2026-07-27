@@ -4,7 +4,12 @@ export const CAMPAIGN_STATUSES = new Set([
 ]);
 
 export const EXECUTABLE_V1_CHANNELS = new Set(['x_organic', 'gmail', 'tara']);
-export const KNOWN_CHANNELS = new Set(['x_organic', 'gmail', 'tara', 'x_ads', 'linkedin', 'meta']);
+export const PLANNABLE_CHANNELS = new Set([
+  'x_organic', 'gmail', 'tara',
+  'x_ads', 'google_ads', 'meta', 'linkedin', 'youtube_ads', 'tiktok_ads',
+  'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
+]);
+export const KNOWN_CHANNELS = PLANNABLE_CHANNELS;
 export const OBJECTIVES = new Set([
   'AWARENESS', 'PRODUCT_LAUNCH', 'LEAD_GENERATION', 'WEBSITE_TRAFFIC',
   'THOUGHT_LEADERSHIP', 'EVENT_PROMOTION', 'RE_ENGAGEMENT', 'CUSTOM',

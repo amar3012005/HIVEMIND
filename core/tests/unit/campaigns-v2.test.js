@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
+import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
 import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
 
@@ -20,8 +21,66 @@ test('campaign input requires caller idempotency and validates time boundaries',
   assert.throws(() => normalizeCampaignInput({ ...baseInput, destination_url: 'javascript:alert(1)' }), { code: 'invalid_destination_url' });
 });
 
-test('campaign input rejects roadmap-only channels', () => {
-  assert.throws(() => normalizeCampaignInput({ ...baseInput, channels: ['linkedin'] }), { code: 'channel_not_executable' });
+test('campaign input accepts plan-only channels but rejects unknown channels', () => {
+  const input = normalizeCampaignInput({ ...baseInput, channels: ['linkedin', 'google_ads'] });
+  assert.deepEqual(input.channels, ['linkedin', 'google_ads']);
+  assert.match(input.requirements[1].text, /approval-ready linkedin actions/);
+  assert.throws(() => normalizeCampaignInput({ ...baseInput, channels: ['unknown_network'] }), { code: 'unknown_campaign_channel' });
+});
+
+test('campaign capabilities separate planning readiness from publishing readiness', async () => {
+  const previous = { enabled: process.env.CAMPAIGNS_V2_ENABLED, orgs: process.env.CAMPAIGNS_V2_ORG_IDS };
+  process.env.CAMPAIGNS_V2_ENABLED = 'true';
+  process.env.CAMPAIGNS_V2_ORG_IDS = '*';
+  const prisma = {
+    xAdsCredential: { findUnique: async () => null },
+    nangoConnection: { findFirst: async () => null },
+    platformIntegration: { findFirst: async () => null },
+    taraRuntimeConfig: { findUnique: async () => null },
+  };
+  try {
+    const capabilities = await getCampaignCapabilities({ prisma, userId: 'user-1', orgId: 'org-1' });
+    const meta = capabilities.channels.find((channel) => channel.id === 'meta');
+    const x = capabilities.channels.find((channel) => channel.id === 'x_organic');
+    assert.equal(meta.planning_ready, true);
+    assert.equal(meta.execution_ready, false);
+    assert.equal(meta.execution_reason, 'adapter_not_available');
+    assert.equal(x.planning_ready, true);
+    assert.equal(x.executable, false);
+    assert.equal(x.evidence.status, 'not_connected');
+    assert.equal(typeof capabilities.checked_at, 'string');
+  } finally {
+    if (previous.enabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = previous.enabled;
+    if (previous.orgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = previous.orgs;
+  }
+});
+
+test('campaign capabilities expose safe account evidence without credentials', async () => {
+  const previous = { enabled: process.env.CAMPAIGNS_V2_ENABLED, orgs: process.env.CAMPAIGNS_V2_ORG_IDS };
+  process.env.CAMPAIGNS_V2_ENABLED = 'true';
+  process.env.CAMPAIGNS_V2_ORG_IDS = '*';
+  const connectedAt = new Date('2026-07-27T10:00:00.000Z');
+  const prisma = {
+    xAdsCredential: { findUnique: async ({ where }) => where.orgId_userId_authKind.authKind === 'OAUTH2' ? {
+      status: 'active', xUserId: '42', xUsername: 'singulance', scopes: ['tweet.read', 'tweet.write'],
+      expiresAt: new Date('2030-01-01T00:00:00.000Z'), connectedAt, updatedAt: connectedAt,
+    } : null },
+    nangoConnection: { findFirst: async () => null },
+    platformIntegration: { findFirst: async () => null },
+    taraRuntimeConfig: { findUnique: async () => null },
+  };
+  try {
+    const capabilities = await getCampaignCapabilities({ prisma, userId: 'user-1', orgId: 'org-1' });
+    const x = capabilities.channels.find((channel) => channel.id === 'x_organic');
+    assert.equal(x.connected, true);
+    assert.equal(x.evidence.identity.username, 'singulance');
+    assert.deepEqual(x.evidence.scopes, ['tweet.read', 'tweet.write']);
+    assert.equal(JSON.stringify(capabilities).includes('accessToken'), false);
+    assert.equal(JSON.stringify(capabilities).includes('connectionId'), false);
+  } finally {
+    if (previous.enabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = previous.enabled;
+    if (previous.orgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = previous.orgs;
+  }
 });
 
 test('campaign horizon and intensity produce an authoritative per-channel action range', () => {
@@ -91,6 +150,61 @@ test('bundle gate rejects oversized or mismatched X provider text', () => {
   assert.match(validateCampaignBundle(bundle, campaign).join(' '), /280 characters or fewer/);
   bundle.actions[0].final_copy = 'Visible copy'; bundle.actions[0].payload.text = 'Different provider copy';
   assert.match(validateCampaignBundle(bundle, campaign).join(' '), /must match final copy/);
+});
+
+test('contract v4 requires one source-grounded operating plan across intelligence and execution', () => {
+  const campaign = {
+    requestedChannels: ['x_organic'], requirements: [{ id: 'goal' }, { id: 'channel:x_organic' }],
+    brief: { duration_days: 7, cadence: { preset: 'focused', expected_actions_by_channel: { x_organic: { minimum: 1, maximum: 2 } } } },
+  };
+  const action = {
+    id: 'x-1', channel: 'x_organic', title: 'Proof', format: 'single_post',
+    final_copy: 'A campaign should leave the room ready to run.', payload: { text: 'A campaign should leave the room ready to run.' },
+    scheduled_offset_minutes: 0, rationale: 'Show the operating outcome.', creative_brief: { required: false },
+    claim_status: 'verified', evidence_ids: ['ev-1'], hypothesis_id: 'proof', dependencies: ['Approved X connection'],
+    success_measure: 'Establish an organic engagement baseline.', rollback_or_exit: 'Pause remaining actions if provider validation fails.',
+  };
+  const bundle = {
+    contract_version: 4,
+    objective: 'Build qualified awareness.', strategy: 'Lead with proof of completed work.',
+    strategy_options: [
+      { id: 'proof', name: 'Proof led', thesis: 'Show the result.', tradeoff: 'Needs product evidence.' },
+      { id: 'control', name: 'Control led', thesis: 'Show approval.', tradeoff: 'Less direct.' },
+      { id: 'speed', name: 'Coordination led', thesis: 'Show the workflow.', tradeoff: 'Avoid timing claims.' },
+    ],
+    selected_strategy_id: 'proof',
+    company_grounding: { company_name: 'SINGULANCE', facts_used: ['Campaign Rooms return structured plans.'], unknowns: [] },
+    campaign_horizon: { duration_days: 7, intensity: 'focused', rationale: 'A bounded message test.' },
+    positioning: { statement: 'Campaign Rooms produce reviewable work.', proof_points: ['Structured Campaign Contract'] },
+    audience: { rationale: 'Existing operators.', segments: [{ name: 'Operators', need: 'Controlled execution' }], safety_notes: [] },
+    content_pillars: ['Proof'], kpis: [{ name: 'Qualified engagement', target: 'Baseline', source: 'X', target_type: 'baseline', evidence_ids: [] }],
+    actions: [action], timeline: [{ action_id: 'x-1', phase: 'Launch', scheduled_offset_minutes: 0 }],
+    safety: { guardrails: ['Use verified claims only.'], prohibited_claims: ['Guaranteed growth'] },
+    measurement: { primary_kpi: 'Qualified engagement', attribution_limit: 'Engagement is not revenue.', review_cadence: '24 hours after each Post.' },
+    debate_conflicts_present: true,
+    debate_decisions: [{ conflict: 'Proof versus speed', decision: 'Use proof.', rationale: 'It is grounded.', dissent: 'Test speed later.' }],
+    evidence: [{ id: 'ev-1', claim: 'Campaign Rooms return structured plans.', source: 'Product workflow', source_type: 'company', confidence: 'high', status: 'verified', url: '' }],
+    media_plan: { currency: null, channels: [{ channel: 'x_organic', role: 'Organic awareness', rationale: 'The brief selects X.', budget_amount: 0, prerequisites: ['Approved X connection'], exclusions: ['No paid promotion'] }] },
+    creative_system: { approved_claim_ids: ['ev-1'], hypotheses: [
+      { id: 'proof', insight: 'Operators need finished work.', promise: 'Show the result.', hook: 'Ready to run.', cta: 'Inspect it.', channels: ['x_organic'], experiment_hypothesis: 'Proof earns qualified engagement.' },
+      { id: 'control', insight: 'Operators need control.', promise: 'Keep approval explicit.', hook: 'Plan without publishing.', cta: 'Review it.', channels: ['x_organic'], experiment_hypothesis: 'Control earns trust-oriented replies.' },
+    ] },
+    launch_plan: { mode: 'draft_only', approval_mode: 'APPROVE_PLAN_ONCE', prerequisites: ['Confirm X identity'], blocked_by: [], ceilings: [], verification_steps: ['Read back the Post'], rollback_steps: ['Pause remaining actions'] },
+    monitoring_plan: { baseline: 'Capture the pre-launch baseline.', primary_outcome: 'Qualified engagement', attribution_limit: 'Do not infer revenue.', checkpoints: [{ timing: '24 hours', metrics: ['impressions', 'engagements'], decision_rule: 'Review; do not auto-optimize.' }], optimization_requires_approval: true },
+    assumptions: [], launch_checklist: ['Approve exact copy.'], risks: [],
+    requirement_coverage: [{ requirement_id: 'goal', action_ids: ['x-1'] }, { requirement_id: 'channel:x_organic', action_ids: ['x-1'] }],
+    quality_gate: { ready: true, checks: {
+      goal_alignment: 'passed', company_grounding: 'passed', channel_completeness: 'passed', provider_validity: 'passed', schedule_completeness: 'passed',
+      evidence_integrity: 'passed', creative_completeness: 'passed', launch_safety: 'passed', measurement_readiness: 'passed',
+    } },
+  };
+  assert.deepEqual(validateCampaignBundle(bundle, campaign), []);
+  const missingLaunchSafety = structuredClone(bundle); delete missingLaunchSafety.launch_plan;
+  assert.match(validateCampaignBundle(missingLaunchSafety, campaign).join(' '), /needs a launch plan/);
+  const weakAction = structuredClone(bundle); delete weakAction.actions[0].rollback_or_exit;
+  assert.match(validateCampaignBundle(weakAction, campaign).join(' '), /rollback or exit condition/);
+  const ungroundedTarget = structuredClone(bundle); ungroundedTarget.kpis[0] = { name: 'Qualified engagement', target: '500', source: 'X', target_type: 'verified', evidence_ids: [] };
+  assert.match(validateCampaignBundle(ungroundedTarget, campaign).join(' '), /verified target must reference verified evidence/);
 });
 
 test('action edits create a valid cloned bundle without mutating the approved source', () => {

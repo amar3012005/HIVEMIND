@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-CAMPAIGN_CONTRACT_VERSION = 3
+CAMPAIGN_CONTRACT_VERSION = 4
 
 
 def campaign_system_contract() -> str:
@@ -21,6 +21,10 @@ def campaign_system_contract() -> str:
         "company or invent audiences, URLs, quotes, budgets, proof, customer results, or performance.\n"
         "- Produce the complete campaign sequence required by the brief's horizon and pace; one sample action is "
         "never a complete campaign unless the normalized brief explicitly permits one.\n"
+        "- Build an explicit media plan, creative hypothesis system, draft-only launch plan, and monitoring plan. "
+        "Every action must name its hypothesis, dependencies, success measure, and rollback or exit condition.\n"
+        "- Keep platform-attributed delivery, first-party outcomes, and experimental inference distinct. Optimisation "
+        "is always a new approval-bound proposal, never an automatic conclusion from weak or immature data.\n"
         "- Every x_organic action is exactly one X Post: payload.text and final_copy must match and each must be "
         "280 characters or fewer. Represent a thread as separate ordered x_organic actions, one action per Post.\n"
         "- Decide image need per action. Use a visual only when it materially improves comprehension, attention, "
@@ -156,7 +160,7 @@ def campaign_bundle_errors(
 
     # Existing bundles remain readable. New Campaign Room synthesis requests the
     # latest contract and is held to the richer operating-board contract below.
-    if max(declared_version, minimum_contract_version) >= CAMPAIGN_CONTRACT_VERSION:
+    if max(declared_version, minimum_contract_version) >= 2:
         if not _non_empty_string(bundle.get("objective")):
             errors.append("objective is required for contract v2")
 
@@ -257,6 +261,7 @@ def campaign_bundle_errors(
         elif not evidence:
             errors.append("evidence must not be empty for contract v3")
         evidence_ids = {str(item.get("id") or "") for item in evidence if isinstance(item, dict)}
+        evidence_statuses = {str(item.get("id") or ""): str(item.get("status") or "") for item in evidence if isinstance(item, dict)}
         for index, item in enumerate(evidence):
             if not isinstance(item, dict):
                 errors.append(f"evidence item {index + 1} must be an object")
@@ -302,6 +307,8 @@ def campaign_bundle_errors(
                 errors.append(f"action {action.get('id') or index + 1} references unknown evidence for contract v3")
             elif str(action.get("claim_status") or "") == "verified" and not action_evidence:
                 errors.append(f"action {action.get('id') or index + 1} needs evidence for a verified claim")
+            elif str(action.get("claim_status") or "") == "verified" and any(evidence_statuses.get(str(item)) != "verified" for item in action_evidence):
+                errors.append(f"action {action.get('id') or index + 1} verified claims must reference only verified evidence")
 
         quality = bundle.get("quality_gate")
         checks = quality.get("checks") if isinstance(quality, dict) and isinstance(quality.get("checks"), dict) else {}
@@ -310,6 +317,161 @@ def campaign_bundle_errors(
         for check in ("goal_alignment", "company_grounding", "channel_completeness", "provider_validity", "schedule_completeness"):
             if checks.get(check) != "passed":
                 errors.append(f"quality_gate.checks.{check} must pass for contract v3")
+
+    if max(declared_version, minimum_contract_version) >= 4:
+        kpis = bundle.get("kpis") if isinstance(bundle.get("kpis"), list) else []
+        for index, kpi in enumerate(kpis):
+            if not isinstance(kpi, dict):
+                errors.append(f"KPI {index + 1} must be an object for contract v4")
+                continue
+            target_type = str(kpi.get("target_type") or "")
+            kpi_evidence = kpi.get("evidence_ids")
+            if target_type not in ("baseline", "proposed", "verified"):
+                errors.append(f"KPI {index + 1} needs target_type baseline, proposed, or verified for contract v4")
+            if not isinstance(kpi_evidence, list):
+                errors.append(f"KPI {index + 1} evidence_ids must be an array for contract v4")
+            elif any(str(item) not in evidence_ids for item in kpi_evidence):
+                errors.append(f"KPI {index + 1} references unknown evidence for contract v4")
+            elif target_type == "verified" and (not kpi_evidence or any(evidence_statuses.get(str(item)) != "verified" for item in kpi_evidence)):
+                errors.append(f"KPI {index + 1} verified target must reference verified evidence")
+
+        media_plan = bundle.get("media_plan")
+        media_channels = media_plan.get("channels") if isinstance(media_plan, dict) else None
+        if not isinstance(media_plan, dict):
+            errors.append("media_plan is required for contract v4")
+            media_channels = []
+        if not isinstance(media_channels, list) or not media_channels:
+            errors.append("media_plan.channels must not be empty for contract v4")
+            media_channels = []
+        planned_channels: set[str] = set()
+        for index, row in enumerate(media_channels):
+            if not isinstance(row, dict):
+                errors.append(f"media plan channel {index + 1} must be an object")
+                continue
+            channel = str(row.get("channel") or "").strip().lower()
+            if not channel or channel in planned_channels:
+                errors.append(f"media plan channel {index + 1} needs a unique channel")
+            elif channel not in channels:
+                errors.append(f"media plan channel {channel} was not selected")
+            else:
+                planned_channels.add(channel)
+            for field in ("role", "rationale"):
+                if not _non_empty_string(row.get(field)):
+                    errors.append(f"media plan channel {channel or index + 1} needs {field}")
+            budget = row.get("budget_amount")
+            if budget is not None and (not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget < 0):
+                errors.append(f"media plan channel {channel or index + 1} has an invalid budget_amount")
+            for field in ("prerequisites", "exclusions"):
+                if not isinstance(row.get(field), list):
+                    errors.append(f"media plan channel {channel or index + 1} {field} must be an array")
+        for channel in channels:
+            if channel not in planned_channels:
+                errors.append(f"selected channel {channel} is missing from media_plan")
+        if isinstance(media_plan, dict) and media_plan.get("currency") is not None:
+            currency = str(media_plan.get("currency") or "")
+            if not re.match(r"^[A-Z]{3}$", currency):
+                errors.append("media_plan.currency must be a three-letter code or null")
+
+        creative_system = bundle.get("creative_system")
+        hypotheses = creative_system.get("hypotheses") if isinstance(creative_system, dict) else None
+        if not isinstance(creative_system, dict):
+            errors.append("creative_system is required for contract v4")
+            hypotheses = []
+        if not isinstance(hypotheses, list) or len(hypotheses) < 2:
+            errors.append("creative_system.hypotheses must contain at least two testable hypotheses")
+            hypotheses = []
+        hypothesis_ids: set[str] = set()
+        for index, hypothesis in enumerate(hypotheses):
+            if not isinstance(hypothesis, dict):
+                errors.append(f"creative hypothesis {index + 1} must be an object")
+                continue
+            hypothesis_id = str(hypothesis.get("id") or "").strip()
+            if not hypothesis_id or hypothesis_id in hypothesis_ids:
+                errors.append(f"creative hypothesis {index + 1} needs a unique id")
+            else:
+                hypothesis_ids.add(hypothesis_id)
+            for field in ("insight", "promise", "hook", "cta", "experiment_hypothesis"):
+                if not _non_empty_string(hypothesis.get(field)):
+                    errors.append(f"creative hypothesis {hypothesis_id or index + 1} needs {field}")
+            hypothesis_channels = hypothesis.get("channels")
+            if not _non_empty_list(hypothesis_channels):
+                errors.append(f"creative hypothesis {hypothesis_id or index + 1} needs channels")
+            elif any(str(channel).lower() not in channels for channel in hypothesis_channels):
+                errors.append(f"creative hypothesis {hypothesis_id or index + 1} uses an unselected channel")
+        approved_claim_ids = creative_system.get("approved_claim_ids") if isinstance(creative_system, dict) else None
+        if not isinstance(approved_claim_ids, list):
+            errors.append("creative_system.approved_claim_ids must be an array")
+            approved_claim_ids = []
+        elif any(str(item) not in evidence_ids for item in approved_claim_ids):
+            errors.append("creative_system.approved_claim_ids references unknown evidence")
+        elif any(evidence_statuses.get(str(item)) != "verified" for item in approved_claim_ids):
+            errors.append("creative_system.approved_claim_ids must reference only verified evidence")
+
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                continue
+            action_id = str(action.get("id") or index + 1)
+            hypothesis_id = str(action.get("hypothesis_id") or "")
+            if hypothesis_id not in hypothesis_ids:
+                errors.append(f"action {action_id} must reference a creative hypothesis")
+            if not isinstance(action.get("dependencies"), list):
+                errors.append(f"action {action_id} dependencies must be an array for contract v4")
+            if not _non_empty_string(action.get("success_measure")):
+                errors.append(f"action {action_id} needs success_measure for contract v4")
+            if not _non_empty_string(action.get("rollback_or_exit")):
+                errors.append(f"action {action_id} needs rollback_or_exit for contract v4")
+
+        launch_plan = bundle.get("launch_plan")
+        if not isinstance(launch_plan, dict):
+            errors.append("launch_plan is required for contract v4")
+        else:
+            if launch_plan.get("mode") != "draft_only":
+                errors.append("launch_plan.mode must be draft_only during Room generation")
+            if not _non_empty_string(launch_plan.get("approval_mode")):
+                errors.append("launch_plan.approval_mode is required for contract v4")
+            for field in ("prerequisites", "blocked_by", "ceilings"):
+                if not isinstance(launch_plan.get(field), list):
+                    errors.append(f"launch_plan.{field} must be an array for contract v4")
+            for field in ("verification_steps", "rollback_steps"):
+                if not _non_empty_list(launch_plan.get(field)):
+                    errors.append(f"launch_plan.{field} must not be empty for contract v4")
+
+        monitoring_plan = bundle.get("monitoring_plan")
+        if not isinstance(monitoring_plan, dict):
+            errors.append("monitoring_plan is required for contract v4")
+        else:
+            for field in ("baseline", "primary_outcome", "attribution_limit"):
+                if not _non_empty_string(monitoring_plan.get(field)):
+                    errors.append(f"monitoring_plan.{field} is required for contract v4")
+            checkpoints = monitoring_plan.get("checkpoints")
+            if not _non_empty_list(checkpoints):
+                errors.append("monitoring_plan.checkpoints must not be empty for contract v4")
+                checkpoints = []
+            for index, checkpoint in enumerate(checkpoints):
+                if not isinstance(checkpoint, dict):
+                    errors.append(f"monitoring checkpoint {index + 1} must be an object")
+                    continue
+                if not _non_empty_string(checkpoint.get("timing")):
+                    errors.append(f"monitoring checkpoint {index + 1} needs timing")
+                if not _non_empty_list(checkpoint.get("metrics")):
+                    errors.append(f"monitoring checkpoint {index + 1} needs metrics")
+                if not _non_empty_string(checkpoint.get("decision_rule")):
+                    errors.append(f"monitoring checkpoint {index + 1} needs decision_rule")
+            if monitoring_plan.get("optimization_requires_approval") is not True:
+                errors.append("monitoring_plan.optimization_requires_approval must be true")
+
+        for index, item in enumerate(evidence):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source_type") or "") not in ("company", "connector", "web", "user", "provider", "derived"):
+                errors.append(f"evidence item {index + 1} needs a valid source_type for contract v4")
+            if str(item.get("confidence") or "") not in ("high", "medium", "low", "none"):
+                errors.append(f"evidence item {index + 1} needs a valid confidence for contract v4")
+
+        checks = bundle.get("quality_gate", {}).get("checks", {}) if isinstance(bundle.get("quality_gate"), dict) else {}
+        for check in ("evidence_integrity", "creative_completeness", "launch_safety", "measurement_readiness"):
+            if checks.get(check) != "passed":
+                errors.append(f"quality_gate.checks.{check} must pass for contract v4")
     return list(dict.fromkeys(errors))
 
 

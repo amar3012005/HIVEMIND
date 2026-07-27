@@ -32,6 +32,7 @@ class DomainPack:
     toolkit_prompt: str
     report_contract: str
     skills: Dict[str, Tuple[str, str]]
+    default_skill: str
 
     def skill_catalog(self) -> List[Tuple[str, str]]:
         return [(name, when) for name, (when, _body) in self.skills.items()]
@@ -65,6 +66,10 @@ def _load_pack(path: str) -> Optional[DomainPack]:
                     continue
                 skills[filename[:-3]] = (match.group("when").strip(), match.group("body").strip())
 
+        default_skill = str(manifest.get("default_skill") or "").strip()
+        if default_skill and default_skill not in skills:
+            raise ValueError("default_skill must name a skill in this pack")
+
         return DomainPack(
             slug=slug,
             version=version,
@@ -75,6 +80,7 @@ def _load_pack(path: str) -> Optional[DomainPack]:
             toolkit_prompt=_read(os.path.join(path, "toolkit.md")),
             report_contract=_read(os.path.join(path, "report.md")),
             skills=skills,
+            default_skill=default_skill or next(iter(skills), ""),
         )
     except Exception as exc:  # noqa: BLE001 - one pack must never break general Rooms
         log.warning("[domains] skipped %s: %s", os.path.basename(path), exc)
@@ -118,4 +124,4 @@ def domain_skill_catalog(slug: str) -> List[Tuple[str, str]]:
 
 def default_domain_skill(slug: str) -> str:
     pack = get_domain_pack(slug)
-    return next(iter(pack.skills), "") if pack else ""
+    return pack.default_skill if pack else ""

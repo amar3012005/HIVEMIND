@@ -2124,7 +2124,7 @@ class Director:
                     "goal": {"type": "string"},
                     "name": {"type": ["string", "null"]},
                     "objective": {"type": "string", "enum": ["AWARENESS", "PRODUCT_LAUNCH", "LEAD_GENERATION", "WEBSITE_TRAFFIC", "THOUGHT_LEADERSHIP", "EVENT_PROMOTION", "RE_ENGAGEMENT", "CUSTOM"]},
-                    "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "gmail", "tara"]}},
+                    "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "gmail", "tara", "x_ads", "google_ads", "meta", "linkedin", "youtube_ads", "tiktok_ads", "microsoft_ads", "apple_ads", "amazon_ads", "reddit_ads", "pinterest_ads", "snapchat_ads"]}},
                     "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
                     "intensity": {"type": "string", "enum": ["LIGHT", "FOCUSED", "HIGH"]},
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
@@ -2145,7 +2145,7 @@ class Director:
             "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
             "RUN, START, or SET UP an operational campaign, return its complete brief here. This delegates to a "
             "dedicated Campaign Room, so every gather field must be empty/null and needs_debate=false. Map X to "
-            "x_organic, email/Gmail to gmail, and calls/TARA to tara. Use channels=[] when the user did not specify "
+            "x_organic, paid X to x_ads, email/Gmail to gmail, calls/TARA to tara, and map explicit paid or organic platforms to their matching channel ID. Use channels=[] when the user did not specify "
             "a channel; Core will select only channels that are connected and executable. Defaults: 14 days, "
             "FOCUSED, APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when this is "
             "already a Campaign Room. Starting a campaign NEVER means publishing it.\n"
@@ -2191,10 +2191,14 @@ class Director:
         if _METHOD_SKILLS_ENABLED:
             cat = skill_catalog(self.room_kind)
             if cat:
+                skill_pick_instruction = (
+                    "pick 2-4 METHOD SKILLS" if self.room_kind == "campaign"
+                    else "pick 1-2 METHOD SKILLS"
+                )
                 lessons = ("\nPreviously effective in this room type: "
                            + " | ".join(self.room_playbook)) if self.room_playbook else ""
                 sysp += (
-                    "\n- method_skills: pick 1-2 METHOD SKILLS from this catalog that fit the task "
+                    f"\n- method_skills: {skill_pick_instruction} from this catalog that fit the task "
                     "(their full method loads for the room); [] if none fit:\n"
                     + "\n".join(f"  • {n} — {w}" for n, w in cat) + lessons
                 )
@@ -2249,8 +2253,11 @@ class Director:
                                        and self._allows_places_discovery()) else None)
         # Method skills: keep only real catalog names; auto-load the kind default
         # when the plan picked none (mirrors the polished-email auto-load).
+        skill_limit = 4 if self.room_kind == "campaign" else 2
         ms = [s for s in (plan.get("method_skills") or [])
-              if isinstance(s, str) and load_method_skill(s)][:2]
+              if isinstance(s, str) and load_method_skill(s)][:skill_limit]
+        if self.room_kind == "campaign" and "campaign-operating-system" not in ms:
+            ms = ["campaign-operating-system", *ms][:skill_limit]
         if _METHOD_SKILLS_ENABLED and not ms:
             ms = [default_skill_for(self.room_kind)]
         plan["method_skills"] = ms if _METHOD_SKILLS_ENABLED else []
@@ -2425,13 +2432,13 @@ class Director:
             "You are the final campaign plan compiler. Return one JSON object only. The room may research and draft, "
             "but it must never send. Preserve the user's goal, use only selected channels, and provide complete final "
             f"content. Set contract_version to {CAMPAIGN_CONTRACT_VERSION}. Required shape: "
-            "{contract_version:3,objective:string,strategy:string,"
+            f"{{contract_version:{CAMPAIGN_CONTRACT_VERSION},objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
             "company_grounding:{company_name:string,facts_used:string[],unknowns:string[]},"
             "campaign_horizon:{duration_days:integer,intensity:string,rationale:string},"
             "positioning:{statement:string,proof_points:string[]},"
             "audience:{rationale:string,segments:array,safety_notes:array},"
-            "content_pillars:string[],kpis:[{name:string,target:string,source:string}],actions:[{id:string,channel:string,"
+            "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],actions:[{id:string,channel:string,"
             "title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
             "creative_brief:{required:boolean,objective:string,subject:string,composition:string,brand_style:string,audience:string,"
             "aspect_ratio:1:1|16:9|9:16|4:3|3:4,text_policy:string,required_elements:string[],forbidden_elements:string[],"
@@ -2443,8 +2450,12 @@ class Director:
             "debate_conflicts_present:boolean,"
             "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
             "evidence:[{id:string,claim:string,source:string,status:verified|assumption|missing,url:string}],"
+            "media_plan:{currency:string|null,channels:[{channel:string,role:string,rationale:string,budget_amount:number|null,prerequisites:string[],exclusions:string[]}]},"
+            "creative_system:{approved_claim_ids:string[],hypotheses:[{id:string,insight:string,promise:string,hook:string,cta:string,channels:string[],experiment_hypothesis:string}]},"
+            "launch_plan:{mode:draft_only,approval_mode:string,prerequisites:string[],blocked_by:string[],ceilings:array,verification_steps:string[],rollback_steps:string[]},"
+            "monitoring_plan:{baseline:string,primary_outcome:string,attribution_limit:string,checkpoints:[{timing:string,metrics:string[],decision_rule:string}],optimization_requires_approval:true},"
             "assumptions:string[],launch_checklist:string[],risks:string[],"
-            "quality_gate:{ready:true,checks:{goal_alignment:passed,company_grounding:passed,channel_completeness:passed,provider_validity:passed,schedule_completeness:passed}},"
+            "quality_gate:{ready:true,checks:{goal_alignment:passed,company_grounding:passed,channel_completeness:passed,provider_validity:passed,schedule_completeness:passed,evidence_integrity:passed,creative_completeness:passed,launch_safety:passed,measurement_readiness:passed}},"
             "requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
             "Every action must appear in timeline with the same scheduled offset. Set debate_conflicts_present from "
             "the transcript; when true, record every material conflict and resolution in debate_decisions. Use an "
@@ -2453,6 +2464,15 @@ class Director:
             "E.164 to number, opening, goal, context, language, lawful_basis (consent or legitimate_interest), "
             "ISO country, IANA timezone, and calling_window; "
             "objections, and strategy; TARA must speak first. For X Organic payload include text. No placeholders. "
+            "Each evidence row also requires source_type (company, connector, web, user, provider, or derived) and "
+            "confidence (high, medium, low, or none). Each action requires hypothesis_id, dependencies, success_measure, "
+            "and rollback_or_exit. Every action must reference one declared hypothesis. A verified action claim and every "
+            "creative_system.approved_claim_id may reference only evidence rows whose status is verified. Assumptions and "
+            "missing evidence must never be promoted into approved public claims. launch_plan is draft_only because "
+            "Every KPI must label its target_type. Use baseline when the campaign must establish a baseline, proposed for "
+            "an owner-reviewable goal, and verified only when its evidence_ids point to verified historical evidence. Never "
+            "present a proposed numerical target as observed performance or a sourced benchmark. "
+            "the Room cannot publish; list missing connections, approvals, ceilings, evidence, or tracking in blocked_by. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
@@ -2477,11 +2497,7 @@ class Director:
                                  "\n\nCURRENT INVALID BUNDLE:\n" + previous})
             msg = await self._groq(messages, force_text=True, model=self.synth_model, bucket="synth", temp=0.2)
             raw = str((msg or {}).get("content") or "").strip()
-            try:
-                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
-                candidate = json.loads(raw)
-            except Exception:
-                candidate = None
+            candidate = _first_json_object(raw)
             if isinstance(candidate, dict):
                 previous_candidate = candidate
             visual_actions = [action for action in (candidate.get("actions") or [])

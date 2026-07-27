@@ -34,6 +34,8 @@ test('campaign schemas never expose tenant identity or a publish tool', () => {
   assert.ok(create);
   assert.equal('org_id' in create.function.parameters.properties, false);
   assert.equal('user_id' in create.function.parameters.properties, false);
+  assert.ok(create.function.parameters.properties.channels.items.enum.includes('google_ads'));
+  assert.ok(create.function.parameters.properties.channels.items.enum.includes('meta'));
 });
 
 test('campaign list is hard-scoped to the authenticated organization', async () => {

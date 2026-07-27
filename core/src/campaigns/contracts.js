@@ -1,6 +1,11 @@
 export const CAMPAIGN_ROOM_TASK_TAG = 'CAMPAIGN';
 
-const CHANNEL_LABELS = { x_organic: 'X', gmail: 'Email', tara: 'TARA' };
+const CHANNEL_LABELS = {
+  x_organic: 'X organic', gmail: 'Email', tara: 'TARA', x_ads: 'X Ads',
+  google_ads: 'Google Ads', meta: 'Meta Ads', linkedin: 'LinkedIn', youtube_ads: 'YouTube Ads',
+  tiktok_ads: 'TikTok Ads', microsoft_ads: 'Microsoft Ads', apple_ads: 'Apple Ads',
+  amazon_ads: 'Amazon Ads', reddit_ads: 'Reddit Ads', pinterest_ads: 'Pinterest Ads', snapchat_ads: 'Snapchat Ads',
+};
 
 export function buildCampaignDisplayMessage(campaign, feedback = '') {
   const channels = (campaign.requestedChannels || []).map((channel) => CHANNEL_LABELS[channel] || channel).join(', ');
@@ -16,7 +21,7 @@ export function buildCampaignDisplayMessage(campaign, feedback = '') {
   ].filter(Boolean).join('\n\n');
 }
 
-export function buildCampaignExecutionContext(campaign, feedback = '') {
+export function buildCampaignExecutionContext(campaign, feedback = '', channelCapabilities = []) {
   return [
     `CAMPAIGN_ID: ${campaign.id}`,
     `GOAL: ${campaign.goal}`,
@@ -24,8 +29,10 @@ export function buildCampaignExecutionContext(campaign, feedback = '') {
     `CHANNELS: ${campaign.requestedChannels.join(', ')}`,
     `BRIEF_JSON: ${JSON.stringify(campaign.brief || {})}`,
     `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy || {})}`,
+    `CHANNEL_CAPABILITIES_JSON: ${JSON.stringify(Array.isArray(channelCapabilities) ? channelCapabilities : [])}`,
     feedback ? `USER_FEEDBACK: ${String(feedback).slice(0, 4000)}` : null,
     'For X, create exactly one Post per x_organic action. payload.text and final_copy must match and be 280 characters or fewer. Represent a thread as separate ordered actions, one action per Post.',
+    'For every selected channel, distinguish planning readiness from execution readiness. If an account, connector, permission, budget ceiling, tracking setup, or publisher adapter is unavailable, still create the best approval-ready plan and record the exact missing prerequisite in launch_plan.blocked_by. Never imply that a plan-only channel can publish.',
     'Treat the active organization profile and supplied company evidence as ground truth. Never substitute another company or invent audience size, proof, URLs, performance, budgets, quotes, or customer results.',
     'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and submit the complete plan with campaign__submit_plan. Do not send any external action.',
   ].filter(Boolean).join('\n');
@@ -43,7 +50,7 @@ export function buildCampaignRoomDispatch({ campaign, room, turn, participantIds
     org_id: campaign.orgId,
     user_message: turn.userMessage,
     display_message: turn.userMessage,
-    execution_context: buildCampaignExecutionContext(campaign, briefSnapshot?.feedback || ''),
+    execution_context: buildCampaignExecutionContext(campaign, briefSnapshot?.feedback || '', briefSnapshot?.channel_capabilities || []),
     participant_ids: participantIds,
     room_goal: room.goal,
     task_tag: CAMPAIGN_ROOM_TASK_TAG,

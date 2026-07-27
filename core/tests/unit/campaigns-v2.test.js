@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, getCampaignSettings, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, getCampaignSettings, markCampaignRepairing, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
@@ -245,6 +245,11 @@ test('contract v4 requires one source-grounded operating plan across intelligenc
     } },
   };
   assert.deepEqual(validateCampaignBundle(bundle, campaign), []);
+  const fullAutoCampaign = { ...campaign, autonomyMode: 'FULL_AUTO' };
+  const fullAutoBundle = structuredClone(bundle);
+  fullAutoBundle.monitoring_plan.optimization_requires_approval = false;
+  assert.deepEqual(validateCampaignBundle(fullAutoBundle, fullAutoCampaign), []);
+  assert.match(validateCampaignBundle(bundle, fullAutoCampaign).join(' '), /must be false for FULL_AUTO/);
   const missingLaunchSafety = structuredClone(bundle); delete missingLaunchSafety.launch_plan;
   assert.match(validateCampaignBundle(missingLaunchSafety, campaign).join(' '), /needs a launch plan/);
   const weakAction = structuredClone(bundle); delete weakAction.actions[0].rollback_or_exit;
@@ -408,6 +413,26 @@ test('first Campaign Room event advances the durable run and records progress', 
   assert.equal(result.status, 'RUNNING');
   assert.equal(run.status, 'RUNNING');
   assert.equal(events[0].eventType, 'campaign_generation_started');
+});
+
+test('intermediate campaign contract gaps remain repairable until the Room seals', async () => {
+  const writes = [];
+  const run = { id: 'run-a', campaignId: 'campaign-a', status: 'RUNNING', campaign: { orgId: 'org-a' } };
+  const prisma = {
+    campaignRun: {
+      async findUnique() { return run; },
+      update({ data }) { writes.push(['run', data]); return Promise.resolve(data); },
+    },
+    campaign: { update({ data }) { writes.push(['campaign', data]); return Promise.resolve(data); } },
+    campaignEvent: { create({ data }) { writes.push(['event', data]); return Promise.resolve(data); } },
+    async $transaction(operations) { return Promise.all(operations); },
+  };
+  const result = await markCampaignRepairing({ prisma, turnId: 'turn-a', errors: ['Action A3 needs verified copy'] });
+  assert.equal(result.status, 'VALIDATING');
+  assert.equal(result.repairing, true);
+  assert.equal(writes.find(([kind]) => kind === 'run')[1].status, 'VALIDATING');
+  assert.equal(writes.find(([kind]) => kind === 'campaign')[1].status, 'GENERATING');
+  assert.equal(writes.find(([kind]) => kind === 'event')[1].eventType, 'campaign_contract_repairing');
 });
 
 test('late dispatch transport errors cannot overwrite a completed campaign run', async () => {

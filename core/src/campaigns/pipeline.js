@@ -1,4 +1,4 @@
-import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle } from './service.js';
+import { autoLaunchCampaignIfReady, markCampaignNeedsInput, markCampaignRepairing, persistCampaignBundle } from './service.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
@@ -98,7 +98,7 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
 
   if (!FINAL_RUN_STATES.has(run.status) && normalized.t !== 'seal') await markGenerationStarted(prisma, run);
   if (normalized.t === 'campaign_bundle') {
-    const result = await persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle });
+    const result = await persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle, terminalOnInvalid: false });
     const readyEvent = await persistCampaignReadyHandoff({ prisma, run, result, bundle: normalized.bundle });
     const automatic = result?.status === 'READY_FOR_APPROVAL'
       ? await autoLaunchCampaignIfReady({ prisma, campaignId: run.campaignId })
@@ -107,17 +107,20 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
     return readyEvent ? { ...response, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : response;
   }
   if (normalized.t === 'campaign_bundle_invalid') {
-    return markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });
+    return markCampaignRepairing({ prisma, turnId, errors: normalized.errors });
   }
   if (normalized.t !== 'seal') return { campaignId: run.campaignId, status: 'RUNNING' };
 
   const current = await prisma.campaignRun.findUnique({ where: { id: run.id } });
   if (!current || FINAL_RUN_STATES.has(current.status)) return { campaignId: run.campaignId, status: current?.status || run.status };
   if (String(normalized.status || 'complete').toLowerCase() === 'complete') {
+    const validationErrors = Array.isArray(current.validation?.errors) ? current.validation.errors : [];
     return markCampaignNeedsInput({
       prisma,
       turnId,
-      errors: ['Campaign Room completed without submitting a valid campaign plan. Retry generation or provide the missing campaign details.'],
+      errors: validationErrors.length
+        ? validationErrors
+        : ['Campaign Room completed without submitting a valid campaign plan. Retry generation or provide the missing campaign details.'],
     });
   }
   return markGenerationFailed(prisma, run, normalized);

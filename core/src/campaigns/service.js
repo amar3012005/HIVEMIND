@@ -271,7 +271,10 @@ export function validateCampaignBundle(bundle, campaign) {
         if (!Array.isArray(checkpoint?.metrics) || !checkpoint.metrics.length) errors.push(`Contract v4 monitoring checkpoint ${index + 1} needs metrics`);
         if (!String(checkpoint?.decision_rule || '').trim()) errors.push(`Contract v4 monitoring checkpoint ${index + 1} needs a decision rule`);
       });
-      if (monitoringPlan.optimization_requires_approval !== true) errors.push('Contract v4 optimization must require approval');
+      const expectedOptimizationApproval = String(campaign.autonomyMode || 'APPROVE_PLAN_ONCE').toUpperCase() !== 'FULL_AUTO';
+      if (monitoringPlan.optimization_requires_approval !== expectedOptimizationApproval) {
+        errors.push(`Contract v4 optimization_requires_approval must be ${expectedOptimizationApproval} for ${campaign.autonomyMode || 'APPROVE_PLAN_ONCE'}`);
+      }
     }
 
     evidenceRows.forEach((item, index) => {
@@ -308,12 +311,13 @@ export function campaignAgentWhere(orgId) {
   return { orgId, archivedAt: null, status: { not: 'paused' } };
 }
 
-export async function persistCampaignBundle({ prisma, turnId, bundle }) {
+export async function persistCampaignBundle({ prisma, turnId, bundle, terminalOnInvalid = true }) {
   const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
   if (!run) return null;
   const errors = validateCampaignBundle(bundle, run.campaign);
   if (errors.length) {
-    await markCampaignNeedsInput({ prisma, turnId, errors });
+    if (terminalOnInvalid) await markCampaignNeedsInput({ prisma, turnId, errors });
+    else await markCampaignRepairing({ prisma, turnId, errors });
     return { ok: false, errors, campaignId: run.campaignId };
   }
   const bundleHash = canonicalHash(bundle);
@@ -417,6 +421,23 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
     if (visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_asset_generation_queued', data: { plan_version_id: plan.id, action_count: visualActionCount, source: 'campaign_room' } } });
     return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', visualActionCount };
   });
+}
+
+export async function markCampaignRepairing({ prisma, turnId, errors }) {
+  const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: { select: { orgId: true } } } });
+  if (!run || ['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status)) return null;
+  const cleanErrors = (Array.isArray(errors) ? errors : []).map((item) => String(item).slice(0, 500)).slice(0, 30);
+  const message = cleanErrors.join('; ') || 'Campaign contract is being repaired';
+  await prisma.$transaction([
+    prisma.campaign.update({ where: { id: run.campaignId }, data: { status: 'GENERATING', lastError: message } }),
+    prisma.campaignRun.update({ where: { id: run.id }, data: {
+      status: 'VALIDATING', validation: { valid: false, errors: cleanErrors, repair_in_progress: true }, error: message, completedAt: null,
+    } }),
+    prisma.campaignEvent.create({ data: {
+      campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_contract_repairing', data: { errors: cleanErrors },
+    } }),
+  ]);
+  return { campaignId: run.campaignId, status: 'VALIDATING', repairing: true, errors: cleanErrors };
 }
 
 export async function markCampaignNeedsInput({ prisma, turnId, errors }) {

@@ -598,7 +598,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
 export async function listCampaigns({ prisma, orgId }) {
   requireCampaignsV2(orgId);
   return prisma.campaign.findMany({
-    where: { orgId }, orderBy: { createdAt: 'desc' },
+    where: { orgId, status: { not: 'CANCELLED' } }, orderBy: { createdAt: 'desc' },
     include: { channels: true, runs: { orderBy: { createdAt: 'desc' }, take: 1 }, approvals: { where: { status: 'ACTIVE' }, orderBy: { approvedAt: 'desc' }, take: 1 }, _count: { select: { actions: true } } },
   });
 }
@@ -648,6 +648,28 @@ export async function getCampaign({ prisma, orgId, userId = null, id }) {
     roomTranscript,
     readiness,
   };
+}
+
+export async function deleteCampaign({ prisma, orgId, userId, id }) {
+  requireCampaignsV2(orgId);
+  const campaign = await prisma.campaign.findFirst({ where: { id, orgId, status: { not: 'CANCELLED' } } });
+  if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
+  await requireCampaignEditor(prisma, campaign, userId);
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.campaign.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: now, lastError: null } }),
+    prisma.campaignAction.updateMany({
+      where: { campaignId: id, status: { in: ['READY', 'QUEUED', 'PAUSED', 'FAILED', 'BLOCKED'] } },
+      data: { status: 'CANCELLED', leaseOwner: null, leaseExpiresAt: null },
+    }),
+    prisma.campaignChannel.updateMany({ where: { campaignId: id }, data: { status: 'CANCELLED' } }),
+    prisma.campaignApproval.updateMany({ where: { campaignId: id, status: 'ACTIVE' }, data: { status: 'REVOKED', revokedAt: now } }),
+    prisma.campaignEvent.create({ data: {
+      campaignId: id, orgId, eventType: 'campaign_deleted', actorType: 'user', actorId: userId,
+      data: { soft_delete: true, cancelled_at: now.toISOString() },
+    } }),
+  ]);
+  return { deleted: true, campaignId: id };
 }
 
 async function requireCampaignEditor(prisma, campaign, userId) {

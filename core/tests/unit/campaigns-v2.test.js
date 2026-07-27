@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, getCampaignSettings, markCampaignRepairing, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, deleteCampaign, editCampaignAction, getCampaignSettings, markCampaignRepairing, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
@@ -41,6 +41,32 @@ test('campaign autonomy settings are organization scoped and admin controlled', 
     assert.deepEqual(await getCampaignSettings({ prisma, orgId: 'org-a' }), { autonomy_mode: 'MANUAL_REVIEW' });
     assert.deepEqual(await updateCampaignSettings({ prisma, orgId: 'org-a', userId: 'user-a', autonomyMode: 'AUTO' }), { autonomy_mode: 'AUTO' });
     assert.deepEqual(update, { where: { id: 'org-a' }, data: { campaignAutonomyMode: 'AUTO' } });
+  } finally {
+    if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;
+    if (oldOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = oldOrgs;
+  }
+});
+
+test('campaign deletion is tenant scoped and cancels pending execution while preserving history', async () => {
+  const oldEnabled = process.env.CAMPAIGNS_V2_ENABLED; const oldOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
+  process.env.CAMPAIGNS_V2_ENABLED = 'true'; process.env.CAMPAIGNS_V2_ORG_IDS = '*';
+  const writes = [];
+  const prisma = {
+    campaign: {
+      async findFirst({ where }) { return where.orgId === 'org-a' ? { id: 'campaign-a', orgId: 'org-a', ownerUserId: 'user-a' } : null; },
+      update(args) { writes.push(['campaign', args]); return Promise.resolve(args); },
+    },
+    campaignAction: { updateMany(args) { writes.push(['actions', args]); return Promise.resolve(args); } },
+    campaignChannel: { updateMany(args) { writes.push(['channels', args]); return Promise.resolve(args); } },
+    campaignApproval: { updateMany(args) { writes.push(['approvals', args]); return Promise.resolve(args); } },
+    campaignEvent: { create(args) { writes.push(['event', args]); return Promise.resolve(args); } },
+    $transaction(ops) { return Promise.all(ops); },
+  };
+  try {
+    assert.deepEqual(await deleteCampaign({ prisma, orgId: 'org-a', userId: 'user-a', id: 'campaign-a' }), { deleted: true, campaignId: 'campaign-a' });
+    assert.equal(writes.find(([kind]) => kind === 'campaign')[1].data.status, 'CANCELLED');
+    assert.equal(writes.find(([kind]) => kind === 'event')[1].data.eventType, 'campaign_deleted');
+    await assert.rejects(() => deleteCampaign({ prisma, orgId: 'org-b', userId: 'user-a', id: 'campaign-a' }), { code: 'campaign_not_found', status: 404 });
   } finally {
     if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;
     if (oldOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = oldOrgs;

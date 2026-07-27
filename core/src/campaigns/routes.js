@@ -1,5 +1,5 @@
 import { getCampaignCapabilities } from './capabilities.js';
-import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, editCampaignAction, getCampaign, getCampaignSettings, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics, updateCampaignSettings } from './service.js';
+import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, deleteCampaign, editCampaignAction, getCampaign, getCampaignSettings, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics, updateCampaignSettings } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { processDueCampaignActions } from './worker.js';
 import { campaignWorkerEnabled } from './state.js';
@@ -91,6 +91,11 @@ export async function handleCampaignRequest({ pathname, method, body, req, res, 
     }
     const match = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})$/i);
     if (match && method === 'GET') return jsonResponse(res, { campaign: await getCampaign({ prisma, orgId, userId, id: match[1] }) });
+    if (match && method === 'DELETE') {
+      const result = await deleteCampaign({ prisma, orgId, userId, id: match[1] });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'deleted', campaignId: match[1], metadata: { soft_delete: true } });
+      return jsonResponse(res, result);
+    }
     const assetContentMatch = pathname.match(/^\/api\/campaigns\/([0-9a-f-]{36})\/assets\/([0-9a-f-]{36})\/content$/i);
     if (assetContentMatch && method === 'GET') {
       const result = await getCampaignAssetContent({ prisma, orgId, campaignId: assetContentMatch[1], assetId: assetContentMatch[2] });

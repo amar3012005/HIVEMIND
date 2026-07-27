@@ -1535,6 +1535,8 @@ class Director:
                     for m in (mems if isinstance(mems, list) else [])[:6] if isinstance(m, dict)
                 ]
                 facts = [f for f in facts if f]
+                if self.room_kind == "campaign":
+                    facts = [f for f in facts if self._campaign_recall_fact_is_grounded(f)]
                 self.blackboard.extend(facts)
                 self.gather_count += 1
                 await self.emit({"t": "gather", "sources": ["hivemind"], "memory_hits": len(facts),
@@ -1980,6 +1982,19 @@ class Director:
         common_terms = {"AI", "API", "B2B", "B2C", "CRM", "GDPR", "ICP", "SEO", "X"}
         identifiers = set(re.findall(r"\b[A-Z][A-Z0-9_-]{3,}\b", query or ""))
         return all(token in common_terms or token.casefold() in active_context for token in identifiers)
+
+    def _campaign_recall_fact_is_grounded(self, fact: str) -> bool:
+        match = re.search(r"(?:^|\n)Company:\s*([^\n—–]+)", self.company_brief or "", re.I)
+        if not match:
+            return False
+        company_name = match.group(1).strip(" .,-")
+        tokens = [
+            token.casefold()
+            for token in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9&.-]+", company_name)
+            if len(token.strip("&.-")) >= 3
+        ]
+        haystack = (fact or "").casefold()
+        return bool(tokens) and any(token in haystack for token in tokens)
 
     def _debate_topic(self) -> str:
         return (self.user_message or self.room_goal or "")[:400]

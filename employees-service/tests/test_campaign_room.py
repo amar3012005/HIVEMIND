@@ -73,6 +73,15 @@ def test_campaign_recall_does_not_trust_foreign_brand_in_company_brief():
     assert director._campaign_recall_query_is_grounded("SINGULANCE mission and products") is False
 
 
+def test_campaign_recall_facts_must_name_the_active_company():
+    director = object.__new__(Director)
+    director.company_brief = "Company: B&B. Markenagentur GmbH\nMission: Human intuition plus AI."
+
+    assert director._campaign_recall_fact_is_grounded("B&B. Markenagentur supports brand leaders") is True
+    assert director._campaign_recall_fact_is_grounded("HiPeople is a Berlin prospect") is False
+    assert director._campaign_recall_fact_is_grounded("Budget distribution totals EUR 162000") is False
+
+
 def test_campaign_compiler_normalizes_cta_aliases_without_regeneration():
     bundle = {
         "creative_system": {"hypotheses": [

@@ -7588,7 +7588,16 @@ exit \$RC
             } catch { return jsonResponse(res, { calls: [] }); }
           }
           const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
-          const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
+          // Optional ?session_ids=a,b,c — the campaign panel knows session ids,
+          // not call ids, and needs post-call state for ITS targets only rather
+          // than pulling the org's whole call history on every poll.
+          const _sids = String(url.searchParams.get('session_ids') || '')
+            .split(',').map((s) => s.trim()).filter(Boolean).slice(0, 100);
+          const calls = await prisma.taraCall.findMany({
+            where: { orgId: tOrg, ...(_sids.length ? { sessionId: { in: _sids } } : {}) },
+            orderBy: { startedAt: 'desc' },
+            take: _sids.length || limit,
+          });
           // Attach each call's post-call insight (summary + outcome + LEADS) so the
           // dashboard Leads/Insights tabs populate the instant a call ends. The list
           // previously returned bare call rows and never joined tara_insights, so on
@@ -7604,8 +7613,15 @@ exit \$RC
           } catch (e) { console.warn('[tara/calls] insight join failed:', e.message); }
           const callsOut = calls.map((c) => {
             const d = _insById.get(c.id);
+            // Post-call state the UI can trust. `processing` means the call has
+            // genuinely ended and the insight pass has not landed yet — derived
+            // from real rows, never a timer, so a spinner shown from this is
+            // telling the truth rather than decorating a wait.
+            const ended = c.status === 'completed' || !!c.endedAt;
+            const postCall = !ended ? 'live' : (d ? 'ready' : 'processing');
             return {
               ...c,
+              post_call: postCall,
               insight: d ? {
                 summary: d.summary || null,
                 sentiment: d.sentiment || null,

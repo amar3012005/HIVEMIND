@@ -19,7 +19,6 @@ orchestrator folds into the existing produce / verify / seal pipeline.
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import os
@@ -2554,7 +2553,6 @@ class Director:
             CAMPAIGN_CONTRACT_VERSION,
             assemble_campaign_bundle,
             campaign_system_contract,
-            classify_campaign_errors,
         )
         system = (
             campaign_system_contract() + "\n\n"
@@ -2605,282 +2603,35 @@ class Director:
         envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
         report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
         semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
-        self._ensure_campaign_evidence(semantic)
         for index, action in enumerate(semantic.get("actions") or []):
             if isinstance(action, dict):
                 action["id"] = str(action.get("id") or f"action_{index + 1}")
         candidate = assemble_campaign_bundle(
             semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
         )
-        candidate["report_markdown"] = self._complete_campaign_report(report, candidate)
-        self._repair_campaign_derivations(candidate)
-        from .campaign_contract import campaign__submit_plan
-        accepted, errors = campaign__submit_plan(
+        candidate["report_markdown"] = report
+        from .campaign_contract import campaign__govern_delivery
+        accepted, governance = campaign__govern_delivery(
             candidate,
             channels=channels,
             requirements=requirements,
             minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
             campaign_brief=self.campaign_brief,
         )
+        errors = governance["unmet_deliverables"]
+        await self.emit({
+            "t": "campaign_governance",
+            "tool": "campaign__govern_delivery",
+            "status": governance["status"],
+            "verdict": governance,
+        })
         if errors:
-            await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
-                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": 1})
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
-                             "title": "Repairing campaign details",
-                             "detail": f"The lead is correcting {len(errors)} specific field or action issue(s).",
-                             "attempt": 1})
-            semantic, report = await self._repair_campaign_fields(semantic, report, errors)
-            self._ensure_campaign_evidence(semantic)
-            candidate = assemble_campaign_bundle(
-                semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
-            )
-            candidate["report_markdown"] = self._complete_campaign_report(report, candidate)
-            self._repair_campaign_derivations(candidate)
-            accepted, errors = campaign__submit_plan(
-                candidate,
-                channels=channels,
-                requirements=requirements,
-                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
-                campaign_brief=self.campaign_brief,
-            )
-        if errors:
-            await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
-                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": 2})
+                             "title": "Governance found unmet deliverables",
+                             "detail": f"The Room did not deliver {len(errors)} promised requirement(s). Nothing was approved."})
             return None, errors
-        await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
+        await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
         return accepted, []
-
-    def _ensure_campaign_evidence(self, semantic: Dict[str, Any]) -> None:
-        """Preserve exact supplied context when a writer omits the evidence array."""
-        if any(isinstance(item, dict) for item in (semantic.get("evidence") or [])):
-            return
-        company = re.sub(r"\s+", " ", str(self.company_brief or "")).strip()
-        source_type = "company"
-        source = "Company profile"
-        claim = company[:800]
-        if not claim:
-            goal = str(self.campaign_brief.get("goal") or self.user_message or "").strip()
-            claim = re.sub(r"\s+", " ", goal)[:800]
-            source_type = "user"
-            source = "Campaign brief"
-        if not claim:
-            return
-        evidence_id = "supplied_context_1"
-        semantic["evidence"] = [{
-            "id": evidence_id,
-            "claim": claim,
-            "source": source,
-            "source_type": source_type,
-            "status": "verified",
-            "confidence": "high",
-            "url": "",
-        }]
-        grounding = semantic.get("company_grounding") if isinstance(semantic.get("company_grounding"), dict) else {}
-        grounding["facts_used"] = grounding.get("facts_used") or [claim]
-        semantic["company_grounding"] = grounding
-        positioning = semantic.get("positioning") if isinstance(semantic.get("positioning"), dict) else {}
-        positioning["proof_points"] = positioning.get("proof_points") or [claim]
-        semantic["positioning"] = positioning
-
-    @staticmethod
-    def _complete_campaign_report(report: str, bundle: Dict[str, Any]) -> str:
-        """Deterministically expose every executable action in the authored report."""
-        completed = str(report or "").strip()
-        normalized = re.sub(r"\s+", " ", completed).lower()
-        missing = []
-        for action in bundle.get("actions") or []:
-            if not isinstance(action, dict):
-                continue
-            copy_text = str(action.get("final_copy") or "").strip()
-            if not copy_text or re.sub(r"\s+", " ", copy_text).lower() in normalized:
-                continue
-            missing.append(action)
-        if not missing:
-            return completed
-        rows = ["## Final Actions"]
-        for action in missing:
-            title = str(action.get("title") or action.get("id") or "Campaign action").strip()
-            channel = str(action.get("channel") or "channel").strip()
-            timing = int(action.get("scheduled_offset_minutes") or 0)
-            rows.extend([
-                f"### {title}",
-                f"**Channel:** {channel}  ",
-                f"**Timing:** {timing} minutes after launch  ",
-                str(action.get("final_copy") or "").strip(),
-            ])
-        return f"{completed}\n\n" + "\n\n".join(rows)
-
-    async def _repair_campaign_fields(
-        self, semantic: Dict[str, Any], report: str, errors: List[str],
-    ) -> Tuple[Dict[str, Any], str]:
-        """Repair only named semantic fields/actions; never regenerate the report or plan."""
-        action_ids = {
-            match.group(1)
-            for error in errors
-            if (match := re.search(r"(?:action|Action|X action|Gmail action|TARA action)\s+([^\s:]+)", error))
-        }
-        invalid_actions = [
-            action for action in (semantic.get("actions") or [])
-            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
-        ]
-        field_names = {
-            "strategy", "strategy_options", "selected_strategy_id", "company_grounding", "positioning", "audience",
-            "content_pillars", "kpis", "evidence", "creative_system", "measurement", "debate_conflicts_present",
-            "debate_decisions", "assumptions", "risks",
-        }
-        relevant_fields = {
-            name: semantic.get(name)
-            for name in field_names
-            if any(name.replace("_", " ") in error.lower() or name in error.lower() for error in errors)
-        }
-        repair_system = (
-            "Repair only the supplied campaign fields and actions. Return JSON with actions, fields, and "
-            "report_markdown. actions contains complete replacements only for supplied invalid actions. fields contains "
-            "only corrected supplied top-level fields. Preserve all valid copy and decisions. report_markdown must remain "
-            "empty unless an error explicitly concerns report content. Never invent facts, URLs, recipients, results, "
-            "customers, provider state, or evidence. Rewrite unsupported public claims as claim-safe positioning."
-        )
-        report_error = any("report_markdown" in str(error) for error in errors)
-        payload = {
-            "errors": errors,
-            "invalid_actions": invalid_actions,
-            "relevant_fields": relevant_fields,
-            "verified_company_context": self.company_brief[:1600],
-        }
-        if report_error:
-            payload["report_markdown"] = report
-        msg = await self._groq(
-            [{"role": "system", "content": repair_system},
-             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            force_text=True,
-            model=self.director_model,
-            bucket="synth",
-            temp=0.1,
-            json_object=True,
-        )
-        patch = _first_json_object(str((msg or {}).get("content") or "").strip())
-        if not isinstance(patch, dict):
-            return semantic, report
-        repaired = copy.deepcopy(semantic)
-        replacements = {
-            str(action.get("id") or ""): action
-            for action in (patch.get("actions") or [])
-            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
-        }
-        repaired["actions"] = [
-            replacements.get(str(action.get("id") or ""), action) if isinstance(action, dict) else action
-            for action in (semantic.get("actions") or [])
-        ]
-        for name, value in (patch.get("fields") or {}).items():
-            if name in relevant_fields:
-                repaired[name] = value
-        repaired_report = str(patch.get("report_markdown") or report).strip() if report_error else report
-        return repaired, repaired_report
-
-    @staticmethod
-    def _repair_campaign_derivations(bundle: Dict[str, Any]) -> None:
-        """Normalize harmless compiler aliases without inventing campaign facts.
-
-        Large campaign bundles are otherwise rejected and regenerated in full for
-        fields that can be derived from content already present in the same bundle.
-        This keeps the deterministic contract strict while avoiding repeated LLM
-        passes for schema spelling differences such as call_to_action vs cta.
-        """
-        creative_system = bundle.get("creative_system")
-        hypotheses = creative_system.get("hypotheses") if isinstance(creative_system, dict) else None
-        actions = bundle.get("actions") if isinstance(bundle.get("actions"), list) else []
-        horizon = bundle.get("campaign_horizon") if isinstance(bundle.get("campaign_horizon"), dict) else {}
-        duration_days = int(horizon.get("duration_days") or 0)
-        timeline = bundle.get("timeline") if isinstance(bundle.get("timeline"), list) else []
-        valid_actions = [action for action in actions if isinstance(action, dict)]
-        offsets = [action.get("scheduled_offset_minutes") for action in valid_actions]
-        if duration_days >= 7 and len(valid_actions) > 1 and all(isinstance(offset, int) for offset in offsets):
-            final_offset = (duration_days - 1) * 1440
-            if max(offsets, default=0) < (duration_days - 2) * 1440:
-                by_id = {str(row.get("action_id") or ""): row for row in timeline if isinstance(row, dict)}
-                for index, action in enumerate(valid_actions):
-                    offset = round(final_offset * index / (len(valid_actions) - 1))
-                    action["scheduled_offset_minutes"] = offset
-                    row = by_id.get(str(action.get("id") or ""))
-                    if row is not None:
-                        row["scheduled_offset_minutes"] = offset
-        if not isinstance(hypotheses, list):
-            hypotheses = []
-        actions_by_hypothesis: Dict[str, List[Dict[str, Any]]] = {}
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            hypothesis_id = str(action.get("hypothesis_id") or "").strip()
-            if hypothesis_id:
-                actions_by_hypothesis.setdefault(hypothesis_id, []).append(action)
-        for hypothesis in hypotheses:
-            if not isinstance(hypothesis, dict) or str(hypothesis.get("cta") or "").strip():
-                continue
-            alias = str(hypothesis.get("call_to_action") or "").strip()
-            if alias:
-                hypothesis["cta"] = alias
-                continue
-            linked = actions_by_hypothesis.get(str(hypothesis.get("id") or "").strip(), [])
-            action_cta = next((
-                str((action.get("payload") or {}).get("cta") or action.get("cta") or "").strip()
-                for action in linked
-                if str((action.get("payload") or {}).get("cta") or action.get("cta") or "").strip()
-            ), "")
-            if action_cta:
-                hypothesis["cta"] = action_cta
-
-        monitoring = bundle.get("monitoring_plan")
-        if isinstance(monitoring, dict):
-            baseline = str(monitoring.get("baseline") or "").strip()
-            grounded_kpi = any(
-                isinstance(kpi, dict)
-                and str(kpi.get("target_type") or "") in {"baseline", "verified"}
-                and bool(kpi.get("evidence_ids"))
-                for kpi in (bundle.get("kpis") or [])
-            )
-            if baseline and not grounded_kpi:
-                monitoring["baseline"] = "Establish the campaign baseline from the first published action."
-
-        # Claim classification is bookkeeping, not creative work. If the compiler
-        # already attached only verified evidence to outcome copy, normalize the
-        # label locally instead of spending another synthesis pass or blocking an
-        # otherwise executable campaign.
-        from .campaign_contract import copy_contains_outcome_claim
-        evidence_status = {
-            str(item.get("id") or ""): str(item.get("status") or "")
-            for item in (bundle.get("evidence") or [])
-            if isinstance(item, dict)
-        }
-        grounding = bundle.get("company_grounding")
-        if isinstance(grounding, dict) and not grounding.get("facts_used"):
-            grounding["facts_used"] = [
-                str(item.get("claim") or "").strip()
-                for item in (bundle.get("evidence") or [])
-                if isinstance(item, dict) and item.get("status") == "verified" and str(item.get("claim") or "").strip()
-            ][:8]
-        positioning = bundle.get("positioning")
-        if isinstance(positioning, dict) and not positioning.get("proof_points"):
-            positioning["proof_points"] = list((grounding or {}).get("facts_used") or [])[:8]
-        for action in valid_actions:
-            evidence_ids = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
-            if (
-                str(action.get("claim_status") or "") == "assumption"
-                and evidence_ids
-                and all(evidence_status.get(str(item)) == "verified" for item in evidence_ids)
-            ):
-                action["claim_status"] = "verified"
-            if (
-                str(action.get("claim_status") or "") == "assumption"
-                and not copy_contains_outcome_claim(action.get("final_copy"))
-            ):
-                action["claim_status"] = "no_claim"
-            if (
-                str(action.get("claim_status") or "") == "no_claim"
-                and copy_contains_outcome_claim(action.get("final_copy"))
-                and evidence_ids
-                and all(evidence_status.get(str(item)) == "verified" for item in evidence_ids)
-            ):
-                action["claim_status"] = "verified"
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:
@@ -2899,7 +2650,7 @@ class Director:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
         if self.room_kind == "campaign":
-            raise RuntimeError("Campaign Rooms may complete only through campaign__submit_plan")
+            raise RuntimeError("Campaign Rooms may complete only through campaign__govern_delivery")
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")

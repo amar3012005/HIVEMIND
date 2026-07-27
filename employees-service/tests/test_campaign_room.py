@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from copy import deepcopy
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from hivemind_employees.hyper.campaign_contract import (
     CAMPAIGN_CONTRACT_VERSION,
     assemble_campaign_bundle,
+    campaign__govern_delivery,
     campaign__submit_plan,
     classify_campaign_errors,
 )
@@ -57,7 +59,7 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
             {"id": "date", "insight": "Timing matters", "promise": "Plan ahead", "hook": "Save the date", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Date-led copy earns engagement"},
             {"id": "value", "insight": "Practical value matters", "promise": "Useful discussion", "hook": "What will you learn?", "cta": "Follow updates", "channels": ["x_organic"], "experiment_hypothesis": "Value-led copy earns engagement"},
         ]},
-        "actions": [{"channel": "x_organic", "title": "Save the date", "final_copy": "Save the date for a practical conversation about design leadership.", "claim_status": "no_claim", "evidence_ids": [], "hypothesis_id": "date"}],
+        "actions": [{"channel": "x_organic", "title": "Save the date", "final_copy": "Save the date for a practical conversation about design leadership.", "claim_status": "no_claim", "evidence_ids": [], "hypothesis_id": "date", "rationale": "Open the sequence with the supplied date.", "success_measure": "Engagement", "rollback_or_exit": "Pause if the event date changes."}],
         "measurement": {"primary_kpi": "Engagement", "attribution_limit": "Engagement is not attendance.", "review_cadence": "After each post"},
         "debate_conflicts_present": False, "debate_decisions": [], "assumptions": [], "risks": [],
         "report_markdown": "## Recommendation\nBuild trust.\n## Audience\nDesign leaders.\n## Positioning\nPractical.\n## Content System\nEvidence.\n## Campaign Sequence\nOne post.\n## Schedule\nSeven days.\n## Measurement\nEngagement.\n## Risks\nNone.\n## Launch Readiness\nPending approval.",
@@ -82,7 +84,7 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
     assert accepted == bundle
 
 
-def test_campaign_compiler_applies_authoritative_action_maximum():
+def test_campaign_compiler_does_not_hide_action_overdelivery():
     semantic = {
         "actions": [
             {"id": f"x-{index}", "channel": "x_organic", "final_copy": f"Post {index}"}
@@ -96,54 +98,23 @@ def test_campaign_compiler_applies_authoritative_action_maximum():
         }}},
     )
 
-    assert [action["id"] for action in bundle["actions"]] == [f"x-{index}" for index in range(1, 7)]
-    assert len(bundle["timeline"]) == 6
-    assert len(bundle["creative_system"]["hypotheses"]) == 2
-    assert all(action["hypothesis_id"] for action in bundle["actions"])
+    assert [action["id"] for action in bundle["actions"]] == [f"x-{index}" for index in range(1, 8)]
+    assert len(bundle["timeline"]) == 7
 
 
-def test_campaign_derivations_normalize_only_claim_safe_assumptions():
-    bundle = {
-        "company_grounding": {"facts_used": []},
-        "positioning": {"statement": "Shared company memory.", "proof_points": []},
-        "evidence": [{"id": "company-1", "status": "verified", "claim": "SINGULANCE has a company memory product."}],
-        "actions": [
-            {"id": "safe", "claim_status": "assumption", "final_copy": "Explore a shared company memory."},
-            {"id": "outcome", "claim_status": "assumption", "final_copy": "Our customers improve performance."},
-            {"id": "grounded", "claim_status": "assumption", "final_copy": "SINGULANCE has a company memory product.", "evidence_ids": ["company-1"]},
-        ],
-    }
+def test_campaign_governance_does_not_mutate_missing_semantics():
+    bundle = {"contract_version": CAMPAIGN_CONTRACT_VERSION, "actions": [], "evidence": []}
+    before = copy.deepcopy(bundle)
 
-    Director._repair_campaign_derivations(bundle)
-
-    assert bundle["company_grounding"]["facts_used"] == ["SINGULANCE has a company memory product."]
-    assert bundle["positioning"]["proof_points"] == ["SINGULANCE has a company memory product."]
-    assert bundle["actions"][0]["claim_status"] == "no_claim"
-    assert bundle["actions"][1]["claim_status"] == "assumption"
-    assert bundle["actions"][2]["claim_status"] == "verified"
-
-
-def test_campaign_uses_exact_company_context_when_writer_omits_evidence():
-    director = Director(
-        user_message="Create a campaign", user_id="user", org_id="org", project_id=None,
-        participants=[], room_template="auto", room_goal="Campaign", enabled_connectors=[],
-        emit=lambda event: None, room_kind="campaign", campaign_brief={"goal": "Build awareness"},
-        company_brief="Company: Example GmbH. Product: Shared company memory.",
+    accepted, verdict = campaign__govern_delivery(
+        bundle, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
-    semantic = {
-        "company_grounding": {"company_name": "Example GmbH", "facts_used": []},
-        "positioning": {"statement": "Shared company memory.", "proof_points": []},
-        "evidence": [],
-    }
 
-    director._ensure_campaign_evidence(semantic)
-
-    evidence = semantic["evidence"][0]
-    assert evidence["claim"] == "Company: Example GmbH. Product: Shared company memory."
-    assert evidence["source_type"] == "company"
-    assert evidence["status"] == "verified"
-    assert semantic["company_grounding"]["facts_used"] == [evidence["claim"]]
-    assert semantic["positioning"]["proof_points"] == [evidence["claim"]]
+    assert accepted is None
+    assert verdict["status"] == "unmet"
+    assert verdict["unmet_deliverables"]
+    assert bundle == before
 
 
 def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
@@ -220,66 +191,6 @@ def test_campaign_recall_facts_must_name_the_active_company():
     assert director._campaign_recall_fact_is_grounded("Budget distribution totals EUR 162000") is False
 
 
-def test_campaign_compiler_normalizes_cta_aliases_without_regeneration():
-    bundle = {
-        "creative_system": {"hypotheses": [
-            {"id": "h1", "call_to_action": "Follow for the next campaign chapter"},
-            {"id": "h2"},
-        ]},
-        "actions": [
-            {"hypothesis_id": "h2", "payload": {"cta": "Visit the campaign page"}},
-        ],
-    }
-
-    Director._repair_campaign_derivations(bundle)
-
-    assert bundle["creative_system"]["hypotheses"][0]["cta"] == "Follow for the next campaign chapter"
-    assert bundle["creative_system"]["hypotheses"][1]["cta"] == "Visit the campaign page"
-
-
-def test_campaign_compiler_replaces_unsupported_historical_baseline():
-    bundle = {
-        "kpis": [{"target_type": "proposed", "evidence_ids": []}],
-        "monitoring_plan": {"baseline": "Historical organic reach is approximately 4,000 accounts."},
-    }
-
-    Director._repair_campaign_derivations(bundle)
-
-    assert bundle["monitoring_plan"]["baseline"] == "Establish the campaign baseline from the first published action."
-
-
-def test_campaign_compiler_replaces_unsupported_named_account_baseline():
-    bundle = {
-        "kpis": [{"target_type": "proposed", "evidence_ids": []}],
-        "monitoring_plan": {"baseline": "Current X account average reach for similar posts."},
-    }
-
-    Director._repair_campaign_derivations(bundle)
-
-    assert bundle["monitoring_plan"]["baseline"] == "Establish the campaign baseline from the first published action."
-
-
-def test_campaign_compiler_spans_a_multi_day_horizon():
-    bundle = {
-        "campaign_horizon": {"duration_days": 14},
-        "actions": [
-            {"id": "one", "scheduled_offset_minutes": 0},
-            {"id": "two", "scheduled_offset_minutes": 1440},
-            {"id": "three", "scheduled_offset_minutes": 2880},
-        ],
-        "timeline": [
-            {"action_id": "one", "scheduled_offset_minutes": 0},
-            {"action_id": "two", "scheduled_offset_minutes": 1440},
-            {"action_id": "three", "scheduled_offset_minutes": 2880},
-        ],
-    }
-
-    Director._repair_campaign_derivations(bundle)
-
-    assert [action["scheduled_offset_minutes"] for action in bundle["actions"]] == [0, 9360, 18720]
-    assert [row["scheduled_offset_minutes"] for row in bundle["timeline"]] == [0, 9360, 18720]
-
-
 def test_campaign_contract_rejects_assumptions_in_executable_copy():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["claim_status"] = "assumption"
@@ -342,18 +253,6 @@ def test_campaign_contract_rejects_outcomes_disguised_as_no_claim():
 
     assert accepted is None
     assert any("labeled no_claim" in error for error in errors)
-
-
-def test_campaign_compiler_normalizes_outcome_claim_with_verified_evidence():
-    bundle = _valid_v2_bundle()
-    action = bundle["actions"][0]
-    action["claim_status"] = "no_claim"
-    action["final_copy"] = "Our platform helps legal teams coordinate campaign work."
-    action["payload"]["text"] = action["final_copy"]
-
-    Director._repair_campaign_derivations(bundle)
-
-    assert action["claim_status"] == "verified"
 
 
 def _valid_v1_bundle():
@@ -613,15 +512,6 @@ def test_campaign_report_sections_may_be_localized():
     assert accepted is not None
 
 
-def test_campaign_report_deterministically_includes_missing_final_actions():
-    bundle = _valid_v2_bundle()
-    report = Director._complete_campaign_report("## Strategy\nLead with evidence.", bundle)
-
-    assert "## Final Actions" in report
-    assert bundle["actions"][0]["final_copy"] in report
-    assert "**Channel:** x_organic" in report
-
-
 def test_x_posts_must_fit_provider_limit_and_threads_use_separate_actions():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["final_copy"] = "x" * 281
@@ -684,7 +574,7 @@ def test_campaign_system_prompt_overrides_generic_report_completion():
     )
     prompt = director._system_prompt()
     assert "CAMPAIGN ROOM SYSTEM CONTRACT" in prompt
-    assert "campaign__submit_plan" in prompt
+    assert "campaign__govern_delivery" in prompt
     assert "generic final_report" in prompt
 
 
@@ -695,7 +585,7 @@ def test_campaign_room_cannot_call_generic_synthesis():
         room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
         room_kind="campaign", campaign_brief={"goal": "Build awareness"},
     )
-    with pytest.raises(RuntimeError, match="campaign__submit_plan"):
+    with pytest.raises(RuntimeError, match="campaign__govern_delivery"):
         asyncio.run(director._synthesize(False, ""))
 
 
@@ -710,7 +600,7 @@ def test_campaign_synthesizer_submits_with_the_canonical_contract_version(monkey
 
     def accept(candidate, **kwargs):
         assert kwargs["minimum_contract_version"] == CAMPAIGN_CONTRACT_VERSION
-        return candidate, []
+        return candidate, {"status": "accepted", "unmet_deliverables": []}
 
     director = Director(
         user_message="Create an awareness campaign",
@@ -719,13 +609,13 @@ def test_campaign_synthesizer_submits_with_the_canonical_contract_version(monkey
         room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
     )
     monkeypatch.setattr(director, "_groq", synthesize)
-    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__submit_plan", accept)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__govern_delivery", accept)
 
     bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
     assert errors == []
     assert bundle["contract_version"] == CAMPAIGN_CONTRACT_VERSION
-    assert emitted[-1] == {"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"}
+    assert emitted[-1] == {"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"}
 
 
 def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
@@ -746,8 +636,8 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
     )
     monkeypatch.setattr(director, "_groq", synthesize)
     monkeypatch.setattr(
-        "hivemind_employees.hyper.campaign_contract.campaign__submit_plan",
-        lambda candidate, **kwargs: (candidate, []),
+        "hivemind_employees.hyper.campaign_contract.campaign__govern_delivery",
+        lambda candidate, **kwargs: (candidate, {"status": "accepted", "unmet_deliverables": []}),
     )
 
     bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
@@ -758,10 +648,9 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
     assert calls[0]["json_object"] is True
 
 
-def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
+def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
     models = []
     message_sets = []
-    submissions = 0
 
     async def emit(event):
         return None
@@ -769,14 +658,10 @@ def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
     async def synthesize(*args, **kwargs):
         models.append(kwargs["model"])
         message_sets.append(args[0])
-        if len(models) == 1:
-            return {"content": '{"report_markdown":"Report","plan":{"strategy":"Initial"}}'}
-        return {"content": '{"actions":[],"fields":{"strategy":"Repaired"},"report_markdown":"Report"}'}
+        return {"content": '{"report_markdown":"Report","plan":{"strategy":"Initial"}}'}
 
-    def submit(candidate, **kwargs):
-        nonlocal submissions
-        submissions += 1
-        return (None, ["strategy needs repair"]) if submissions == 1 else (candidate, [])
+    def govern(candidate, **kwargs):
+        return None, {"status": "unmet", "unmet_deliverables": ["strategy needs delivery"]}
 
     director = Director(
         user_message="Create an awareness campaign",
@@ -785,17 +670,13 @@ def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
         room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
     )
     monkeypatch.setattr(director, "_groq", synthesize)
-    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__submit_plan", submit)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__govern_delivery", govern)
 
     _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
-    assert errors == []
-    assert models == [director.synth_model, director.director_model]
-    assert len(message_sets[1]) == 2
-    assert "GATHERED BOARD" not in message_sets[1][1]["content"]
-    assert "invalid_actions" in message_sets[1][1]["content"]
-    assert "Initial" in message_sets[1][1]["content"]
-    assert "report_markdown" not in message_sets[1][1]["content"]
+    assert errors == ["strategy needs delivery"]
+    assert models == [director.synth_model]
+    assert len(message_sets) == 1
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

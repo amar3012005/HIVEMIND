@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, deleteCampaign, editCampaignAction, getCampaignSettings, markCampaignRepairing, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, deleteCampaign, editCampaignAction, getCampaignSettings, markCampaignNeedsInput, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
@@ -395,8 +395,8 @@ test('campaign creation reuses the permanent Campaign Intelligence room and batc
     assert.equal(result.campaign.roomId, result.dispatch.room_id);
     assert.equal(result.campaign.roomId, 'room-fixed');
     assert.equal(calls.find(([name]) => name === 'hyperTurn.create')[1].seq, 5);
-    assert.doesNotMatch(result.dispatch.user_message, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
-    assert.match(result.dispatch.execution_context, /campaign__submit_plan/);
+    assert.doesNotMatch(result.dispatch.user_message, /CAMPAIGN_ID|BRIEF_JSON|campaign__govern_delivery/);
+    assert.match(result.dispatch.execution_context, /campaign__govern_delivery/);
   } finally {
     if (previous === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = previous;
     if (previousOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = previousOrgs;
@@ -414,8 +414,8 @@ test('campaign room contract carries the campaign identity and completion tool',
     participantIds: ['agent-a'],
     briefSnapshot: { campaign_id: 'campaign-a' },
   });
-  assert.match(kickoff, /campaign__submit_plan/);
-  assert.doesNotMatch(displayMessage, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
+  assert.match(kickoff, /campaign__govern_delivery/);
+  assert.doesNotMatch(displayMessage, /CAMPAIGN_ID|BRIEF_JSON|campaign__govern_delivery/);
   assert.equal(dispatch.user_message, displayMessage);
   assert.equal(dispatch.display_message, displayMessage);
   assert.match(dispatch.execution_context, /CAMPAIGN_ID: campaign-a/);
@@ -441,7 +441,7 @@ test('first Campaign Room event advances the durable run and records progress', 
   assert.equal(events[0].eventType, 'campaign_generation_started');
 });
 
-test('intermediate campaign contract gaps remain repairable until the Room seals', async () => {
+test('campaign governance gaps terminate cleanly with exact unmet deliverables', async () => {
   const writes = [];
   const run = { id: 'run-a', campaignId: 'campaign-a', status: 'RUNNING', campaign: { orgId: 'org-a' } };
   const prisma = {
@@ -453,12 +453,11 @@ test('intermediate campaign contract gaps remain repairable until the Room seals
     campaignEvent: { create({ data }) { writes.push(['event', data]); return Promise.resolve(data); } },
     async $transaction(operations) { return Promise.all(operations); },
   };
-  const result = await markCampaignRepairing({ prisma, turnId: 'turn-a', errors: ['Action A3 needs verified copy'] });
-  assert.equal(result.status, 'VALIDATING');
-  assert.equal(result.repairing, true);
-  assert.equal(writes.find(([kind]) => kind === 'run')[1].status, 'VALIDATING');
-  assert.equal(writes.find(([kind]) => kind === 'campaign')[1].status, 'GENERATING');
-  assert.equal(writes.find(([kind]) => kind === 'event')[1].eventType, 'campaign_contract_repairing');
+  const result = await markCampaignNeedsInput({ prisma, turnId: 'turn-a', errors: ['Action A3 needs verified copy'] });
+  assert.equal(result.campaignId, 'campaign-a');
+  assert.equal(writes.find(([kind]) => kind === 'run')[1].status, 'NEEDS_INPUT');
+  assert.equal(writes.find(([kind]) => kind === 'campaign')[1].status, 'NEEDS_INPUT');
+  assert.equal(writes.find(([kind]) => kind === 'event')[1].eventType, 'campaign_governance_unmet');
 });
 
 test('late dispatch transport errors cannot overwrite a completed campaign run', async () => {

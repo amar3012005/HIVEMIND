@@ -12,14 +12,14 @@ This preserves one campaign ID, one evidence board, one approval history, one sc
 2. Snapshot tenant-scoped company, audience, connector, and channel-capability evidence.
 3. Load the Campaign Operating System plus only the relevant research, media, creative, platform, launch, or measurement skills.
 4. Gather evidence and debate materially different strategies in the Campaign Room.
-5. Compile and validate one Campaign Contract v4.
+5. Compile operational mechanics, then govern the authored report and Campaign Contract v4 against the normalized brief.
 6. Generate only the selected visual assets after plan acceptance.
 7. Return the plan to Your Campaigns for review.
 8. Allow launch only when every requested channel is execution-ready and the existing approval, capability, audit, idempotency, verification, and rollback controls pass.
 
 Campaign Intelligence owns this sequence end to end. It runs one visible Room
-orchestration and one targeted compiler repair when needed; it does not enter the
-general Room goalkeeper loop. An accepted contract returns directly to Your
+orchestration and one final deterministic governance audit; it does not enter the
+general Room goalkeeper loop and governance never rewrites semantic content. An accepted contract returns directly to Your
 Campaigns. Manual Review stops once for approval, while Full Auto continues into
 the existing launch path without another generic approval gate.
 

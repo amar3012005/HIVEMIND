@@ -72,8 +72,9 @@ def campaign_system_contract() -> str:
         "proof, or emotional clarity; never add decorative images to every action. When required=true, provide a "
         "concise visual concept and alt text. The visual-prompt-architecture skill expands that concept only after "
         "the plan is accepted, immediately before asset generation.\n"
-        "- A Campaign Room is complete ONLY when the final compiler calls campaign__submit_plan and its "
-        "deterministic contract accepts the full CampaignBundle. A generic final_report, prose summary, or "
+        "- A Campaign Room is complete ONLY when campaign__govern_delivery verifies that the authored report and "
+        "compiled CampaignBundle deliver every promise in the normalized brief. Governance never rewrites content. "
+        "A generic final_report, prose summary, or "
         "partial draft can never complete campaign work.\n"
         "- Keep internal identifiers, serialized execution context, tool instructions, and raw JSON out of "
         "user-facing prose."
@@ -168,37 +169,8 @@ def assemble_campaign_bundle(
     plan["creative_system"] = creative
 
     actions = [row for row in (plan.get("actions") or []) if isinstance(row, dict)]
-    expected = cadence.get("expected_actions_by_channel") if isinstance(cadence.get("expected_actions_by_channel"), dict) else {}
-    if expected:
-        kept: list[dict[str, Any]] = []
-        seen_by_channel: dict[str, int] = {}
-        for action in actions:
-            channel = str(action.get("channel") or (channels[0] if len(channels) == 1 else "")).lower()
-            maximum = int(((expected.get(channel) or {}).get("maximum") or len(actions))) if isinstance(expected.get(channel), dict) else len(actions)
-            seen = seen_by_channel.get(channel, 0)
-            if seen >= maximum:
-                continue
-            kept.append(action)
-            seen_by_channel[channel] = seen + 1
-        actions = kept
     primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")
-    while len(hypotheses) < 2 and actions:
-        source = actions[len(hypotheses) % len(actions)]
-        title = str(source.get("title") or f"Campaign action {len(hypotheses) + 1}").strip()
-        copy_text = str(source.get("final_copy") or source.get("copy") or "").strip()
-        hypotheses.append({
-            "id": f"compiled_hypothesis_{len(hypotheses) + 1}",
-            "insight": str(source.get("rationale") or title).strip(),
-            "promise": title,
-            "hook": copy_text[:180] or title,
-            "cta": str((source.get("payload") or {}).get("cta") or title).strip(),
-            "channels": [str(source.get("channel") or (channels[0] if len(channels) == 1 else "")).lower()],
-            "experiment_hypothesis": f"Evaluate {title} against {primary_metric}.",
-        })
-    creative["hypotheses"] = hypotheses
-    plan["creative_system"] = creative
     final_offset = max(0, (duration - 1) * 1440)
-    hypothesis_ids = [row["id"] for row in hypotheses]
     for index, action in enumerate(actions):
         action["id"] = str(action.get("id") or f"action_{index + 1}")
         if len(channels) == 1:
@@ -213,11 +185,11 @@ def assemble_campaign_bundle(
         action["payload"] = payload
         if not isinstance(action.get("scheduled_offset_minutes"), int) or isinstance(action.get("scheduled_offset_minutes"), bool):
             action["scheduled_offset_minutes"] = round(final_offset * index / max(1, len(actions) - 1))
-        action["rationale"] = str(action.get("rationale") or f"Advance the campaign through {action['title'].lower()}.")
-        action["hypothesis_id"] = str(action.get("hypothesis_id") or (hypothesis_ids[index % len(hypothesis_ids)] if hypothesis_ids else ""))
+        action["rationale"] = str(action.get("rationale") or "")
+        action["hypothesis_id"] = str(action.get("hypothesis_id") or "")
         action["dependencies"] = action.get("dependencies") if isinstance(action.get("dependencies"), list) else []
-        action["success_measure"] = str(action.get("success_measure") or primary_metric)
-        action["rollback_or_exit"] = str(action.get("rollback_or_exit") or "Pause this and remaining scheduled actions if the stated safety or provider checks fail.")
+        action["success_measure"] = str(action.get("success_measure") or "")
+        action["rollback_or_exit"] = str(action.get("rollback_or_exit") or "")
         action["evidence_ids"] = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
         action["claim_status"] = str(action.get("claim_status") or "no_claim")
         creative_brief = action.get("creative_brief") if isinstance(action.get("creative_brief"), dict) else {}
@@ -796,7 +768,26 @@ def campaign__submit_plan(
     minimum_contract_version: int = 1,
     campaign_brief: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """Accept a CampaignBundle only when every deterministic contract passes."""
+    """Compatibility adapter for older callers; governance is the authority."""
+    accepted, verdict = campaign__govern_delivery(
+        bundle,
+        channels=channels,
+        requirements=requirements,
+        minimum_contract_version=minimum_contract_version,
+        campaign_brief=campaign_brief,
+    )
+    return accepted, verdict["unmet_deliverables"]
+
+
+def campaign__govern_delivery(
+    bundle: Any,
+    *,
+    channels: list[str],
+    requirements: list[str],
+    minimum_contract_version: int = 1,
+    campaign_brief: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Audit promised versus delivered campaign work without changing the bundle."""
     errors = campaign_bundle_errors(
         bundle,
         channels,
@@ -804,4 +795,41 @@ def campaign__submit_plan(
         minimum_contract_version=minimum_contract_version,
         campaign_brief=campaign_brief,
     )
-    return (bundle if not errors else None), errors
+    campaign = bundle if isinstance(bundle, dict) else {}
+    actions = [row for row in (campaign.get("actions") or []) if isinstance(row, dict)]
+    evidence = [row for row in (campaign.get("evidence") or []) if isinstance(row, dict)]
+    timeline = [row for row in (campaign.get("timeline") or []) if isinstance(row, dict)]
+    brief = campaign_brief if isinstance(campaign_brief, dict) else {}
+    brief_payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    cadence = brief_payload.get("cadence") if isinstance(brief_payload.get("cadence"), dict) else {}
+    promised_ranges = cadence.get("expected_actions_by_channel") if isinstance(cadence.get("expected_actions_by_channel"), dict) else {}
+    delivered_by_channel: dict[str, int] = {}
+    for action in actions:
+        channel = str(action.get("channel") or "").lower()
+        delivered_by_channel[channel] = delivered_by_channel.get(channel, 0) + 1
+    covered_requirements = {
+        str(row.get("requirement_id"))
+        for row in (campaign.get("requirement_coverage") or [])
+        if isinstance(row, dict) and row.get("action_ids")
+    }
+    verdict = {
+        "status": "accepted" if not errors else "unmet",
+        "promised": {
+            "requirements": list(requirements),
+            "channels": list(channels),
+            "duration_days": int(brief_payload.get("duration_days") or 14),
+            "actions_by_channel": promised_ranges,
+        },
+        "delivered": {
+            "report": bool(str(campaign.get("report_markdown") or "").strip()),
+            "actions": len(actions),
+            "actions_by_channel": delivered_by_channel,
+            "evidence_items": len(evidence),
+            "schedule_rows": len(timeline),
+            "covered_requirements": sorted(covered_requirements),
+            "launch_controls": isinstance(campaign.get("launch_plan"), dict),
+            "monitoring_plan": isinstance(campaign.get("monitoring_plan"), dict),
+        },
+        "unmet_deliverables": errors,
+    }
+    return (campaign if not errors else None), verdict

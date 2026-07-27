@@ -313,13 +313,12 @@ export function campaignAgentWhere(orgId) {
   return { orgId, archivedAt: null, status: { not: 'paused' } };
 }
 
-export async function persistCampaignBundle({ prisma, turnId, bundle, terminalOnInvalid = true }) {
+export async function persistCampaignBundle({ prisma, turnId, bundle }) {
   const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
   if (!run) return null;
   const errors = validateCampaignBundle(bundle, run.campaign);
   if (errors.length) {
-    if (terminalOnInvalid) await markCampaignNeedsInput({ prisma, turnId, errors });
-    else await markCampaignRepairing({ prisma, turnId, errors });
+    await markCampaignNeedsInput({ prisma, turnId, errors });
     return { ok: false, errors, campaignId: run.campaignId };
   }
   const bundleHash = canonicalHash(bundle);
@@ -425,23 +424,6 @@ export async function persistCampaignBundle({ prisma, turnId, bundle, terminalOn
   });
 }
 
-export async function markCampaignRepairing({ prisma, turnId, errors }) {
-  const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: { select: { orgId: true } } } });
-  if (!run || ['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status)) return null;
-  const cleanErrors = (Array.isArray(errors) ? errors : []).map((item) => String(item).slice(0, 500)).slice(0, 30);
-  const message = cleanErrors.join('; ') || 'Campaign contract is being repaired';
-  await prisma.$transaction([
-    prisma.campaign.update({ where: { id: run.campaignId }, data: { status: 'GENERATING', lastError: message } }),
-    prisma.campaignRun.update({ where: { id: run.id }, data: {
-      status: 'VALIDATING', validation: { valid: false, errors: cleanErrors, repair_in_progress: true }, error: message, completedAt: null,
-    } }),
-    prisma.campaignEvent.create({ data: {
-      campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_contract_repairing', data: { errors: cleanErrors },
-    } }),
-  ]);
-  return { campaignId: run.campaignId, status: 'VALIDATING', repairing: true, errors: cleanErrors };
-}
-
 export async function markCampaignNeedsInput({ prisma, turnId, errors }) {
   const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: { select: { orgId: true } } } });
   if (!run) return null;
@@ -449,7 +431,7 @@ export async function markCampaignNeedsInput({ prisma, turnId, errors }) {
   await prisma.$transaction([
     prisma.campaign.update({ where: { id: run.campaignId }, data: { status: 'NEEDS_INPUT', lastError: cleanErrors.join('; ') || 'Campaign bundle validation failed' } }),
     prisma.campaignRun.update({ where: { id: run.id }, data: { status: 'NEEDS_INPUT', validation: { valid: false, errors: cleanErrors }, error: cleanErrors.join('; '), completedAt: new Date() } }),
-    prisma.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_needs_input', data: { errors: cleanErrors } } }),
+    prisma.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_governance_unmet', data: { unmet_deliverables: cleanErrors } } }),
   ]);
   return { campaignId: run.campaignId };
 }

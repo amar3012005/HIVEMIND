@@ -34,7 +34,7 @@ export function buildCampaignExecutionContext(campaign, feedback = '', channelCa
     'For X, create exactly one Post per x_organic action. payload.text and final_copy must match and be 280 characters or fewer. Represent a thread as separate ordered actions, one action per Post.',
     'For every selected channel, distinguish planning readiness from execution readiness. If an account, connector, permission, budget ceiling, tracking setup, or publisher adapter is unavailable, still create the best approval-ready plan and record the exact missing prerequisite in launch_plan.blocked_by. Never imply that a plan-only channel can publish.',
     'Treat the active organization profile and supplied company evidence as ground truth. Never substitute another company or invent audience size, proof, URLs, performance, budgets, quotes, or customer results.',
-    'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and submit the complete plan with campaign__submit_plan. Do not send any external action.',
+    'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and govern the complete delivery with campaign__govern_delivery. Do not send any external action.',
   ].filter(Boolean).join('\n');
 }
 

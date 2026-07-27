@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, validateCampaignBundle } from '../../src/campaigns/service.js';
+import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, canonicalHash, createCampaign, editCampaignAction, getCampaignSettings, normalizeCampaignInput, regenerateCampaign, syncCampaignMetrics, updateCampaignSettings, validateCampaignBundle } from '../../src/campaigns/service.js';
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
@@ -19,6 +19,32 @@ test('campaign input requires caller idempotency and validates time boundaries',
   assert.throws(() => normalizeCampaignInput({ ...baseInput, duration_days: 0 }), { code: 'invalid_duration' });
   assert.throws(() => normalizeCampaignInput({ ...baseInput, timezone: 'Mars/Olympus' }), { code: 'invalid_timezone' });
   assert.throws(() => normalizeCampaignInput({ ...baseInput, destination_url: 'javascript:alert(1)' }), { code: 'invalid_destination_url' });
+});
+
+test('campaign input supports organization-owned full autonomy', () => {
+  assert.equal(normalizeCampaignInput({ ...baseInput, autonomy_mode: 'FULL_AUTO' }).autonomyMode, 'FULL_AUTO');
+  assert.throws(() => normalizeCampaignInput({ ...baseInput, autonomy_mode: 'UNSAFE_AUTO' }), /Unknown approval mode/);
+});
+
+test('campaign autonomy settings are organization scoped and admin controlled', async () => {
+  const oldEnabled = process.env.CAMPAIGNS_V2_ENABLED; const oldOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
+  process.env.CAMPAIGNS_V2_ENABLED = 'true'; process.env.CAMPAIGNS_V2_ORG_IDS = 'org-a';
+  let update;
+  const prisma = {
+    organization: {
+      async findUnique({ where }) { assert.deepEqual(where, { id: 'org-a' }); return { campaignAutonomyMode: 'MANUAL_REVIEW' }; },
+      async update(args) { update = args; return args.data; },
+    },
+    userOrganization: { async findUnique() { return { role: 'admin' }; } },
+  };
+  try {
+    assert.deepEqual(await getCampaignSettings({ prisma, orgId: 'org-a' }), { autonomy_mode: 'MANUAL_REVIEW' });
+    assert.deepEqual(await updateCampaignSettings({ prisma, orgId: 'org-a', userId: 'user-a', autonomyMode: 'AUTO' }), { autonomy_mode: 'AUTO' });
+    assert.deepEqual(update, { where: { id: 'org-a' }, data: { campaignAutonomyMode: 'AUTO' } });
+  } finally {
+    if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;
+    if (oldOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = oldOrgs;
+  }
 });
 
 test('campaign input accepts plan-only channels but rejects unknown channels', () => {
@@ -279,6 +305,7 @@ test('campaign creation reuses the permanent Campaign Intelligence room and batc
   const calls = []; let batch = null;
   const fixedRoom = { id: 'room-fixed', orgId: 'org-a', agentConnectors: { _domain_home: true } };
   const prisma = {
+    organization: { async findUnique() { return { campaignAutonomyMode: 'MANUAL_REVIEW' }; } },
     campaign: {
       async findUnique() { return null; },
       create({ data }) { calls.push(['campaign.create', data]); return Promise.resolve({ ...data, createdAt: new Date() }); },

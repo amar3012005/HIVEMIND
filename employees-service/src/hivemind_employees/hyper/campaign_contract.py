@@ -505,8 +505,10 @@ def campaign_bundle_errors(
                     errors.append(f"monitoring checkpoint {index + 1} needs metrics")
                 if not _non_empty_string(checkpoint.get("decision_rule")):
                     errors.append(f"monitoring checkpoint {index + 1} needs decision_rule")
-            if monitoring_plan.get("optimization_requires_approval") is not True:
-                errors.append("monitoring_plan.optimization_requires_approval must be true")
+            autonomy_mode = str((campaign_brief or {}).get("autonomyMode") or (campaign_brief or {}).get("autonomy_mode") or "APPROVE_PLAN_ONCE").upper()
+            expected_approval = autonomy_mode != "FULL_AUTO"
+            if monitoring_plan.get("optimization_requires_approval") is not expected_approval:
+                errors.append(f"monitoring_plan.optimization_requires_approval must be {str(expected_approval).lower()} for {autonomy_mode}")
 
         for index, item in enumerate(evidence):
             if not isinstance(item, dict):

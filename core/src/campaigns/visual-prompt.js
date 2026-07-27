@@ -26,6 +26,11 @@ export function normalizeCreativeBrief(value = {}) {
     alt_text: text(source.alt_text, legacyConcept),
     generation_prompt: text(source.generation_prompt || source.prompt, legacyConcept),
     rationale: text(source.rationale),
+    lighting: text(source.lighting),
+    camera: text(source.camera),
+    color_direction: text(source.color_direction),
+    emotional_tone: text(source.emotional_tone),
+    visual_references: list(source.visual_references),
   };
 }
 
@@ -53,6 +58,11 @@ export function buildCampaignImagePrompt(value, context = {}) {
     `Primary subject: ${brief.subject || 'A concrete, inspectable representation of the campaign idea'}.`,
     `Composition and camera: ${brief.composition || 'Clear focal subject, purposeful depth, uncluttered layout, professional editorial framing'}.`,
     `Brand and visual language: ${brief.brand_style || text(context.brandStyle, 'Credible, contemporary, restrained, human-led')}.`,
+    brief.color_direction ? `Color direction: ${brief.color_direction}.` : null,
+    brief.lighting ? `Lighting: ${brief.lighting}.` : null,
+    brief.camera ? `Camera, lens, and perspective: ${brief.camera}.` : null,
+    brief.emotional_tone ? `Emotional tone: ${brief.emotional_tone}.` : null,
+    brief.visual_references.length ? `Visual references to interpret without copying: ${brief.visual_references.join('; ')}.` : null,
     `Detailed generation direction: ${exactPrompt}.`,
     `Required elements: ${required}`,
     `Do not include: ${exclusions}`,
@@ -61,7 +71,7 @@ export function buildCampaignImagePrompt(value, context = {}) {
       : `Text treatment policy: ${brief.text_policy}. Render only explicitly supplied exact copy; never improvise wording.`,
     `Output framing: ${brief.aspect_ratio}; keep important subjects within a central safe area for responsive cropping.`,
     'Make the result specific to the described product and audience, visually coherent, realistic in material and lighting, and immediately usable as a professional campaign creative.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export const CAMPAIGN_IMAGE_ASPECT_RATIOS = [...ASPECT_RATIOS];

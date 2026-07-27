@@ -39,13 +39,20 @@ test('campaign schemas never expose tenant identity or a publish tool', () => {
 });
 
 test('campaign list is hard-scoped to the authenticated organization', async () => {
+  const oldEnabled = process.env.CAMPAIGNS_V2_ENABLED; const oldOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
+  process.env.CAMPAIGNS_V2_ENABLED = 'true'; process.env.CAMPAIGNS_V2_ORG_IDS = 'org-server';
   let where;
   const prisma = { campaign: { findMany: async (query) => { where = query.where; return []; } } };
-  const result = await executeCampaignTool('campaign_list', {}, {
-    prisma, userId: 'user-1', orgId: 'org-server', ctx: {},
-  });
-  assert.deepEqual(where, { orgId: 'org-server' });
-  assert.deepEqual(result, { campaigns: [] });
+  try {
+    const result = await executeCampaignTool('campaign_list', {}, {
+      prisma, userId: 'user-1', orgId: 'org-server', ctx: {},
+    });
+    assert.deepEqual(where, { orgId: 'org-server' });
+    assert.deepEqual(result, { campaigns: [] });
+  } finally {
+    if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;
+    if (oldOrgs === undefined) delete process.env.CAMPAIGNS_V2_ORG_IDS; else process.env.CAMPAIGNS_V2_ORG_IDS = oldOrgs;
+  }
 });
 
 test('Campaign Rooms cannot recursively create another Campaign Room', async () => {

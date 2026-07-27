@@ -84,6 +84,7 @@ model Organization {
   // profiles). Durable DB toggle surfaced in the Cognition tab; read via raw SQL
   // in governance-routes.js + server.js profile-dream-cron. See migration 20260623.
   profileAutomaintainEnabled   Boolean            @default(false) @map("profile_automaintain_enabled")
+  campaignAutonomyMode         String             @default("MANUAL_REVIEW") @map("campaign_autonomy_mode") @db.VarChar(24)
   // Set to now() on the false→true toggle. The cognition loop clamps its
   // synthesis window to max(now-1h, this) so enabling NEVER backfills the
   // org's history — it starts from a 1h window at toggle-on and rolls forward.

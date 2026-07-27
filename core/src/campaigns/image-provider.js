@@ -1,5 +1,5 @@
 const OPENROUTER_IMAGE_URL = 'https://openrouter.ai/api/v1/images';
-export const DEFAULT_CAMPAIGN_IMAGE_MODEL = 'openai/gpt-image-1';
+export const DEFAULT_CAMPAIGN_IMAGE_MODEL = 'openai/gpt-image-1-mini';
 
 export class CampaignImageProviderError extends Error {
   constructor(message, { status = 502, code = 'campaign_image_provider_error', details = null } = {}) {
@@ -30,7 +30,7 @@ export async function generateCampaignImage({ prompt, aspectRatio = '16:9', mode
       'HTTP-Referer': 'https://singulancelabs.com',
       'X-Title': 'Singulance Campaign OS',
     },
-    body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'high', output_format: 'png' }),
+    body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'medium', output_format: 'png' }),
     signal: signal || AbortSignal.timeout(180_000),
   });
   const data = await response.json().catch(() => ({}));

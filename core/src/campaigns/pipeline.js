@@ -1,4 +1,4 @@
-import { markCampaignNeedsInput, persistCampaignBundle } from './service.js';
+import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle } from './service.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
@@ -100,7 +100,11 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
   if (normalized.t === 'campaign_bundle') {
     const result = await persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle });
     const readyEvent = await persistCampaignReadyHandoff({ prisma, run, result, bundle: normalized.bundle });
-    return readyEvent ? { ...result, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : result;
+    const automatic = result?.status === 'READY_FOR_APPROVAL'
+      ? await autoLaunchCampaignIfReady({ prisma, campaignId: run.campaignId })
+      : { launched: false };
+    const response = automatic.launched ? { ...result, status: 'RUNNING', autoLaunched: true } : result;
+    return readyEvent ? { ...response, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : response;
   }
   if (normalized.t === 'campaign_bundle_invalid') {
     return markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });

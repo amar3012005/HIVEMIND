@@ -440,7 +440,7 @@ export function normalizeCampaignInput(body = {}) {
   const unsupported = channels.filter((channel) => !KNOWN_CHANNELS.has(channel));
   if (unsupported.length) throw campaignError(`Unknown campaign channels: ${unsupported.join(', ')}`, 400, 'unknown_campaign_channel');
   const autonomyMode = String(body.autonomy_mode || 'APPROVE_PLAN_ONCE').trim().toUpperCase();
-  if (!['APPROVE_PLAN_ONCE', 'REVIEW_EVERY_ACTION'].includes(autonomyMode)) throw campaignError('Unknown approval mode');
+  if (!['FULL_AUTO', 'APPROVE_PLAN_ONCE', 'REVIEW_EVERY_ACTION'].includes(autonomyMode)) throw campaignError('Unknown approval mode');
   const creationKey = cleanText(body.idempotency_key, 160, 'Idempotency key', true);
   const name = cleanText(body.name, 255, 'Campaign name') || `${objective.replaceAll('_', ' ')} campaign`;
   const durationDays = Number(body.duration_days ?? 14);
@@ -475,7 +475,9 @@ export function normalizeCampaignInput(body = {}) {
 
 export async function createCampaign({ prisma, userId, orgId, body }) {
   requireCampaignsV2(orgId);
-  const input = normalizeCampaignInput(body);
+  const organization = await prisma.organization.findUnique({ where: { id: orgId }, select: { campaignAutonomyMode: true } });
+  const defaultMode = organization?.campaignAutonomyMode === 'AUTO' ? 'FULL_AUTO' : 'APPROVE_PLAN_ONCE';
+  const input = normalizeCampaignInput({ ...body, autonomy_mode: body?.autonomy_mode || defaultMode });
   const existing = await prisma.campaign.findUnique({
     where: { orgId_ownerUserId_creationKey: { orgId, ownerUserId: userId, creationKey: input.creationKey } },
     include: { runs: { orderBy: { createdAt: 'desc' }, take: 1 }, channels: true },
@@ -632,6 +634,52 @@ async function requireCampaignEditor(prisma, campaign, userId) {
   const membership = await prisma.userOrganization.findUnique({ where: { userId_orgId: { userId, orgId: campaign.orgId } }, select: { role: true } });
   if (['owner', 'admin'].includes(membership?.role)) return;
   throw campaignError('Only the campaign creator or an organization admin can change this campaign', 403, 'campaign_editor_required');
+}
+
+export async function getCampaignSettings({ prisma, orgId }) {
+  requireCampaignsV2(orgId);
+  const organization = await prisma.organization.findUnique({
+    where: { id: orgId }, select: { campaignAutonomyMode: true },
+  });
+  if (!organization) throw campaignError('Organization not found', 404, 'organization_not_found');
+  return { autonomy_mode: organization.campaignAutonomyMode === 'AUTO' ? 'AUTO' : 'MANUAL_REVIEW' };
+}
+
+export async function updateCampaignSettings({ prisma, orgId, userId, autonomyMode }) {
+  requireCampaignsV2(orgId);
+  const membership = await prisma.userOrganization.findUnique({
+    where: { userId_orgId: { userId, orgId } }, select: { role: true },
+  });
+  if (!['owner', 'admin'].includes(membership?.role)) {
+    throw campaignError('Only an organization owner or admin can change campaign autonomy', 403, 'campaign_settings_admin_required');
+  }
+  const normalized = String(autonomyMode || '').trim().toUpperCase();
+  if (!['MANUAL_REVIEW', 'AUTO'].includes(normalized)) throw campaignError('Unknown campaign autonomy mode', 400, 'campaign_autonomy_invalid');
+  await prisma.organization.update({ where: { id: orgId }, data: { campaignAutonomyMode: normalized } });
+  return { autonomy_mode: normalized };
+}
+
+export async function autoLaunchCampaignIfReady({ prisma, campaignId, clock = () => new Date() }) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId }, select: { id: true, orgId: true, ownerUserId: true, autonomyMode: true, status: true },
+  });
+  if (!campaign || campaign.autonomyMode !== 'FULL_AUTO' || campaign.status !== 'READY_FOR_APPROVAL') return { launched: false };
+  try {
+    const result = await approveCampaign({ prisma, orgId: campaign.orgId, userId: campaign.ownerUserId, id: campaign.id, clock });
+    await prisma.campaignEvent.create({ data: {
+      campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_auto_launched',
+      actorType: 'system', actorId: campaign.ownerUserId,
+      data: { approval_id: result.approval.id, plan_version_id: result.launch.plan_version_id },
+    } });
+    return { launched: true, ...result };
+  } catch (error) {
+    await prisma.campaignEvent.create({ data: {
+      campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_auto_launch_waiting',
+      actorType: 'system', actorId: campaign.ownerUserId,
+      data: { error: String(error?.message || error).slice(0, 1000), code: error?.code || null },
+    } });
+    return { launched: false, waiting: true, error };
+  }
 }
 
 export async function approveCampaign({ prisma, orgId, userId, id, clock = () => new Date() }) {

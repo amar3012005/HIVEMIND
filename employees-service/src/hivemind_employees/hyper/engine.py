@@ -2490,6 +2490,7 @@ class Director:
 
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
+        full_auto = str(self.campaign_brief.get("autonomyMode") or self.campaign_brief.get("autonomy_mode") or "").upper() == "FULL_AUTO"
         board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
         from .campaign_contract import CAMPAIGN_CONTRACT_VERSION, campaign_system_contract
         system = (
@@ -2507,7 +2508,7 @@ class Director:
             "title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
             "creative_brief:{required:boolean,objective:string,subject:string,composition:string,brand_style:string,audience:string,"
             "aspect_ratio:1:1|16:9|9:16|4:3|3:4,text_policy:string,required_elements:string[],forbidden_elements:string[],"
-            "unsupported_claims:string[],alt_text:string,generation_prompt:string,rationale:string},"
+            "unsupported_claims:string[],alt_text:string,generation_prompt:string,rationale:string,lighting:string,camera:string,color_direction:string,emotional_tone:string,visual_references:string[]},"
             "claim_status:verified|assumption|no_claim,evidence_ids:string[]}],"
             "timeline:[{action_id:string,phase:string,scheduled_offset_minutes:integer}],"
             "safety:{guardrails:string[],prohibited_claims:string[]},"
@@ -2518,7 +2519,7 @@ class Director:
             "media_plan:{currency:string|null,channels:[{channel:string,role:string,rationale:string,budget_amount:number|null,prerequisites:string[],exclusions:string[]}]},"
             "creative_system:{approved_claim_ids:string[],hypotheses:[{id:string,insight:string,promise:string,hook:string,cta:string,channels:string[],experiment_hypothesis:string}]},"
             "launch_plan:{mode:draft_only,approval_mode:string,prerequisites:string[],blocked_by:string[],ceilings:array,verification_steps:string[],rollback_steps:string[]},"
-            "monitoring_plan:{baseline:string,primary_outcome:string,attribution_limit:string,checkpoints:[{timing:string,metrics:string[],decision_rule:string}],optimization_requires_approval:true},"
+            f"monitoring_plan:{{baseline:string,primary_outcome:string,attribution_limit:string,checkpoints:[{{timing:string,metrics:string[],decision_rule:string}}],optimization_requires_approval:{str(not full_auto).lower()}}},"
             "assumptions:string[],launch_checklist:string[],risks:string[],"
             "quality_gate:{ready:true,checks:{goal_alignment:passed,company_grounding:passed,channel_completeness:passed,provider_validity:passed,schedule_completeness:passed,evidence_integrity:passed,creative_completeness:passed,launch_safety:passed,measurement_readiness:passed}},"
             "requirement_coverage:[{requirement_id:string,strategy_sections:string[],action_ids:string[]}]}. "
@@ -2599,6 +2600,10 @@ class Director:
                 return accepted, []
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
                              "errors": errors[:12], "attempt": attempt + 1})
+            await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
+                             "title": "Contract checks found gaps",
+                             "detail": f"The lead is repairing {len(errors)} validation issue(s) before acceptance.",
+                             "attempt": attempt + 1})
         return None, errors
 
     @staticmethod
@@ -3007,6 +3012,9 @@ class Director:
         # pipeline ending in a fabricated report.
         if str(plan.get("turn_mode") or "task").lower() == "chat":
             return await self._chat_turn(t0)
+        if self.room_kind == "campaign":
+            await self.emit({"t": "campaign_stage", "stage": "brief", "status": "complete",
+                             "title": "Campaign brief understood", "detail": "Objective, channels, horizon, pace, and operating constraints are set."})
         campaign_request = plan.get("campaign_request")
         if isinstance(campaign_request, dict) and self.room_kind != "campaign":
             await self.emit({"t": "typing", "agent": _lead,
@@ -3053,7 +3061,13 @@ class Director:
                     "gather_count": 0, "tool_calls": 1, "sim_report": None,
                     "campaign_handoff_error": error, "io": self.io, "tok_by": self.tok_by}
         # PHASE 2 — PARALLEL GATHER. Every recall + connector read + web runs CONCURRENTLY.
+        if self.room_kind == "campaign":
+            await self.emit({"t": "campaign_stage", "stage": "evidence", "status": "active",
+                             "title": "Gathering campaign evidence", "detail": "Agents are reading company memory, audience context, provider capabilities, and relevant market sources."})
         tool_calls_made = await self._run_gather(plan)
+        if self.room_kind == "campaign":
+            await self.emit({"t": "campaign_stage", "stage": "evidence", "status": "complete",
+                             "title": "Evidence board assembled", "detail": f"The team completed {tool_calls_made} bounded research and capability tasks."})
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
         # report the FE shows as a hideable popup, and feeds that report into the synthesis. Fully
         # wrapped — a failure just skips it; the main turn (debate + synth) is never affected.
@@ -3068,6 +3082,9 @@ class Director:
         transcript_json = ""
         if len(self.participants) >= 2 and plan.get("needs_debate"):
             try:
+                if self.room_kind == "campaign":
+                    await self.emit({"t": "campaign_stage", "stage": "debate", "status": "active",
+                                     "title": "Campaign specialists are debating", "detail": "Strategy, audience, creative direction, claims, channel roles, and timing are being challenged in the Room."})
                 # Permanent domain rooms keep a standing room_goal. The active
                 # user message is the run-specific objective and must lead every
                 # debate; using room_goal first made unrelated campaigns debate
@@ -3075,6 +3092,9 @@ class Director:
                 topic = self._debate_topic()
                 transcript_json = await self._debate(topic, self.debate_max_rounds)
                 forced_debate = True
+                if self.room_kind == "campaign":
+                    await self.emit({"t": "campaign_stage", "stage": "debate", "status": "complete",
+                                     "title": "Strategic decisions resolved", "detail": "Material disagreements and the selected recommendation are recorded for the final contract."})
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] debate failed: %s", exc)
         # PHASE 3.5 — TASK-COMPLETION PASS. If the task's deliverable is prospects/
@@ -3115,8 +3135,12 @@ class Director:
         campaign_bundle = None
         campaign_bundle_errors: List[str] = []
         if self.room_kind == "campaign":
+            await self.emit({"t": "campaign_stage", "stage": "build", "status": "active",
+                             "title": "Building the campaign contract", "detail": "The lead is compiling final posts, visuals, schedule, evidence, measurement, and launch controls."})
             campaign_bundle, campaign_bundle_errors = await self._synthesize_campaign_bundle(forced_debate, transcript_json)
             if campaign_bundle and not campaign_bundle_errors:
+                await self.emit({"t": "campaign_stage", "stage": "build", "status": "complete",
+                                 "title": "Campaign contract accepted", "detail": "Every required action, visual brief, timing decision, claim, and measurement field passed validation."})
                 await self.emit({"t": "campaign_bundle", "bundle": campaign_bundle})
                 final_text = self._render_campaign_report(campaign_bundle)
             else:

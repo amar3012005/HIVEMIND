@@ -1,5 +1,5 @@
 import { getCampaignCapabilities } from './capabilities.js';
-import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, editCampaignAction, getCampaign, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics } from './service.js';
+import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, editCampaignAction, getCampaign, getCampaignSettings, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics, updateCampaignSettings } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { processDueCampaignActions } from './worker.js';
 import { campaignWorkerEnabled } from './state.js';
@@ -61,6 +61,14 @@ export async function handleCampaignRequest({ pathname, method, body, req, res, 
   try {
     if (pathname === '/api/campaigns/capabilities' && method === 'GET') {
       return jsonResponse(res, await getCampaignCapabilities({ prisma, userId, orgId }));
+    }
+    if (pathname === '/api/campaigns/settings' && method === 'GET') {
+      return jsonResponse(res, await getCampaignSettings({ prisma, orgId }));
+    }
+    if (pathname === '/api/campaigns/settings' && method === 'PATCH') {
+      const settings = await updateCampaignSettings({ prisma, orgId, userId, autonomyMode: body?.autonomy_mode });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'autonomy_changed', campaignId: null, metadata: settings });
+      return jsonResponse(res, settings);
     }
     if (pathname === '/api/campaigns' && method === 'GET') {
       return jsonResponse(res, { campaigns: await listCampaigns({ prisma, orgId }) });

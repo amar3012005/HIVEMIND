@@ -56,7 +56,7 @@ export function buildCampaignRoomDispatch({ campaign, room, turn, participantIds
     task_tag: CAMPAIGN_ROOM_TASK_TAG,
     campaign_id: campaign.id,
     campaign_brief: briefSnapshot,
-    write_policy: 'ask',
+    write_policy: campaign.autonomyMode === 'FULL_AUTO' ? 'auto' : 'ask',
     callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
   };
 }

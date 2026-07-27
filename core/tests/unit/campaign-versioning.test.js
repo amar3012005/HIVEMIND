@@ -73,6 +73,7 @@ test('regeneration creates the next turn in the same campaign room', withCampaig
   const room = { id: 'room-a', goal: 'Campaign room', participantIds: ['agent-a'] };
   const tx = {
     campaign: { async updateMany({ data }) { campaignUpdates.push(data); return { count: 1 }; } },
+    hyperRoom: { async update() { return room; } },
     hyperTurn: {
       async findFirst() { return { seq: 3 }; },
       async create({ data }) { const row = { id: 'turn-4', ...data }; turns.push(row); return row; },
@@ -86,6 +87,10 @@ test('regeneration creates the next turn in the same campaign room', withCampaig
   };
   const prisma = {
     campaign: { async findFirst() { return campaign; } }, hyperRoom: { async findUnique() { return room; } },
+    xAdsCredential: { async findUnique() { return null; } },
+    nangoConnection: { async findFirst() { return null; } },
+    platformIntegration: { async findFirst() { return null; } },
+    taraRuntimeConfig: { async findUnique() { return null; } },
     async $transaction(run) { return run(tx); },
   };
   const result = await regenerateCampaign({ prisma, orgId: 'org-a', userId: 'user-a', id: 'campaign-a', feedback: 'Use stronger evidence.' });

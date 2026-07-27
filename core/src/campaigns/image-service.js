@@ -151,6 +151,8 @@ async function finalizeCampaignAssets(prisma, campaignId) {
     prisma.campaign.update({ where: { id: campaign.id }, data: { status: 'READY_FOR_APPROVAL', lastError: null } }),
     prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_ready', data: { campaign_id: campaign.id, room_id: campaign.roomId, turn_id: campaign.runs[0]?.turnId || null, plan_version_id: campaign.currentPlanVersionId, display: { title: campaign.name, objective: campaign.objective, channels: campaign.requestedChannels, action_count: currentActions.length, status: 'READY_FOR_APPROVAL', message: 'Your campaign content and visuals are ready to review.' } } } }),
   ]);
+  const { autoLaunchCampaignIfReady } = await import('./service.js');
+  await autoLaunchCampaignIfReady({ prisma, campaignId: campaign.id });
 }
 
 export async function processQueuedCampaignAssets({ prisma, limit = 1, provider = generateCampaignImage } = {}) {

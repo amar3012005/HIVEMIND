@@ -36,8 +36,12 @@ test('campaign approval atomically anchors actions and returns a launch summary'
   const launchAt = new Date('2026-07-26T18:00:00.000Z');
   const bundle = {
     actions: [
-      { id: 'post-now', channel: 'x_organic', payload: { text: 'Now' }, scheduled_offset_minutes: 0 },
-      { id: 'post-later', channel: 'x_organic', payload: { text: 'Later' }, scheduled_offset_minutes: 120 },
+      { id: 'post-now', channel: 'x_organic', payload: { text: 'Now' }, scheduled_offset_minutes: 0, claim_status: 'no_claim' },
+      { id: 'post-later', channel: 'x_organic', payload: { text: 'Later' }, scheduled_offset_minutes: 120, claim_status: 'no_claim' },
+    ],
+    timeline: [
+      { action_id: 'post-now', scheduled_offset_minutes: 0 },
+      { action_id: 'post-later', scheduled_offset_minutes: 120 },
     ],
   };
   const plan = { id: 'plan-a', canonicalHash: canonicalHash(bundle), bundle };
@@ -46,8 +50,8 @@ test('campaign approval atomically anchors actions and returns a launch summary'
     currentPlanVersionId: 'plan-a', requestedChannels: [], autonomyMode: 'APPROVE_PLAN_ONCE', baseline: {}, planVersions: [plan],
   };
   const actions = [
-    { id: 'action-now', channel: 'x_organic', position: 0, payload: { text: 'Now', scheduled_offset_minutes: 0 } },
-    { id: 'action-later', channel: 'x_organic', position: 1, payload: { text: 'Later', scheduled_offset_minutes: 120 } },
+    { id: 'action-now', planVersionId: 'plan-a', status: 'READY', channel: 'x_organic', position: 0, payload: { text: 'Now', source_action_id: 'post-now', scheduled_offset_minutes: 0 } },
+    { id: 'action-later', planVersionId: 'plan-a', status: 'READY', channel: 'x_organic', position: 1, payload: { text: 'Later', source_action_id: 'post-later', scheduled_offset_minutes: 120 } },
   ];
   const campaignClaims = []; const actionUpdates = []; const approvalCreates = []; const events = [];
   const tx = {
@@ -88,12 +92,15 @@ test('campaign approval atomically anchors actions and returns a launch summary'
 }));
 
 test('launch transaction rejects an action that can no longer be claimed READY', withCampaignLaunchFlags(async () => {
-  const bundle = { actions: [{ id: 'post-now', channel: 'x_organic', payload: { text: 'Now' }, scheduled_offset_minutes: 0 }] };
+  const bundle = {
+    actions: [{ id: 'post-now', channel: 'x_organic', payload: { text: 'Now' }, scheduled_offset_minutes: 0, claim_status: 'no_claim' }],
+    timeline: [{ action_id: 'post-now', scheduled_offset_minutes: 0 }],
+  };
   const campaign = {
     id: 'campaign-a', orgId: 'org-a', ownerUserId: 'user-a', status: 'READY_FOR_APPROVAL', currentPlanVersionId: 'plan-a',
     requestedChannels: [], autonomyMode: 'APPROVE_PLAN_ONCE', planVersions: [{ id: 'plan-a', bundle, canonicalHash: canonicalHash(bundle) }],
   };
-  const action = { id: 'action-now', channel: 'x_organic', position: 0, payload: { text: 'Now', scheduled_offset_minutes: 0 } };
+  const action = { id: 'action-now', planVersionId: 'plan-a', status: 'READY', channel: 'x_organic', position: 0, payload: { text: 'Now', source_action_id: 'post-now', scheduled_offset_minutes: 0 } };
   const tx = {
     campaign: { async updateMany() { return { count: 1 }; } },
     campaignApproval: { async updateMany() { return { count: 0 }; }, async create({ data }) { return { id: 'approval-a', ...data }; } },

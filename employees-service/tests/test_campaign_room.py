@@ -329,6 +329,20 @@ def test_v1_campaign_bundles_remain_backward_compatible():
     assert accepted is not None
 
 
+def test_full_auto_campaign_contract_does_not_request_optimization_approval():
+    bundle = _valid_v2_bundle()
+    bundle["launch_plan"]["approval_mode"] = "FULL_AUTO"
+    bundle["monitoring_plan"]["optimization_requires_approval"] = False
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        campaign_brief={"autonomyMode": "FULL_AUTO"},
+    )
+    assert errors == []
+    assert accepted is not None
+
+
 def test_new_campaign_compilation_requires_v2_operating_sections():
     accepted, errors = campaign__submit_plan(
         _valid_v1_bundle(),

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeImageAspectRatio } from '../../src/campaigns/image-provider.js';
+import { DEFAULT_CAMPAIGN_IMAGE_MODEL, normalizeImageAspectRatio } from '../../src/campaigns/image-provider.js';
+
+test('campaign image provider uses the low-latency dedicated image model', () => {
+  assert.equal(DEFAULT_CAMPAIGN_IMAGE_MODEL, 'openai/gpt-image-1-mini');
+});
 
 test('campaign image provider maps channel ratios to supported provider ratios', () => {
   assert.equal(normalizeImageAspectRatio('16:9'), '3:2');

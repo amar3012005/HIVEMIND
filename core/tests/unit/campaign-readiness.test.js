@@ -31,6 +31,27 @@ test('readiness passes a verified organic plan with ready persisted actions', ()
   assert.ok(result.checks.every((item) => item.status === 'passed'));
 });
 
+test('readiness treats queued and succeeded actions as healthy after launch', () => {
+  const input = fixture();
+  input.campaign.status = 'RUNNING';
+  input.actions[0].status = 'SUCCEEDED';
+  input.actions.push({ id: 'persisted-2', planVersionId: 'plan-1', status: 'QUEUED', payload: { source_action_id: 'action-2' } });
+  const result = assessCampaignReadiness(input);
+  assert.equal(result.checks.find((item) => item.id === 'actions').status, 'passed');
+  assert.deepEqual(result.checks.find((item) => item.id === 'actions').action_statuses, { SUCCEEDED: 1, QUEUED: 1 });
+});
+
+test('readiness identifies the exact failed action after launch', () => {
+  const input = fixture();
+  input.campaign.status = 'RUNNING';
+  input.actions[0].status = 'FAILED';
+  const result = assessCampaignReadiness(input);
+  const actionCheck = result.checks.find((item) => item.id === 'actions');
+  assert.equal(actionCheck.status, 'blocked');
+  assert.match(actionCheck.detail, /persisted-1 \(FAILED\)/);
+  assert.match(actionCheck.recovery, /provider error/);
+});
+
 test('readiness blocks assumed public claims even when the channel is connected', () => {
   const input = fixture();
   input.plan.bundle.actions[0].claim_status = 'assumption';

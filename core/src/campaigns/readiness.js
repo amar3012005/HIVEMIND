@@ -3,6 +3,7 @@ const PAID_CHANNELS = new Set([
   'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
 ]);
 const CHANNEL_LABELS = { x_organic: 'X Organic Posts', x_ads: 'Paid X Ads', gmail: 'Email', tara: 'TARA' };
+const HEALTHY_ACTION_STATUSES = new Set(['READY', 'AWAITING_APPROVAL', 'QUEUED', 'EXECUTING', 'SUCCEEDED']);
 
 function channelLabel(value) {
   return CHANNEL_LABELS[value] || String(value || '').replaceAll('_', ' ');
@@ -74,12 +75,16 @@ export function assessCampaignReadiness({ campaign, plan, actions = [], assets =
   const bundleActions = Array.isArray(bundle.actions) ? bundle.actions : [];
   const persistedBySource = new Map(actions.map((action) => [text(action?.payload?.source_action_id), action]));
   const missingActions = bundleActions.filter((action) => !persistedBySource.has(text(action?.id))).map((action) => text(action?.id)).filter(Boolean);
-  const nonReadyActions = actions.filter((action) => action.planVersionId === plan?.id && action.status !== 'READY').map((action) => action.id);
+  const nonReadyActions = actions.filter((action) => action.planVersionId === plan?.id && !HEALTHY_ACTION_STATUSES.has(action.status));
+  const nonReadyActionIds = nonReadyActions.map((action) => action.id);
+  const actionStatusSummary = actions
+    .filter((action) => action.planVersionId === plan?.id)
+    .reduce((summary, action) => ({ ...summary, [action.status]: (summary[action.status] || 0) + 1 }), {});
   checks.push(check(
     'actions', 'Executable actions', !bundleActions.length || missingActions.length || nonReadyActions.length ? 'blocked' : 'passed',
-    !bundleActions.length ? 'The current plan contains no actions.' : missingActions.length ? `Persisted actions are missing for ${missingActions.join(', ')}.` : nonReadyActions.length ? 'One or more current actions are not ready.' : `${bundleActions.length} campaign actions are persisted and ready.`,
-    !bundleActions.length || missingActions.length || nonReadyActions.length ? 'Regenerate or repair the campaign plan before approval.' : null,
-    { action_ids: [...missingActions, ...nonReadyActions] },
+    !bundleActions.length ? 'The current plan contains no actions.' : missingActions.length ? `Persisted actions are missing for ${missingActions.join(', ')}.` : nonReadyActions.length ? `Action attention required: ${nonReadyActions.map((action) => `${action.id} (${action.status})`).join(', ')}.` : `${bundleActions.length} campaign actions are persisted and operational.`,
+    !bundleActions.length || missingActions.length ? 'Regenerate or repair the campaign plan before approval.' : nonReadyActions.length ? 'Open the affected action, inspect its provider error, and retry or reconcile it.' : null,
+    { action_ids: [...missingActions, ...nonReadyActionIds], action_statuses: actionStatusSummary },
   ));
 
   const evidence = new Map((Array.isArray(bundle.evidence) ? bundle.evidence : []).map((item) => [text(item?.id), item]));

@@ -52,6 +52,14 @@ test('readiness identifies the exact failed action after launch', () => {
   assert.match(actionCheck.recovery, /provider error/);
 });
 
+test('readiness treats paused actions as healthy for a paused campaign', () => {
+  const input = fixture();
+  input.campaign.status = 'PAUSED';
+  input.actions[0].status = 'PAUSED';
+  const result = assessCampaignReadiness(input);
+  assert.equal(result.checks.find((item) => item.id === 'actions').status, 'passed');
+});
+
 test('readiness blocks assumed public claims even when the channel is connected', () => {
   const input = fixture();
   input.plan.bundle.actions[0].claim_status = 'assumption';

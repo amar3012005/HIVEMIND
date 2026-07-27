@@ -3,7 +3,7 @@ const PAID_CHANNELS = new Set([
   'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
 ]);
 const CHANNEL_LABELS = { x_organic: 'X Organic Posts', x_ads: 'Paid X Ads', gmail: 'Email', tara: 'TARA' };
-const HEALTHY_ACTION_STATUSES = new Set(['READY', 'AWAITING_APPROVAL', 'QUEUED', 'EXECUTING', 'SUCCEEDED']);
+const HEALTHY_ACTION_STATUSES = new Set(['READY', 'AWAITING_APPROVAL', 'QUEUED', 'EXECUTING', 'SUCCEEDED', 'PAUSED']);
 
 function channelLabel(value) {
   return CHANNEL_LABELS[value] || String(value || '').replaceAll('_', ' ');

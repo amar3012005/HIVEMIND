@@ -5,7 +5,13 @@ from typing import Any
 
 CAMPAIGN_CONTRACT_VERSION = 4
 
-_HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant")
+_HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant", "proprietary")
+_PUBLIC_URL_RE = re.compile(r"https?://[^\s)\]}>]+", re.I)
+_NO_CLAIM_OUTCOME_RE = re.compile(
+    r"\b(?:case\s+stud(?:y|ies)|help(?:ed|s|ing)?|deliver(?:ed|s|ing)?|accelerat\w*|deepen\w*|"
+    r"driv(?:e|es|en|ing)|improv\w*|increas\w*|reduc\w*|revamp\w*|refresh\w*|achiev\w*)\b",
+    re.I,
+)
 
 
 def _unsupported_evidence_markers(copy: str, evidence_claims: list[str]) -> list[str]:
@@ -295,6 +301,20 @@ def campaign_bundle_errors(
             errors.append("campaign_horizon.duration_days must match the brief for contract v3")
         if not isinstance(horizon, dict) or str(horizon.get("intensity") or "").lower() != expected_intensity:
             errors.append("campaign_horizon.intensity must match the brief for contract v3")
+        if expected_duration >= 7 and len(action_offsets) > 1:
+            minimum_final_offset = max(0, (expected_duration - 2) * 1440)
+            if max(action_offsets.values(), default=0) < minimum_final_offset:
+                errors.append("campaign timeline must span the requested horizon; schedule the final action within the last two days")
+
+        allowed_urls = {
+            str(value).rstrip("/.,")
+            for value in (
+                brief_payload.get("destination_url"),
+                brief_payload.get("destinationUrl"),
+                brief_payload.get("website_url"),
+            )
+            if _non_empty_string(value)
+        }
 
         for index, action in enumerate(actions):
             if not isinstance(action, dict):
@@ -318,6 +338,12 @@ def campaign_bundle_errors(
                 errors.append(f"action {action.get('id') or index + 1} needs a valid claim_status for contract v3")
             elif str(action.get("claim_status") or "") == "assumption":
                 errors.append(f"action {action.get('id') or index + 1} cannot publish an assumption as final_copy")
+            final_copy = str(action.get("final_copy") or "")
+            public_urls = {value.rstrip("/.,") for value in _PUBLIC_URL_RE.findall(final_copy)}
+            if public_urls - allowed_urls:
+                errors.append(f"action {action.get('id') or index + 1} contains a URL that was not supplied in the campaign brief")
+            if str(action.get("claim_status") or "") == "no_claim" and _NO_CLAIM_OUTCOME_RE.search(final_copy):
+                errors.append(f"action {action.get('id') or index + 1} is labeled no_claim but contains a customer, performance, or outcome claim")
             action_evidence = action.get("evidence_ids")
             if not isinstance(action_evidence, list):
                 errors.append(f"action {action.get('id') or index + 1} evidence_ids must be an array for contract v3")

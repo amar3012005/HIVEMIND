@@ -121,6 +121,27 @@ def test_campaign_compiler_replaces_unsupported_named_account_baseline():
     assert bundle["monitoring_plan"]["baseline"] == "Establish the campaign baseline from the first published action."
 
 
+def test_campaign_compiler_spans_a_multi_day_horizon():
+    bundle = {
+        "campaign_horizon": {"duration_days": 14},
+        "actions": [
+            {"id": "one", "scheduled_offset_minutes": 0},
+            {"id": "two", "scheduled_offset_minutes": 1440},
+            {"id": "three", "scheduled_offset_minutes": 2880},
+        ],
+        "timeline": [
+            {"action_id": "one", "scheduled_offset_minutes": 0},
+            {"action_id": "two", "scheduled_offset_minutes": 1440},
+            {"action_id": "three", "scheduled_offset_minutes": 2880},
+        ],
+    }
+
+    Director._repair_campaign_derivations(bundle)
+
+    assert [action["scheduled_offset_minutes"] for action in bundle["actions"]] == [0, 9360, 18720]
+    assert [row["scheduled_offset_minutes"] for row in bundle["timeline"]] == [0, 9360, 18720]
+
+
 def test_campaign_contract_rejects_assumptions_in_executable_copy():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["claim_status"] = "assumption"
@@ -149,6 +170,40 @@ def test_campaign_contract_rejects_numbers_and_absolutes_borrowing_unrelated_evi
 
     assert accepted is None
     assert any("claims not present in its evidence: 50 ms, always" in error for error in errors)
+
+
+def test_campaign_contract_rejects_unsupplied_public_urls():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["claim_status"] = "no_claim"
+    bundle["actions"][0]["evidence_ids"] = []
+    bundle["actions"][0]["final_copy"] = "Read the case study: https://example.com/case"
+    bundle["actions"][0]["payload"]["text"] = bundle["actions"][0]["final_copy"]
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+    )
+
+    assert accepted is None
+    assert any("URL that was not supplied" in error for error in errors)
+
+
+def test_campaign_contract_rejects_outcomes_disguised_as_no_claim():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["claim_status"] = "no_claim"
+    bundle["actions"][0]["evidence_ids"] = []
+    bundle["actions"][0]["final_copy"] = "How we helped a municipal agency refresh its brand."
+    bundle["actions"][0]["payload"]["text"] = bundle["actions"][0]["final_copy"]
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+    )
+
+    assert accepted is None
+    assert any("labeled no_claim" in error for error in errors)
 
 
 def _valid_v1_bundle():
@@ -320,7 +375,7 @@ def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
         action = deepcopy(bundle["actions"][0])
         action["id"] = f"x-{index}"
         action["title"] = f"Campaign post {index}"
-        action["scheduled_offset_minutes"] = (index - 1) * 1440
+        action["scheduled_offset_minutes"] = round(13 * 1440 * (index - 1) / 5)
         complete["actions"].append(action)
         complete["timeline"].append({
             "action_id": action["id"], "phase": "sustain",

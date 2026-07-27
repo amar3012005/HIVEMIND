@@ -2613,6 +2613,21 @@ class Director:
         creative_system = bundle.get("creative_system")
         hypotheses = creative_system.get("hypotheses") if isinstance(creative_system, dict) else None
         actions = bundle.get("actions") if isinstance(bundle.get("actions"), list) else []
+        horizon = bundle.get("campaign_horizon") if isinstance(bundle.get("campaign_horizon"), dict) else {}
+        duration_days = int(horizon.get("duration_days") or 0)
+        timeline = bundle.get("timeline") if isinstance(bundle.get("timeline"), list) else []
+        valid_actions = [action for action in actions if isinstance(action, dict)]
+        offsets = [action.get("scheduled_offset_minutes") for action in valid_actions]
+        if duration_days >= 7 and len(valid_actions) > 1 and all(isinstance(offset, int) for offset in offsets):
+            final_offset = (duration_days - 1) * 1440
+            if max(offsets, default=0) < (duration_days - 2) * 1440:
+                by_id = {str(row.get("action_id") or ""): row for row in timeline if isinstance(row, dict)}
+                for index, action in enumerate(valid_actions):
+                    offset = round(final_offset * index / (len(valid_actions) - 1))
+                    action["scheduled_offset_minutes"] = offset
+                    row = by_id.get(str(action.get("id") or ""))
+                    if row is not None:
+                        row["scheduled_offset_minutes"] = offset
         if not isinstance(hypotheses, list):
             hypotheses = []
         actions_by_hypothesis: Dict[str, List[Dict[str, Any]]] = {}

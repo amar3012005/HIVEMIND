@@ -7618,7 +7618,16 @@ exit \$RC
             // from real rows, never a timer, so a spinner shown from this is
             // telling the truth rather than decorating a wait.
             const ended = c.status === 'completed' || !!c.endedAt;
-            const postCall = !ended ? 'live' : (d ? 'ready' : 'processing');
+            // A call that ended long ago with no insight is not "processing" —
+            // the pass either failed or never ran (e.g. the call died before any
+            // turns). Time-box it so the UI stops spinning forever and says so,
+            // and so the client's poller can terminate.
+            const endedAtMs = c.endedAt ? new Date(c.endedAt).getTime()
+              : (c.startedAt ? new Date(c.startedAt).getTime() : Date.now());
+            const staleNoInsight = Date.now() - endedAtMs > 3 * 60 * 1000;
+            const postCall = !ended
+              ? 'live'
+              : (d ? 'ready' : (staleNoInsight ? 'none' : 'processing'));
             return {
               ...c,
               post_call: postCall,

@@ -233,6 +233,36 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       return reply(res, { session_id: session.id, config: session.configSnapshot, org_id: session.orgId, user_id: session.userId });
     }
 
+    // PSTN session registration. A telephony call has no browser capability and
+    // therefore no tara_voice_sessions row, so the events endpoint below (which
+    // resolves tenancy from that row) had nothing to key on — which is why Grok
+    // phone calls persisted nothing: no call, no turns, no insight, no leads.
+    // The adapter registers here at dial time and uses the returned UUID as the
+    // session id for the whole call, so every downstream path works unchanged.
+    // Tenancy comes from the CALLER (core's own campaign runner) over a
+    // service-token channel — the same trust boundary tara-deepgram already uses.
+    if (pathname === '/internal/v1/tara/calls/register' && method === 'POST') {
+      if (!serviceAuthorized(req)) return reply(res, { error: 'unauthorized' }, 401);
+      const orgId = boundedString(body.org_id, 64);
+      const userId = boundedString(body.user_id, 64);
+      if (!orgId || !userId) return reply(res, { error: 'org_id and user_id required' }, 400);
+      const provider = PROVIDERS.has(body.provider) ? body.provider : 'grok';
+      const snapshot = plainObject(body.config) ? body.config : {};
+      const session = await prisma.taraVoiceSession.create({
+        data: {
+          orgId, userId, provider,
+          mode: body.mode === 'internal' ? 'internal' : 'external',
+          // Not a browser capability — nothing will ever redeem it. Mark it
+          // consumed and short-expiry so it cannot be mistaken for a live one.
+          capabilityJti: `pstn-${crypto.randomUUID()}`,
+          configSnapshot: snapshot,
+          expiresAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
+          consumedAt: new Date(),
+        },
+      });
+      return reply(res, { session_id: session.id });
+    }
+
     const events = pathname.match(/^\/internal\/v1\/tara\/calls\/([0-9a-f-]{36})\/events$/i);
     if (events && method === 'POST') {
       if (!serviceAuthorized(req)) return reply(res, { error: 'unauthorized' }, 401);
@@ -244,7 +274,48 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       catch (error) { if (error.code === 'P2002') return reply(res, { ok: true, duplicate: true }); throw error; }
       const snapshot = session.configSnapshot || {};
       const call = await prisma.taraCall.upsert({ where: { orgId_sessionId: { orgId: session.orgId, sessionId: session.id } }, update: {}, create: { orgId: session.orgId, userId: session.userId, sessionId: session.id, provider: session.provider, providerModel: snapshot.model || null, configRevision: Number(snapshot.config_revision || 1), mode: session.mode, voiceId: snapshot.voice_id || null, language: snapshot.language || 'en', goal: snapshot.goal || null } });
-      if (body.type === 'completed' || body.type === 'failed') await prisma.taraCall.update({ where: { id: call.id }, data: { status: body.type === 'completed' ? 'completed' : 'failed', endedAt: new Date(), failureCode: body.payload?.failure_code || null } });
+      // Turn + end are RELAYED into the existing /api/tara/calls pipeline rather
+      // than reimplemented here. That pipeline already writes turns and, on end,
+      // runs the whole post-call pass — insight, sentiment, goal outcome, leads,
+      // learnings-into-memory, outbound-action outcome upgrade. Duplicating any
+      // of it would guarantee the two providers drift. Core calls itself with its
+      // OWN master key (the adapter never holds it) and pins the tenant to the
+      // session row, so the adapter cannot assert another org.
+      const relay = async (path, payload) => {
+        try {
+          const r = await fetch(`http://localhost:${process.env.PORT || 3000}${path}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || '',
+              'x-hm-user-id': session.userId,
+              'x-hm-org-id': session.orgId,
+            },
+            body: JSON.stringify({ session_id: session.id, ...payload }),
+            signal: AbortSignal.timeout(20000),
+          });
+          if (!r.ok) console.warn(`[tara-grok] relay ${path} -> ${r.status}`);
+        } catch (error) {
+          console.warn(`[tara-grok] relay ${path} failed: ${error.message}`);
+        }
+      };
+
+      if (body.type === 'turn') {
+        const p = body.payload || {};
+        await relay('/api/tara/calls/turn', {
+          seq: Number(p.seq) || undefined,
+          user_text: boundedString(p.user_text, 4000) || '',
+          agent_text: boundedString(p.agent_text, 4000) || '',
+        });
+        return reply(res, { ok: true });
+      }
+
+      if (body.type === 'completed' || body.type === 'failed') {
+        await prisma.taraCall.update({ where: { id: call.id }, data: { status: body.type === 'completed' ? 'completed' : 'failed', endedAt: new Date(), failureCode: body.payload?.failure_code || null } });
+        // Fire the post-call pass for a real conversation. A failed call has no
+        // transcript worth analysing, so don't burn a model call on it.
+        if (body.type === 'completed') await relay('/api/tara/calls/end', {});
+      }
       return reply(res, { ok: true });
     }
 

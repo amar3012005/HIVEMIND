@@ -9330,7 +9330,9 @@ Write the persona now.`;
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(provider.provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+            // Both adapters share ONE dial gate — scoping the key to deepgram
+            // made every Grok room call 401 at the adapter.
+            ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
           },
           body: JSON.stringify({
             to,
@@ -10696,6 +10698,77 @@ Write the persona now.`;
   }
 
   // ─── TARA provider control (session-cookie → Core, admin-gated writes) ──
+  // Browser-initiated outbound dial ("Talk to TARA" → call a number).
+  // The FE used to POST the adapter's /calls/outbound DIRECTLY, which 401s the
+  // moment TARA_DG_API_KEY is set — and the browser must never hold that key,
+  // because it authorizes dialing anyone. Dial server-side instead: the session
+  // cookie proves who is asking, the tenant is pinned from the session (never
+  // the body), and the provider follows the org's CURRENT toggle rather than a
+  // hardcoded adapter.
+  if (pathname === '/v1/tara/outbound' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const body = await parseBody(req);
+    const to = String(body.to || '').replace(/[\s()/-]/g, '');
+    if (!/^\+[1-9]\d{7,14}$/.test(to)) {
+      return jsonResponse(res, { error: 'to must be a valid E.164 number' }, 400);
+    }
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    const provider = await taraProviderFor(orgId).catch(() => null);
+    if (!provider) return jsonResponse(res, { error: 'no voice provider configured' }, 503);
+    const sessionId = `out-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        },
+        body: JSON.stringify({
+          to,
+          session_id: sessionId,
+          user_id: userId,
+          org_id: orgId,
+          language: String(body.language || 'en').slice(0, 8),
+          voice_id: body.voice_id || undefined,
+          goal: body.goal ? String(body.goal).slice(0, 600) : undefined,
+          company: body.company ? String(body.company).slice(0, 200) : undefined,
+          mode: 'external',
+        }),
+        signal: AbortSignal.timeout(25000),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return jsonResponse(res, { error: data.error || `dial failed (${r.status})` }, r.status === 400 ? 400 : 502);
+      return jsonResponse(res, { ...data, session_id: data.session_id || sessionId, provider: provider.provider });
+    } catch (error) {
+      return jsonResponse(res, { error: `TARA voice service unreachable: ${error.message}` }, 502);
+    }
+  }
+
+  // Hang up a browser-initiated call. Same reason as the dial above: the
+  // adapter gates this behind the dial key, which the browser cannot hold.
+  const taraHangupMatch = pathname.match(/^\/v1\/tara\/outbound\/([A-Za-z0-9_-]{6,64})\/hangup$/);
+  if (taraHangupMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const provider = await taraProviderFor(current.session.orgId).catch(() => null);
+    if (!provider) return jsonResponse(res, { error: 'no voice provider configured' }, 503);
+    try {
+      const r = await fetch(`${provider.baseUrl}/calls/outbound/${taraHangupMatch[1]}/hangup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      return jsonResponse(res, { ok: r.ok }, r.ok ? 200 : 502);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 502);
+    }
+  }
+
   if (pathname === '/v1/tara/runtime-config' || pathname === '/v1/tara/voice-sessions') {
     const current = await requireSession(req, res);
     if (!current) return;

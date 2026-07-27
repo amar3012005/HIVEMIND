@@ -310,11 +310,19 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         return reply(res, { ok: true });
       }
 
-      if (body.type === 'completed' || body.type === 'failed') {
-        await prisma.taraCall.update({ where: { id: call.id }, data: { status: body.type === 'completed' ? 'completed' : 'failed', endedAt: new Date(), failureCode: body.payload?.failure_code || null } });
-        // Fire the post-call pass for a real conversation. A failed call has no
-        // transcript worth analysing, so don't burn a model call on it.
-        if (body.type === 'completed') await relay('/api/tara/calls/end', {});
+      if (body.type === 'completed') {
+        // Relay FIRST, and do NOT pre-set the status. /api/tara/calls/end owns
+        // completion: it stamps status + endedAt AND runs the post-call pass.
+        // Marking the call completed here made it answer `already_completed`
+        // and skip the analysis entirely — turns persisted, insight never ran.
+        await relay('/api/tara/calls/end', {});
+      } else if (body.type === 'failed') {
+        // A failed call has no transcript worth analysing, so close it out
+        // directly rather than burning a model call on it.
+        await prisma.taraCall.update({
+          where: { id: call.id },
+          data: { status: 'failed', endedAt: new Date(), failureCode: body.payload?.failure_code || null },
+        });
       }
       return reply(res, { ok: true });
     }

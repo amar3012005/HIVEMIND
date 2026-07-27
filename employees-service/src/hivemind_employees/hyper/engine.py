@@ -2090,10 +2090,21 @@ class Director:
         policy = self.campaign_brief.get("audiencePolicy") or self.campaign_brief.get("audience_policy") or {}
         if isinstance(policy, dict) and policy.get("discover_if_insufficient") is False:
             return False
-        # Campaign kickoff text contains serialized policy keys; only the original
-        # goal may authorize prospect discovery.
+        # A campaign audience such as "for law firms" describes targeting; it does
+        # not ask Maps to source contacts. Discovery requires an explicit sourcing
+        # verb and an explicit market location. This prevents a generic awareness
+        # brief from silently inventing a city and replacing the intended audience.
         goal = str(self.campaign_brief.get("goal") or "")
-        return _wants_discovery(goal)
+        explicit_source = re.search(
+            r"\b(?:find|source|discover|identify|list|get|look\s+up|search\s+for)\b"
+            r"[^.\n]{0,80}\b(?:prospects?|leads?|contacts?|firms?|companies|businesses|clients?)\b",
+            goal, re.I)
+        explicit_geo = re.search(
+            r"\b(?:in|near|around|within|across)\s+(?!our\b|the\b|this\b|that\b|your\b|my\b)"
+            r"[A-Za-zÄÖÜäöüß][\w\- ]{2,50}", goal, re.I)
+        nested_brief = self.campaign_brief.get("brief") if isinstance(self.campaign_brief.get("brief"), dict) else {}
+        brief_geo = self.campaign_brief.get("geography") or nested_brief.get("geography") or []
+        return bool(explicit_source and (explicit_geo or brief_geo))
 
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,

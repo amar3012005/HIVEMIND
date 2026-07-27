@@ -132,10 +132,12 @@ async function selectReadyAsset(prisma, { campaign, action, asset }) {
 }
 
 async function finalizeCampaignAssets(prisma, campaignId) {
-  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { actions: { where: { planVersionId: { not: null } }, include: { assets: { where: { deletedAt: null } } } }, runs: { orderBy: { createdAt: 'desc' }, take: 1 } } });
+  const identity = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { currentPlanVersionId: true } });
+  if (!identity?.currentPlanVersionId) return;
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { actions: { where: { planVersionId: identity.currentPlanVersionId }, include: { assets: { where: { deletedAt: null } } } }, runs: { orderBy: { createdAt: 'desc' }, take: 1 } } });
   if (!campaign || campaign.status !== 'PREPARING_ASSETS') return;
   if (campaign.actions.some((action) => action.assets.some((asset) => ['QUEUED', 'GENERATING'].includes(asset.status)))) return;
-  const currentActions = campaign.actions.filter((action) => action.planVersionId === campaign.currentPlanVersionId);
+  const currentActions = campaign.actions;
   const missing = currentActions.filter((action) => action.payload?.creative_brief?.required === true && !action.payload?.asset_id);
   if (missing.length) {
     const message = `Image generation needs attention for ${missing.length} campaign action${missing.length === 1 ? '' : 's'}`;

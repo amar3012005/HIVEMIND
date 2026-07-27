@@ -311,6 +311,28 @@ def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():
     assert director._allows_places_discovery() is False
 
 
+def test_awareness_audience_does_not_trigger_places_discovery():
+    director = Director(
+        user_message="Create an awareness campaign for law firms",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign",
+        campaign_brief={"goal": "Create an awareness campaign for law firms", "audiencePolicy": {"discover_if_insufficient": True}},
+    )
+    assert director._allows_places_discovery() is False
+
+
+def test_campaign_places_discovery_requires_sourcing_intent_and_geography():
+    director = Director(
+        user_message="Find prospects",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign",
+        campaign_brief={"goal": "Find law firm prospects in Berlin", "audiencePolicy": {"discover_if_insufficient": True}},
+    )
+    assert director._allows_places_discovery() is True
+
+
 def test_tara_campaign_action_requires_speak_first_opening():
     bundle = {
         "strategy": "Call opted-in leads.",

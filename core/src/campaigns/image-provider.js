@@ -11,6 +11,14 @@ export class CampaignImageProviderError extends Error {
   }
 }
 
+export function normalizeImageAspectRatio(value) {
+  const ratio = String(value || '').trim().toLowerCase();
+  if (['1:1', '3:2', '2:3', 'auto'].includes(ratio)) return ratio;
+  if (['16:9', '4:3', 'landscape'].includes(ratio)) return '3:2';
+  if (['9:16', '3:4', 'portrait'].includes(ratio)) return '2:3';
+  return 'auto';
+}
+
 export async function generateCampaignImage({ prompt, aspectRatio = '16:9', model = DEFAULT_CAMPAIGN_IMAGE_MODEL, signal } = {}) {
   const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
   if (!apiKey) throw new CampaignImageProviderError('Image generation is not configured', { status: 503, code: 'campaign_image_provider_unavailable' });
@@ -22,7 +30,7 @@ export async function generateCampaignImage({ prompt, aspectRatio = '16:9', mode
       'HTTP-Referer': 'https://singulancelabs.com',
       'X-Title': 'Singulance Campaign OS',
     },
-    body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: aspectRatio, quality: 'high', output_format: 'png' }),
+    body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'high', output_format: 'png' }),
     signal: signal || AbortSignal.timeout(180_000),
   });
   const data = await response.json().catch(() => ({}));

@@ -3086,6 +3086,14 @@ async def _orchestrate_single_agent(
             result = await run_director(**director_kwargs)
     except Exception as exc:  # noqa: BLE001 — never crash the turn
         log.warning("[single] director failed: %s", exc)
+        if _room_kind == "campaign":
+            await _emit({
+                "t": "campaign_stage",
+                "stage": "contract",
+                "status": "failed",
+                "title": "Campaign contract could not be completed",
+                "detail": "The Room stopped before an executable campaign contract was accepted. Retry this campaign to continue safely.",
+            })
         await _emit({"t": "seal", "cost_tokens": 0, "status": "failed",
                      "duration_ms": int((time.time() - started) * 1000)})
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")

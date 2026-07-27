@@ -567,11 +567,14 @@ async def telnyx_stream(ws: WebSocket):
         await xai.send(json.dumps({
             "type": "response.create",
             "response": {"instructions": (
+                # AI disclosure is legally required (EU AI Act Art. 50) and stays.
+                # The recording line is GONE — calls are no longer recorded, so
+                # announcing it was both untrue and a needless trust hit.
                 "Open the call now, before the other person speaks. In ONE short sentence: "
                 "say you are an AI assistant calling"
-                + (f" on behalf of {meta['company']}" if meta.get("company") else "")
-                + ", that the call may be recorded, then ask a single opening question that "
-                "serves your objective. Under 25 words. Do not wait."
+                + (f" from {meta['company']}" if meta.get("company") else "")
+                + ", then give the single most relevant reason you are calling and ask one "
+                "opening question. Under 25 words. Do not wait."
             )},
         }))
     except Exception:  # noqa: BLE001
@@ -580,6 +583,12 @@ async def telnyx_stream(ws: WebSocket):
         return
     log.info("grok PSTN bridge open session=%s leg=%s (opener requested)",
              session_id, meta.get("call_control_id"))
+    # Persistence: these events relay into the SAME /api/tara/calls pipeline
+    # deepgram uses, so a Grok phone call produces a call row, turns, and the
+    # full post-call pass (insight, leads, learnings) instead of nothing.
+    await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "started",
+                                  "payload": {"provider": "grok", "channel": "pstn"}})
+    turn_state = {"seq": 0, "user": ""}
     listen.tee_json(session_id, {"type": "ready", "session_id": session_id})
 
     async def pstn_to_xai():
@@ -631,11 +640,25 @@ async def telnyx_stream(ws: WebSocket):
                         (event.get("conversation") or {}).get("id"))
                 # Mirror transcripts to dashboard listeners (same shape as deepgram).
                 if etype == "conversation.item.input_audio_transcription.completed":
+                    text = event.get("transcript") or ""
+                    turn_state["user"] = text
                     listen.tee_json(session_id, {"type": "transcript", "role": "user",
-                                                 "content": event.get("transcript") or ""})
+                                                 "content": text})
                 elif etype == "response.output_audio_transcript.done":
+                    text = event.get("transcript") or ""
                     listen.tee_json(session_id, {"type": "transcript", "role": "assistant",
-                                                 "content": event.get("transcript") or ""})
+                                                 "content": text})
+                    # One turn = the caller's utterance + TARA's reply, matching
+                    # how tara-deepgram records them so both providers produce
+                    # the same transcript shape.
+                    turn_state["seq"] += 1
+                    asyncio.create_task(emit_event(session_id, {
+                        "event_id": str(uuid.uuid4()), "type": "turn",
+                        "payload": {"seq": turn_state["seq"],
+                                    "user_text": turn_state.get("user") or "",
+                                    "agent_text": text},
+                    }))
+                    turn_state["user"] = ""
         except Exception:  # noqa: BLE001
             log.exception("xai_to_pstn failed session=%s", session_id)
 
@@ -646,5 +669,13 @@ async def telnyx_stream(ws: WebSocket):
         for task in tasks:
             task.cancel()
         listen.tee_json(session_id, {"type": "ended", "session_id": session_id})
+        # Terminal event → Core relays to /api/tara/calls/end, which runs the
+        # post-call pass. Without this a Grok call would never be analysed.
+        try:
+            await emit_event(session_id, {"event_id": str(uuid.uuid4()),
+                                          "type": "completed",
+                                          "payload": {"provider": "grok"}})
+        except Exception:  # noqa: BLE001
+            log.exception("grok completed event failed session=%s", session_id)
         await xai.close()
         log.info("grok PSTN bridge closed session=%s", session_id)

@@ -20,6 +20,7 @@ import httpx
 from pydantic import BaseModel
 
 from . import config
+from .core_client import register_pstn_session
 
 log = logging.getLogger("tara_grok.telephony")
 
@@ -75,10 +76,32 @@ async def dial(req: DialRequest) -> dict:
     if not allow_all and req.to not in config.ALLOWED_NUMBERS:
         raise ValueError(f"Number {req.to!r} not in the configured allowlist.")
 
+    # Register the call with Core FIRST and use ITS uuid as the session id.
+    # A phone call has no browser capability, so without a tara_voice_sessions
+    # row the events endpoint has no tenancy to resolve and the whole call
+    # persists nothing — no record, no turns, no insight, no leads. Best-effort:
+    # if registration fails we still place the call on the caller's id rather
+    # than dropping a dial, we just lose persistence for it.
+    session_id = req.session_id
+    try:
+        registered = await register_pstn_session(
+            org_id=str(req.org_id or ""), user_id=str(req.user_id or ""),
+            provider="grok", mode=req.mode or "external",
+            snapshot={
+                "model": config.TARA_GROK_MODEL,
+                "voice_id": req.voice_id, "language": req.language,
+                "goal": req.goal, "skill_id": req.skill_id,
+            },
+        )
+        if registered:
+            session_id = registered
+    except Exception as error:  # noqa: BLE001
+        log.warning("pstn session register failed (call will not persist): %s", error)
+
     # session_id rides the forwardTo query string; Zernio preserves it verbatim
     # (verified live), which is how the media socket finds this call's snapshot.
     qs = urlencode({k: v for k, v in {
-        "session_id": req.session_id,
+        "session_id": session_id,
         "language": req.language,
         "voice_id": req.voice_id or "",
     }.items() if v})
@@ -94,7 +117,7 @@ async def dial(req: DialRequest) -> dict:
     if config.ZERNIO_AMD:
         body["amd"] = True
     result = await _zernio("post", "/voice/calls", json=body,
-                           extra_headers={"Idempotency-Key": f"tara-grok-{req.session_id}"})
+                           extra_headers={"Idempotency-Key": f"tara-grok-{session_id}"})
     leg = str(result.get("callId") or "")
     if not leg:
         raise ValueError(f"Zernio returned no callId: {str(result)[:200]}")
@@ -103,10 +126,10 @@ async def dial(req: DialRequest) -> dict:
         "provider": "zernio",
         "telnyx_call_control_id": result.get("telnyxCallControlId"),
         "status": result.get("status") or "dialing",
-        **req.model_dump(),
+        **{**req.model_dump(), "session_id": session_id},
     }
-    log.info("grok dial leg=%s session=%s to=%s", leg, req.session_id, req.to)
-    return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
+    log.info("grok dial leg=%s session=%s to=%s", leg, session_id, req.to)
+    return {"call_leg_id": leg, "session_id": session_id, "status": "dialing"}
 
 
 async def hangup(call_leg_id: str) -> None:

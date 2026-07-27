@@ -2703,16 +2703,18 @@ class Director:
             "Repair only the supplied campaign fields and actions. Return JSON with actions, fields, and "
             "report_markdown. actions contains complete replacements only for supplied invalid actions. fields contains "
             "only corrected supplied top-level fields. Preserve all valid copy and decisions. report_markdown must remain "
-            "identical unless an error explicitly concerns report content. Never invent facts, URLs, recipients, results, "
+            "empty unless an error explicitly concerns report content. Never invent facts, URLs, recipients, results, "
             "customers, provider state, or evidence. Rewrite unsupported public claims as claim-safe positioning."
         )
+        report_error = any("report_markdown" in str(error) for error in errors)
         payload = {
             "errors": errors,
             "invalid_actions": invalid_actions,
             "relevant_fields": relevant_fields,
-            "report_markdown": report,
             "verified_company_context": self.company_brief[:1600],
         }
+        if report_error:
+            payload["report_markdown"] = report
         msg = await self._groq(
             [{"role": "system", "content": repair_system},
              {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
@@ -2738,7 +2740,7 @@ class Director:
         for name, value in (patch.get("fields") or {}).items():
             if name in relevant_fields:
                 repaired[name] = value
-        repaired_report = str(patch.get("report_markdown") or report).strip()
+        repaired_report = str(patch.get("report_markdown") or report).strip() if report_error else report
         return repaired, repaired_report
 
     @staticmethod
@@ -2822,6 +2824,9 @@ class Director:
                 for item in (bundle.get("evidence") or [])
                 if isinstance(item, dict) and item.get("status") == "verified" and str(item.get("claim") or "").strip()
             ][:8]
+        positioning = bundle.get("positioning")
+        if isinstance(positioning, dict) and not positioning.get("proof_points"):
+            positioning["proof_points"] = list((grounding or {}).get("facts_used") or [])[:8]
         for action in valid_actions:
             evidence_ids = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
             if (

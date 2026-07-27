@@ -105,6 +105,7 @@ def test_campaign_compiler_applies_authoritative_action_maximum():
 def test_campaign_derivations_normalize_only_claim_safe_assumptions():
     bundle = {
         "company_grounding": {"facts_used": []},
+        "positioning": {"statement": "Shared company memory.", "proof_points": []},
         "evidence": [{"id": "company-1", "status": "verified", "claim": "SINGULANCE has a company memory product."}],
         "actions": [
             {"id": "safe", "claim_status": "assumption", "final_copy": "Explore a shared company memory."},
@@ -116,6 +117,7 @@ def test_campaign_derivations_normalize_only_claim_safe_assumptions():
     Director._repair_campaign_derivations(bundle)
 
     assert bundle["company_grounding"]["facts_used"] == ["SINGULANCE has a company memory product."]
+    assert bundle["positioning"]["proof_points"] == ["SINGULANCE has a company memory product."]
     assert bundle["actions"][0]["claim_status"] == "no_claim"
     assert bundle["actions"][1]["claim_status"] == "assumption"
     assert bundle["actions"][2]["claim_status"] == "verified"
@@ -770,6 +772,7 @@ def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
     assert "GATHERED BOARD" not in message_sets[1][1]["content"]
     assert "invalid_actions" in message_sets[1][1]["content"]
     assert "Initial" in message_sets[1][1]["content"]
+    assert "report_markdown" not in message_sets[1][1]["content"]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

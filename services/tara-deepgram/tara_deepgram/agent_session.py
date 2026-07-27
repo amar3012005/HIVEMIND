@@ -26,7 +26,7 @@ from urllib.parse import urlencode
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import config, listen
+from . import config, dtmf, ivr, listen
 from .core_client import core_post
 from .functions import FUNCTION_DEFS, FunctionExecutor
 from .tara_stream import stream_tara
@@ -154,7 +154,21 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
         await telnyx_ws.accept()
     call_start = time.monotonic()
     events = CallEventLog(session_id)
+    ivr_nav = ivr.IvrNavigator(session_id)
     stream_id: Optional[str] = None  # Twilio streamSid (echoed in outbound frames)
+
+    async def _send_dtmf(digits: str) -> None:
+        """Push in-band DTMF to the carrier leg, paced like real audio."""
+        try:
+            for payload in dtmf.digits_to_media_frames(digits):
+                out = {"event": "media", "media": {"payload": payload}}
+                if stream_id:  # Twilio requires streamSid; Telnyx omits it
+                    out["streamSid"] = stream_id
+                await telnyx_ws.send_text(json.dumps(out))
+                await asyncio.sleep(0.02)  # 20ms frames == real-time cadence
+            log.info("ivr dtmf sent session=%s digits=%s", session_id, digits)
+        except Exception:  # noqa: BLE001
+            log.exception("ivr dtmf send failed session=%s", session_id)
     if seed_start:  # start event already consumed by the caller (Twilio peek)
         st = seed_start.get("start", {}) or {}
         stream_id = (seed_start.get("streamSid") or st.get("streamSid")
@@ -262,6 +276,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                         listen.tee_event(session_id, {"type": "transcript", "role": role, "content": content})
                         if role == "user":
                             turn["user_text"] = content
+                            # IVR: if the "caller" is a phone tree, press the digit
+                            # that reaches a human. In-band tones — the carrier has
+                            # no send-DTMF API. Fire-and-forget so a menu never
+                            # blocks the audio loop.
+                            _digit = ivr_nav.on_caller_text(content)
+                            if _digit:
+                                events.write("ivr_press", {"digits": _digit})
+                                asyncio.create_task(_send_dtmf(_digit))
                         elif role == "assistant":
                             turn["n"] += 1
                             asyncio.create_task(core_post("/api/tara/calls/turn", {

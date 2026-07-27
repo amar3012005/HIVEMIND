@@ -206,6 +206,18 @@ def test_campaign_contract_rejects_outcomes_disguised_as_no_claim():
     assert any("labeled no_claim" in error for error in errors)
 
 
+def test_campaign_compiler_normalizes_outcome_claim_with_verified_evidence():
+    bundle = _valid_v2_bundle()
+    action = bundle["actions"][0]
+    action["claim_status"] = "no_claim"
+    action["final_copy"] = "Our platform helps legal teams coordinate campaign work."
+    action["payload"]["text"] = action["final_copy"]
+
+    Director._repair_campaign_derivations(bundle)
+
+    assert action["claim_status"] == "verified"
+
+
 def _valid_v1_bundle():
     return {
         "strategy": "Build founder awareness with concise, grounded proof.",

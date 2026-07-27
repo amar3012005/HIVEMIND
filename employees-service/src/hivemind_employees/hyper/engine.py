@@ -2561,7 +2561,9 @@ class Director:
                 messages.append({"role": "user", "content":
                                  "Repair every validation error below. Preserve valid strategy, evidence, and copy from the prior draft; "
                                  "return the complete JSON object, never a patch. Count actions per channel before returning and ensure every "
-                                 "action appears exactly once in timeline and requirement_coverage.\n\n"
+                                 "action appears exactly once in timeline and requirement_coverage. For an assumption or no_claim outcome "
+                                 "error, either cite directly supporting verified evidence and label the action verified, or rewrite the public "
+                                 "copy so it makes no customer, performance, or outcome assertion.\n\n"
                                  "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
                                  "\n\nCURRENT INVALID BUNDLE:\n" + previous})
             msg = await self._groq(
@@ -2672,6 +2674,26 @@ class Director:
             )
             if baseline and not grounded_kpi:
                 monitoring["baseline"] = "Establish the campaign baseline from the first published action."
+
+        # Claim classification is bookkeeping, not creative work. If the compiler
+        # already attached only verified evidence to outcome copy, normalize the
+        # label locally instead of spending another synthesis pass or blocking an
+        # otherwise executable campaign.
+        from .campaign_contract import copy_contains_outcome_claim
+        evidence_status = {
+            str(item.get("id") or ""): str(item.get("status") or "")
+            for item in (bundle.get("evidence") or [])
+            if isinstance(item, dict)
+        }
+        for action in valid_actions:
+            evidence_ids = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
+            if (
+                str(action.get("claim_status") or "") == "no_claim"
+                and copy_contains_outcome_claim(action.get("final_copy"))
+                and evidence_ids
+                and all(evidence_status.get(str(item)) == "verified" for item in evidence_ids)
+            ):
+                action["claim_status"] = "verified"
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:

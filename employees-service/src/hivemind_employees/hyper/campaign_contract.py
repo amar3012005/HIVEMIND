@@ -24,6 +24,11 @@ def _unsupported_evidence_markers(copy: str, evidence_claims: list[str]) -> list
     return sorted(set(markers))
 
 
+def copy_contains_outcome_claim(copy: Any) -> bool:
+    """Return whether public copy needs evidence instead of a no-claim label."""
+    return bool(_NO_CLAIM_OUTCOME_RE.search(str(copy or "")))
+
+
 def campaign_system_contract() -> str:
     """Authoritative instruction hierarchy shared by every Campaign Room stage."""
     return (
@@ -343,7 +348,7 @@ def campaign_bundle_errors(
             public_urls = {value.rstrip("/.,") for value in _PUBLIC_URL_RE.findall(final_copy)}
             if public_urls - allowed_urls:
                 errors.append(f"action {action.get('id') or index + 1} contains a URL that was not supplied in the campaign brief")
-            if str(action.get("claim_status") or "") == "no_claim" and _NO_CLAIM_OUTCOME_RE.search(final_copy):
+            if str(action.get("claim_status") or "") == "no_claim" and copy_contains_outcome_claim(final_copy):
                 errors.append(f"action {action.get('id') or index + 1} is labeled no_claim but contains a customer, performance, or outcome claim")
             action_evidence = action.get("evidence_ids")
             if not isinstance(action_evidence, list):

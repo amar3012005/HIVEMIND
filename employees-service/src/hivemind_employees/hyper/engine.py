@@ -2605,6 +2605,7 @@ class Director:
         envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
         report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
         semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
+        self._ensure_campaign_evidence(semantic)
         for index, action in enumerate(semantic.get("actions") or []):
             if isinstance(action, dict):
                 action["id"] = str(action.get("id") or f"action_{index + 1}")
@@ -2629,6 +2630,7 @@ class Director:
                              "detail": f"The lead is correcting {len(errors)} specific field or action issue(s).",
                              "attempt": 1})
             semantic, report = await self._repair_campaign_fields(semantic, report, errors)
+            self._ensure_campaign_evidence(semantic)
             candidate = assemble_campaign_bundle(
                 semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
             )
@@ -2647,6 +2649,38 @@ class Director:
             return None, errors
         await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
         return accepted, []
+
+    def _ensure_campaign_evidence(self, semantic: Dict[str, Any]) -> None:
+        """Preserve exact supplied context when a writer omits the evidence array."""
+        if any(isinstance(item, dict) for item in (semantic.get("evidence") or [])):
+            return
+        company = re.sub(r"\s+", " ", str(self.company_brief or "")).strip()
+        source_type = "company"
+        source = "Company profile"
+        claim = company[:800]
+        if not claim:
+            goal = str(self.campaign_brief.get("goal") or self.user_message or "").strip()
+            claim = re.sub(r"\s+", " ", goal)[:800]
+            source_type = "user"
+            source = "Campaign brief"
+        if not claim:
+            return
+        evidence_id = "supplied_context_1"
+        semantic["evidence"] = [{
+            "id": evidence_id,
+            "claim": claim,
+            "source": source,
+            "source_type": source_type,
+            "status": "verified",
+            "confidence": "high",
+            "url": "",
+        }]
+        grounding = semantic.get("company_grounding") if isinstance(semantic.get("company_grounding"), dict) else {}
+        grounding["facts_used"] = grounding.get("facts_used") or [claim]
+        semantic["company_grounding"] = grounding
+        positioning = semantic.get("positioning") if isinstance(semantic.get("positioning"), dict) else {}
+        positioning["proof_points"] = positioning.get("proof_points") or [claim]
+        semantic["positioning"] = positioning
 
     @staticmethod
     def _complete_campaign_report(report: str, bundle: Dict[str, Any]) -> str:

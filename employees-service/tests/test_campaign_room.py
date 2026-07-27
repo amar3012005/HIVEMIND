@@ -123,6 +123,29 @@ def test_campaign_derivations_normalize_only_claim_safe_assumptions():
     assert bundle["actions"][2]["claim_status"] == "verified"
 
 
+def test_campaign_uses_exact_company_context_when_writer_omits_evidence():
+    director = Director(
+        user_message="Create a campaign", user_id="user", org_id="org", project_id=None,
+        participants=[], room_template="auto", room_goal="Campaign", enabled_connectors=[],
+        emit=lambda event: None, room_kind="campaign", campaign_brief={"goal": "Build awareness"},
+        company_brief="Company: Example GmbH. Product: Shared company memory.",
+    )
+    semantic = {
+        "company_grounding": {"company_name": "Example GmbH", "facts_used": []},
+        "positioning": {"statement": "Shared company memory.", "proof_points": []},
+        "evidence": [],
+    }
+
+    director._ensure_campaign_evidence(semantic)
+
+    evidence = semantic["evidence"][0]
+    assert evidence["claim"] == "Company: Example GmbH. Product: Shared company memory."
+    assert evidence["source_type"] == "company"
+    assert evidence["status"] == "verified"
+    assert semantic["company_grounding"]["facts_used"] == [evidence["claim"]]
+    assert semantic["positioning"]["proof_points"] == [evidence["claim"]]
+
+
 def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
     bundle = _valid_v2_bundle()
     bundle["kpis"][0].update({"target": "2% engagement rate", "target_type": "proposed"})

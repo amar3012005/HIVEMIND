@@ -324,6 +324,11 @@ export function createOutreachModule(deps) {
     // Same goal + SKILL plan for every outbound call, whichever provider runs it.
     const skillId = campaign.voiceConfigSnapshot?.skill_id || null;
     const skillPrompt = await resolveSkillPrompt(campaign, skillId);
+    // The org placing the call — TARA introduces herself as working for THIS,
+    // not for the prospect she is dialing.
+    const callerCompany = (await prisma.organization
+      .findUnique({ where: { id: campaign.orgId }, select: { name: true } })
+      .catch(() => null))?.name || null;
     const provider = campaign.voiceProvider
       ? { provider: campaign.voiceProvider, revision: campaign.voiceConfigSnapshot?.revision || 1, config: campaign.voiceConfigSnapshot || {}, baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl }
       : await taraProviderFor(campaign.orgId);
@@ -376,7 +381,11 @@ export function createOutreachModule(deps) {
         // so a phone call runs the chosen persona, not the bare base prompt.
         skill_id: skillId || undefined,
         skill_prompt: skillPrompt || undefined,
-        company: target.company ? String(target.company).slice(0, 200) : undefined,
+        // `company` is WHO TARA WORKS FOR — it lands in "you are a phone agent
+        // for {company}". Passing the PROSPECT here made TARA announce herself as
+        // "calling on behalf of <the firm she was cold-calling>". The prospect's
+        // identity belongs in contact_name/context, never here.
+        company: callerCompany || undefined,
         // Auto-selected call contract: language + concrete Cartesia voice (TARA resolves a
         // language default when voice_id is null).
         language,

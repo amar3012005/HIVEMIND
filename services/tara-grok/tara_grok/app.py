@@ -219,10 +219,14 @@ def _telephony_instructions(meta: dict) -> str:
     parts = []
     if meta.get("skill_prompt"):
         parts.append(str(meta["skill_prompt"]).strip())
+    # `company` is WHO YOU WORK FOR (matches tara-deepgram's "phone agent for
+    # {company}"); `contact_name` is WHO YOU ARE CALLING. These were inverted
+    # here, which is how TARA ended up introducing herself as an agent of the
+    # prospect she was cold-calling.
     if meta.get("company"):
-        parts.append(f"You are calling {meta['company']}.")
+        parts.append(f"You are a phone agent for {meta['company']}; introduce yourself as calling from it.")
     if meta.get("contact_name"):
-        parts.append(f"Ask for {meta['contact_name']}.")
+        parts.append(f"You are calling {meta['contact_name']}.")
     if meta.get("goal"):
         parts.append(f"Objective: {meta['goal']}")
     if meta.get("context"):

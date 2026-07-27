@@ -329,9 +329,22 @@ export function createOutreachModule(deps) {
     const callerCompany = (await prisma.organization
       .findUnique({ where: { id: campaign.orgId }, select: { name: true } })
       .catch(() => null))?.name || null;
-    const provider = campaign.voiceProvider
-      ? { provider: campaign.voiceProvider, revision: campaign.voiceConfigSnapshot?.revision || 1, config: campaign.voiceConfigSnapshot || {}, baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl }
-      : await taraProviderFor(campaign.orgId);
+    // Provider follows the org's CURRENT selection at dial time, not the value
+    // snapshotted when the campaign was created. Flipping the Deepgram/Grok
+    // toggle must take effect on the next call — otherwise a campaign created
+    // last week keeps dialing on the old engine and the toggle looks broken.
+    // The snapshot stays as the fallback if the live lookup fails, so a
+    // transient error can never leave a campaign unable to dial.
+    let provider = await taraProviderFor(campaign.orgId).catch(() => null);
+    if (!provider && campaign.voiceProvider) {
+      provider = {
+        provider: campaign.voiceProvider,
+        revision: campaign.voiceConfigSnapshot?.revision || 1,
+        config: campaign.voiceConfigSnapshot || {},
+        baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl,
+      };
+    }
+    if (!provider) throw new Error('no TARA voice provider available for this org');
 
     // ── Telephony present? If not, hand the contract to the user's browser ──
     // Previously this dialed unconditionally: against a provider with no PSTN
@@ -423,7 +436,17 @@ export function createOutreachModule(deps) {
     // lands on the OutboundAction via the existing /api/tara/calls/end path.
     return prisma.outreachTarget.update({
       where: { id: target.id },
-      data: { state: 'sent', resultRef: { taraCallLegId: result?.call_leg_id || null, sessionId } },
+      // `provider` is required by live-listen: the audio tap lives on whichever
+      // ADAPTER ran the call (/voice2 for deepgram, /voice-grok for grok), so a
+      // listener that assumes deepgram hears silence on a Grok call.
+      data: {
+        state: 'sent',
+        resultRef: {
+          taraCallLegId: result?.call_leg_id || null,
+          sessionId,
+          provider: provider.provider,
+        },
+      },
     });
   }
 

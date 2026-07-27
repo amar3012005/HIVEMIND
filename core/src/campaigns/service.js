@@ -22,6 +22,20 @@ function cleanStringList(value, maxItems, maxLength, label) {
   return [...new Set(value.map((item) => cleanText(item, maxLength, label)).filter(Boolean))];
 }
 
+const HIGH_RISK_CLAIM_TERMS = ['only', 'never', 'always', 'guarantee', 'guaranteed', 'ensures', 'ensuring', 'certified', 'compliant'];
+
+function unsupportedEvidenceMarkers(copy, evidenceClaims = []) {
+  const publicCopy = String(copy || '').toLowerCase();
+  const support = evidenceClaims.map((claim) => String(claim || '').toLowerCase()).join(' ');
+  const numeric = publicCopy.match(/\b\d+(?:[.,]\d+)?\s*(?:%|ms|x|k|m|b)?\b/g) || [];
+  const markers = numeric.filter((value) => !support.includes(value));
+  for (const term of HIGH_RISK_CLAIM_TERMS) {
+    const pattern = new RegExp(`\\b${term}\\b`, 'i');
+    if (pattern.test(publicCopy) && !pattern.test(support)) markers.push(term);
+  }
+  return [...new Set(markers)].sort();
+}
+
 function validateDestinationUrl(value) {
   if (!value) return '';
   let parsed;
@@ -178,6 +192,7 @@ export function validateCampaignBundle(bundle, campaign) {
     const evidenceRows = Array.isArray(bundle.evidence) ? bundle.evidence : [];
     const evidenceIds = new Set(evidenceRows.map((item) => String(item?.id || '')).filter(Boolean));
     const evidenceStatuses = new Map(evidenceRows.map((item) => [String(item?.id || ''), String(item?.status || '')]));
+    const evidenceClaims = new Map(evidenceRows.map((item) => [String(item?.id || ''), String(item?.claim || '')]));
     bundle.kpis.forEach((kpi, index) => {
       const targetType = String(kpi?.target_type || '');
       if (!['baseline', 'proposed', 'verified'].includes(targetType)) errors.push(`Contract v4 KPI ${index + 1} needs a valid target type`);
@@ -230,6 +245,10 @@ export function validateCampaignBundle(bundle, campaign) {
       if (!String(action?.success_measure || '').trim()) errors.push(`Contract v4 action ${id} needs a success measure`);
       if (!String(action?.rollback_or_exit || '').trim()) errors.push(`Contract v4 action ${id} needs a rollback or exit condition`);
       if (action?.claim_status === 'verified' && (!Array.isArray(action.evidence_ids) || action.evidence_ids.some((evidenceId) => evidenceStatuses.get(String(evidenceId)) !== 'verified'))) errors.push(`Contract v4 action ${id} verified claims must reference only verified evidence`);
+      if (action?.claim_status === 'verified' && Array.isArray(action.evidence_ids)) {
+        const unsupported = unsupportedEvidenceMarkers(action.final_copy, action.evidence_ids.map((evidenceId) => evidenceClaims.get(String(evidenceId)) || ''));
+        if (unsupported.length) errors.push(`Contract v4 action ${id} contains claims not present in its evidence: ${unsupported.join(', ')}`);
+      }
     });
 
     const launchPlan = bundle.launch_plan;

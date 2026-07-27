@@ -65,6 +65,11 @@ test('readiness requires selected hash-bound assets only for visual actions', ()
   result = assessCampaignReadiness(input);
   assert.equal(result.decision, 'ready');
 
+  input.assets[0].width = 1536;
+  input.assets[0].height = 1024;
+  result = assessCampaignReadiness(input);
+  assert.equal(result.decision, 'ready');
+
   input.assets[0].width = 900;
   input.assets[0].height = 1600;
   result = assessCampaignReadiness(input);

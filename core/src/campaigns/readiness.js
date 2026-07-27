@@ -11,10 +11,14 @@ function check(id, label, status, detail, recovery = null, context = {}) {
   return { id, label, status, detail, recovery, ...context };
 }
 
-function expectedRatio(value) {
+function ratioNumber(value) {
   const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(text(value));
   if (!match || Number(match[2]) === 0) return null;
   return Number(match[1]) / Number(match[2]);
+}
+
+function expectedRatios(value) {
+  return [...new Set([ratioNumber(value), ratioNumber(normalizeImageAspectRatio(value))].filter(Boolean))];
 }
 
 function creativeProblems(bundleAction, action, asset) {
@@ -30,10 +34,10 @@ function creativeProblems(bundleAction, action, asset) {
   const payloadAlt = text(action.payload?.asset_alt_text);
   const assetAlt = text(asset.metadata?.alt_text);
   if (!payloadAlt || !assetAlt || payloadAlt !== assetAlt) problems.push('alt_text_missing_or_changed');
-  const intended = expectedRatio(bundleAction?.creative_brief?.aspect_ratio);
-  if (intended && Number.isInteger(asset.width) && Number.isInteger(asset.height) && asset.height > 0) {
+  const intended = expectedRatios(bundleAction?.creative_brief?.aspect_ratio);
+  if (intended.length && Number.isInteger(asset.width) && Number.isInteger(asset.height) && asset.height > 0) {
     const actual = asset.width / asset.height;
-    if (Math.abs(actual - intended) / intended > 0.08) problems.push('aspect_ratio_mismatch');
+    if (!intended.some((ratio) => Math.abs(actual - ratio) / ratio <= 0.08)) problems.push('aspect_ratio_mismatch');
   }
   return [...new Set(problems)];
 }
@@ -157,3 +161,4 @@ export function assessCampaignReadiness({ campaign, plan, actions = [], assets =
 }
 
 export { PAID_CHANNELS };
+import { normalizeImageAspectRatio } from './image-provider.js';

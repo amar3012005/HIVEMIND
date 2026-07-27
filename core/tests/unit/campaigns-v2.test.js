@@ -207,6 +207,8 @@ test('contract v4 requires one source-grounded operating plan across intelligenc
   assert.match(validateCampaignBundle(ungroundedTarget, campaign).join(' '), /verified target must reference verified evidence/);
   const assumptionCopy = structuredClone(bundle); assumptionCopy.actions[0].claim_status = 'assumption'; assumptionCopy.actions[0].evidence_ids = [];
   assert.match(validateCampaignBundle(assumptionCopy, campaign).join(' '), /cannot publish an assumption as final copy/);
+  const borrowedMetric = structuredClone(bundle); borrowedMetric.actions[0].final_copy = 'Campaign Rooms are always ready in 50 ms.'; borrowedMetric.actions[0].payload.text = borrowedMetric.actions[0].final_copy;
+  assert.match(validateCampaignBundle(borrowedMetric, campaign).join(' '), /claims not present in its evidence: 50 ms, always/);
 });
 
 test('action edits create a valid cloned bundle without mutating the approved source', () => {

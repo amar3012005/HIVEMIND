@@ -5,6 +5,17 @@ from typing import Any
 
 CAMPAIGN_CONTRACT_VERSION = 4
 
+_HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant")
+
+
+def _unsupported_evidence_markers(copy: str, evidence_claims: list[str]) -> list[str]:
+    public_copy = str(copy or "").lower()
+    support = " ".join(str(claim or "").lower() for claim in evidence_claims)
+    numeric = re.findall(r"\b\d+(?:[.,]\d+)?\s*(?:%|ms|x|k|m|b)?\b", public_copy)
+    markers = [value for value in numeric if value not in support]
+    markers.extend(term for term in _HIGH_RISK_CLAIM_TERMS if re.search(rf"\b{re.escape(term)}\b", public_copy) and not re.search(rf"\b{re.escape(term)}\b", support))
+    return sorted(set(markers))
+
 
 def campaign_system_contract() -> str:
     """Authoritative instruction hierarchy shared by every Campaign Room stage."""
@@ -16,6 +27,8 @@ def campaign_system_contract() -> str:
         "performance, URLs, or provider capabilities. Mark unresolved facts and assumptions explicitly.\n"
         "- Assumptions and hypotheses may guide strategy, but must never appear as factual final action copy. "
         "Every executable public claim must reference verified evidence; otherwise rewrite the copy as no_claim.\n"
+        "- Evidence must directly support every number and absolute term in final copy. Never attach one broad "
+        "company fact to unrelated latency, exclusivity, certification, compliance, or performance claims.\n"
         "- Debate material strategic conflicts. Record the conflict, chosen decision, rationale, and meaningful "
         "dissent; state explicitly when no material conflict remains.\n"
         "- Agents may research, challenge, and draft, but must never publish or send during Room generation.\n"
@@ -264,6 +277,7 @@ def campaign_bundle_errors(
             errors.append("evidence must not be empty for contract v3")
         evidence_ids = {str(item.get("id") or "") for item in evidence if isinstance(item, dict)}
         evidence_statuses = {str(item.get("id") or ""): str(item.get("status") or "") for item in evidence if isinstance(item, dict)}
+        evidence_claims = {str(item.get("id") or ""): str(item.get("claim") or "") for item in evidence if isinstance(item, dict)}
         for index, item in enumerate(evidence):
             if not isinstance(item, dict):
                 errors.append(f"evidence item {index + 1} must be an object")
@@ -313,6 +327,10 @@ def campaign_bundle_errors(
                 errors.append(f"action {action.get('id') or index + 1} needs evidence for a verified claim")
             elif str(action.get("claim_status") or "") == "verified" and any(evidence_statuses.get(str(item)) != "verified" for item in action_evidence):
                 errors.append(f"action {action.get('id') or index + 1} verified claims must reference only verified evidence")
+            elif str(action.get("claim_status") or "") == "verified":
+                unsupported = _unsupported_evidence_markers(action.get("final_copy"), [evidence_claims.get(str(item), "") for item in action_evidence])
+                if unsupported:
+                    errors.append(f"action {action.get('id') or index + 1} contains claims not present in its evidence: {', '.join(unsupported)}")
 
         quality = bundle.get("quality_gate")
         checks = quality.get("checks") if isinstance(quality, dict) and isinstance(quality.get("checks"), dict) else {}

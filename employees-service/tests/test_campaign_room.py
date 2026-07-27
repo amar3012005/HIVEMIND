@@ -52,6 +52,23 @@ def test_campaign_contract_rejects_assumptions_in_executable_copy():
     assert "cannot publish an assumption as final_copy" in errors
 
 
+def test_campaign_contract_rejects_numbers_and_absolutes_borrowing_unrelated_evidence():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["final_copy"] = "Campaign Rooms are always ready in 50 ms."
+    bundle["actions"][0]["payload"]["text"] = bundle["actions"][0]["final_copy"]
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        duration_days=14,
+        cadence_preset="focused",
+    )
+
+    assert accepted is None
+    assert "claims not present in its evidence: 50 ms, always" in errors
+
+
 def _valid_v1_bundle():
     return {
         "strategy": "Build founder awareness with concise, grounded proof.",

@@ -170,6 +170,14 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
              hears alternating 20ms slices of tone and speech, i.e. noise.
         A handset sends a digit into silence; so must we.
         """
+        # PREFERRED: let the carrier emit the digit out-of-band (RFC 2833). This
+        # is what IVRs actually accept; in-band audio tones are the fallback.
+        # Live today only when the leg is in our own Telnyx account.
+        from . import telephony as _tel  # local import: matches the existing
+        # pattern in this module and keeps the import graph acyclic.
+        if await _tel.send_dtmf_out_of_band(session_id, digits):
+            log.info("ivr dtmf sent OUT-OF-BAND session=%s digits=%s", session_id, digits)
+            return
         try:
             dtmf_active.set()
             clr = {"event": "clear"}

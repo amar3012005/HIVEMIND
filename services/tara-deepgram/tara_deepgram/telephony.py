@@ -194,6 +194,41 @@ async def dial(req: DialRequest) -> dict:
     return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
 
 
+async def send_dtmf_out_of_band(session_id: str, digits: str) -> bool:
+    """Press digits via the CARRIER, not the audio path. Returns True if sent.
+
+    In-band tones are a fallback, not the answer: injected audio reaches the far
+    end (prospects hear TARA over the same channel) but IVRs still ignore
+    correct, correctly-levelled tones — they expect RFC 2833 out-of-band digits,
+    which only the carrier can emit.
+
+    Telnyx supports this natively and our Telnyx integration already exists
+    (`_telnyx`, /calls, streaming_start) — it ran in production before Zernio and
+    TELNYX_APP_ID is still configured. So the moment TELNYX_API_KEY is present
+    this becomes the real DTMF path with no other change.
+
+    Zernio cannot do this today: it exposes no send-DTMF endpoint (nine path
+    shapes probed) and owns the Telnyx account behind our calls, so its
+    telnyxCallControlId is not actionable with our credentials.
+    """
+    meta = find_by_session(session_id)
+    if not meta:
+        return False
+    # Only usable when the leg lives in OUR Telnyx account.
+    if meta.get("provider") == "zernio" or not config.TELNYX_API_KEY:
+        return False
+    cid = meta.get("call_control_id")
+    if not cid:
+        return False
+    try:
+        await _telnyx("post", f"/calls/{cid}/actions/send_dtmf", json={"digits": str(digits)})
+        log.info("telnyx send_dtmf leg=%s digits=%s", cid, digits)
+        return True
+    except Exception as error:  # noqa: BLE001
+        log.warning("telnyx send_dtmf failed leg=%s: %s", cid, error)
+        return False
+
+
 async def hangup(call_leg_id: str) -> None:
     meta = pending_calls.get(call_leg_id)
     if not meta:

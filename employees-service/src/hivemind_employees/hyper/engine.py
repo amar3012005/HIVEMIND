@@ -2557,7 +2557,11 @@ class Director:
         for attempt in range(2):
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             if attempt:
-                previous = json.dumps(previous_candidate, ensure_ascii=False)[:12000] if previous_candidate else "(no parseable prior draft)"
+                # A campaign repair must see the complete prior contract. Truncating
+                # long action sequences made the model reconstruct omitted actions,
+                # which multiplied validation errors and could leave a provider
+                # generating indefinitely.
+                previous = json.dumps(previous_candidate, ensure_ascii=False) if previous_candidate else "(no parseable prior draft)"
                 messages.append({"role": "user", "content":
                                  "Repair every validation error below. Preserve valid strategy, evidence, and copy from the prior draft; "
                                  "return the complete JSON object, never a patch. Count actions per channel before returning and ensure every "

@@ -1906,7 +1906,8 @@ class Director:
         # PROSPECT rows, agents debate the ACTUAL firms (who to prioritize, the
         # per-firm hook + likely objection, the sequence) — not generic theory.
         _prospect_lines = [l for l in self.blackboard if "PROSPECT:" in str(l)][:8]
-        if _prospect_lines:
+        campaign_channels, _ = self._campaign_requirements() if self.room_kind == "campaign" else ([], [])
+        if _prospect_lines and self._uses_prospect_debate(campaign_channels):
             _plist = "\n".join(_prospect_lines)
             r1_prompt = (f"The team found these PROSPECTS on the board:\n{_plist}\n\n"
                          f"Objective: {topic}\nDiscuss THESE specific firms — which to prioritize and why, "
@@ -1950,6 +1951,16 @@ class Director:
             "rounds": rounds,
             "transcript": [{"r": x["round"], "agent": x["agent"], "said": x["text"][:400]} for x in self.transcript],
         })
+
+    def _uses_prospect_debate(self, campaign_channels: List[str]) -> bool:
+        if self.room_kind != "campaign":
+            return True
+        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or bool(
+            _PROSPECT_RE.search(self.user_message or "")
+        )
+
+    def _debate_topic(self) -> str:
+        return (self.user_message or self.room_goal or "")[:400]
 
     # ── main loop ─────────────────────────────────────────────────────
     def _company_identity_block(self) -> str:
@@ -2518,6 +2529,7 @@ class Director:
             raw = str((msg or {}).get("content") or "").strip()
             candidate = _first_json_object(raw)
             if isinstance(candidate, dict):
+                self._repair_campaign_derivations(candidate)
                 previous_candidate = candidate
             visual_actions = [action for action in (candidate.get("actions") or [])
                               if isinstance(action, dict)
@@ -2546,6 +2558,43 @@ class Director:
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
                              "errors": errors[:12], "attempt": attempt + 1})
         return None, errors
+
+    @staticmethod
+    def _repair_campaign_derivations(bundle: Dict[str, Any]) -> None:
+        """Normalize harmless compiler aliases without inventing campaign facts.
+
+        Large campaign bundles are otherwise rejected and regenerated in full for
+        fields that can be derived from content already present in the same bundle.
+        This keeps the deterministic contract strict while avoiding repeated LLM
+        passes for schema spelling differences such as call_to_action vs cta.
+        """
+        creative_system = bundle.get("creative_system")
+        hypotheses = creative_system.get("hypotheses") if isinstance(creative_system, dict) else None
+        actions = bundle.get("actions") if isinstance(bundle.get("actions"), list) else []
+        if not isinstance(hypotheses, list):
+            return
+        actions_by_hypothesis: Dict[str, List[Dict[str, Any]]] = {}
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            hypothesis_id = str(action.get("hypothesis_id") or "").strip()
+            if hypothesis_id:
+                actions_by_hypothesis.setdefault(hypothesis_id, []).append(action)
+        for hypothesis in hypotheses:
+            if not isinstance(hypothesis, dict) or str(hypothesis.get("cta") or "").strip():
+                continue
+            alias = str(hypothesis.get("call_to_action") or "").strip()
+            if alias:
+                hypothesis["cta"] = alias
+                continue
+            linked = actions_by_hypothesis.get(str(hypothesis.get("id") or "").strip(), [])
+            action_cta = next((
+                str((action.get("payload") or {}).get("cta") or action.get("cta") or "").strip()
+                for action in linked
+                if str((action.get("payload") or {}).get("cta") or action.get("cta") or "").strip()
+            ), "")
+            if action_cta:
+                hypothesis["cta"] = action_cta
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:
@@ -2950,7 +2999,11 @@ class Director:
         transcript_json = ""
         if len(self.participants) >= 2 and plan.get("needs_debate"):
             try:
-                topic = (self.room_goal or self.user_message or "")[:400]
+                # Permanent domain rooms keep a standing room_goal. The active
+                # user message is the run-specific objective and must lead every
+                # debate; using room_goal first made unrelated campaigns debate
+                # the same generic room mission and reuse stale prospect context.
+                topic = self._debate_topic()
                 transcript_json = await self._debate(topic, self.debate_max_rounds)
                 forced_debate = True
             except Exception as exc:  # noqa: BLE001

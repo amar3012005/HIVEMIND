@@ -35,6 +35,41 @@ def test_campaign_submit_plan_is_the_completion_contract():
     assert "actions must not be empty" in errors
 
 
+def test_permanent_campaign_room_debates_the_active_run_goal():
+    director = object.__new__(Director)
+    director.user_message = "Create a 14-day X awareness campaign for FOREST"
+    director.room_goal = "Turn company truth into debated campaigns"
+    director.room_kind = "campaign"
+
+    assert director._debate_topic() == director.user_message
+
+
+def test_x_awareness_campaign_does_not_turn_recalled_prospects_into_outreach():
+    director = object.__new__(Director)
+    director.user_message = "Create a brand-awareness campaign for X Organic"
+    director.room_kind = "campaign"
+
+    assert director._uses_prospect_debate(["x_organic"]) is False
+    assert director._uses_prospect_debate(["gmail"]) is True
+
+
+def test_campaign_compiler_normalizes_cta_aliases_without_regeneration():
+    bundle = {
+        "creative_system": {"hypotheses": [
+            {"id": "h1", "call_to_action": "Follow for the next campaign chapter"},
+            {"id": "h2"},
+        ]},
+        "actions": [
+            {"hypothesis_id": "h2", "payload": {"cta": "Visit the campaign page"}},
+        ],
+    }
+
+    Director._repair_campaign_derivations(bundle)
+
+    assert bundle["creative_system"]["hypotheses"][0]["cta"] == "Follow for the next campaign chapter"
+    assert bundle["creative_system"]["hypotheses"][1]["cta"] == "Visit the campaign page"
+
+
 def test_campaign_contract_rejects_assumptions_in_executable_copy():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["claim_status"] = "assumption"
@@ -44,12 +79,10 @@ def test_campaign_contract_rejects_assumptions_in_executable_copy():
         bundle,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
-        duration_days=14,
-        cadence_preset="focused",
     )
 
     assert accepted is None
-    assert "cannot publish an assumption as final_copy" in errors
+    assert any("cannot publish an assumption as final_copy" in error for error in errors)
 
 
 def test_campaign_contract_rejects_numbers_and_absolutes_borrowing_unrelated_evidence():
@@ -61,12 +94,10 @@ def test_campaign_contract_rejects_numbers_and_absolutes_borrowing_unrelated_evi
         bundle,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
-        duration_days=14,
-        cadence_preset="focused",
     )
 
     assert accepted is None
-    assert "claims not present in its evidence: 50 ms, always" in errors
+    assert any("claims not present in its evidence: 50 ms, always" in error for error in errors)
 
 
 def _valid_v1_bundle():

@@ -60,6 +60,7 @@ def test_semantic_campaign_plan_is_assembled_into_execution_contract():
         "actions": [{"channel": "x_organic", "title": "Save the date", "final_copy": "Save the date for a practical conversation about design leadership.", "claim_status": "no_claim", "evidence_ids": [], "hypothesis_id": "date"}],
         "measurement": {"primary_kpi": "Engagement", "attribution_limit": "Engagement is not attendance.", "review_cadence": "After each post"},
         "debate_conflicts_present": False, "debate_decisions": [], "assumptions": [], "risks": [],
+        "report_markdown": "## Recommendation\nBuild trust.\n## Audience\nDesign leaders.\n## Positioning\nPractical.\n## Content System\nEvidence.\n## Campaign Sequence\nOne post.\n## Schedule\nSeven days.\n## Measurement\nEngagement.\n## Risks\nNone.\n## Launch Readiness\nPending approval.",
     }
     bundle = assemble_campaign_bundle(
         semantic, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
@@ -308,6 +309,7 @@ def _valid_v1_bundle():
 def _valid_v2_bundle():
     return {
         **_valid_v1_bundle(),
+        "report_markdown": "## Recommendation\nLead with proof.\n## Audience\nExisting founders.\n## Positioning\nApproval-ready campaign coordination.\n## Content System\nOutcome and control.\n## Campaign Sequence\nOne grounded post.\n## Schedule\nLaunch after approval.\n## Measurement\nEstablish a baseline.\n## Risks\nNo historical baseline.\n## Launch Readiness\nPending approval.",
         "contract_version": CAMPAIGN_CONTRACT_VERSION,
         "strategy_options": [
             {"id": "proof", "name": "Proof led", "thesis": "Show the finished work.", "tradeoff": "Requires product evidence."},
@@ -477,6 +479,69 @@ def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
     assert accepted is not None
 
 
+def test_campaign_report_rejects_unsupported_performance_numbers():
+    bundle = _valid_v2_bundle()
+    bundle["report_markdown"] = bundle["report_markdown"].replace(
+        "Establish a baseline.", "Customers improve performance by 30%.",
+    )
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+
+    assert accepted is None
+    assert "report_markdown contains an unsupported performance number: 30%" in errors
+
+
+def test_campaign_report_does_not_expose_internal_method_library():
+    bundle = _valid_v2_bundle()
+    bundle["report_markdown"] += "\nClaude Ads selected the method."
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+
+    assert accepted is None
+    assert "report_markdown must not expose internal method names" in errors
+
+
+def test_campaign_report_sections_may_be_localized():
+    bundle = _valid_v2_bundle()
+    bundle["report_markdown"] = "\n".join([
+        "## Recommandation\nConstruire la confiance.",
+        "## Public\nDécideurs.",
+        "## Positionnement\nPratique.",
+        "## Contenu\nFondé sur les preuves.",
+        "## Calendrier\nAprès approbation.",
+        "## Mesure\nÉtablir une référence.",
+    ])
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+    )
+
+    assert errors == []
+    assert accepted is not None
+
+
+def test_campaign_report_deterministically_includes_missing_final_actions():
+    bundle = _valid_v2_bundle()
+    report = Director._complete_campaign_report("## Strategy\nLead with evidence.", bundle)
+
+    assert "## Final Actions" in report
+    assert bundle["actions"][0]["final_copy"] in report
+    assert "**Channel:** x_organic" in report
+
+
 def test_x_posts_must_fit_provider_limit_and_threads_use_separate_actions():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["final_copy"] = "x" * 281
@@ -591,7 +656,7 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
 
     async def synthesize(*args, **kwargs):
         calls.append(kwargs["model"])
-        return {"content": '{"actions":[{"creative_brief":{"required":true,"concept":"A focused product scene","alt_text":"Product scene"}}]}'}
+        return {"content": '{"report_markdown":"Campaign report","plan":{"actions":[{"creative_brief":{"required":true,"concept":"A focused product scene","alt_text":"Product scene"}}]}}'}
 
     director = Director(
         user_message="Create an X awareness campaign",
@@ -623,7 +688,9 @@ def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
     async def synthesize(*args, **kwargs):
         models.append(kwargs["model"])
         message_sets.append(args[0])
-        return {"content": "{}"}
+        if len(models) == 1:
+            return {"content": '{"report_markdown":"Report","plan":{"strategy":"Initial"}}'}
+        return {"content": '{"actions":[],"fields":{"strategy":"Repaired"},"report_markdown":"Report"}'}
 
     def submit(candidate, **kwargs):
         nonlocal submissions
@@ -642,10 +709,11 @@ def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):
     _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
     assert errors == []
-    assert models == [director.synth_model, director.synth_model]
+    assert models == [director.synth_model, director.director_model]
     assert len(message_sets[1]) == 2
     assert "GATHERED BOARD" not in message_sets[1][1]["content"]
-    assert "CURRENT SEMANTIC PLAN" in message_sets[1][1]["content"]
+    assert "invalid_actions" in message_sets[1][1]["content"]
+    assert "Initial" in message_sets[1][1]["content"]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

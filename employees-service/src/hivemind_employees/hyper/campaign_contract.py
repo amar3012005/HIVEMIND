@@ -719,6 +719,38 @@ def campaign_bundle_errors(
         for check in ("evidence_integrity", "creative_completeness", "launch_safety", "measurement_readiness"):
             if checks.get(check) != "passed":
                 errors.append(f"quality_gate.checks.{check} must pass for contract v4")
+
+        report = str(bundle.get("report_markdown") or "").strip()
+        if not report:
+            errors.append("report_markdown is required for contract v4")
+        else:
+            lowered_report = report.lower()
+            headings = re.findall(r"(?m)^##\s+\S.+$", report)
+            if len(headings) < 6:
+                errors.append("report_markdown needs at least 6 operating sections")
+            if "claude ads" in lowered_report or "campaign_method[" in lowered_report:
+                errors.append("report_markdown must not expose internal method names")
+            verified_claims = " ".join(
+                str(item.get("claim") or "")
+                for item in evidence
+                if isinstance(item, dict) and item.get("status") == "verified"
+            ).lower()
+            for number in re.findall(r"\b\d+(?:[.,]\d+)?\s*%", report):
+                if number.lower() in verified_claims:
+                    continue
+                context_match = re.search(rf"[^.\n]{{0,80}}{re.escape(number)}[^.\n]{{0,80}}", report, re.I)
+                context = context_match.group(0).lower() if context_match else ""
+                if not any(label in context for label in ("proposed", "target", "hypothesis", "test", "guardrail")):
+                    errors.append(f"report_markdown contains an unsupported performance number: {number}")
+            report_brief = (campaign_brief or {}).get("brief")
+            report_brief = report_brief if isinstance(report_brief, dict) else {}
+            duration = int(report_brief.get("duration_days") or 14)
+            offsets = [
+                action.get("scheduled_offset_minutes")
+                for action in actions if isinstance(action, dict) and isinstance(action.get("scheduled_offset_minutes"), int)
+            ]
+            if duration >= 7 and len(offsets) > 1 and max(offsets, default=0) < (duration - 2) * 1440:
+                errors.append(f"campaign schedule must span the requested {duration}-day horizon")
     return list(dict.fromkeys(errors))
 
 

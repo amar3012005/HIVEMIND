@@ -289,6 +289,8 @@ export function validateCampaignBundle(bundle, campaign) {
 }
 
 function renderBundleReport(bundle) {
+  const authored = String(bundle.report_markdown || '').trim();
+  if (authored) return authored;
   const actions = bundle.actions.map((action) => `- **${action.title || action.id}** (${action.channel}): ${action.rationale || ''}`).join('\n');
   const kpis = bundle.kpis.map((kpi) => `- **${kpi.name || 'Metric'}**: ${kpi.target || 'Track from baseline'}`).join('\n');
   const risks = (bundle.risks || []).map((risk) => `- ${risk}`).join('\n') || '- None identified.';

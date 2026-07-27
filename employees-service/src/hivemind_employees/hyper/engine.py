@@ -19,6 +19,7 @@ orchestrator folds into the existing produce / verify / seal pipeline.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -2182,6 +2183,14 @@ class Director:
                 "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
+                "campaign_method_assignments": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "task": {"type": "string"},
+                        "query": {"type": "string"},
+                    },
+                    "required": ["role", "task", "query"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
                 "campaign_request": {"type": ["object", "null"], "properties": {
                     "goal": {"type": "string"},
@@ -2193,7 +2202,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "turn_mode", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2233,6 +2242,12 @@ class Director:
             "and PLANS, STRATEGIES, RECOMMENDATIONS, prioritisations, budget splits, and 'what should we do' "
             "deliverables ALWAYS qualify (they are judgment, not lookup). false ONLY for a pure factual "
             "lookup or a mechanical retrieval/formatting task.\n"
+            "- campaign_method_assignments: ONLY in a Campaign Room, assign up to four bounded jobs to "
+            "Strategist, Builder, Skeptic, or Final Synthesizer. Each query describes the advertising method "
+            "needed, such as 'organic X copy framework', 'campaign measurement', 'source verification', or "
+            "'campaign report'. The Campaign-only claude_ads_load tool searches the complete method library "
+            "and loads at most two matching resources per assignment. Use [] outside Campaign Rooms. Do not "
+            "request paid-platform methods for an organic-only channel.\n"
             "GROUND recall_queries AND web_query in the COMPANY CONTEXT when one is given — reference the company's "
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
@@ -2329,6 +2344,17 @@ class Director:
         if _METHOD_SKILLS_ENABLED and not ms:
             ms = [default_skill_for(self.room_kind)]
         plan["method_skills"] = ms if _METHOD_SKILLS_ENABLED else []
+        assignments: List[Dict[str, str]] = []
+        if self.room_kind == "campaign":
+            for row in (plan.get("campaign_method_assignments") or [])[:4]:
+                if not isinstance(row, dict):
+                    continue
+                role = str(row.get("role") or "Specialist").strip()[:40]
+                task = str(row.get("task") or "").strip()[:240]
+                query = str(row.get("query") or task).strip()[:240]
+                if task and query:
+                    assignments.append({"role": role, "task": task, "query": query})
+        plan["campaign_method_assignments"] = assignments
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         # Deterministic backstop — the model-judged gate misclassified judgment tasks as
         # lookups twice in live use ("marketing plan", "social media plan" → no debate,
@@ -2408,6 +2434,27 @@ class Director:
                 self.skills_used.append(sname)
                 self.blackboard.append(f"SKILL[{sname}]:\n{body}")
                 await self.emit({"t": "skill_used", "skill": sname, "room_kind": self.room_kind})
+        campaign_method_count = 0
+        if self.room_kind == "campaign" and plan.get("campaign_method_assignments"):
+            from .claude_ads_toolkit import load_assignments
+            for loaded in load_assignments(plan["campaign_method_assignments"]):
+                self.blackboard.append(
+                    f"CAMPAIGN_METHOD[{loaded['role']} | {loaded['task']} | {loaded['resource']}]:\n{loaded['body']}"
+                )
+                await self.emit({
+                    "t": "campaign_method_used",
+                    "role": loaded["role"],
+                    "task": loaded["task"],
+                    "resource": loaded["resource"],
+                })
+                await self.emit({
+                    "t": "skill_used",
+                    "skill": loaded["task"] or loaded["description"],
+                    "agent_role": loaded["role"],
+                    "room_kind": "campaign",
+                    "source": "campaign_toolkit",
+                })
+                campaign_method_count += 1
         tasks: List[Awaitable[None]] = []
         _i = 0
         for q in plan["recall_queries"]:
@@ -2424,7 +2471,7 @@ class Director:
                                           owner=self._gather_owner(_i, "web_search")))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        return len(tasks)
+        return len(tasks) + campaign_method_count
 
     # Room-kind report SKELETONS: each kind seals under FIXED headings so the
     # report reads like that domain specialist's signed deliverable AND the FE
@@ -2502,10 +2549,13 @@ class Director:
         )
         system = (
             campaign_system_contract() + "\n\n"
-            "You are the campaign judgment synthesizer. Return one compact JSON object only; never publish. "
-            "Decide strategy, evidence, copy, creative hypotheses, and measurement. Product code adds identifiers, "
-            "timeline rows, payload mirrors, schedule defaults, safety scaffolding, launch controls, and requirement coverage. "
-            "Required semantic shape: {objective:string,strategy:string,"
+            "You are the final Campaign Intelligence synthesizer. Return one compact JSON object with exactly "
+            "report_markdown and plan. Write the polished user-facing operating report once, then provide only the "
+            "semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
+            "rows, payload mirrors, schedule defaults, safety scaffolding, launch controls, and requirement coverage. "
+            "The report must contain Recommendation, Audience, Positioning, Content System, Campaign Sequence, "
+            "Schedule, Measurement, Risks, and Launch Readiness. Do not repeat internal prompts, method names, or IDs. "
+            "Required plan shape: {objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
             "company_grounding:{company_name:string,facts_used:string[],unknowns:string[]},"
             "positioning:{statement:string,proof_points:string[]},"
@@ -2528,52 +2578,52 @@ class Director:
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
+            "The report and plan must agree exactly on action count, timing, claims, metrics, and launch readiness. "
+            "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
-        errors = ["bundle was not generated"]
-        previous_candidate: Optional[Dict[str, Any]] = None
-        # Campaign Intelligence owns its contract compilation. One focused repair
-        # is enough after the initial synthesis; the general Room goalkeeper must
-        # not rerun research, debate, and synthesis for schema-level defects.
-        synthesis_round = 0
-        validation_attempt = 0
-        while validation_attempt < 2:
-            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-            if synthesis_round:
-                # A campaign repair must see the complete prior contract. Truncating
-                # long action sequences made the model reconstruct omitted actions,
-                # which multiplied validation errors and could leave a provider
-                # generating indefinitely.
-                previous = json.dumps(previous_candidate, ensure_ascii=False) if previous_candidate else "(no parseable prior draft)"
-                messages = [{"role": "system", "content":
-                             "You repair a campaign semantic plan. Return the complete corrected JSON object only, never a patch. "
-                             "Preserve every valid strategy, evidence item, action, and exact piece of copy. Change only what the listed "
-                             "errors require. Never invent facts, URLs, claims, recipients, or provider capabilities."},
-                            {"role": "user", "content":
-                             "Repair every validation error. Keep all valid actions and count them before returning. For an assumption "
-                             "outcome error, cite directly supporting verified evidence or rewrite only that public copy as no_claim.\n\n"
-                             "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
-                             "\n\nCURRENT SEMANTIC PLAN:\n" + previous}]
-            synthesis_round += 1
-            msg = await self._groq(
-                messages,
-                force_text=True,
-                model=self.synth_model,
-                bucket="synth",
-                temp=0.2,
-                uncapped=True,
-            )
-            raw = str((msg or {}).get("content") or "").strip()
-            semantic_candidate = _first_json_object(raw)
+        msg = await self._groq(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            force_text=True,
+            model=self.synth_model,
+            bucket="synth",
+            temp=0.2,
+            uncapped=True,
+        )
+        envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
+        report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
+        semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
+        for index, action in enumerate(semantic.get("actions") or []):
+            if isinstance(action, dict):
+                action["id"] = str(action.get("id") or f"action_{index + 1}")
+        candidate = assemble_campaign_bundle(
+            semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
+        )
+        candidate["report_markdown"] = self._complete_campaign_report(report, candidate)
+        self._repair_campaign_derivations(candidate)
+        from .campaign_contract import campaign__submit_plan
+        accepted, errors = campaign__submit_plan(
+            candidate,
+            channels=channels,
+            requirements=requirements,
+            minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+            campaign_brief=self.campaign_brief,
+        )
+        if errors:
+            await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
+                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": 1})
+            await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
+                             "title": "Repairing campaign details",
+                             "detail": f"The lead is correcting {len(errors)} specific field or action issue(s).",
+                             "attempt": 1})
+            semantic, report = await self._repair_campaign_fields(semantic, report, errors)
             candidate = assemble_campaign_bundle(
-                semantic_candidate, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
+                semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
             )
-            if isinstance(candidate, dict):
-                self._repair_campaign_derivations(candidate)
-                previous_candidate = semantic_candidate if isinstance(semantic_candidate, dict) else {}
-            from .campaign_contract import campaign__submit_plan
+            candidate["report_markdown"] = self._complete_campaign_report(report, candidate)
+            self._repair_campaign_derivations(candidate)
             accepted, errors = campaign__submit_plan(
                 candidate,
                 channels=channels,
@@ -2581,17 +2631,104 @@ class Director:
                 minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
                 campaign_brief=self.campaign_brief,
             )
-            if not errors:
-                await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
-                return accepted, []
-            validation_attempt += 1
+        if errors:
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
-                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": validation_attempt})
-            await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
-                             "title": "Contract checks found gaps",
-                             "detail": f"The lead is repairing {len(errors)} validation issue(s) before acceptance.",
-                             "attempt": validation_attempt})
-        return None, errors
+                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": 2})
+            return None, errors
+        await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
+        return accepted, []
+
+    @staticmethod
+    def _complete_campaign_report(report: str, bundle: Dict[str, Any]) -> str:
+        """Deterministically expose every executable action in the authored report."""
+        completed = str(report or "").strip()
+        normalized = re.sub(r"\s+", " ", completed).lower()
+        missing = []
+        for action in bundle.get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            copy_text = str(action.get("final_copy") or "").strip()
+            if not copy_text or re.sub(r"\s+", " ", copy_text).lower() in normalized:
+                continue
+            missing.append(action)
+        if not missing:
+            return completed
+        rows = ["## Final Actions"]
+        for action in missing:
+            title = str(action.get("title") or action.get("id") or "Campaign action").strip()
+            channel = str(action.get("channel") or "channel").strip()
+            timing = int(action.get("scheduled_offset_minutes") or 0)
+            rows.extend([
+                f"### {title}",
+                f"**Channel:** {channel}  ",
+                f"**Timing:** {timing} minutes after launch  ",
+                str(action.get("final_copy") or "").strip(),
+            ])
+        return f"{completed}\n\n" + "\n\n".join(rows)
+
+    async def _repair_campaign_fields(
+        self, semantic: Dict[str, Any], report: str, errors: List[str],
+    ) -> Tuple[Dict[str, Any], str]:
+        """Repair only named semantic fields/actions; never regenerate the report or plan."""
+        action_ids = {
+            match.group(1)
+            for error in errors
+            if (match := re.search(r"(?:action|Action|X action|Gmail action|TARA action)\s+([^\s:]+)", error))
+        }
+        invalid_actions = [
+            action for action in (semantic.get("actions") or [])
+            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
+        ]
+        field_names = {
+            "strategy", "strategy_options", "selected_strategy_id", "company_grounding", "positioning", "audience",
+            "content_pillars", "kpis", "evidence", "creative_system", "measurement", "debate_conflicts_present",
+            "debate_decisions", "assumptions", "risks",
+        }
+        relevant_fields = {
+            name: semantic.get(name)
+            for name in field_names
+            if any(name.replace("_", " ") in error.lower() or name in error.lower() for error in errors)
+        }
+        repair_system = (
+            "Repair only the supplied campaign fields and actions. Return JSON with actions, fields, and "
+            "report_markdown. actions contains complete replacements only for supplied invalid actions. fields contains "
+            "only corrected supplied top-level fields. Preserve all valid copy and decisions. report_markdown must remain "
+            "identical unless an error explicitly concerns report content. Never invent facts, URLs, recipients, results, "
+            "customers, provider state, or evidence. Rewrite unsupported public claims as claim-safe positioning."
+        )
+        payload = {
+            "errors": errors,
+            "invalid_actions": invalid_actions,
+            "relevant_fields": relevant_fields,
+            "report_markdown": report,
+            "verified_company_context": self.company_brief[:1600],
+        }
+        msg = await self._groq(
+            [{"role": "system", "content": repair_system},
+             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            force_text=True,
+            model=self.director_model,
+            bucket="synth",
+            temp=0.1,
+        )
+        patch = _first_json_object(str((msg or {}).get("content") or "").strip())
+        if not isinstance(patch, dict):
+            return semantic, report
+        repaired = copy.deepcopy(semantic)
+        replacements = {
+            str(action.get("id") or ""): action
+            for action in (patch.get("actions") or [])
+            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
+        }
+        repaired["actions"] = [
+            replacements.get(str(action.get("id") or ""), action) if isinstance(action, dict) else action
+            for action in (semantic.get("actions") or [])
+        ]
+        for name, value in (patch.get("fields") or {}).items():
+            if name in relevant_fields:
+                repaired[name] = value
+        repaired_report = str(patch.get("report_markdown") or report).strip()
+        return repaired, repaired_report
 
     @staticmethod
     def _repair_campaign_derivations(bundle: Dict[str, Any]) -> None:
@@ -2679,6 +2816,9 @@ class Director:
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:
+        report = str(bundle.get("report_markdown") or "").strip()
+        if report:
+            return report
         actions = bundle.get("actions") or []
         action_lines = [f"- **{a.get('title') or a.get('id')}** ({a.get('channel')}): {a.get('rationale')}" for a in actions]
         kpi_lines = [f"- **{k.get('name')}**: {k.get('target')} ({k.get('source')})" for k in bundle.get("kpis") or []]
@@ -3097,7 +3237,7 @@ class Director:
                 # debate; using room_goal first made unrelated campaigns debate
                 # the same generic room mission and reuse stale prospect context.
                 topic = self._debate_topic()
-                transcript_json = await self._debate(topic, self.debate_max_rounds)
+                transcript_json = await self._debate(topic, 1 if self.room_kind == "campaign" else self.debate_max_rounds)
                 forced_debate = True
                 if self.room_kind == "campaign":
                     await self.emit({"t": "campaign_stage", "stage": "debate", "status": "complete",

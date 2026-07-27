@@ -1220,6 +1220,7 @@ class Director:
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
         bucket: str = "director", schema: Optional[Dict[str, Any]] = None,
+        uncapped: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """One Groq chat call. Retries a 400 (malformed tool-call generation) once
         at a lower temperature per Groq's guidance. Returns the message dict or
@@ -1256,7 +1257,7 @@ class Director:
         # The final report (synth) must never truncate mid-table: give it a large
         # generation budget + a long deadline. Without an explicit cap the provider
         # default clipped long markdown tables; the 60s deadline also cut long runs.
-        if bucket == "synth" and "max_tokens" not in body:
+        if bucket == "synth" and not uncapped and "max_tokens" not in body:
             body["max_tokens"] = int(os.getenv("HYPER_SYNTH_MAX_TOKENS", "4096") or 4096)
         if bucket == "debate":
             _to = 40.0
@@ -2495,7 +2496,14 @@ class Director:
                                  "action appears exactly once in timeline and requirement_coverage.\n\n"
                                  "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
                                  "\n\nCURRENT INVALID BUNDLE:\n" + previous})
-            msg = await self._groq(messages, force_text=True, model=self.synth_model, bucket="synth", temp=0.2)
+            msg = await self._groq(
+                messages,
+                force_text=True,
+                model=self.synth_model,
+                bucket="synth",
+                temp=0.2,
+                uncapped=True,
+            )
             raw = str((msg or {}).get("content") or "").strip()
             candidate = _first_json_object(raw)
             if isinstance(candidate, dict):

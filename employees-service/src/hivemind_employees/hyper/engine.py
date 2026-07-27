@@ -1883,6 +1883,13 @@ class Director:
         if not members:
             return json.dumps({"error": "no participants to debate"})
 
+        campaign_channels, _ = self._campaign_requirements() if self.room_kind == "campaign" else ([], [])
+        if self.room_kind == "campaign" and not self._uses_prospect_debate(campaign_channels):
+            # Existing-audience recall can return CRM prospect rows even for a
+            # brand campaign. They are irrelevant evidence for organic awareness
+            # and previously pulled the whole debate toward named-firm outreach.
+            self.blackboard = [line for line in self.blackboard if "PROSPECT:" not in str(line)]
+
         # Round 1 — independent stances (parallel sub-calls = genuine independence)
         self._round_seq += 1
         await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
@@ -1906,7 +1913,6 @@ class Director:
         # PROSPECT rows, agents debate the ACTUAL firms (who to prioritize, the
         # per-firm hook + likely objection, the sequence) — not generic theory.
         _prospect_lines = [l for l in self.blackboard if "PROSPECT:" in str(l)][:8]
-        campaign_channels, _ = self._campaign_requirements() if self.room_kind == "campaign" else ([], [])
         if _prospect_lines and self._uses_prospect_debate(campaign_channels):
             _plist = "\n".join(_prospect_lines)
             r1_prompt = (f"The team found these PROSPECTS on the board:\n{_plist}\n\n"
@@ -2579,7 +2585,7 @@ class Director:
         hypotheses = creative_system.get("hypotheses") if isinstance(creative_system, dict) else None
         actions = bundle.get("actions") if isinstance(bundle.get("actions"), list) else []
         if not isinstance(hypotheses, list):
-            return
+            hypotheses = []
         actions_by_hypothesis: Dict[str, List[Dict[str, Any]]] = {}
         for action in actions:
             if not isinstance(action, dict):
@@ -2602,6 +2608,18 @@ class Director:
             ), "")
             if action_cta:
                 hypothesis["cta"] = action_cta
+
+        monitoring = bundle.get("monitoring_plan")
+        if isinstance(monitoring, dict):
+            baseline = str(monitoring.get("baseline") or "").strip()
+            grounded_kpi = any(
+                isinstance(kpi, dict)
+                and str(kpi.get("target_type") or "") in {"baseline", "verified"}
+                and bool(kpi.get("evidence_ids"))
+                for kpi in (bundle.get("kpis") or [])
+            )
+            if baseline and not grounded_kpi and re.search(r"\d|%|percent|approximately|historical", baseline, re.I):
+                monitoring["baseline"] = "Establish the campaign baseline from the first published action."
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:

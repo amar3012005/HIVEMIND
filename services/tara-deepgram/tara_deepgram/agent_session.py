@@ -158,8 +158,20 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
     stream_id: Optional[str] = None  # Twilio streamSid (echoed in outbound frames)
 
     async def _send_dtmf(digits: str) -> None:
-        """Push in-band DTMF to the carrier leg, paced like real audio."""
+        """Push in-band DTMF to the carrier leg, paced like real audio.
+
+        CRITICAL: flush TARA's queued TTS first. Live evidence — the first
+        Romano Law test sent a correct tone while she was mid-greeting, the two
+        signals mixed on the same leg, and the tree heard noise and re-prompted.
+        A phone tree needs the tone in near-silence, exactly as a human presses
+        a key without talking over the menu.
+        """
         try:
+            clr = {"event": "clear"}
+            if stream_id:
+                clr["streamSid"] = stream_id
+            await telnyx_ws.send_text(json.dumps(clr))
+            await asyncio.sleep(0.25)  # let the far end settle into silence
             for payload in dtmf.digits_to_media_frames(digits):
                 out = {"event": "media", "media": {"payload": payload}}
                 if stream_id:  # Twilio requires streamSid; Telnyx omits it

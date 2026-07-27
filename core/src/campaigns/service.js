@@ -495,6 +495,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
     prisma.hyperRoom.create({ data: {
       id: roomId, userId, orgId, name: input.name.slice(0, 120), goal: roomGoal,
       participantIds, template: 'auto', permanentLeadId: participantIds[0],
+      roomTag: 'campaign',
       enabledConnectors: input.channels.includes('gmail') ? ['gmail'] : [], qualityMode: 'best',
     } }),
     prisma.campaign.create({ data: {
@@ -839,6 +840,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
       data: { status: 'GENERATING', currentPlanVersionId: null, approvedPlanVersionId: null, lastError: null },
     });
     if (!claimed.count) throw campaignError('Campaign regeneration was already started', 409, 'campaign_regeneration_conflict');
+    await tx.hyperRoom.update({ where: { id: room.id }, data: { roomTag: 'campaign' } });
     const lastTurn = await tx.hyperTurn.findFirst({ where: { roomId: room.id }, orderBy: { seq: 'desc' }, select: { seq: true } });
     const kickoff = buildCampaignDisplayMessage(campaign, cleanFeedback);
     const turn = await tx.hyperTurn.create({ data: {

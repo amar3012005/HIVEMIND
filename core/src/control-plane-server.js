@@ -7451,7 +7451,7 @@ Write the persona now.`;
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
           ? body.template : 'debate';
-        const ALLOWED_ROOM_TAGS = new Set(['general', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+        const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
         const roomTag = (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag))
           ? body.room_tag : 'general';
         let permanentLeadId = null;
@@ -8899,7 +8899,7 @@ Write the persona now.`;
           updated.goal = nextGoal;
         } catch (e) { console.warn('[hyper-rooms] goal update failed:', e.message); }
       }
-      const ALLOWED_ROOM_TAGS = new Set(['general', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+      const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
       if (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag)) {
         try {
           await prisma.$executeRawUnsafe(

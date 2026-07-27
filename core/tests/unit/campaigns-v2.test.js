@@ -301,6 +301,7 @@ test('campaign creation uses an atomic batch without an interactive update trans
     ]);
     assert.equal(result.campaign.status, 'GENERATING');
     assert.equal(result.campaign.roomId, result.dispatch.room_id);
+    assert.equal(calls.find(([name]) => name === 'hyperRoom.create')[1].roomTag, 'campaign');
     assert.doesNotMatch(result.dispatch.user_message, /CAMPAIGN_ID|BRIEF_JSON|campaign__submit_plan/);
     assert.match(result.dispatch.execution_context, /campaign__submit_plan/);
   } finally {

@@ -205,6 +205,8 @@ test('contract v4 requires one source-grounded operating plan across intelligenc
   assert.match(validateCampaignBundle(weakAction, campaign).join(' '), /rollback or exit condition/);
   const ungroundedTarget = structuredClone(bundle); ungroundedTarget.kpis[0] = { name: 'Qualified engagement', target: '500', source: 'X', target_type: 'verified', evidence_ids: [] };
   assert.match(validateCampaignBundle(ungroundedTarget, campaign).join(' '), /verified target must reference verified evidence/);
+  const assumptionCopy = structuredClone(bundle); assumptionCopy.actions[0].claim_status = 'assumption'; assumptionCopy.actions[0].evidence_ids = [];
+  assert.match(validateCampaignBundle(assumptionCopy, campaign).join(' '), /cannot publish an assumption as final copy/);
 });
 
 test('action edits create a valid cloned bundle without mutating the approved source', () => {

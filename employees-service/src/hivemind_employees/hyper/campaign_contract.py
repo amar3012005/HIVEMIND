@@ -14,6 +14,8 @@ def campaign_system_contract() -> str:
         "audience and exclusions, final channel content, coordinated timeline, safety, and measurement.\n"
         "- Ground decisions in company context and gathered evidence. Never invent facts, recipients, consent, "
         "performance, URLs, or provider capabilities. Mark unresolved facts and assumptions explicitly.\n"
+        "- Assumptions and hypotheses may guide strategy, but must never appear as factual final action copy. "
+        "Every executable public claim must reference verified evidence; otherwise rewrite the copy as no_claim.\n"
         "- Debate material strategic conflicts. Record the conflict, chosen decision, rationale, and meaningful "
         "dissent; state explicitly when no material conflict remains.\n"
         "- Agents may research, challenge, and draft, but must never publish or send during Room generation.\n"
@@ -300,6 +302,8 @@ def campaign_bundle_errors(
                                 errors.append(f"action {action.get('id') or index + 1} creative_brief.{field} must be an array")
             if str(action.get("claim_status") or "") not in ("verified", "assumption", "no_claim"):
                 errors.append(f"action {action.get('id') or index + 1} needs a valid claim_status for contract v3")
+            elif str(action.get("claim_status") or "") == "assumption":
+                errors.append(f"action {action.get('id') or index + 1} cannot publish an assumption as final_copy")
             action_evidence = action.get("evidence_ids")
             if not isinstance(action_evidence, list):
                 errors.append(f"action {action.get('id') or index + 1} evidence_ids must be an array for contract v3")

@@ -166,6 +166,7 @@ export function validateCampaignBundle(bundle, campaign) {
       if (!action?.creative_brief || typeof action.creative_brief !== 'object') errors.push(`Action ${action?.id || index + 1} needs a creative brief`);
       creativeBriefErrors(action?.creative_brief).forEach((error) => errors.push(`Action ${action?.id || index + 1}: ${error}`));
       if (!['verified', 'assumption', 'no_claim'].includes(String(action?.claim_status || ''))) errors.push(`Action ${action?.id || index + 1} needs a valid claim status`);
+      else if (action?.claim_status === 'assumption') errors.push(`Action ${action?.id || index + 1} cannot publish an assumption as final copy`);
       if (action?.claim_status === 'verified' && (!Array.isArray(action?.evidence_ids) || !action.evidence_ids.length)) errors.push(`Action ${action?.id || index + 1} needs evidence for a verified claim`);
     });
     const quality = bundle.quality_gate;

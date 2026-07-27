@@ -35,6 +35,23 @@ def test_campaign_submit_plan_is_the_completion_contract():
     assert "actions must not be empty" in errors
 
 
+def test_campaign_contract_rejects_assumptions_in_executable_copy():
+    bundle = _valid_v2_bundle()
+    bundle["actions"][0]["claim_status"] = "assumption"
+    bundle["actions"][0]["evidence_ids"] = []
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        duration_days=14,
+        cadence_preset="focused",
+    )
+
+    assert accepted is None
+    assert "cannot publish an assumption as final_copy" in errors
+
+
 def _valid_v1_bundle():
     return {
         "strategy": "Build founder awareness with concise, grounded proof.",

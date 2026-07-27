@@ -28,11 +28,14 @@ _TONES = {
 }
 # ITU-T Q.24 says a tone must be >=40ms and the gap >=40ms. IVRs are happier with
 # a bit more, and a phone tree that misses a digit costs a whole call.
-TONE_MS = 180
+TONE_MS = 250
 GAP_MS = 120
-# Well under full scale: summing two sines at high amplitude clips into μ-law and
-# an IVR reads a clipped tone as noise.
-AMPLITUDE = 0.35
+# Combined peak, split across the two sines — so each component peaks at
+# AMPLITUDE/2. At 0.35 each tone sat near -15 dBFS, which a live IVR (Romano Law)
+# did not register. Standard DTMF is roughly -8 dBFS per tone; 0.7 combined puts
+# each at ~0.35 while still leaving headroom, so the sum cannot clip into μ-law
+# (a clipped tone reads as noise, which is worse than a quiet one).
+AMPLITUDE = 0.7
 
 
 def _linear_to_ulaw(sample: int) -> int:

@@ -1972,6 +1972,12 @@ class Director:
             _PROSPECT_RE.search(self.user_message or "")
         )
 
+    def _campaign_recall_query_is_grounded(self, query: str) -> bool:
+        active_context = f"{self.company_brief} {self.user_message}".casefold()
+        common_terms = {"AI", "API", "B2B", "B2C", "CRM", "GDPR", "ICP", "SEO", "X"}
+        identifiers = set(re.findall(r"\b[A-Z][A-Z0-9_-]{3,}\b", query or ""))
+        return all(token in common_terms or token.casefold() in active_context for token in identifiers)
+
     def _debate_topic(self) -> str:
         return (self.user_message or self.room_goal or "")[:400]
 
@@ -2259,6 +2265,8 @@ class Director:
         if not isinstance(plan, dict):
             plan = {}
         rq = [q for q in (plan.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:3]
+        if self.room_kind == "campaign":
+            rq = [q for q in rq if self._campaign_recall_query_is_grounded(q)]
         plan["recall_queries"] = rq or [(self.user_message or self.room_goal or "")[:200]]
         ccs: List[Dict[str, Any]] = []
         for c in (plan.get("connector_calls") or []):

@@ -53,6 +53,16 @@ def test_x_awareness_campaign_does_not_turn_recalled_prospects_into_outreach():
     assert director._uses_prospect_debate(["gmail"]) is True
 
 
+def test_campaign_recall_queries_reject_foreign_brand_identifiers():
+    director = object.__new__(Director)
+    director.company_brief = "Company: B&B. Markenagentur GmbH"
+    director.user_message = "Build awareness for B&B among German brand leaders"
+
+    assert director._campaign_recall_query_is_grounded("B&B target audience") is True
+    assert director._campaign_recall_query_is_grounded("GDPR considerations for B2B X organic") is True
+    assert director._campaign_recall_query_is_grounded("SINGULANCE x_organic channel capabilities") is False
+
+
 def test_campaign_compiler_normalizes_cta_aliases_without_regeneration():
     bundle = {
         "creative_system": {"hypotheses": [

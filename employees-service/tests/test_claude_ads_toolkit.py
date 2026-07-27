@@ -71,3 +71,30 @@ def test_campaign_room_emits_user_safe_skill_event(tmp_path, monkeypatch):
     skill_event = next(event for event in events if event.get("t") == "skill_used")
     assert skill_event["skill"] == "Plan the product launch"
     assert skill_event["source"] == "campaign_toolkit"
+
+
+def test_campaign_planner_backstops_missing_method_assignments(monkeypatch):
+    async def emit(event):
+        return None
+
+    async def gather_plan(*args, **kwargs):
+        return {"content": """{
+          "recall_queries": [], "connector_calls": [], "web_query": null,
+          "places_query": null, "needs_debate": true, "method_skills": [],
+          "campaign_method_assignments": [], "turn_mode": "task", "campaign_request": null
+        }"""}
+
+    director = Director(
+        user_message="Build a seven-day awareness campaign", user_id="user", org_id="org",
+        project_id=None, participants=[{"id": "one"}, {"id": "two"}], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit, room_kind="campaign",
+        campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
+    )
+    monkeypatch.setattr(director, "_groq", gather_plan)
+
+    plan = asyncio.run(director._plan_gather())
+
+    assert len(plan["campaign_method_assignments"]) == 4
+    assert {row["role"] for row in plan["campaign_method_assignments"]} == {
+        "Strategist", "Builder", "Skeptic", "Final Synthesizer",
+    }

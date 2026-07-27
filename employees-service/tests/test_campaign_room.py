@@ -655,7 +655,7 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
         return None
 
     async def synthesize(*args, **kwargs):
-        calls.append(kwargs["model"])
+        calls.append(kwargs)
         return {"content": '{"report_markdown":"Campaign report","plan":{"actions":[{"creative_brief":{"required":true,"concept":"A focused product scene","alt_text":"Product scene"}}]}}'}
 
     director = Director(
@@ -674,7 +674,8 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
 
     assert errors == []
     assert bundle["actions"][0]["creative_brief"]["concept"] == "A focused product scene"
-    assert calls == [director.synth_model]
+    assert [call["model"] for call in calls] == [director.synth_model]
+    assert calls[0]["json_object"] is True
 
 
 def test_campaign_validation_repair_uses_compact_synthesis_context(monkeypatch):

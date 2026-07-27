@@ -1221,7 +1221,7 @@ class Director:
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
         bucket: str = "director", schema: Optional[Dict[str, Any]] = None,
-        uncapped: bool = False,
+        uncapped: bool = False, json_object: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """One Groq chat call. Retries a 400 (malformed tool-call generation) once
         at a lower temperature per Groq's guidance. Returns the message dict or
@@ -1245,6 +1245,8 @@ class Director:
             # tool-calling — sidesteps the gpt-oss harmony tool-call glitch entirely.
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "gather_plan", "schema": schema, "strict": True}}
+        elif json_object:
+            body["response_format"] = {"type": "json_object"}
         # Provider-aware routing: a non-Groq-native model (gemini/claude/deepseek…)
         # goes DIRECT to OpenRouter (provider-pinned) — skip the Groq round-trip.
         # gpt-oss/llama stay Groq-primary below + the OpenRouter failover. Non-
@@ -2354,6 +2356,13 @@ class Director:
                 query = str(row.get("query") or task).strip()[:240]
                 if task and query:
                     assignments.append({"role": role, "task": task, "query": query})
+            if not assignments:
+                assignments = [
+                    {"role": "Strategist", "task": "Select the campaign strategy", "query": "campaign strategy media plan"},
+                    {"role": "Builder", "task": "Build the channel-ready content", "query": "organic social copy framework"},
+                    {"role": "Skeptic", "task": "Verify campaign evidence", "query": "source verification campaign"},
+                    {"role": "Final Synthesizer", "task": "Define measurement and the operating report", "query": "campaign measurement report"},
+                ]
         plan["campaign_method_assignments"] = assignments
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         # Deterministic backstop — the model-judged gate misclassified judgment tasks as
@@ -2591,6 +2600,7 @@ class Director:
             bucket="synth",
             temp=0.2,
             uncapped=True,
+            json_object=True,
         )
         envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
         report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
@@ -2710,6 +2720,7 @@ class Director:
             model=self.director_model,
             bucket="synth",
             temp=0.1,
+            json_object=True,
         )
         patch = _first_json_object(str((msg or {}).get("content") or "").strip())
         if not isinstance(patch, dict):

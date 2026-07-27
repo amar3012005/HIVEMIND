@@ -2493,7 +2493,7 @@ class Director:
 
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
-        board = "\n".join(self.blackboard)[:8000] or "(no grounded facts were gathered)"
+        board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
         from .campaign_contract import (
             CAMPAIGN_CONTRACT_VERSION,
             assemble_campaign_bundle,
@@ -2512,9 +2512,7 @@ class Director:
             "audience:{rationale:string,segments:array,safety_notes:array},"
             "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],"
             "actions:[{id:string,channel:string,title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
-            "creative_brief:{required:boolean,objective:string,subject:string,composition:string,brand_style:string,audience:string,"
-            "aspect_ratio:1:1|16:9|9:16|4:3|3:4,text_policy:string,required_elements:string[],forbidden_elements:string[],"
-            "unsupported_claims:string[],alt_text:string,generation_prompt:string,rationale:string,lighting:string,camera:string,color_direction:string,emotional_tone:string,visual_references:string[]},"
+            "creative_brief:{required:boolean,concept:string,alt_text:string},"
             "claim_status:verified|assumption|no_claim,evidence_ids:string[],hypothesis_id:string}],"
             "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},debate_conflicts_present:boolean,"
             "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
@@ -2530,17 +2528,18 @@ class Director:
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
-        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:5000]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:3000]}\n\n"
-                f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:5000] if forced_debate else '(not forced)'}")
+        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n\n"
+                f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
         errors = ["bundle was not generated"]
         previous_candidate: Optional[Dict[str, Any]] = None
-        visual_skill = ""
         # Campaign Intelligence owns its contract compilation. One focused repair
         # is enough after the initial synthesis; the general Room goalkeeper must
         # not rerun research, debate, and synthesis for schema-level defects.
-        for attempt in range(2):
+        synthesis_round = 0
+        validation_attempt = 0
+        while validation_attempt < 2:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-            if attempt:
+            if synthesis_round:
                 # A campaign repair must see the complete prior contract. Truncating
                 # long action sequences made the model reconstruct omitted actions,
                 # which multiplied validation errors and could leave a provider
@@ -2554,10 +2553,11 @@ class Director:
                                  "copy so it makes no customer, performance, or outcome assertion.\n\n"
                                  "VALIDATION ERRORS:\n- " + "\n- ".join(errors) +
                                  "\n\nCURRENT INVALID BUNDLE:\n" + previous})
+            synthesis_round += 1
             msg = await self._groq(
                 messages,
                 force_text=True,
-                model=self.synth_model,
+                model=self.synth_model if validation_attempt == 0 else self.director_model,
                 bucket="synth",
                 temp=0.2,
                 uncapped=True,
@@ -2570,19 +2570,6 @@ class Director:
             if isinstance(candidate, dict):
                 self._repair_campaign_derivations(candidate)
                 previous_candidate = semantic_candidate if isinstance(semantic_candidate, dict) else {}
-            visual_actions = [action for action in (candidate.get("actions") or [])
-                              if isinstance(action, dict)
-                              and isinstance(action.get("creative_brief"), dict)
-                              and action["creative_brief"].get("required") is True] if isinstance(candidate, dict) else []
-            if visual_actions and not visual_skill:
-                visual_skill = load_method_skill("visual-prompt-architecture")
-                if visual_skill:
-                    if "visual-prompt-architecture" not in self.skills_used:
-                        self.skills_used.append("visual-prompt-architecture")
-                    await self.emit({"t": "skill_used", "skill": "visual-prompt-architecture", "room_kind": "campaign",
-                                     "note": "Visual prompt architecture activated for selected campaign actions."})
-                    errors = ["The image gate selected visual actions. Apply this visual-prompt skill to those actions only, then return the complete bundle again:\n" + visual_skill]
-                    continue
             from .campaign_contract import campaign__submit_plan
             accepted, errors = campaign__submit_plan(
                 candidate,
@@ -2594,12 +2581,13 @@ class Director:
             if not errors:
                 await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"})
                 return accepted, []
+            validation_attempt += 1
             await self.emit({"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "rejected",
-                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": attempt + 1})
+                             "errors": errors[:12], "error_groups": classify_campaign_errors(errors), "attempt": validation_attempt})
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Contract checks found gaps",
                              "detail": f"The lead is repairing {len(errors)} validation issue(s) before acceptance.",
-                             "attempt": attempt + 1})
+                             "attempt": validation_attempt})
         return None, errors
 
     @staticmethod

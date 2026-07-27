@@ -583,6 +583,66 @@ def test_campaign_synthesizer_submits_with_the_canonical_contract_version(monkey
     assert emitted[-1] == {"t": "campaign_tool", "tool": "campaign__submit_plan", "status": "accepted"}
 
 
+def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
+    calls = []
+
+    async def emit(event):
+        return None
+
+    async def synthesize(*args, **kwargs):
+        calls.append(kwargs["model"])
+        return {"content": '{"actions":[{"creative_brief":{"required":true,"concept":"A focused product scene","alt_text":"Product scene"}}]}'}
+
+    director = Director(
+        user_message="Create an X awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit,
+        room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
+    )
+    monkeypatch.setattr(director, "_groq", synthesize)
+    monkeypatch.setattr(
+        "hivemind_employees.hyper.campaign_contract.campaign__submit_plan",
+        lambda candidate, **kwargs: (candidate, []),
+    )
+
+    bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+
+    assert errors == []
+    assert bundle["actions"][0]["creative_brief"]["concept"] == "A focused product scene"
+    assert calls == [director.synth_model]
+
+
+def test_campaign_validation_repair_uses_fast_model(monkeypatch):
+    models = []
+    submissions = 0
+
+    async def emit(event):
+        return None
+
+    async def synthesize(*args, **kwargs):
+        models.append(kwargs["model"])
+        return {"content": "{}"}
+
+    def submit(candidate, **kwargs):
+        nonlocal submissions
+        submissions += 1
+        return (None, ["strategy needs repair"]) if submissions == 1 else (candidate, [])
+
+    director = Director(
+        user_message="Create an awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit,
+        room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
+    )
+    monkeypatch.setattr(director, "_groq", synthesize)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__submit_plan", submit)
+
+    _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+
+    assert errors == []
+    assert models == [director.synth_model, director.director_model]
+
+
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():
     director = Director(
         user_message='AUDIENCE_POLICY_JSON: {"discover_if_insufficient": false} run a company campaign',

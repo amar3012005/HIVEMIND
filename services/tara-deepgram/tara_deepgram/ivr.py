@@ -78,6 +78,20 @@ _IVR_SIGNALS = ("press", "dial", "main menu", "for english", "para español",
                 "if you know your party", "extension", "please hold", "your call is important")
 
 
+# Spoken escapes, most-recognised first. The carrier will not carry our DTMF
+# tones to the far end (Telnyx media streaming appears to negotiate RFC 2833
+# out-of-band DTMF, so in-band audio tones are ignored), and Zernio exposes no
+# send-DTMF API. But we DO control the voice channel: most modern trees are
+# speech-enabled, and almost every DTMF-only one still routes a spoken
+# "operator" to reception. This is the bypass that needs nothing from the
+# carrier.
+SPOKEN_ESCAPES = ("Operator.", "Representative.", "Speak to a person.")
+
+
+def spoken_escape(attempt: int = 0) -> str:
+    return SPOKEN_ESCAPES[min(max(attempt, 0), len(SPOKEN_ESCAPES) - 1)]
+
+
 def looks_like_ivr(text: str) -> bool:
     low = (text or "").lower()
     return any(s in low for s in _IVR_SIGNALS)

@@ -179,6 +179,18 @@ async def run_bridge(telnyx_ws: WebSocket, *, session_id: str,
                 await telnyx_ws.send_text(json.dumps(out))
                 await asyncio.sleep(0.02)  # 20ms frames == real-time cadence
             log.info("ivr dtmf sent session=%s digits=%s", session_id, digits)
+            # BYPASS: the tone alone does not reach the far end today, so also
+            # SAY the escape word. Sequential, never simultaneous — overlapping
+            # signals are what made the first attempt read as noise. Speech is
+            # the one channel we fully control, and most trees honour a spoken
+            # "operator" even when they are DTMF-driven.
+            await asyncio.sleep(0.45)
+            await dg.send(json.dumps({
+                "type": "InjectAgentMessage",
+                "message": ivr.spoken_escape(ivr_nav.presses - 1),
+            }))
+            log.info("ivr spoken escape session=%s phrase=%r",
+                     session_id, ivr.spoken_escape(ivr_nav.presses - 1))
         except Exception:  # noqa: BLE001
             log.exception("ivr dtmf send failed session=%s", session_id)
     if seed_start:  # start event already consumed by the caller (Twilio peek)

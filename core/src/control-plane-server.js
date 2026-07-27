@@ -46,6 +46,7 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
+import { discoverCompanyPages, fallbackDomainHires } from './onboarding/company-discovery.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -7823,20 +7824,28 @@ Write the persona now.`;
           const companyGuess = host.split('.')[0].replace(/[-_]/g, ' ').toUpperCase();
           say('Saving your brief');
 
-          // ── Read the website, page by page (each fetch is its own log line) ──
-          const pagePaths = ['', '/about', '/product', '/pricing'];
-          const screenshotPromise = screenshotSite(`https://${host}`);
-          const pages = await Promise.all(pagePaths.map(async (pagePath) => {
-            say(`Fetching: https://${host}${pagePath || '/'}...`);
+          // Read the homepage first, then follow the most informative same-site
+          // links that the company actually exposes. Never invent conventional
+          // /about, /product, or /pricing paths.
+          const homepageUrl = `https://${host}/`;
+          const screenshotPromise = screenshotSite(homepageUrl);
+          const fetchPage = async (pageUrl) => {
+            say(`Fetching: ${pageUrl}...`);
             const ac = new AbortController();
             const t = setTimeout(() => ac.abort(), 8000);
             try {
-              const r = await fetch(`https://${host}${pagePath}`, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
-              if (!r.ok) return { text: '', html: '' };
+              const r = await fetch(pageUrl, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
+              if (!r.ok) return { url: pageUrl, text: '', html: '' };
               const html = await r.text();
-              return { text: stripHtml(html), html };
-            } catch { return { text: '', html: '' }; } finally { clearTimeout(t); }
-          }));
+              return { url: r.url || pageUrl, text: stripHtml(html), html };
+            } catch { return { url: pageUrl, text: '', html: '' }; } finally { clearTimeout(t); }
+          };
+          const homepage = await fetchPage(homepageUrl);
+          const discovered = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 5 });
+          if (discovered.length) say(`Found ${discovered.length} relevant pages from the homepage navigation`);
+          else say('No additional company pages were linked from the homepage');
+          const linkedPages = await Promise.all(discovered.map((page) => fetchPage(page.url)));
+          const pages = [homepage, ...linkedPages];
           const siteText = pages.map((page) => page.text).join(' ').slice(0, 12000);
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
@@ -7845,7 +7854,7 @@ Write the persona now.`;
           let websiteVisualSource = screenshot ? 'homepage-screenshot' : null;
           if (!screenshot) {
             screenshot = await storeOfficialWebsiteVisual({
-              html: pages[0]?.html || '', pageUrl: `https://${host}/`, orgId,
+              html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId,
             });
             if (screenshot) {
               websiteVisualSource = 'official-site-image';
@@ -7872,12 +7881,12 @@ Write the persona now.`;
           const researchDigest = research.map((r) => `- ${r.title}: ${r.snippet}`).join('\n').slice(0, 4000);
           try {
             profile = JSON.parse(await llm(
-              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content and web research — do not invent facts. Keep fields concise (1-2 sentences each).',
+              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content and web research — do not invent facts. Name the specific operating domain in industry (for example brand agency, legal practice, industrial manufacturer, fintech, or SaaS), not a broad label. Keep fields concise (1-2 sentences each).',
               `Company website: ${siteUrl}\nDomain: ${host}\nUser goal: ${userGoal || '(none stated)'}\n\nWEBSITE CONTENT:\n${siteText || '(no content — infer cautiously)'}\n\nWEB RESEARCH:\n${researchDigest || '(none)'}`,
               { json: true, maxTokens: 900 },
             ));
           } catch {
-            profile = { name: companyGuess, tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [] };
+            profile = { name: companyGuess, industry: '', business_model: '', capabilities: [], tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [] };
           }
           // Clamp: the LLM sometimes copies the site <title> verbatim
           // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
@@ -7960,6 +7969,16 @@ Write the persona now.`;
                 { t: 'Program / Delivery Manager', a: 'coordinator', b: 'plans, risk, cross-team delivery' },
               ],
             };
+            // Add a company-specific lane derived from the grounded profile.
+            // This protects first-run staffing from provider failures and gives
+            // the selector real domain professions instead of forcing every
+            // company into generic marketing, product, or fintech roles.
+            const domainRoles = fallbackDomainHires(profile);
+            const domainField = domainRoles[0]?.field || profile.industry || 'Industry';
+            MARKETPLACE[domainField] = domainRoles.map((role) => ({
+              t: role.title, a: role.archetype, b: role.blurb,
+            }));
+            say(`Matching specialists to your domain: ${profile.industry || domainField}`);
             // Show the archetype [in brackets] so the picker can BALANCE the debate lenses.
             const catalogText = Object.entries(MARKETPLACE)
               .map(([f, ps]) => `${f}: ${ps.map((p) => `${p.t} [${p.a}]`).join(' | ')}`).join('\n');
@@ -7972,8 +7991,8 @@ Write the persona now.`;
             let picks = [];
             try {
               const pj = JSON.parse(await llm(
-                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) choose the field(s) MOST RELEVANT to this company\'s category/industry; (2) the three MUST span complementary lenses for a robust team — include at least ONE [skeptic] (challenges assumptions/risk), ONE [investigator] (evidence/data/metrics), and ONE [strategist] or [generalist] or [coordinator] (direction/execution); (3) no duplicate titles.',
-                `CATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
+                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) prioritize the company-specific domain field and choose at least two roles from it; (2) the three MUST span complementary lenses — ONE [skeptic], ONE [investigator], and ONE [strategist], [generalist], or [coordinator]; (3) no duplicate titles; (4) match the company\'s actual work and business model, not merely the user\'s first goal.',
+                `COMPANY-SPECIFIC DOMAIN FIELD: ${domainField}\nCATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
                 { json: true, maxTokens: 500 },
               ));
               picks = (Array.isArray(pj.hires) ? pj.hires : [])
@@ -7987,13 +8006,7 @@ Write the persona now.`;
                 .slice(0, 3);
             } catch { /* fallback below */ }
             if (picks.length < 3 - specialistCount) {
-              // Deterministic fallback: a lens-BALANCED cross-functional trio —
-              // direction (strategist) + evidence (investigator) + challenge (skeptic).
-              picks = [
-                { name: 'Lena', title: 'Brand Strategist', archetype: 'strategist', blurb: 'positioning, narrative, brand architecture', focus: 'positioning and narrative', field: 'Marketing' },
-                { name: 'Omar', title: 'Performance Marketer', archetype: 'investigator', blurb: 'paid acquisition, CAC, funnels, ROAS', focus: 'growth + unit economics', field: 'Marketing' },
-                { name: 'Priya', title: 'Risk Analyst', archetype: 'skeptic', blurb: 'credit/fraud risk, exposure, models', focus: 'challenge assumptions + risk', field: 'Fintech' },
-              ];
+              picks = domainRoles;
             }
             // Deterministic robustness guarantee: the trio must cover a CHALLENGER [skeptic],
             // an EVIDENCE lens [investigator], and a DIRECTION lens [strategist|generalist|

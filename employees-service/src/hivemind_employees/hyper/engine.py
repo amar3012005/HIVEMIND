@@ -1915,6 +1915,13 @@ class Director:
                          f"the outreach should open. Be concrete about the named firms; no generic theory.")
         else:
             r1_prompt = f"What is your stance on: {topic}? Give your view + your single biggest concern."
+            if self.room_kind == "campaign":
+                r1_prompt += (
+                    " Use only facts on the shared board. Do not invent customer results, metrics, "
+                    "testimonials, dates, competitor capabilities, case studies, or performance targets. "
+                    "When proof is missing, identify the gap and propose claim-safe messaging instead of "
+                    "supplying a hypothetical number as if it were real."
+                )
         r1 = await asyncio.gather(*[
             _consult_and_emit(m, r1_prompt, self._round_seq, ("challenge", "contribute"))
             for m in members

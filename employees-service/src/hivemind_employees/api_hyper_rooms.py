@@ -3203,6 +3203,26 @@ async def _orchestrate_single_agent(
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
 
+    # The single-engine path must emit the same durable report contract as the
+    # legacy orchestrator. CampaignOperatingReport uses this event as its render
+    # boundary and enriches it with the separately emitted campaign_bundle. A
+    # missing final_report left accepted plans hidden behind raw debate bubbles.
+    campaign_bundle = result.get("campaign_bundle") if isinstance(result.get("campaign_bundle"), dict) else {}
+    action_items = [
+        action.get("title") or action.get("id")
+        for action in (campaign_bundle.get("actions") or [])
+        if isinstance(action, dict) and (action.get("title") or action.get("id"))
+    ]
+    await _emit(_build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        room_goal=req.room_goal,
+        status=status,
+        lead=lead,
+        action_items=action_items,
+    ))
+
     # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal so the FE (SSE closes on
     # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL
     # outcome, then persists to the GLOBAL playbook (digital_employees) — learning compounds across

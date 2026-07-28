@@ -37,6 +37,8 @@ import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
+import { completeCampaignConnectionRedirect } from './campaigns/zernio-execution.js';
+import { acceptZernioWebhook } from './campaigns/zernio-webhook.js';
 import { processDueCampaignActions } from './campaigns/worker.js';
 import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
@@ -5480,6 +5482,33 @@ exit \$RC
     return;
   }
 
+  // Zernio delivers one team-level webhook for every tenant profile. Verify the
+  // signature over the untouched bytes, persist the event, and acknowledge fast;
+  // profile-scoped reconciliation continues asynchronously.
+  if (pathname === '/api/campaigns/webhooks/zernio' && req.method === 'POST') {
+    try {
+      const rawBody = await readBoundedBuffer(req, 1024 * 1024);
+      const result = await acceptZernioWebhook({
+        prisma, rawBody,
+        signature: req.headers['x-zernio-signature'] || req.headers['x-late-signature'],
+        eventIdHeader: req.headers['x-zernio-event-id'] || req.headers['x-late-event-id'],
+      });
+      return jsonResponse(res, result, 200);
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'campaign_webhook_failed', message: error.message }, error.status || 500);
+    }
+  }
+
+  if (pathname === '/api/campaigns/connections/callback' && req.method === 'GET') {
+    try {
+      const location = completeCampaignConnectionRedirect(req.url);
+      res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      return res.end();
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'campaign_connection_callback_failed', message: error.message }, error.status || 400);
+    }
+  }
+
   // API Routes
   if (pathname.startsWith('/api/')) {
     try {
@@ -10100,28 +10129,61 @@ exit \$RC
       // ── Usage tracking + plan enforcement (PlanEnforcer) ──
       if (planEnforcer && orgId) {
         // Pre-flight: check the relevant limit type for this request
-        let enforcementType = null;
-        let enforcementAmount = 1;
+        // Route → meters, resolved in ONE place on purpose. Many different FE
+        // surfaces (Overview, Talk to HIVE, the mobile chat, the widget) hit the
+        // same endpoints, so metering per call-site guarantees a surface gets
+        // missed. Anything that costs money is charged HERE, at the door.
+        //
+        // A request may consume more than one meter: creating a memory spends
+        // tokens AND consumes a memory slot, and those have different limits.
+        const meters = [];
+        const charTokens = (text, floor = 0) =>
+          Math.max(floor, Math.ceil((typeof text === 'string' ? text.length : 0) / 4));
 
-        if (req.method === 'POST' && (pathname === '/api/memories')) {
-          enforcementType = 'tokens';
-          enforcementAmount = body?.content ? Math.ceil(body.content.length / 4) : 100;
+        if (req.method === 'POST' && pathname === '/api/memories') {
+          // Both, not either. Charging only tokens here meant maxMemories — the
+          // headline limit on every plan card — was never enforced on the path
+          // that actually creates memories.
+          meters.push({ type: 'memories', amount: 1 });
+          meters.push({ type: 'tokens', amount: charTokens(body?.content, 100) });
+        } else if (req.method === 'POST' && (pathname === '/api/chat' || pathname === '/api/chat/stream')) {
+          // Talk to HIVE. This was UNMETERED: the fallthrough below keys off
+          // body.content, but chat sends body.message, so the most expensive
+          // surface in the product charged nothing. A chat turn also runs recall
+          // internally, hence the search meter alongside the tokens.
+          meters.push({ type: 'tokens', amount: charTokens(body?.message, 250), charge: true, feature: 'chat' });
+          meters.push({ type: 'searches', amount: 1, charge: true, feature: 'chat' });
         } else if (pathname.includes('/search') || pathname.includes('/recall')) {
-          enforcementType = 'searches';
+          meters.push({ type: 'searches', amount: 1 });
         } else if (body?.content) {
-          enforcementType = 'tokens';
-          enforcementAmount = Math.ceil((body.content.length || 0) / 4);
+          meters.push({ type: 'tokens', amount: charTokens(body.content) });
         }
 
-        if (enforcementType) {
-          const check = await planEnforcer.checkLimit(orgId, enforcementType, enforcementAmount);
+        for (const meter of meters) {
+          const check = await planEnforcer.checkLimit(orgId, meter.type, meter.amount);
           if (!check.allowed) {
-            // Monthly token/search QUOTA exhaustion is a plan limit, not a rate-limit → 402 contract.
-            return jsonResponse(res, planLimitBody(check, enforcementType), check.status || 402);
+            // Quota exhaustion is a PLAN limit, not a rate limit → 402 contract,
+            // which is what the FE PlanLimitModal keys off to offer the upgrade.
+            return jsonResponse(res, planLimitBody(check, meter.type), check.status || 402);
           }
           // Set warning header for overage plans
           if (check.overage) {
             res.setHeader('X-HiveMind-Usage-Warning', 'Overage billing active — usage exceeds plan allocation');
+          }
+          // CHARGE ON ADMISSION for meters nothing else records. Chat recorded
+          // NOTHING anywhere in the codebase, so its counter never moved and its
+          // limit could never trip — a check with no matching record is a limit
+          // that does not exist. Recording here, at the same single place the
+          // check happens, is what makes the two impossible to drift apart.
+          //
+          // Deliberately NOT done for 'memories': checkLimit('memories') reads the
+          // live row count from the DB rather than a counter, so recording would
+          // double-count. Same for meters whose handlers already record
+          // (kbPages, tara, deepResearch) — those are charged at completion where
+          // the real amount is known.
+          if (meter.charge) {
+            try { planEnforcer.recordUsage(orgId, meter.type, meter.amount, { feature: meter.feature }); }
+            catch { /* metering must never break the request */ }
           }
         }
 

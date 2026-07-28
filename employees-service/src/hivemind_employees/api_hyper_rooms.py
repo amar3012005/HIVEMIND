@@ -71,9 +71,11 @@ from .db import (
     get_employee_playbooks_map,
     update_employee_playbook,
     get_room_playbook,
+    get_room_journal,
     get_room_instructions,
     get_connected_gmail,
     update_room_playbook,
+    append_room_journal_entry,
     get_company_name,
     get_room_template,
     get_trust_scores,
@@ -88,7 +90,7 @@ from .hivemind_client import (
     recall_emulated,
 )
 from .hyper.engine import (Director, _openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
-                           _persona_fields, _evo_recall)
+                           make_journal_entry, _persona_fields, _evo_recall)
 
 log = logging.getLogger(__name__)
 
@@ -2967,6 +2969,11 @@ async def _orchestrate_single_agent(
             _evo_mode = await get_room_evo_mode(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _evo_mode = "off"
+    # Campaign Intelligence is a permanent specialist Room: its employee and
+    # method playbooks must keep learning even when an older room row predates
+    # the self-evolve toggle. Other Room types retain their explicit setting.
+    if _room_kind == "campaign":
+        _evo_mode = "on"
     _evo_playbooks: Dict[str, list] = {}
     if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
@@ -3049,6 +3056,11 @@ async def _orchestrate_single_agent(
         _room_playbook = await get_room_playbook(req.room_id, org_id=req.org_id)
     except Exception:  # noqa: BLE001
         _room_playbook = []
+    _room_journal: list = []
+    try:
+        _room_journal = await get_room_journal(req.room_id, req.org_id)
+    except Exception:  # noqa: BLE001
+        _room_journal = []
     # Owner-set Swarm Instructions — fetched EVERY turn (not from the request
     # payload) so every dispatch path (chat, task, cycle, flyby) obeys them.
     _room_instructions = ""
@@ -3075,7 +3087,8 @@ async def _orchestrate_single_agent(
             "evo_mode": _evo_mode, "evo_playbooks": _evo_playbooks,
             "company_brief": _company_brief, "intended_output": intended_output,
             "room_kind": _room_kind,
-            "room_playbook": _room_playbook, "room_instructions": _room_instructions,
+            "room_playbook": _room_playbook, "room_journal": _room_journal,
+            "room_instructions": _room_instructions,
             "sender_email": _sender_email, "out_language": (req.language or ""),
             "campaign_brief": req.campaign_brief,
             "room_id": req.room_id, "turn_id": req.turn_id,
@@ -3247,6 +3260,22 @@ async def _orchestrate_single_agent(
         lead=lead,
         action_items=action_items,
     ))
+
+    # Persist compact episodic continuity for every run after the final report exists.
+    # This never blocks sealing and is distinct from room/employee operating playbooks.
+    try:
+        _journal_entry = await make_journal_entry(
+            req.user_message, final_text, transcript=transcript, participants=participants,
+            turn_id=req.turn_id, status=status,
+        )
+        if _journal_entry:
+            _journal_ok = await append_room_journal_entry(
+                req.room_id, req.org_id, _journal_entry,
+            )
+            if _journal_ok:
+                await _emit({"t": "room_journal", "entry": _journal_entry})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[single] room journal failed (non-fatal): %s", exc)
 
     # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal so the FE (SSE closes on
     # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL

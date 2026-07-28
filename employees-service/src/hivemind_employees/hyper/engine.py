@@ -516,6 +516,27 @@ _DIGEST_READ_CAP = max(4000, int(os.environ.get("HYPER_DIGEST_READ_CAP", "12000"
 _JOURNAL_ENABLED = (os.environ.get("HYPER_JOURNAL_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"))
 _JOURNAL_MODEL = os.environ.get("HYPER_JOURNAL_MODEL", "openai/gpt-oss-20b")  # canonical: no llama (effort=low returns content)
 _JOURNAL_KEEP = max(2, min(20, int(os.environ.get("HYPER_JOURNAL_KEEP", "6") or "6")))  # entries injected/kept
+_JOURNAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "asked": {"type": "string"},
+        "swarm_summary": {"type": "string"},
+        "agents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "contribution": {"type": "string"},
+                },
+                "required": ["name", "contribution"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["asked", "swarm_summary", "agents"],
+    "additionalProperties": False,
+}
 
 # ── Self-revision (reflexion on the final deliverable) ─────────────────────
 # ONE bounded critique→revise pass after synth: the synth model re-reads its OWN draft against the
@@ -672,28 +693,75 @@ def _journal_positions(transcript: Optional[List[Dict[str, Any]]]) -> str:
 
 async def make_journal_entry(user_message: str, final_text: str, *,
                              transcript: Optional[List[Dict[str, Any]]] = None,
-                             model: Optional[str] = None) -> Optional[str]:
-    """Compact this turn into ONE figure-preserving journal line for future turns (the Claude-Code
-    compaction model). Keeps the decision + key numbers verbatim (the spike showed dropping figures
-    halves recall) AND a per-agent positions slice when a debate happened (so agents stay consistent
-    with their own prior stance). Returns the line or None on failure. Called by the api AFTER seal."""
+                             participants: Optional[List[Dict[str, Any]]] = None,
+                             turn_id: str = "", status: str = "complete",
+                             model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Distill one run into structured episodic memory: each agent's contribution and
+    the swarm result. It is intentionally separate from reusable operating lessons."""
     if not _JOURNAL_ENABLED:
         return None
+    def _fallback() -> Optional[Dict[str, Any]]:
+        latest: Dict[str, str] = {}
+        for item in (transcript or []):
+            if isinstance(item, dict) and item.get("agent") and item.get("text"):
+                latest[str(item["agent"])] = str(item["text"])
+        agents = []
+        for p in (participants or [])[:5]:
+            name = str(p.get("name") or p.get("slug") or "")
+            if name in latest:
+                agents.append({
+                    "slug": str(p.get("slug") or p.get("id") or ""),
+                    "name": name,
+                    "contribution": latest[name].strip()[:260],
+                })
+        summary = re.sub(r"\s+", " ", str(final_text or "")).strip()[:520]
+        if not summary:
+            return None
+        return {
+            "turn_id": str(turn_id or ""),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": str(status or "complete"),
+            "asked": re.sub(r"\s+", " ", str(user_message or "")).strip()[:240],
+            "swarm_summary": summary,
+            "agents": agents,
+            "final_report_excerpt": str(final_text or "").strip()[:1800],
+        }
     try:
         pos = _journal_positions(transcript)
-        fmt = ("\"asked: <≤10 words> | decided: <decision + EVERY key figure/amount/%/date verbatim, ≤28 words>"
-               + (" | positions: <≤6 words per agent, 'Name: stance; …', ONLY agents who took a clear stance>\""
-                  if pos else "\""))
-        sysp = ("Summarize this room turn into ONE compact journal line for future turns. Format EXACTLY: "
-                + fmt + " Preserve numbers exactly; never round or drop them. No preamble, one line.")
-        usr = f"USER ASKED: {user_message[:400]}\n\nTEAM DELIVERABLE:\n{final_text[:1500]}{pos}"
+        names = [str(p.get("name") or p.get("slug") or "") for p in (participants or []) if p]
+        sysp = (
+            "Create compact episodic memory for a multi-agent Room. Summarize what the user asked, "
+            "what the swarm actually delivered, and one concrete sentence for each agent who contributed. "
+            "Preserve important figures, dates, and decisions exactly. Do not invent work or describe generic roles. "
+            "asked <= 18 words; swarm_summary <= 45 words; each contribution <= 24 words. Output only the schema."
+        )
+        usr = (f"ROOM PARTICIPANTS: {', '.join(names)}\nUSER ASKED: {user_message[:500]}\n\n"
+               f"FINAL DELIVERABLE:\n{final_text[:1800]}{pos}")
         out = await _evo_groq([{"role": "system", "content": sysp}, {"role": "user", "content": usr}],
-                              model=(model or _JOURNAL_MODEL), schema=None)
-        line = (out or "").strip().split("\n")[0].strip()
-        return line[:420] or None
+                              model=(model or _JOURNAL_MODEL), schema=_JOURNAL_SCHEMA)
+        data = json.loads(out or "{}")
+        known = {name for name in names if name}
+        agents = []
+        for row in data.get("agents") or []:
+            name = str(row.get("name") or "").strip()
+            contribution = str(row.get("contribution") or "").strip()
+            if name and contribution and (not known or name in known):
+                slug = next((str(p.get("slug") or p.get("id") or "") for p in (participants or [])
+                             if str(p.get("name") or p.get("slug") or "") == name), "")
+                agents.append({"slug": slug, "name": name, "contribution": contribution[:260]})
+        entry = {
+            "turn_id": str(turn_id or ""),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": str(status or "complete"),
+            "asked": str(data.get("asked") or user_message).strip()[:240],
+            "swarm_summary": str(data.get("swarm_summary") or final_text).strip()[:520],
+            "agents": agents[:5],
+            "final_report_excerpt": str(final_text or "").strip()[:1800],
+        }
+        return entry if entry["swarm_summary"] else _fallback()
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
-        return None
+        return _fallback()
 
 
 def _evo_keywords(s: str) -> set:
@@ -1105,6 +1173,7 @@ class Director:
         intended_output: str = "answer",
         room_kind: str = "",
         room_playbook: Optional[List[str]] = None,
+        room_journal: Optional[List[Dict[str, Any]]] = None,
         room_instructions: str = "",
         sender_email: str = "",
         out_language: str = "",
@@ -1142,6 +1211,8 @@ class Director:
         # Room-type learned lessons ("previously effective: X→Y"), written by the
         # post-turn reflection, primed into the planner catalog block. [] = none yet.
         self.room_playbook: List[str] = [str(x) for x in (room_playbook or []) if str(x).strip()][:6]
+        self.room_journal: List[Dict[str, Any]] = [x for x in (room_journal or []) if isinstance(x, dict)][-_JOURNAL_KEEP:]
+        self._journal_block = self._room_journal_context()
         # Owner-set Swarm Instructions for this room — MANDATORY on every run.
         # Injected into the director plan, every persona turn, and the synthesis
         # so the room can never "forget" its standing orders.
@@ -2291,7 +2362,7 @@ class Director:
             _campaign_policy = (
                 "CAMPAIGN CONTRACT — authoritative structured input; never infer the opposite from TASK prose:\n"
                 + json.dumps(self.campaign_brief, ensure_ascii=False)[:4000] + "\n\n")
-        user = f"{_org_block}{_campaign_policy}{self._room_instr_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
+        user = f"{_org_block}{_campaign_policy}{self._journal_block}{self._room_instr_block}ROOM GOAL: {self.room_goal or '(none)'}\nTASK: {self.user_message}"
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                model=self.director_model, temp=0.3, schema=schema, bucket="director")
         self.director_iters.append(self._last_tok)
@@ -2531,6 +2602,26 @@ class Director:
             f"Do NOT mix languages. Keep proper nouns, brand names (SINGULANCE, TARA, HIVEMIND, "
             f"HYPERAGENTS), URLs, and email addresses verbatim.")
 
+    def _room_journal_context(self) -> str:
+        """Bounded continuity for planning and synthesis, never full turn history."""
+        if not _JOURNAL_ENABLED or not self.room_journal:
+            return ""
+        rows = []
+        for entry in self.room_journal:
+            agent_notes = "; ".join(
+                f"{a.get('name')}: {a.get('contribution')}"
+                for a in (entry.get("agents") or [])[:5] if isinstance(a, dict)
+            )
+            row = (f"- Asked: {entry.get('asked', '')} | Swarm: {entry.get('swarm_summary', '')}"
+                   + (f" | Agents: {agent_notes}" if agent_notes else ""))
+            rows.append(row[:900])
+        latest = str(self.room_journal[-1].get("final_report_excerpt") or "").strip()[:1800]
+        return (
+            "\nROOM JOURNAL — compact continuity from prior runs. Use it for consistency, while the current "
+            "brief and current verified evidence remain authoritative:\n" + "\n".join(rows)
+            + (f"\n\nLATEST FINAL REPORT EXCERPT:\n{latest}" if latest else "") + "\n"
+        )
+
     def _campaign_requirements(self) -> Tuple[List[str], List[str]]:
         source = self.campaign_brief.get("channels") or self.campaign_brief.get("requestedChannels") or []
         channels = [str(value).strip().lower() for value in source if str(value).strip()] if isinstance(source, list) else []
@@ -2603,7 +2694,7 @@ class Director:
             "In report_markdown, introduce every unsupported numeric target with the literal label 'Proposed target:' in the same sentence. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
-        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n\n"
+        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
         msg = await self._groq(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -2792,7 +2883,7 @@ class Director:
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "
                       f"and market; make every specific concrete to this company, not generic):\n{_org[:1500]}\n\n"
                       if _org else "")
-        user = (f"{_org_block}TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
+        user = (f"{_org_block}{self._journal_block}TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
                 "Write the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
                                force_text=True, model=self.synth_model, bucket="synth")
@@ -3198,6 +3289,7 @@ async def run_director(
     intended_output: str = "answer",
     room_kind: str = "",
     room_playbook: Optional[List[str]] = None,
+    room_journal: Optional[List[Dict[str, Any]]] = None,
     room_instructions: str = "",
     sender_email: str = "",
     out_language: str = "",
@@ -3216,7 +3308,7 @@ async def run_director(
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
         company_brief=company_brief,
         intended_output=intended_output,
-        room_kind=room_kind, room_playbook=room_playbook,
+        room_kind=room_kind, room_playbook=room_playbook, room_journal=room_journal,
         room_instructions=room_instructions,
         sender_email=sender_email,
         out_language=out_language,

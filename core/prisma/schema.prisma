@@ -2233,6 +2233,9 @@ model HyperRoom {
   simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
   /// Population-Sim cast size (FE slider, 10-100). Default 24.
   simAgents          Int          @default(24) @map("sim_agents")
+  /// Bounded episodic summaries of completed Room runs. This is continuity memory,
+  /// distinct from the room method playbook and each employee's global playbook.
+  roomJournal        Json         @default("[]") @map("room_journal")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

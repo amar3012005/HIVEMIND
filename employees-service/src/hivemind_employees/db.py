@@ -572,7 +572,58 @@ async def update_room_playbook(room_id: str, org_id: str, lessons: list) -> bool
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("update_room_playbook failed (non-fatal): %s", exc)
-    return False
+            return False
+
+
+async def get_room_journal(room_id: str, org_id: str) -> list:
+    """Return the Room's bounded episodic journal. Always tenant-scoped."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT room_journal FROM hivemind.hyper_rooms "
+                "WHERE id = $1::uuid AND org_id = $2::uuid",
+                room_id, org_id,
+            )
+        raw = row["room_journal"] if row else []
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        return [item for item in (raw or []) if isinstance(item, dict)][-8:]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_room_journal failed (non-fatal): %s", exc)
+        return []
+
+
+async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep: int = 8) -> bool:
+    """Append one journal entry atomically and retain only the newest entries."""
+    if not isinstance(entry, dict):
+        return False
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT room_journal FROM hivemind.hyper_rooms "
+                    "WHERE id = $1::uuid AND org_id = $2::uuid FOR UPDATE",
+                    room_id, org_id,
+                )
+                if not row:
+                    return False
+                raw = row["room_journal"] or []
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                journal = [item for item in raw if isinstance(item, dict)]
+                journal.append(entry)
+                journal = journal[-max(2, min(20, int(keep or 8))):]
+                await conn.execute(
+                    "UPDATE hivemind.hyper_rooms SET room_journal = $1::jsonb, updated_at = now() "
+                    "WHERE id = $2::uuid AND org_id = $3::uuid",
+                    json.dumps(journal, ensure_ascii=False), room_id, org_id,
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("append_room_journal_entry failed (non-fatal): %s", exc)
+        return False
 
 
 async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:

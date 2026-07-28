@@ -8774,7 +8774,7 @@ Write the persona now.`;
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
       try {
         const pr = await prisma.$queryRawUnsafe(
-          'SELECT project_id, goal, room_tag, quality_mode, sim_mode, sim_agents FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT project_id, goal, room_tag, quality_mode, sim_mode, sim_agents, room_journal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid AND org_id = $2::uuid', roomId, current.session.orgId,
         );
         room.projectId = pr?.[0]?.project_id || null;
         room.goal = pr?.[0]?.goal || '';
@@ -8782,6 +8782,9 @@ Write the persona now.`;
         room.quality_mode = pr?.[0]?.quality_mode || 'auto';
         room.sim_mode = pr?.[0]?.sim_mode || 'off';
         room.sim_agents = pr?.[0]?.sim_agents || 24;
+        room.room_journal = Array.isArray(pr?.[0]?.room_journal) ? pr[0].room_journal : [];
+        // Backward-compatible FE field while clients move to room_journal.
+        room.evo_journal = room.room_journal;
       } catch { /* leave undefined */ }
       const linkedCampaign = await prisma.campaign.findFirst({
         where: { roomId, orgId: current.session.orgId },
@@ -8920,7 +8923,17 @@ Write the persona now.`;
           JSON.stringify({ _swarm_instructions: si }), roomId,
         );
       }
+      if (body.journal_reset === true) {
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "room_journal" = \'[]\'::jsonb, "updated_at" = now() WHERE "id" = $1::uuid AND "org_id" = $2::uuid',
+          roomId, current.session.orgId,
+        );
+      }
       const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
+      if (body.journal_reset === true) {
+        updated.room_journal = [];
+        updated.evo_journal = [];
+      }
       if (hasGoalPatch) {
         try {
           await prisma.$executeRawUnsafe(

@@ -1,4 +1,5 @@
 from hivemind_employees.hyper.domains import domain_slugs, get_domain_pack
+from hivemind_employees.hyper.engine import Director
 from hivemind_employees.hyper.rooms import lead_shape_for
 from hivemind_employees.hyper.skills import (
     default_skill_for,
@@ -65,3 +66,26 @@ def test_campaign_intelligence_pack_exposes_bounded_specialist_methods():
     assert "intent-and-marketplace-ads" in catalog
     assert "organic-and-direct-channels" in catalog
     assert default_skill_for("campaign") == "campaign-operating-system"
+
+
+def test_room_journal_is_bounded_and_only_latest_report_is_recalled():
+    journal = [
+        {
+            "asked": f"request {i}",
+            "swarm_summary": f"decision {i}",
+            "agents": [{"name": "Ari", "contribution": f"work {i}"}],
+            "final_report_excerpt": f"report {i}",
+        }
+        for i in range(10)
+    ]
+    director = Director(
+        user_message="continue", user_id="user", org_id="org", project_id=None,
+        participants=[], room_template="auto", room_goal="Campaign",
+        enabled_connectors=[], emit=lambda event: None, room_kind="campaign",
+        room_journal=journal,
+    )
+    context = director._journal_block
+    assert "request 0" not in context
+    assert "request 9" in context
+    assert "report 9" in context
+    assert "report 8" not in context

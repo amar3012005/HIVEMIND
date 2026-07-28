@@ -3,33 +3,58 @@ import assert from 'node:assert/strict';
 import { discoverCompanyPages, fallbackDomainHires, selectCompanyResearchPages } from '../../src/onboarding/company-discovery.js';
 import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile } from '../../src/onboarding/company-research.js';
 
-test('onboarding follows real same-site homepage links instead of guessed paths', () => {
+test('onboarding collects real same-site links without language-specific classification', () => {
   const html = `
     <nav>
-      <a href="/agentur/">Agentur</a>
-      <a href="https://www.bundb.de/leistungen?source=nav">Leistungen</a>
-      <a href="/arbeiten">Referenzen</a>
+      <a href="/私たちについて/">私たちについて</a>
+      <a href="https://www.bundb.de/servicios?source=nav">Servicios</a>
+      <a href="/réalisations">Réalisations</a>
       <a href="/kontakt">Kontakt</a>
-      <a href="/impressum">Impressum</a>
-      <a href="/datenschutzerklaerung">Datenschutz</a>
+      <a href="/polityka-prywatnosci">Polityka prywatności</a>
       <a href="https://linkedin.com/company/bundb">LinkedIn</a>
       <a href="/assets/portfolio.pdf">PDF</a>
     </nav>`;
-  const pages = discoverCompanyPages(html, 'https://bundb.de/', { maxPages: 5 });
-  assert.deepEqual(pages.map((page) => page.url), [
-    'https://bundb.de/agentur',
-    'https://www.bundb.de/leistungen',
-    'https://bundb.de/arbeiten',
+  const pages = discoverCompanyPages(html, 'https://bundb.de/', { maxPages: 10 });
+  assert.deepEqual(new Set(pages.map((page) => decodeURI(page.url))), new Set([
+    'https://bundb.de/私たちについて',
+    'https://www.bundb.de/servicios',
+    'https://bundb.de/réalisations',
     'https://bundb.de/kontakt',
-  ]);
+    'https://bundb.de/polityka-prywatnosci',
+  ]));
   assert.equal(pages.some((page) => /about|product|pricing/.test(page.url)), false);
 });
 
-test('onboarding fallback can include imprint pages specifically for location evidence', () => {
-  const html = '<a href="/privacy">Privacy</a><a href="/impressum">Impressum</a><a href="/about">About</a>';
-  const pages = discoverCompanyPages(html, 'https://example.de/', { maxPages: 5, includeLocationPages: true });
-  assert.equal(pages.some((page) => page.url === 'https://example.de/impressum'), true);
-  assert.equal(pages.some((page) => page.url === 'https://example.de/privacy'), false);
+test('semantic selection is constrained to mapped first-party pages', () => {
+  const pages = selectCompanyResearchPages([
+    { url: 'https://example.jp/会社概要', title: '会社概要' },
+    { url: 'https://example.jp/所在地', title: '所在地' },
+    { url: 'https://example.jp/導入事例', title: '導入事例' },
+  ], 'https://example.jp/', {
+    maxPages: 4,
+    semanticSelection: [
+      { url: 'https://example.jp/所在地', purpose: 'location' },
+      { url: 'https://example.jp/導入事例', purpose: 'proof' },
+      { url: 'https://example.jp/invented', purpose: 'offering' },
+      { url: 'https://attacker.example/会社概要', purpose: 'identity' },
+    ],
+  });
+  assert.deepEqual(pages.map((page) => page.purpose), ['identity', 'location', 'proof']);
+  assert.equal(pages.some((page) => page.url.includes('invented') || page.url.includes('attacker')), false);
+});
+
+test('invalid semantic output falls back to structurally diverse mapped pages', () => {
+  const pages = selectCompanyResearchPages([
+    'https://example.fr/entreprise',
+    'https://example.fr/services/conseil',
+    'https://example.fr/services/design',
+  ], 'https://example.fr/', {
+    maxPages: 3,
+    semanticSelection: [{ url: 'https://example.fr/page-inventee', purpose: 'identity' }],
+  });
+  assert.equal(pages.length, 3);
+  assert.equal(pages[0].url, 'https://example.fr/');
+  assert.equal(pages.filter((page) => page.url.includes('/services/')).length, 1);
 });
 
 test('initial hires match a creative brand agency while preserving debate lenses', () => {
@@ -52,18 +77,17 @@ test('unknown domains receive a balanced domain-neutral operating team', () => {
   assert.deepEqual(hires.map((hire) => hire.archetype), ['strategist', 'investigator', 'skeptic']);
 });
 
-test('Firecrawl map selection preserves identity, offering, proof, and location evidence', () => {
+test('structural fallback remains useful without assigning semantic meaning to paths', () => {
   const pages = selectCompanyResearchPages([
-    { url: 'https://example.com/products/one', title: 'Product one' },
-    { url: 'https://example.com/products/two', title: 'Product two' },
-    { url: 'https://example.com/about', title: 'About us' },
-    { url: 'https://example.com/impressum', title: 'Impressum' },
-    { url: 'https://example.com/customers', title: 'Customers' },
-    { url: 'https://other.example/about', title: 'Wrong company' },
-  ], 'https://example.com/', { maxPages: 5 });
+    { url: 'https://example.com/oferta/jeden', title: 'Jeden' },
+    { url: 'https://example.com/oferta/dwa', title: 'Dwa' },
+    { url: 'https://example.com/empresa', title: 'Empresa' },
+    { url: 'https://example.com/mentions-legales', title: 'Mentions légales' },
+    { url: 'https://other.example/empresa', title: 'Wrong company' },
+  ], 'https://example.com/', { maxPages: 4 });
   assert.equal(pages[0].url, 'https://example.com/');
-  assert.equal(pages.some((page) => page.purpose === 'location'), true);
-  assert.equal(pages.some((page) => page.purpose === 'proof'), true);
+  assert.equal(pages.filter((page) => page.url.includes('/oferta/')).length, 1);
+  assert.equal(pages.every((page) => ['identity', 'company'].includes(page.purpose)), true);
   assert.equal(pages.some((page) => page.url.includes('other.example')), false);
 });
 

@@ -7845,23 +7845,40 @@ Write the persona now.`;
               return { url: r.url || pageUrl, text: stripHtml(html), html };
             } catch { return { url: pageUrl, text: '', html: '' }; } finally { clearTimeout(t); }
           };
+          const selectResearchPages = async (candidates, { maxPages = 6 } = {}) => {
+            if (!Array.isArray(candidates) || !candidates.length) return [];
+            try {
+              const result = JSON.parse(await llm(
+                'You select complementary first-party website pages for company onboarding. Understand page titles, descriptions, and paths in ANY language. Output ONLY JSON: {"pages":[{"url":"","purpose":"identity|offering|location|proof|team|commercial|company"}]}. Select up to the requested limit. Prefer pages that together establish exact identity, offerings, company location or legal identity, customer proof, team, and commercial model when those pages actually exist. Do not invent URLs, translate paths, or select a page absent from CANDIDATES. Include the homepage. A deterministic validator will reject every URL not present in CANDIDATES.',
+                `REQUESTED LIMIT: ${maxPages}\nCANDIDATES:\n${JSON.stringify(candidates.slice(0, 80))}`,
+                { json: true, maxTokens: 700 },
+              ));
+              return Array.isArray(result?.pages) ? result.pages : [];
+            } catch { return []; }
+          };
           const [homepage, firecrawlResearch] = await Promise.all([
             fetchPage(homepageUrl),
-            researchCompanyWebsite(homepageUrl, { onProgress: say }),
+            researchCompanyWebsite(homepageUrl, { onProgress: say, selectPages: selectResearchPages }),
           ]);
           let pages = firecrawlResearch.pages;
           if (firecrawlResearch.provider !== 'firecrawl') {
             if (firecrawlResearch.error && firecrawlResearch.error !== 'not_configured') {
               say('Firecrawl was unavailable; using direct first-party website reading');
             }
-            const discovered = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 6, includeLocationPages: true });
-            if (discovered.length) say(`Found ${discovered.length} relevant pages from the homepage navigation`);
+            const candidates = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 40 });
+            const semanticSelection = await selectResearchPages(candidates, { maxPages: 6 });
+            const selected = selectCompanyResearchPages(candidates, homepage.url || homepageUrl, { maxPages: 6, semanticSelection });
+            const discovered = selected.filter((page) => page.depth > 0);
+            if (discovered.length) say(`Selected ${discovered.length} complementary pages from the homepage navigation`);
             else say('No additional company pages were linked from the homepage');
-            const linkedPages = await Promise.all(discovered.map((page) => fetchPage(page.url)));
+            const linkedPages = await Promise.all(discovered.map(async (page) => ({
+              ...(await fetchPage(page.url)),
+              purpose: page.purpose,
+            })));
             pages = [homepage, ...linkedPages].map((page) => ({
               url: page.url,
               content: page.text,
-              purpose: 'company',
+              purpose: page.purpose || 'company',
               provider: 'direct',
             }));
           }

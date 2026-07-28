@@ -1,4 +1,4 @@
-import { selectCompanyResearchPages } from './company-discovery.js';
+import { normalizeCompanyPageCandidates, selectCompanyResearchPages } from './company-discovery.js';
 
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
 
@@ -132,6 +132,7 @@ export async function researchCompanyWebsite(websiteUrl, {
   apiKey = process.env.FIRECRAWL_API_KEY,
   maxPages = 6,
   onProgress = () => {},
+  selectPages = null,
 } = {}) {
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
@@ -145,7 +146,12 @@ export async function researchCompanyWebsite(websiteUrl, {
       timeout: 45000,
     }, { apiKey, timeoutMs: 50000 });
     const links = Array.isArray(mapped?.links) ? mapped.links : [];
-    const selected = selectCompanyResearchPages(links, websiteUrl, { maxPages });
+    const candidates = normalizeCompanyPageCandidates(links, websiteUrl);
+    let semanticSelection = [];
+    if (typeof selectPages === 'function') {
+      try { semanticSelection = await selectPages(candidates, { maxPages }); } catch { semanticSelection = []; }
+    }
+    const selected = selectCompanyResearchPages(links, websiteUrl, { maxPages, semanticSelection });
     onProgress(`Firecrawl found ${links.length} pages; reading ${selected.length} high-signal pages`);
     const pages = [];
     // Keep provider concurrency modest: onboarding is interactive and Firecrawl

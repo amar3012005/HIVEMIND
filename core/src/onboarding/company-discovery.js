@@ -1,6 +1,5 @@
 const SKIP_EXTENSIONS = /\.(?:avif|css|csv|docx?|gif|ico|jpe?g|js|json|mov|mp3|mp4|pdf|png|pptx?|svg|webm|webp|xlsx?|xml|zip)$/i;
-const SKIP_PATHS = /\/(?:agb|auth|cart|checkout|cookie|datenschutz(?:erklaerung)?|impressum|legal|login|logout|privacy|register|signin|signup|terms|widerruf)(?:\/|$)/i;
-const LOCATION_EVIDENCE_PATHS = /\/(?:impressum|legal-notice|contact|kontakt|location|standort|office)(?:\/|$)/i;
+const PAGE_PURPOSES = new Set(['identity', 'offering', 'location', 'proof', 'team', 'commercial', 'company']);
 
 function decodeAttribute(value) {
   return String(value || '')
@@ -23,77 +22,100 @@ function normalizedHost(hostname) {
   return String(hostname || '').toLowerCase().replace(/^www\./, '');
 }
 
-const RESEARCH_PAGE_SIGNALS = [
-  [/about|company|story|agency|studio|unternehmen|agentur|ueber|über/, 100, 'identity'],
-  [/service|solution|expertise|leistung|angebot|capabilit|product|platform|software|produkt/, 95, 'offering'],
-  [/contact|kontakt|impressum|legal-notice|location|standort|office/, 92, 'location'],
-  [/work|arbeit|case|customer|client|project|portfolio|referenz/, 86, 'proof'],
-  [/team|people|founder|leadership/, 82, 'team'],
-  [/pricing|plans|preise/, 76, 'commercial'],
-];
+function normalizePageCandidate(item, base) {
+  const rawUrl = typeof item === 'string' ? item : item?.url;
+  let url;
+  try { url = new URL(rawUrl, base); } catch { return null; }
+  if (!/^https?:$/.test(url.protocol) || normalizedHost(url.hostname) !== normalizedHost(base.hostname)) return null;
+  url.hash = '';
+  url.search = '';
+  url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
+  if (SKIP_EXTENSIONS.test(url.pathname)) return null;
+  const title = String(item?.title || '').trim().slice(0, 300);
+  const description = String(item?.description || '').trim().slice(0, 500);
+  const label = String(item?.label || title || description || url.pathname).trim().slice(0, 500);
+  return {
+    url: url.href,
+    label,
+    title,
+    description,
+    purpose: 'company',
+    depth: url.pathname.split('/').filter(Boolean).length,
+  };
+}
 
-export function selectCompanyResearchPages(links, homepageUrl, { maxPages = 6 } = {}) {
+export function normalizeCompanyPageCandidates(links, homepageUrl, { maxCandidates = 80 } = {}) {
   let base;
   try { base = new URL(homepageUrl); } catch { return []; }
   const candidates = new Map();
   for (const item of Array.isArray(links) ? links : []) {
-    const rawUrl = typeof item === 'string' ? item : item?.url;
-    let url;
-    try { url = new URL(rawUrl, base); } catch { continue; }
-    if (!/^https?:$/.test(url.protocol) || normalizedHost(url.hostname) !== normalizedHost(base.hostname)) continue;
-    url.hash = '';
-    url.search = '';
-    url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
-    if (SKIP_EXTENSIONS.test(url.pathname)) continue;
-    const label = [item?.title, item?.description, url.pathname].filter(Boolean).join(' ');
-    const match = RESEARCH_PAGE_SIGNALS.find(([pattern]) => pattern.test(label.toLowerCase()));
-    if (!match && url.pathname !== '/') continue;
-    const candidate = {
-      url: url.href,
-      label: String(item?.title || item?.description || url.pathname),
-      purpose: match?.[2] || 'identity',
-      score: match?.[1] || 110,
-    };
+    const candidate = normalizePageCandidate(item, base);
+    if (!candidate) continue;
     const current = candidates.get(candidate.url);
-    if (!current || current.score < candidate.score) candidates.set(candidate.url, candidate);
+    const detail = candidate.title.length + candidate.description.length + candidate.label.length;
+    const currentDetail = current ? current.title.length + current.description.length + current.label.length : -1;
+    if (!current || detail > currentDetail) candidates.set(candidate.url, candidate);
   }
-  const homepage = { url: new URL('/', base).href, label: 'Homepage', purpose: 'identity', score: 110 };
+  const homepage = normalizePageCandidate({ url: new URL('/', base).href, label: 'Homepage' }, base);
   candidates.set(homepage.url, homepage);
+  return [...candidates.values()]
+    .sort((a, b) => a.depth - b.depth
+      || (b.title.length + b.description.length + b.label.length) - (a.title.length + a.description.length + a.label.length)
+      || a.url.localeCompare(b.url))
+    .slice(0, Math.max(1, maxCandidates));
+}
 
-  // Preserve evidence breadth before filling remaining slots by score. This
-  // prevents six product pages from crowding out the legal/contact page that
-  // usually contains the strongest company-location evidence.
-  const ordered = [...candidates.values()].sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+function structuralFallback(candidates, maxPages) {
   const selected = [];
-  for (const purpose of ['identity', 'offering', 'location', 'proof', 'team', 'commercial']) {
-    const next = ordered.find((page) => page.purpose === purpose && !selected.some((picked) => picked.url === page.url));
-    if (next) selected.push(next);
+  const pathFamilies = new Set();
+  for (const page of candidates) {
+    if (selected.length >= maxPages) break;
+    let family = '';
+    try { family = new URL(page.url).pathname.split('/').filter(Boolean)[0] || '/'; } catch { continue; }
+    if (page.depth > 0 && pathFamilies.has(family)) continue;
+    selected.push(page);
+    pathFamilies.add(family);
   }
-  for (const page of ordered) {
-    if (selected.length >= Math.max(1, maxPages)) break;
+  for (const page of candidates) {
+    if (selected.length >= maxPages) break;
     if (!selected.some((picked) => picked.url === page.url)) selected.push(page);
   }
-  return selected.slice(0, Math.max(1, maxPages));
+  return selected;
 }
 
-function pageScore(url, label) {
-  const signal = `${url.pathname} ${label}`.toLowerCase();
-  const priorities = [
-    [/about|company|story|agency|studio|unternehmen|agentur|ueber|über/, 100],
-    [/service|solution|expertise|leistung|angebot|capabilit/, 95],
-    [/product|platform|software|produkt/, 90],
-    [/work|arbeit|case|customer|client|project|portfolio|referenz/, 85],
-    [/team|people|founder|leadership|karriere|career/, 80],
-    [/pricing|plans|preise/, 75],
-    [/contact|kontakt/, 45],
-    [/blog|news|insight|magazin|journal/, 25],
-  ];
-  const matched = priorities.find(([pattern]) => pattern.test(signal));
-  const depth = url.pathname.split('/').filter(Boolean).length;
-  return (matched?.[1] || 50) - Math.max(0, depth - 1) * 8;
+export function selectCompanyResearchPages(links, homepageUrl, { maxPages = 6, semanticSelection = [] } = {}) {
+  const limit = Math.max(1, maxPages);
+  const candidates = normalizeCompanyPageCandidates(links, homepageUrl);
+  if (!candidates.length) return [];
+  const byUrl = new Map(candidates.map((page) => [page.url, page]));
+  const selected = [];
+  for (const item of Array.isArray(semanticSelection) ? semanticSelection : []) {
+    let normalized;
+    try {
+      const url = new URL(typeof item === 'string' ? item : item?.url, homepageUrl);
+      url.hash = '';
+      url.search = '';
+      url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
+      normalized = url.href;
+    } catch { continue; }
+    const candidate = byUrl.get(normalized);
+    if (!candidate || selected.some((page) => page.url === candidate.url)) continue;
+    const requestedPurpose = String(item?.purpose || '').toLowerCase();
+    selected.push({ ...candidate, purpose: PAGE_PURPOSES.has(requestedPurpose) ? requestedPurpose : 'company' });
+    if (selected.length >= limit) break;
+  }
+
+  if (selected.length) {
+    const homepage = candidates.find((page) => page.depth === 0);
+    if (homepage && !selected.some((page) => page.url === homepage.url)) {
+      selected.unshift({ ...homepage, purpose: 'identity' });
+    }
+    return selected.slice(0, limit);
+  }
+  return structuralFallback(candidates, limit);
 }
 
-export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 5, includeLocationPages = false } = {}) {
+export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 40 } = {}) {
   let base;
   try { base = new URL(homepageUrl); } catch { return []; }
   const candidates = new Map();
@@ -109,14 +131,15 @@ export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 5, 
     url.search = '';
     url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
     if (url.pathname === '/' || SKIP_EXTENSIONS.test(url.pathname)) continue;
-    if (SKIP_PATHS.test(url.pathname) && !(includeLocationPages && LOCATION_EVIDENCE_PATHS.test(url.pathname))) continue;
     const label = anchor[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const key = url.href;
-    const score = pageScore(url, label);
-    if (!candidates.has(key) || candidates.get(key).score < score) candidates.set(key, { url: key, label, score });
+    const candidate = normalizePageCandidate({ url: key, label, title: label }, base);
+    if (!candidate) continue;
+    const current = candidates.get(key);
+    if (!current || candidate.label.length > current.label.length) candidates.set(key, candidate);
   }
   return [...candidates.values()]
-    .sort((a, b) => b.score - a.score || a.url.localeCompare(b.url))
+    .sort((a, b) => a.depth - b.depth || b.label.length - a.label.length || a.url.localeCompare(b.url))
     .slice(0, Math.max(0, maxPages));
 }
 

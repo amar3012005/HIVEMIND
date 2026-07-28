@@ -372,6 +372,17 @@ if config.TARA_DG_ENABLED:
             prompt += f"\n\n[CALL GOAL] {call_goal} — steer every turn toward this; never lose sight of it."
         if meta.get("contact_name"):
             prompt += f"\n[CALLER] The person you are calling is named {meta['contact_name']}."
+        # ORG BRIEF — every new conversation opens already knowing who TARA works
+        # for, for ANY tenant and ANY skill. Core supplies it in the dial payload
+        # (built there because it is off the critical path and grok cannot reach
+        # /api/profiles). Falls back to nothing rather than to profile_context,
+        # which is the OPERATOR's personal profile, not a description of the org.
+        org_brief = (str(meta.get("org_brief") or "").strip()
+                     or str(persona.get("org_brief") or "").strip())[:600]
+        if org_brief:
+            prompt += (f"\n\n[ORG] Who you work for:\n{org_brief}\n"
+                       "Speak from this when asked what the company does. "
+                       "Never contradict it and never invent beyond it.")
         call_context = (meta.get("context") or "").strip()
         if call_context:
             prompt += (f"\n[PROSPECT CONTEXT] {call_context[:800]}\n"
@@ -382,24 +393,34 @@ if config.TARA_DG_ENABLED:
         # by asking the right FIRST question (not a generic hello). Pre-seed the
         # turn-strategist's session state so it continues that plan.
         greeting_extra = ""
+        plan: dict = {}
         if call_goal or call_context:
             plan = await plan_opening(persona_prompt=skill_prompt,
                                       goal=(f"{call_goal}\nProspect: {call_context[:400]}" if call_context else call_goal),
-                                      company=company, language=call_lang)
+                                      company=company, language=call_lang,
+                                      org_brief=org_brief)
             greeting_extra = plan.get("opening") or ""
-            think_shim._session_state[session_id] = {
-                "directive": plan.get("strategy") or "",
-                "goal_state": plan.get("goal_state") or f"Objective: {call_goal}",
-                # Prospect brief seeds the strategist's working memory so every
-                # turn plans around WHO is on the line, not just the objective.
-                "facts": ([f"Prospect: {call_context[:400]}"] if call_context else []),
-                # Seed the weighted hypothesis set from the GOAL at plan time, so
-                # turn 1 already steers instead of spending the call working out
-                # what to test. The set then evolves live — weights move, dead
-                # branches drop, new ones appear.
-                "hypotheses": [h for h in (plan.get("hypotheses") or [])
-                               if isinstance(h, dict) and h.get("h")][:4],
-            }
+        # Seed the strategist ALWAYS, not only when a goal was dialed. Without a
+        # seeded row think_shim built its own default that had no hypotheses key at
+        # all, so a goal-less call started with no steering state whatsoever.
+        think_shim._session_state[session_id] = {
+            # first_move is the TURN-1 DIRECTIVE — what this opening is trying
+            # to find out. The old code put the whole-call `strategy` line here,
+            # which then went out as voice_directive: a plan where a tactical
+            # instruction belongs.
+            "directive": plan.get("first_move") or "",
+            "goal_state": plan.get("goal_state") or (f"Objective: {call_goal}" if call_goal else ""),
+            # Prospect brief seeds the strategist's working memory so every
+            # turn plans around WHO is on the line, not just the objective.
+            "facts": ([f"Prospect: {call_context[:400]}"] if call_context else []),
+            "tok": {"p": 0, "c": 0},
+            # Seed the weighted hypothesis set from the GOAL at plan time, so
+            # turn 1 already steers instead of spending the call working out
+            # what to test. The set then evolves live — weights move, dead
+            # branches drop, new ones appear.
+            "hypotheses": [h for h in (plan.get("hypotheses") or [])
+                           if isinstance(h, dict) and h.get("h")][:4],
+        }
         await run_bridge(
             ws, session_id=session_id,
             user_id=meta.get("user_id"), org_id=meta.get("org_id"),

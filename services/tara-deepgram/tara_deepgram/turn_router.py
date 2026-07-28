@@ -31,31 +31,44 @@ from . import config
 
 log = logging.getLogger("tara_dg.router")
 
-_ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent on a live call.
-You run a WEIGHTED HYPOTHESIS SET seeded at planning time from the call goal, and
-you CONVERGE — calls move forward and END, never loop. Reply ONLY minified JSON:
+_ROUTER_SYS = """You are the INNER VOICE of TARA, a spoken voice agent on a live call — the part of
+her that reads the person on the other end while the rest of her talks.
+
+You are not an analyst writing a report. You are the thought behind the eyes:
+"he's stalling", "she's already been burned by something like this", "this is a
+gatekeeper, not the buyer". Think in that voice, then hand the talking part ONE
+instruction. You CONVERGE — calls move forward and END, never loop.
+
+Reply ONLY minified JSON:
 {"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100,"hypotheses":[{"h":"...","w":0-100}],"lead":"..."}
 
-hypotheses — the steering wheel. Carry the set forward EVERY turn and rewrite the
-weights from what they just said AND how they said it:
-- RAISE the weight of any hypothesis their answer supports; LOWER it for any the
-  answer contradicts. Weights are independent; they need not sum to 100.
-- DROP any hypothesis below 15 — a dead branch must not cost you turns.
-- ADD a new one the moment they reveal something none of the current set predicts.
-  The set is alive: seeded, not fixed.
-- Each must stay SPECIFIC and FALSIFIABLE — a claim about THIS person that changes
-  what you say next, testable by ONE spoken question. Never "they may be
-  interested" or "they might have a need"; that steers nothing.
+hypotheses — your read on this person, and the steering wheel of the call. Carry
+the set forward EVERY turn and rewrite the weights from what they just said AND
+how they said it:
+- Write each as a THOUGHT ABOUT THIS PERSON, in your own voice, WITH THE TELL
+  that made you think it: "He isn't the one who decides — he keeps putting it on
+  'the partners'." The tell is what makes the thought checkable, so never leave
+  it out.
+- RAISE the weight of a read their answer supports; LOWER it for one the answer
+  cuts against. Weights are independent; they need not sum to 100.
+- DROP anything below 15 — a dead read must not cost you turns.
+- ADD one the moment they say something none of your current reads explains.
+  The set is alive: seeded at planning, never fixed.
+- BANNED, because they steer nothing: "they may be interested", "they might have
+  a need", "the call could go well", "they are a potential customer". If a read
+  would not change your next sentence, it is not a read.
 - Keep at most 4. Deliberation is not free on a live call: pick and move.
-- "lead" = the single highest-weight hypothesis you are currently acting on.
+- "lead" = the single highest-weight read you are currently acting on.
+This works the same in any language and in any line of business: you are reading
+a person, not matching a script.
 
 THRESHOLDS — this is what stops the call drifting:
-- lead >= 70 → STOP probing. You have your read. Commit to it, stop testing
-  alternatives, and drive them to the concrete conclusion the goal names.
-- lead < 40 with two hypotheses close together → you are guessing. Ask the ONE
-  question that best separates them. Never ask a question that cannot change a
-  weight.
-- every hypothesis below 40 after 2 phases → the premise was wrong: go to wrapup.
+- lead >= 70 → STOP probing. You know who you are talking to. Commit to that
+  read, stop testing the alternatives, and walk them to the concrete conclusion
+  the goal names.
+- lead < 40 with two reads close together → you are guessing. Ask the ONE
+  question that tells them apart. Never ask anything that cannot move a weight.
+- every read below 40 after 2 phases → the premise was wrong: go to wrapup.
 
 action:
 - "recall": message needs facts about the company, products, prices, docs,
@@ -67,19 +80,20 @@ action:
 history_turns: previous turns the answer needs (2-8).
 
 phase + confidence — the convergence engine:
-- confidence = the weight of your LEAD hypothesis (see above). Update EVERY turn.
+- confidence = the weight of your LEAD read (see above). Update EVERY turn.
 - Each phase gets AT MOST 2 questions. Then you MUST advance:
   discover → qualify → propose → close → wrapup. Never move backward.
 - confidence >= 70 (interested): stop probing, PROPOSE the concrete next step
   toward the goal (demo, booking, commitment) and drive to close.
-- confidence <= 30 OR two short/flat/uninterested replies in a row: the
-  hypothesis failed — go straight to wrapup: one-sentence graceful summary,
-  thank them, say goodbye. A clean short call beats a dragging one.
+- confidence <= 30 OR two short/flat/uninterested replies in a row: the read
+  failed — go straight to wrapup: one-sentence graceful summary, thank them,
+  say goodbye. A clean short call beats a dragging one.
 - In wrapup the directive must be: deliver closing line, then END the call.
 
 directive: ONE line = tone + the single concrete NEXT MOVE for this phase, and
-it must serve the LEAD hypothesis — either testing it while it is unconfirmed, or
-acting on it once it passes 70.
+it must serve the LEAD read — either testing it while it is unconfirmed, or
+acting on it once it passes 70. This is the only thing the talking part sees, so
+it must be an instruction, not an observation.
 HARD RULES: max ONE question per reply — prefer statements that give value.
 Never ask anything already in goal_state/facts. Never repeat a previous move
 that didn't land — change angle or advance phase instead.
@@ -195,39 +209,64 @@ async def route(*, persona_name: str, goal: str,
         return fallback
 
 
-_PLAN_SYS = """You are the call planner for TARA, a spoken voice agent. Given the
-agent's PERSONA (skill) and the CALL GOAL, plan the strategic opening AND seed
-the hypothesis set the call will be steered by.
-Reply ONLY minified JSON:
-{"opening":"...","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress","hypotheses":[{"h":"...","w":0-100},...]}
+_PLAN_SYS = """You plan the FIRST MOVE of a phone call for TARA, a spoken voice agent — nothing
+more. Given her PERSONA (skill), the ORG she works for and the CALL GOAL, decide
+how to open and seed the read on the person you're about to meet.
 
-hypotheses — 2 to 4, SEEDED FROM THIS GOAL, and this is the part that decides
-whether the call works:
-- Each is a SPECIFIC, FALSIFIABLE claim about THIS person that, if true, changes
-  what you should say next. Derive them from the goal and persona.
+Reply ONLY minified JSON:
+{"opening":"...","first_move":"one line: what this opening is trying to find out","goal_state":"one line initial goal progress","hypotheses":[{"h":"...","w":0-100},...]}
+
+KEEP THIS SMALL. It is a base plan, not a script. Do NOT plan later turns, do NOT
+list steps, branches or contingencies, do NOT write talking points. Everything
+after the first move is decided live from what the person actually says. A long
+plan is a worse plan: it makes her read her notes instead of the human.
+
+opening — the AI disclosure has ALREADY been spoken immediately before this
+("Hi, this is TARA, an AI assistant calling on behalf of <company>..."). So the
+opening must NOT reintroduce TARA, NOT repeat the company name, NOT say "hi" or
+"hello" again. It is the NEXT sentence: say in one short line why you're calling
+and ask the single best FIRST question toward the goal. 1 sentence, at most 2.
+Human, not scripted. Never invent facts about the org or the person.
+
+first_move — ONE line, for TARA only, never spoken: what this opening is meant to
+find out about them. It is the first thing she is listening for.
+
+hypotheses — 2 to 4, seeded from THIS goal and THIS person, and the part that
+decides whether the call works. Write them as TARA's inner voice — the thought
+behind the eyes, not an analyst's proposition:
+  good: "He's the one who feels this problem daily but has to ask someone else to
+         spend money on it."
+  bad:  "The prospect may have a need for our solution."
+- Each is about THIS person, checkable by ONE spoken question, and specific
+  enough that being wrong changes what she says next.
 - BANNED because they steer nothing: "they may be interested", "they might have
   a need", "the call could go well", "they are a potential customer".
-- Each must be testable by ONE spoken question.
-- w = your prior weight 0-100. They need not sum to 100.
-
-CRITICAL — the AI disclosure has ALREADY been spoken immediately before this
-("Hi, this is TARA, an AI assistant calling on behalf of <company>..."). So the
-"opening" must NOT reintroduce TARA, NOT repeat the company name, NOT say "hi"
-or "hello" again. It is the NEXT sentence: state in one short line why you're
-calling and ask the single best FIRST question toward the goal. 1 sentence, at
-most 2. Human, not scripted. Never invent facts."""
+- w = your prior 0-100. They need not sum to 100.
+- Before a word is exchanged these are guesses, so weight them honestly: a prior
+  above 75 on turn 0 is overconfidence, not insight.
+This holds for any org, any skill, any language — you are seeding a read on a
+person, never filling in a template."""
 
 
 async def plan_opening(*, persona_prompt: str, goal: str, company: str,
-                       language: str) -> dict:
-    """One fast-model call at call start → {opening, strategy, goal_state}."""
-    fallback = {"opening": "", "strategy": "", "goal_state": f"Objective: {goal}" if goal else "",
+                       language: str, org_brief: str = "") -> dict:
+    """One fast-model call at call start → {opening, first_move, goal_state, hypotheses}.
+
+    Deliberately a BASE plan: how to open and what to listen for. Everything after
+    the first move is decided live by route() from what the person actually says —
+    a longer plan makes TARA read notes instead of the human.
+    """
+    fallback = {"opening": "", "first_move": "", "goal_state": f"Objective: {goal}" if goal else "",
                 "hypotheses": []}
     if not config.OPENROUTER_API_KEY or not goal:
         return fallback
     user = (
         f"Company: {company}\nCall goal: {goal}\nLanguage: respond in {language}\n"
-        f"Persona (skill):\n{(persona_prompt or 'You are TARA, a warm professional voice agent.')[:1200]}"
+        # The org brief grounds the opening so it can name what this company
+        # actually does — for ANY tenant, without a company-specific prompt.
+        + (f"About {company} (never contradict this, never invent beyond it):\n{org_brief[:600]}\n"
+           if org_brief else "")
+        + f"Persona (skill):\n{(persona_prompt or 'You are TARA, a warm professional voice agent.')[:1200]}"
     )
     try:
         async with httpx.AsyncClient(timeout=8) as c:
@@ -268,7 +307,7 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
         seeded.sort(key=lambda x: x["w"], reverse=True)
         return {
             "opening": str(out.get("opening") or "")[:400],
-            "strategy": str(out.get("strategy") or "")[:300],
+            "first_move": str(out.get("first_move") or "")[:300],
             "goal_state": str(out.get("goal_state") or (f"Objective: {goal}" if goal else ""))[:300],
             "hypotheses": seeded[:4],
         }
@@ -280,6 +319,7 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
 async def answer_direct(*, persona_prompt: str, language: str, directive: str,
                         messages: List[Dict[str, Any]], history_turns: int,
                         goal_state: str = "", facts: List[str] | None = None,
+                        org_brief: str = "",
                         usage_out: Dict[str, Any] | None = None):
     """Local persona answer (no recall, no core): async generator of text chunks."""
     convo = [m for m in messages if m.get("role") in ("user", "assistant")]
@@ -289,6 +329,10 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
     sys = (
         f"[LANGUAGE] Respond ONLY in {language}.\n\n"
         + (persona_prompt or "You are TARA, a warm professional voice agent.")
+        # The direct path builds its OWN system prompt from the raw skill prompt, so
+        # the [ORG] block app.py adds to the Deepgram agent prompt never reached it —
+        # meaning the fast local path was the one path that did not know the org.
+        + (f"\n\n[ORG] Who you work for:\n{org_brief[:600]}" if org_brief else "")
         + "\n\n[VOICE] Spoken reply: 1-2 short natural sentences, no lists, no markdown."
         + (f"\n[REMEMBER] Facts from this call: {'; '.join(facts)}" if facts else "")
         + (f"\n[GOAL] {goal_state}" if goal_state else "")

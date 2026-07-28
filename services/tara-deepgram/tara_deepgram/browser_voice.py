@@ -59,6 +59,14 @@ _AURA_BY_LANG = {
 }
 
 
+def _company_from_brief(org_brief: str) -> str:
+    """First line of the brief is "Organization: <name>" — use the real name."""
+    for line in (org_brief or "").splitlines():
+        if line.lower().startswith("organization:"):
+            return line.split(":", 1)[1].strip()[:120]
+    return ""
+
+
 def _company_from_profile(profile_context: str) -> str:
     for line in (profile_context or "").splitlines():
         if line.strip().lower().startswith("company:"):
@@ -104,10 +112,18 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
     persona = await get_persona(user_id, org_id)
     skill_prompt = persona.get("internal_prompt" if mode == "internal" else "system_prompt") or ""
     profile_context = persona.get("profile_context") or ""
+    # Org brief rides the cached /api/tara/config fetch, so the widget also opens
+    # knowing the workspace. profile_context is the OPERATOR's profile, which is a
+    # different thing and cannot stand in for it.
+    org_brief = str(persona.get("org_brief") or "").strip()[:600]
     prompt = skill_prompt or (
         "You are TARA, the voice of this company's HIVEMIND. Answer briefly "
         "(1-3 spoken sentences), warmly and factually. Never invent facts."
     )
+    if org_brief:
+        prompt += (f"\n\n[ORG] Who you work for:\n{org_brief}\n"
+                   "Speak from this when asked what the company does. "
+                   "Never contradict it and never invent beyond it.")
     if goal:
         prompt += f"\n\n[SESSION GOAL] {goal} — steer every turn toward this."
     settings = build_settings(
@@ -130,7 +146,8 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
     if goal:
         from .turn_router import plan_opening
         plan = await plan_opening(persona_prompt=skill_prompt, goal=goal,
-                                  company="the company", language=language)
+                                  company=_company_from_brief(org_brief) or "the company",
+                                  language=language, org_brief=org_brief)
         opening = (plan.get("opening") or "").strip()
     if not opening:
         opening = _profile_greeting(mode=mode, language=language, profile_context=profile_context)

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { buildOrgBrief } from './org-brief.js';
 
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
@@ -200,6 +201,10 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         config_revision: current.revision,
         instructions: boundedString(configuredPrompt, 12_000) || '',
         profile_context: boundedString(profileContext, 2_000) || '',
+        // Compact org brief in EVERY new browser session's snapshot, so the very
+        // first instruction already says who this workspace is. profile_context is
+        // the operator's personal profile — it is not a description of the org.
+        org_brief: boundedString(await buildOrgBrief(prisma, orgId), 600) || '',
         opening_instruction: boundedString(buildOpeningInstruction({
           mode,
           goal: boundedString(body.goal, 300) || '',

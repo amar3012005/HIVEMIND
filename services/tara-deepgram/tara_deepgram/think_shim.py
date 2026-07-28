@@ -158,8 +158,12 @@ async def think(request: Request):
             if len(_session_state) > 500:  # bound memory across long uptimes
                 _session_state.clear()
             state = _session_state.setdefault(
-                session_id, {"directive": "", "goal_state": "", "facts": [], "tok": {"p": 0, "c": 0}})
+                session_id, {"directive": "", "goal_state": "", "facts": [],
+                             "hypotheses": [], "tok": {"p": 0, "c": 0}})
             state.setdefault("tok", {"p": 0, "c": 0})
+            # Browser/legacy sessions and any row seeded by an older build predate
+            # the hypothesis set; without this the steering key is simply missing.
+            state.setdefault("hypotheses", [])
             turn_tok0 = (state["tok"]["p"], state["tok"]["c"])  # baseline for this turn's delta
             # Seed goal_state from the dial-time goal so the strategist is oriented
             # from turn 1 (it evolves it thereafter).
@@ -276,6 +280,7 @@ async def think(request: Request):
                     history_turns=decision.get("history_turns", 3),
                     goal_state=state.get("goal_state", ""),
                     facts=state.get("facts", []),
+                    org_brief=str(persona.get("org_brief") or ""),
                     usage_out=_u,
                 ):
                     if first_ms is None:

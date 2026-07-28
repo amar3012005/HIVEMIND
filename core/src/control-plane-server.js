@@ -10762,6 +10762,14 @@ Write the persona now.`;
     const provider = await taraProviderFor(orgId).catch(() => null);
     if (!provider) return jsonResponse(res, { error: 'no voice provider configured' }, 503);
     const sessionId = `out-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    // Same compact org brief the campaign dialer sends, so a manually-dialed call
+    // opens knowing the org as well as an automated one does.
+    const orgBrief = await (async () => {
+      try {
+        const { buildOrgBrief } = await import('./tara/org-brief.js');
+        return await buildOrgBrief(prisma, orgId);
+      } catch { return ''; }
+    })();
     try {
       const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
         method: 'POST',
@@ -10778,6 +10786,7 @@ Write the persona now.`;
           voice_id: body.voice_id || undefined,
           goal: body.goal ? String(body.goal).slice(0, 600) : undefined,
           company: body.company ? String(body.company).slice(0, 200) : undefined,
+          org_brief: orgBrief || undefined,
           mode: 'external',
         }),
         signal: AbortSignal.timeout(25000),

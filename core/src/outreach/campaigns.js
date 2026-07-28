@@ -378,6 +378,12 @@ export function createOutreachModule(deps) {
       return updated;
     }
 
+    const orgBrief = await (async () => {
+      try {
+        const { buildOrgBrief } = await import('../tara/org-brief.js');
+        return await buildOrgBrief(prisma, campaign.orgId);
+      } catch { return ''; }
+    })();
     const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
       method: 'POST',
       headers: {
@@ -399,6 +405,10 @@ export function createOutreachModule(deps) {
         // "calling on behalf of <the firm she was cold-calling>". The prospect's
         // identity belongs in contact_name/context, never here.
         company: callerCompany || undefined,
+        // Compact org brief so the opener knows WHAT this company does, not just
+        // its name. Built in core (cached, off the call's critical path) and sent
+        // to whichever adapter dials — both consume the same field.
+        org_brief: orgBrief || undefined,
         // Auto-selected call contract: language + concrete Cartesia voice (TARA resolves a
         // language default when voice_id is null).
         language,

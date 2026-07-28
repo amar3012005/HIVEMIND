@@ -20910,6 +20910,14 @@ exit \$RC
               agentName,
               { userId, orgId }
             );
+            // Compact org brief travels with the config the voice adapters already
+            // fetch and cache, so every new conversation — phone or browser widget —
+            // opens knowing who the org IS, for any tenant and any skill. Kept
+            // separate from profile_context, which is the operator's own profile.
+            try {
+              const { buildOrgBrief } = await import('./tara/org-brief.js');
+              taraConfig.org_brief = await buildOrgBrief(prisma, orgId);
+            } catch { /* brief is optional — never fail the config fetch */ }
             return jsonResponse(res, { config: taraConfig });
           }
           if (req.method === 'POST') {

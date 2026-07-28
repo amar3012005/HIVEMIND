@@ -183,7 +183,14 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
     return {
         "type": "session.update",
         "session": {
-            "instructions": "\n\n".join(part for part in [SYSTEM_PROMPT, snapshot.get("instructions", "")] if part),
+            "instructions": "\n\n".join(part for part in [
+                SYSTEM_PROMPT,
+                snapshot.get("instructions", ""),
+                # Same org brief the phone leg gets, from the session snapshot core
+                # minted — so a browser conversation is grounded identically.
+                (f"[ORG] Who you work for:\n{str(snapshot.get('org_brief') or '')[:600]}"
+                 if snapshot.get("org_brief") else ""),
+            ] if part),
             "voice": snapshot.get("voice_id", "eve"),
             "reasoning": {"effort": snapshot.get("reasoning_effort", "high")},
             "turn_detection": {"type": "server_vad", **vad},
@@ -225,6 +232,13 @@ def _telephony_instructions(meta: dict) -> str:
     # prospect she was cold-calling.
     if meta.get("company"):
         parts.append(f"You are a phone agent for {meta['company']}; introduce yourself as calling from it.")
+    # Compact org brief, supplied by core in the dial payload. Every new call opens
+    # knowing what this company actually does — not just its name — for any tenant
+    # and any skill, without a company-specific prompt anywhere in this service.
+    if meta.get("org_brief"):
+        parts.append("Who you work for: " + str(meta["org_brief"])[:600].replace("\n", " ")
+                     + " Speak from this when asked what the company does; never contradict it "
+                       "and never invent beyond it.")
     if meta.get("contact_name"):
         parts.append(f"You are calling {meta['contact_name']}.")
     if meta.get("goal"):

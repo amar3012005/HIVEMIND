@@ -8220,9 +8220,9 @@ Write the persona now.`;
           const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
           try {
             const tj = JSON.parse(await llm(
-              'Create one concise, immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 8 words. Details must be company-specific, at most 35 words, and state the evidence or decision produced. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
+              'Create one immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 10 words. Each detail must be 30-60 words, company-specific, and explain the work, evidence, decision, and business value. Each deliverable must name one concrete output in at most 8 words. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
               `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}\nCURRENT SOURCES: ${JSON.stringify(research.slice(0, 6))}${userGoal ? `\nUSER PRIORITY: ${userGoal}` : ''}`,
-              { json: true, maxTokens: 1200 },
+              { json: true, maxTokens: 1800 },
             ));
             const proposed = new Map((Array.isArray(tj.tasks) ? tj.tasks : [])
               .filter((task) => task && starterRooms.some((roomDefinition) => roomDefinition.key === task.room_tag))
@@ -8234,7 +8234,8 @@ Write the persona now.`;
                 room_tag: roomDefinition.key,
                 room_name: roomDefinition.name,
                 title: String(x.title || '').trim().slice(0, 80),
-                detail: String(x.detail || '').trim().slice(0, 260),
+                detail: String(x.detail || '').trim().slice(0, 520),
+                deliverable: String(x.deliverable || '').trim().slice(0, 160),
                 tag: roomDefinition.key === 'research' ? 'RESEARCH'
                   : roomDefinition.key === 'product' || roomDefinition.key === 'design' ? 'FEATURE'
                     : roomDefinition.key === 'legal_finance' || roomDefinition.key === 'fundraising' ? 'STRATEGY'
@@ -8243,20 +8244,20 @@ Write the persona now.`;
                 room_id: null,
               };
             });
-            if (tasks.some((task) => !task.title || !task.detail)) tasks = [];
+            if (tasks.some((task) => !task.title || !task.detail || !task.deliverable)) tasks = [];
           } catch { /* tasks optional */ }
           if (tasks.length !== starterRooms.length) {
             const localMarket = profile.location || profile.location_country || 'the company operating market';
             const fallbackTasks = {
-              seo: ['Establish the search baseline', `Audit discoverability, technical blockers, and demand around ${companyName}; return a ranked SEO baseline with evidence.`],
-              marketing: ['Choose the first growth experiment', `Select one measurable audience and channel experiment for ${localMarket}, grounded in verified offer and buyer evidence.`],
-              campaign: ['Design the first campaign', `Turn the strongest verified position into one approval-ready campaign brief with audience, channel, sequence, and measurement.`],
-              branding: ['Sharpen the company narrative', `Compare ${companyName}'s current message with buyer needs and alternatives; recommend one defensible narrative and prohibited claims.`],
-              fundraising: ['Assess fundraising readiness', `Evaluate investor fit, evidence gaps, milestones, and capital story; return a candid readiness decision, not a generic pitch.`],
-              research: ['Close the highest-risk evidence gaps', `Verify unresolved company, buyer, competitor, and location facts using first-party and authoritative sources.`],
-              product: ['Prioritize the customer problem', `Translate verified buyer pain into one product priority with expected outcome, assumptions, and validation evidence.`],
-              design: ['Review the critical user journey', `Identify the highest-value journey and produce a focused usability and conversion improvement brief grounded in current evidence.`],
-              legal_finance: ['Map immediate obligations and economics', `Identify material legal, privacy, financial, and unit-economic questions for ${localMarket}; rank what requires expert review.`],
+              seo: ['Establish the search growth baseline', `Audit ${companyName}'s rendered website, indexability, page structure, search demand, and competitor visibility. Rank the technical and content opportunities by likely business impact, effort, and supporting evidence so the SEO room has a measurable starting point.`, 'Prioritized SEO baseline'],
+              marketing: ['Choose the first growth experiment', `Use the verified offer, audience, and market context to select one focused experiment for ${localMarket}. Define the audience, message, channel, expected behavior, measurement method, and stop-or-scale decision without relying on unsupported demand assumptions.`, 'Growth experiment brief'],
+              campaign: ['Design the first campaign system', `Turn ${companyName}'s strongest defensible position into an approval-ready campaign direction. Specify the objective, audience, channel roles, content sequence, creative requirements, schedule, and success signals while keeping every public claim tied to available company evidence.`, 'Campaign operating brief'],
+              branding: ['Sharpen the company narrative', `Compare ${companyName}'s current language with verified buyer needs and credible alternatives. Recommend a differentiated narrative, message hierarchy, voice principles, proof points, and prohibited claims that every market-facing room can reuse consistently.`, 'Brand narrative framework'],
+              fundraising: ['Assess fundraising readiness', `Evaluate the company story, market evidence, traction signals, milestones, investor fit, and material gaps. Produce a candid readiness recommendation that separates verified facts from assumptions and identifies what must be proven before beginning investor outreach.`, 'Fundraising readiness memo'],
+              research: ['Close the highest-risk evidence gaps', `Investigate unresolved company, buyer, competitor, location, and market questions using first-party sources and authoritative external evidence. Record citations, contradictions, confidence, and the decisions each finding unlocks for the other specialist rooms.`, 'Verified evidence register'],
+              product: ['Prioritize the customer problem', `Translate the strongest verified buyer pain into one product priority. Define the affected user, desired outcome, current friction, assumptions, validation method, dependencies, and measurable acceptance signals before recommending implementation.`, 'Product priority brief'],
+              design: ['Review the critical user journey', `Identify the highest-value user journey across ${companyName}'s current experience. Evaluate comprehension, trust, friction, accessibility, and conversion moments, then produce a focused improvement brief grounded in observed evidence rather than decorative redesign.`, 'Journey improvement brief'],
+              legal_finance: ['Map immediate obligations and economics', `Identify the material legal, privacy, regulatory, contractual, financial, and unit-economic questions for ${localMarket}. Rank exposure and business impact, distinguish internal actions from matters requiring qualified professional review, and define the next evidence needed.`, 'Risk and economics register'],
             };
             tasks = starterRooms.map((roomDefinition, i) => ({
               id: `t${i + 1}`,
@@ -8264,6 +8265,7 @@ Write the persona now.`;
               room_name: roomDefinition.name,
               title: fallbackTasks[roomDefinition.key][0],
               detail: fallbackTasks[roomDefinition.key][1],
+              deliverable: fallbackTasks[roomDefinition.key][2],
               tag: roomDefinition.key === 'research' ? 'RESEARCH'
                 : roomDefinition.key === 'product' || roomDefinition.key === 'design' ? 'FEATURE'
                   : roomDefinition.key === 'legal_finance' || roomDefinition.key === 'fundraising' ? 'STRATEGY'

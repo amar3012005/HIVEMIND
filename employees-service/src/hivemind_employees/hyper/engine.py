@@ -2348,6 +2348,10 @@ class Director:
             return []
 
     def _allows_places_discovery(self) -> bool:
+        # Places is a lead/prospect capability. Search opportunities in an SEO
+        # brief mean query/page demand, never local agencies to contact.
+        if self.room_kind == "seo":
+            return False
         if self.room_kind != "campaign":
             return _wants_discovery(self.user_message)
         policy = self.campaign_brief.get("audiencePolicy") or self.campaign_brief.get("audience_policy") or {}
@@ -2581,6 +2585,8 @@ class Director:
         # strategy turn). Stops the "20 firms every run" noise the user flagged.
         plan["places_query"] = (pq if (isinstance(pq, str) and pq.strip() and _places_on
                                        and self._allows_places_discovery()) else None)
+        if self.room_kind == "seo":
+            plan["places_query"] = None
         # Method skills: keep only real catalog names; auto-load the kind default
         # when the plan picked none (mirrors the polished-email auto-load).
         skill_limit = 4 if self.room_kind == "campaign" else 2
@@ -2669,7 +2675,14 @@ class Director:
                 await self.emit({"t": "typing", "agent": owner.get("slug"), "note": f"{nm} — {start}"})
             else:
                 await self._emit_tool_start(fn, args)
-            await self._exec(fn, args)
+            result = await self._exec(fn, args)
+            if fn == "seo_audit":
+                try:
+                    audit_result = json.loads(result or "{}")
+                except Exception:
+                    audit_result = {}
+                if audit_result.get("is_error"):
+                    raise RuntimeError(str(audit_result.get("error") or "SEO audit did not complete"))
             if owner:
                 await self.emit({"t": "react", "agent": owner.get("slug"),
                                  "name": owner.get("name") or owner.get("slug"),

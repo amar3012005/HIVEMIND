@@ -264,7 +264,11 @@ async def seo_audit_emulated(url: str, *, user_id: Optional[str], org_id: Option
             last_stage = None
             for _ in range(max(12, int(timeout_s / 2))):
                 await asyncio.sleep(2)
-                response = await c.get(f"/api/web/jobs/{job_id}")
+                try:
+                    response = await c.get(f"/api/web/jobs/{job_id}")
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    log.warning("SEO audit poll transient failure job=%s: %s", job_id, exc)
+                    continue
                 if response.status_code != 200:
                     continue
                 payload = response.json() or {}

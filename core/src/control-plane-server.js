@@ -47,6 +47,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, fallbackDomainHires } from './onboarding/company-discovery.js';
+import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket } from './onboarding/company-research.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -7626,6 +7627,7 @@ Write the persona now.`;
       try { host = new URL(siteUrl).hostname.replace(/^www\./, ''); } catch { /* validated below */ }
       if (!host) return jsonResponse(res, { error: 'valid website_url is required' }, 400);
       const userGoal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 500) : '';
+      const claimedCompanyLocation = typeof body.company_location === 'string' ? body.company_location.trim().slice(0, 240) : '';
 
       const job = { lines: [], done: false, error: null, startedAt: Date.now(), result: null };
       _hyperOnboardJobs.set(orgId, job);
@@ -7654,7 +7656,7 @@ Write the persona now.`;
       // summary=0.72, fact=0.55 — so identity+mission+
       // positioning outrank plain facts. tags carry the entity-boost lever
       // (entity:<name> stacks +0.14/match at recall) + the org-canon pin.
-      const saveMemory = async ({ title, content, tags, memoryType = 'fact' }) => {
+      const saveMemory = async ({ title, content, tags, memoryType = 'fact', authorityLevel = 'claimed' }) => {
         try {
           const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/ingest/source`, {
             method: 'POST',
@@ -7668,7 +7670,7 @@ Write the persona now.`;
               title, content, tags,
               mode: 'atomic',
               source: { type: 'api', platform: 'hyperagents-onboarding', url: siteUrl, title },
-              metadata: { memory_type: memoryType, priority: 'high', authority_level: 'claimed' },
+              metadata: { memory_type: memoryType, priority: 'high', authority_level: authorityLevel },
             }),
           });
           return r.ok;
@@ -7843,13 +7845,27 @@ Write the persona now.`;
               return { url: r.url || pageUrl, text: stripHtml(html), html };
             } catch { return { url: pageUrl, text: '', html: '' }; } finally { clearTimeout(t); }
           };
-          const homepage = await fetchPage(homepageUrl);
-          const discovered = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 5 });
-          if (discovered.length) say(`Found ${discovered.length} relevant pages from the homepage navigation`);
-          else say('No additional company pages were linked from the homepage');
-          const linkedPages = await Promise.all(discovered.map((page) => fetchPage(page.url)));
-          const pages = [homepage, ...linkedPages];
-          const siteText = pages.map((page) => page.text).join(' ').slice(0, 12000);
+          const [homepage, firecrawlResearch] = await Promise.all([
+            fetchPage(homepageUrl),
+            researchCompanyWebsite(homepageUrl, { onProgress: say }),
+          ]);
+          let pages = firecrawlResearch.pages;
+          if (firecrawlResearch.provider !== 'firecrawl') {
+            if (firecrawlResearch.error && firecrawlResearch.error !== 'not_configured') {
+              say('Firecrawl was unavailable; using direct first-party website reading');
+            }
+            const discovered = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 6, includeLocationPages: true });
+            if (discovered.length) say(`Found ${discovered.length} relevant pages from the homepage navigation`);
+            else say('No additional company pages were linked from the homepage');
+            const linkedPages = await Promise.all(discovered.map((page) => fetchPage(page.url)));
+            pages = [homepage, ...linkedPages].map((page) => ({
+              url: page.url,
+              content: page.text,
+              purpose: 'company',
+              provider: 'direct',
+            }));
+          }
+          const siteText = firstPartyResearchDigest(pages, { maxChars: 18000 });
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
           say(`Capturing homepage: https://${host}/...`);
@@ -7867,41 +7883,51 @@ Write the persona now.`;
             }
           }
 
-          // ── Market research: real web searches, each its own log line ──
-          say('Researching your market');
+          // Identity is synthesized from first-party pages only. External search
+          // happens after identity resolution, so a same-name company can never
+          // rename this organization or supply its location/offering.
+          say('Verifying company identity and location');
           const research = [];
-          const q1 = `${host} company what do they do`;
-          say(`Searching web for: ${q1}...`);
-          const q2 = `${companyGuess} ${host} founder team`;
-          say(`Searching web for: ${q2}...`);
-          const [companyResearch, teamResearch] = await Promise.all([
-            webSearch(q1, { limit: 5 }), webSearch(q2, { limit: 4 }),
-          ]);
-          research.push(...companyResearch, ...teamResearch);
 
           say('Drafting your company profile');
           let profile;
-          const researchDigest = research.map((r) => `- ${r.title}: ${r.snippet}`).join('\n').slice(0, 4000);
           try {
             profile = JSON.parse(await llm(
-              'You are a sharp business analyst. Output ONLY a JSON object: {"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":["",""],"tone":"","opportunities":["",""],"risks":["",""]}. Ground every field in the provided website content and web research — do not invent facts. Name the specific operating domain in industry (for example brand agency, legal practice, industrial manufacturer, fintech, or SaaS), not a broad label. Keep fields concise (1-2 sentences each).',
-              `Company website: ${siteUrl}\nDomain: ${host}\nUser goal: ${userGoal || '(none stated)'}\n\nWEBSITE CONTENT:\n${siteText || '(no content — infer cautiously)'}\n\nWEB RESEARCH:\n${researchDigest || '(none)'}`,
-              { json: true, maxTokens: 900 },
+              'You resolve a company identity from FIRST-PARTY website evidence. Output ONLY JSON: {"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":[],"tone":"","opportunities":["",""],"risks":["",""],"location":"","location_city":"","location_region":"","location_country":"","location_evidence_url":"","location_source":"","evidence_gaps":[""]}. Rules: (1) every factual field must be supported by supplied first-party sources or the explicitly labeled user claim; (2) never substitute a similarly named company; (3) location means company HQ/operating location. Prefer an explicit contact/imprint/legal-page location and set location_source=first_party. If the site has no location but USER-PROVIDED COMPANY LOCATION is present, preserve it exactly and set location_source=user_claim; (4) never infer location from TLD, language, audience, or desired market; (5) if location is absent from both sources, return empty and list it in evidence_gaps; (6) competitors remain empty unless the company itself names them; (7) use the exact website brand name. Keep prose concise.',
+              `Requested website: ${siteUrl}\nCanonical domain: ${host}\nUSER-PROVIDED COMPANY LOCATION: ${claimedCompanyLocation || '(none)'}\nUser goal: ${userGoal || '(none stated)'}\n\nFIRST-PARTY SOURCES ONLY:\n${siteText || '(website unavailable; keep unsupported fields empty)'}`,
+              { json: true, maxTokens: 1100 },
             ));
           } catch {
-            profile = { name: companyGuess, industry: '', business_model: '', capabilities: [], tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [] };
+            profile = { name: companyGuess, industry: '', business_model: '', capabilities: [], tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [], location: '', location_city: '', location_region: '', location_country: '', location_evidence_url: '', evidence_gaps: ['Company profile synthesis unavailable'] };
           }
+          profile = normalizeCompanyProfile(profile, {
+            fallbackName: companyGuess,
+            websiteUrl: homepageUrl,
+            claimedLocation: claimedCompanyLocation,
+          });
           // Clamp: the LLM sometimes copies the site <title> verbatim
           // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
           // the segment before any "|"/"–" separator, cap length hard.
           const companyName = String(profile.name || companyGuess)
             .split(/\s*[|–—]\s*/)[0].trim().slice(0, 48) || companyGuess;
 
-          // ── Deep competitive search grounded in the drafted profile ──
-          const q3 = `${(profile.what_it_does || companyName).slice(0, 90)} competitors ${new Date().getFullYear()}`;
-          say(`Deep searching web for: ${q3}...`);
-          const deep = await webSearch(q3, { limit: 6 });
-          research.push(...deep);
+          say('Researching your market from the verified company profile');
+          const locationContext = profile.location || profile.location_country || '';
+          const companyQuery = `"${companyName}" ${host} ${locationContext} company`;
+          const marketSubject = String(profile.industry || profile.what_it_does || companyName).slice(0, 140);
+          const marketQuery = `${marketSubject} ${locationContext} competitors market ${new Date().getFullYear()}`;
+          say(`Searching web for verified company coverage: ${companyName}...`);
+          say(`Searching web for local market evidence: ${locationContext || 'target market'}...`);
+          let [companyCoverage, marketCoverage] = await Promise.all([
+            searchCompanyMarket(companyQuery, { limit: 5, includeDomains: [host], location: locationContext, country: profile.location_country }),
+            searchCompanyMarket(marketQuery, { limit: 6, location: locationContext, country: profile.location_country }),
+          ]);
+          if (!companyCoverage.length) companyCoverage = await webSearch(companyQuery, { limit: 5 });
+          if (!marketCoverage.length) marketCoverage = await webSearch(marketQuery, { limit: 6 });
+          research.push(
+            ...companyCoverage.filter((item) => isFirstPartyUrl(item.url, homepageUrl)),
+            ...marketCoverage.map((item) => ({ ...item, evidence_scope: 'external-market' })),
+          );
 
           say('Writing your mission');
           let mission = '';
@@ -8087,7 +8113,9 @@ Write the persona now.`;
           const canonTags = ['org-canon', 'company-profile', 'pinned', 'onboarding', 'source:hyperagents-onboarding', ...entityTags];
           const sections = [
             { title: `${companyName} — Company profile`, memoryType: 'summary',
-              content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.` },
+              content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.${profile.location ? ` Company location: ${profile.location}.` : ''}` },
+            ...(profile.location ? [{ title: `${companyName} — Company location`, memoryType: 'fact', authorityLevel: profile.location_source === 'first_party' ? 'verified' : 'claimed',
+              content: `COMPANY LOCATION (${profile.location_source === 'first_party' ? 'first-party verified' : 'user provided'}) — ${companyName}: ${profile.location}. Evidence: ${profile.location_evidence_url || siteUrl}. Use this location to ground local market, customer, competitor, regulatory, hiring, and outreach research; do not treat it as the user's home address.` }] : []),
             { title: `${companyName} — Mission`, memoryType: 'summary',
               content: `MISSION of ${companyName}: ${mission}` },
             { title: `${companyName} — Positioning`, memoryType: 'decision',
@@ -8117,6 +8145,11 @@ Write the persona now.`;
               { key: 'company:positioning', value: profile.positioning || null },
               { key: 'company:icp', value: profile.icp || null },
               { key: 'company:website', value: siteUrl || null },
+              { key: 'company:location', value: profile.location || null },
+              { key: 'location', value: profile.location ? `Company HQ: ${profile.location}` : null },
+              { key: 'company:location_city', value: profile.location_city || null },
+              { key: 'company:location_region', value: profile.location_region || null },
+              { key: 'company:location_country', value: profile.location_country || null },
             ].filter((f) => f.value && String(f.value).trim());
             for (const f of companyFacts) {
               await _ps.upsertFact({
@@ -8133,9 +8166,9 @@ Write the persona now.`;
           let tasks = [];
           try {
             const tj = JSON.parse(await llm(
-              'Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH"}]}. Write 4-5 concrete, scoped first tasks for an AI team operating this company (market research, positioning, content, outreach prep — things doable with web research + writing). title = short imperative (<=10 words); detail = 1-2 sentences of scope; tag = one of RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY. CRITICAL: never invent or name a specific competitor, product, or company that is not present in the provided profile — a competitor task must say "identify and analyze THIS company\'s real competitors via web research", never a guessed name. Refer to the company only by its real name from the profile.',
-              `Company profile: ${JSON.stringify(profile)}\nMission: ${mission}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
-              { json: true, maxTokens: 700 },
+              'Design a first research backlog for this company. Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH","research_question":"","deliverable":"","source_plan":[""],"done_when":""}]}. Produce exactly 5 useful, non-overlapping tasks in dependency order. Task 1 verifies any first-party evidence gaps. Tasks 2-3 investigate the company location and target market using authoritative local sources, customer evidence, registries, trade bodies, analyst material, and current competitor websites. Task 4 turns verified evidence into a positioning or product decision. Task 5 prepares one evidence-backed go-to-market experiment; do not write generic content assets before the evidence work. Every task must name the decision it unlocks, a concrete deliverable, source types, and an observable completion criterion. At least three tasks must be RESEARCH. Never invent competitor names or market statistics. tag must be RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY.',
+              `Verified company profile: ${JSON.stringify(profile)}\nMission: ${mission}\nCompany location: ${profile.location || '(not verified; make location verification task 1)'}\nCurrent external market sources: ${JSON.stringify(research.slice(0, 8))}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
+              { json: true, maxTokens: 1200 },
             ));
             tasks = (Array.isArray(tj.tasks) ? tj.tasks : [])
               .filter((x) => x && typeof x.title === 'string' && x.title.trim())
@@ -8143,12 +8176,31 @@ Write the persona now.`;
               .map((x, i) => ({
                 id: `t${i + 1}`,
                 title: x.title.trim().slice(0, 120),
-                detail: (typeof x.detail === 'string' ? x.detail.trim() : '').slice(0, 400),
-                tag: ['RESEARCH', 'FEATURE', 'MARKETING', 'OUTREACH', 'STRATEGY'].includes(x.tag) ? x.tag : 'RESEARCH',
+                detail: (typeof x.detail === 'string' ? x.detail.trim() : '').slice(0, 500),
+                tag: i < 3 ? 'RESEARCH' : (['RESEARCH', 'FEATURE', 'MARKETING', 'OUTREACH', 'STRATEGY'].includes(x.tag) ? x.tag : 'RESEARCH'),
+                research_question: String(x.research_question || '').trim().slice(0, 300),
+                deliverable: String(x.deliverable || '').trim().slice(0, 300),
+                source_plan: (Array.isArray(x.source_plan) ? x.source_plan : []).map((source) => String(source).trim()).filter(Boolean).slice(0, 6),
+                done_when: String(x.done_when || '').trim().slice(0, 300),
                 status: 'todo',
                 room_id: null,
               }));
+            const completeResearchContract = tasks.length === 5
+              && new Set(tasks.map((task) => task.title.toLowerCase())).size === 5
+              && tasks.every((task) => task.detail && task.research_question && task.deliverable && task.source_plan.length && task.done_when)
+              && tasks.filter((task) => task.tag === 'RESEARCH').length >= 3;
+            if (!completeResearchContract) tasks = [];
           } catch { /* tasks optional */ }
+          if (tasks.length < 5) {
+            const localMarket = profile.location || profile.location_country || 'the company operating market';
+            tasks = [
+              { title: 'Close company evidence gaps', detail: `Verify ${companyName}'s unresolved first-party facts and document each answer with a source URL.`, tag: 'RESEARCH', research_question: 'Which company facts remain unsupported?', deliverable: 'Verified company evidence register', source_plan: ['Company website', 'Official company registry'], done_when: 'Every profile fact is sourced or explicitly marked unknown.' },
+              { title: 'Map the local buyer landscape', detail: `Research buyer segments, active demand signals, and procurement constraints in ${localMarket}; rank segments by evidence and fit.`, tag: 'RESEARCH', research_question: `Where is demand strongest in ${localMarket}?`, deliverable: 'Ranked local buyer landscape', source_plan: ['Industry bodies', 'Public procurement data', 'Customer evidence'], done_when: 'Three segments are ranked with cited evidence and a recommended first segment.' },
+              { title: 'Verify the competitive set', detail: `Identify real alternatives serving the same buyer and problem in ${localMarket}; compare capabilities, proof, pricing signals, and positioning.`, tag: 'RESEARCH', research_question: 'Which alternatives do target buyers actually compare?', deliverable: 'Sourced competitor comparison', source_plan: ['Competitor websites', 'Customer reviews', 'Analyst and registry sources'], done_when: 'Each included competitor has direct evidence and a documented comparison basis.' },
+              { title: 'Choose a defensible position', detail: 'Turn verified buyer and competitor evidence into one positioning recommendation, preserving unsupported claims as open questions.', tag: 'STRATEGY', research_question: 'Which position is differentiated and supportable?', deliverable: 'Positioning decision brief', source_plan: ['Completed buyer research', 'Completed competitor research'], done_when: 'One position is selected with evidence, trade-offs, and prohibited claims.' },
+              { title: 'Design the first market test', detail: `Create a measurable, low-risk experiment for the highest-priority segment in ${localMarket}, including message, channel, audience, and success criteria.`, tag: 'MARKETING', research_question: 'What is the fastest credible demand test?', deliverable: 'Launch-ready experiment brief', source_plan: ['Positioning decision', 'Channel benchmarks'], done_when: 'The experiment has an owner, audience, channel, timing, metric, and stop/go threshold.' },
+            ].map((task, i) => ({ id: `t${i + 1}`, ...task, status: 'todo', room_id: null }));
+          }
           say('Saving your tasks');
 
           say('Provisioning your workspace');
@@ -8165,7 +8217,7 @@ Write the persona now.`;
           // "You are the team running <name>" — NOT "Operate <name>", which a
           // model can misread as a proper noun ("Operate B&B" evaluated as a
           // third-party partner company in a live run).
-          const roomGoal = `You are the team running ${companyName} — this is YOUR company. Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2000);
+          const roomGoal = `You are the team running ${companyName} — this is YOUR company.${profile.location ? ` Verified company location: ${profile.location}. Ground local research in this location unless the user names another market.` : ' Company location is not yet verified; preserve it as an explicit research gap.'} Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2400);
           try {
             await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', roomGoal, room.id);
           } catch (e) { console.warn('[hyper-onboarding] room goal failed:', e.message); }
@@ -8176,6 +8228,8 @@ Write the persona now.`;
             website: siteUrl,
             screenshot: screenshot || null,
             website_visual_source: websiteVisualSource,
+            research_provider: firecrawlResearch.provider,
+            company_location: profile.location || null,
             profile, mission, tasks,
             research: research.slice(0, 10),
             documents: [

@@ -1,5 +1,6 @@
 const SKIP_EXTENSIONS = /\.(?:avif|css|csv|docx?|gif|ico|jpe?g|js|json|mov|mp3|mp4|pdf|png|pptx?|svg|webm|webp|xlsx?|xml|zip)$/i;
 const SKIP_PATHS = /\/(?:agb|auth|cart|checkout|cookie|datenschutz(?:erklaerung)?|impressum|legal|login|logout|privacy|register|signin|signup|terms|widerruf)(?:\/|$)/i;
+const LOCATION_EVIDENCE_PATHS = /\/(?:impressum|legal-notice|contact|kontakt|location|standort|office)(?:\/|$)/i;
 
 function decodeAttribute(value) {
   return String(value || '')
@@ -22,6 +23,59 @@ function normalizedHost(hostname) {
   return String(hostname || '').toLowerCase().replace(/^www\./, '');
 }
 
+const RESEARCH_PAGE_SIGNALS = [
+  [/about|company|story|agency|studio|unternehmen|agentur|ueber|über/, 100, 'identity'],
+  [/service|solution|expertise|leistung|angebot|capabilit|product|platform|software|produkt/, 95, 'offering'],
+  [/contact|kontakt|impressum|legal-notice|location|standort|office/, 92, 'location'],
+  [/work|arbeit|case|customer|client|project|portfolio|referenz/, 86, 'proof'],
+  [/team|people|founder|leadership/, 82, 'team'],
+  [/pricing|plans|preise/, 76, 'commercial'],
+];
+
+export function selectCompanyResearchPages(links, homepageUrl, { maxPages = 6 } = {}) {
+  let base;
+  try { base = new URL(homepageUrl); } catch { return []; }
+  const candidates = new Map();
+  for (const item of Array.isArray(links) ? links : []) {
+    const rawUrl = typeof item === 'string' ? item : item?.url;
+    let url;
+    try { url = new URL(rawUrl, base); } catch { continue; }
+    if (!/^https?:$/.test(url.protocol) || normalizedHost(url.hostname) !== normalizedHost(base.hostname)) continue;
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
+    if (SKIP_EXTENSIONS.test(url.pathname)) continue;
+    const label = [item?.title, item?.description, url.pathname].filter(Boolean).join(' ');
+    const match = RESEARCH_PAGE_SIGNALS.find(([pattern]) => pattern.test(label.toLowerCase()));
+    if (!match && url.pathname !== '/') continue;
+    const candidate = {
+      url: url.href,
+      label: String(item?.title || item?.description || url.pathname),
+      purpose: match?.[2] || 'identity',
+      score: match?.[1] || 110,
+    };
+    const current = candidates.get(candidate.url);
+    if (!current || current.score < candidate.score) candidates.set(candidate.url, candidate);
+  }
+  const homepage = { url: new URL('/', base).href, label: 'Homepage', purpose: 'identity', score: 110 };
+  candidates.set(homepage.url, homepage);
+
+  // Preserve evidence breadth before filling remaining slots by score. This
+  // prevents six product pages from crowding out the legal/contact page that
+  // usually contains the strongest company-location evidence.
+  const ordered = [...candidates.values()].sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  const selected = [];
+  for (const purpose of ['identity', 'offering', 'location', 'proof', 'team', 'commercial']) {
+    const next = ordered.find((page) => page.purpose === purpose && !selected.some((picked) => picked.url === page.url));
+    if (next) selected.push(next);
+  }
+  for (const page of ordered) {
+    if (selected.length >= Math.max(1, maxPages)) break;
+    if (!selected.some((picked) => picked.url === page.url)) selected.push(page);
+  }
+  return selected.slice(0, Math.max(1, maxPages));
+}
+
 function pageScore(url, label) {
   const signal = `${url.pathname} ${label}`.toLowerCase();
   const priorities = [
@@ -39,7 +93,7 @@ function pageScore(url, label) {
   return (matched?.[1] || 50) - Math.max(0, depth - 1) * 8;
 }
 
-export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 5 } = {}) {
+export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 5, includeLocationPages = false } = {}) {
   let base;
   try { base = new URL(homepageUrl); } catch { return []; }
   const candidates = new Map();
@@ -54,7 +108,8 @@ export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 5 }
     url.hash = '';
     url.search = '';
     url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
-    if (url.pathname === '/' || SKIP_EXTENSIONS.test(url.pathname) || SKIP_PATHS.test(url.pathname)) continue;
+    if (url.pathname === '/' || SKIP_EXTENSIONS.test(url.pathname)) continue;
+    if (SKIP_PATHS.test(url.pathname) && !(includeLocationPages && LOCATION_EVIDENCE_PATHS.test(url.pathname))) continue;
     const label = anchor[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const key = url.href;
     const score = pageScore(url, label);

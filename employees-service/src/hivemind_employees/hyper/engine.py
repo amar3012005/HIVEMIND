@@ -1935,6 +1935,27 @@ class Director:
         board_audit["capability"] = {key: capability.get(key) for key in (
             "schema", "id", "version", "artifact_id", "worker_class",
         )}
+        # Page-level answers are the common direct-query path. Keep their exact
+        # DOM values ahead of bulky template/site-file metadata so the direct
+        # synthesis context cannot truncate the evidence it was asked for.
+        page_keys = (
+            "url", "status", "title", "description", "canonical", "word_count", "template",
+            "internal_inlinks", "orphan_candidate", "issue_count",
+        )
+        board_audit["pages"] = [
+            {key: page.get(key) for key in page_keys if key in page}
+            for page in (audit.get("pages") or [])[:8]
+            if isinstance(page, dict)
+        ]
+        finding_keys = (
+            "id", "category", "severity", "title", "description", "url", "template",
+            "instances", "evidence", "recommendation",
+        )
+        board_audit["findings"] = [
+            {key: finding.get(key) for key in finding_keys if key in finding}
+            for finding in (audit.get("findings") or [])[:8]
+            if isinstance(finding, dict)
+        ]
         board_audit.update({key: audit.get(key) for key in (
             "evidence_quality", "maturity", "categories", "templates", "architecture",
             "site_files", "crawl_errors", "limitations",
@@ -1956,24 +1977,6 @@ class Director:
         board_audit["search_console"]["opportunities"] = (search_console.get("opportunities") or [])[:20]
         board_audit["search_console"]["queries"] = (search_console.get("queries") or [])[:20]
         board_audit["search_console"]["query_pages"] = (search_console.get("query_pages") or [])[:20]
-        finding_keys = (
-            "id", "category", "severity", "title", "description", "url", "template",
-            "instances", "evidence", "recommendation",
-        )
-        board_audit["findings"] = [
-            {key: finding.get(key) for key in finding_keys if key in finding}
-            for finding in (audit.get("findings") or [])[:8]
-            if isinstance(finding, dict)
-        ]
-        page_keys = (
-            "url", "status", "title", "canonical", "word_count", "template",
-            "internal_inlinks", "orphan_candidate", "issue_count",
-        )
-        board_audit["pages"] = [
-            {key: page.get(key) for key in page_keys if key in page}
-            for page in (audit.get("pages") or [])[:8]
-            if isinstance(page, dict)
-        ]
         board_audit["search_console"]["pages"] = (search_console.get("pages") or [])[:20]
         board_audit["search_console"]["daily"] = (search_console.get("daily") or [])[-35:]
         self.blackboard.insert(0, "SEO_AUDIT_EVIDENCE:\n" + json.dumps(board_audit, ensure_ascii=False))

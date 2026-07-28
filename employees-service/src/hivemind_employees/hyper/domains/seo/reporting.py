@@ -64,6 +64,69 @@ def _owner(_: Dict[str, Any]) -> str:
     return "Confirm"
 
 
+def render_remediation_report(audit: Dict[str, Any]) -> str:
+    """Render a bounded remediation status directly from measured crawl evidence."""
+    severity = audit.get("severity") or {}
+    coverage = audit.get("coverage") or {}
+    capability = audit.get("capability") or {}
+    findings = [row for row in audit.get("findings") or [] if isinstance(row, dict)]
+    priority = [row for row in findings if str(row.get("severity") or "").lower() in {"critical", "high"}]
+    if not priority:
+        priority = [row for row in findings if str(row.get("severity") or "").lower() == "medium"][:8]
+
+    rows = [
+        "| " + " | ".join(_cell(value) for value in (
+            str(item.get("severity") or "unknown").upper(),
+            item.get("title") or item.get("rule") or "Measured finding",
+            _finding_scope(item),
+            _finding_evidence(item),
+            item.get("recommendation") or "Correct the measured signal.",
+            f"Rerun the rendered audit and confirm `{item.get('id', item.get('rule', 'finding'))}` is absent.",
+        )) + " |"
+        for item in priority
+    ]
+    if not rows:
+        rows = ["| - | No actionable findings in the inspected evidence | - | - | Continue monitoring | Rescan after site changes |"]
+
+    critical = int(severity.get("critical") or 0)
+    high = int(severity.get("high") or 0)
+    if critical or high:
+        status = (
+            f"The fresh rendered audit confirms **{critical} critical** and **{high} high** finding(s). "
+            "The table below is the measured remediation queue."
+        )
+    else:
+        status = (
+            "The fresh rendered audit confirms **0 critical** and **0 high** findings. "
+            "The requested blocker count is not present in current crawl evidence; no critical/high fix should be claimed."
+        )
+
+    return f"""## Current Finding Status
+
+{status}
+
+| Measure | Current evidence |
+|---|---|
+| Website | {_cell(audit.get('seed_url'))} |
+| Audit artifact | `{_cell(capability.get('artifact_id'))}` |
+| Pages scanned | {_cell(coverage.get('pages_scanned', 0))} |
+| Critical | {critical} |
+| High | {high} |
+| Medium | {_cell(severity.get('medium', 0))} |
+| Low | {_cell(severity.get('low', 0))} |
+
+## Measured Remediation Queue
+
+| Severity | Finding | Scope | Evidence | Required change | Verification |
+|---|---|---|---|---|---|
+{chr(10).join(rows)}
+
+## Execution Status
+
+**No website change was claimed by this Room.** A finding becomes resolved only after a write-capable CMS or repository tool reports success and a fresh rendered audit no longer returns that finding ID.
+""".strip()
+
+
 def render_operating_report(audit: Dict[str, Any], recommendation: str = "") -> str:
     """Render a complete SEO operating report from a completed audit artifact."""
     maturity = audit.get("maturity") or {}

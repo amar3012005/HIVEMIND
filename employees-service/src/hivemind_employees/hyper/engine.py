@@ -1244,6 +1244,7 @@ class Director:
         self.response_depth = "operating"
         self.collaboration_intensity = "deep"
         self.evidence_mode = "standard"
+        self.seo_task = "none"
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -2313,6 +2314,7 @@ class Director:
                 "web_query": {"type": ["string", "null"]},
                 "seo_audit_url": {"type": ["string", "null"]},
                 "seo_audit_scope": {"type": "string", "enum": ["none", "page", "sample", "site"]},
+                "seo_task": {"type": "string", "enum": ["none", "inspect", "audit", "remediate", "rescan", "strategy"]},
                 "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
@@ -2338,7 +2340,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2383,6 +2385,9 @@ class Director:
             "- seo_audit_scope: none when seo_audit_url is null; page for one exact-page answer; sample for a "
             "bounded page/template diagnosis; site for a broad audit OR a remediation/rescan command referring "
             "to site-wide finding counts. Audit scope controls evidence breadth, not collaboration intensity.\n"
+            "- seo_task: none outside SEO work; inspect for one page/template question; audit for a new health "
+            "assessment; remediate for a command to fix/resolve measured findings; rescan to verify changes; "
+            "strategy for an explicit SEO growth program. 'Resolve 4 critical and 0 high finding(s)' is remediate.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2525,6 +2530,10 @@ class Director:
             audit_url = match.group(0).rstrip(".,;") if match else None
         plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
         plan["seo_audit_scope"] = audit_scope if plan["seo_audit_url"] else "none"
+        seo_task = str(plan.get("seo_task") or "none").strip().lower()
+        plan["seo_task"] = seo_task if seo_task in {
+            "none", "inspect", "audit", "remediate", "rescan", "strategy",
+        } else "none"
         plan["seo_audit_page_limit"] = {"none": 0, "page": 1, "sample": 8, "site": 25}[
             plan["seo_audit_scope"]
         ]
@@ -3327,11 +3336,13 @@ class Director:
         self.response_depth = str(plan.get("response_depth") or "focused")
         self.collaboration_intensity = str(plan.get("collaboration_intensity") or "standard")
         self.evidence_mode = str(plan.get("evidence_mode") or "standard")
+        self.seo_task = str(plan.get("seo_task") or "none")
         await self.emit({
             "t": "work_scope",
             "room_kind": self.room_kind,
             "intensity": self.collaboration_intensity,
             "depth": self.response_depth,
+            "seo_task": self.seo_task,
             "audit_page_limit": plan.get("seo_audit_page_limit") if plan.get("seo_audit_url") else 0,
             "debate": bool(plan.get("needs_debate")),
         })
@@ -3481,7 +3492,20 @@ class Director:
                 final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
                     f"- {error}" for error in campaign_bundle_errors)
         else:
-            if self.room_kind == "seo" and self.response_depth == "operating" and self._seo_audit_evidence:
+            if (self.room_kind == "seo" and self._seo_audit_evidence
+                    and self.seo_task in {"remediate", "rescan"}
+                    and self.response_depth != "operating"):
+                from .domains.seo.reporting import render_remediation_report
+                final_text = render_remediation_report(self._seo_audit_evidence)
+                await self.emit({
+                    "t": "seo_report_governance",
+                    "status": "accepted",
+                    "mode": "remediation_compiled",
+                    "artifact_id": ((self._seo_audit_evidence.get("capability") or {}).get("artifact_id")),
+                    "finding_count": len(self._seo_audit_evidence.get("findings") or []),
+                    "message": "Remediation status was compiled from the deterministic SEO artifact.",
+                })
+            elif self.room_kind == "seo" and self.response_depth == "operating" and self._seo_audit_evidence:
                 from .domains.seo.reporting import render_operating_report
                 recommendation = await self._synthesize_seo_recommendation(transcript_json)
                 final_text = render_operating_report(self._seo_audit_evidence, recommendation)

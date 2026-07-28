@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from hivemind_employees.hyper.engine import Director
+from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
 def _director(*, message: str, room_kind: str = "general", company_brief: str = ""):
@@ -38,6 +39,7 @@ def test_light_intensity_is_a_bounded_director_contract(monkeypatch):
         "web_query": "law firm campaign benchmarks",
         "seo_audit_url": None,
         "seo_audit_scope": "none",
+        "seo_task": "none",
         "places_query": None,
         "needs_debate": True,
         "method_skills": [],
@@ -73,6 +75,7 @@ def test_seo_remediation_refreshes_measured_evidence_without_forcing_deep(monkey
         "web_query": None,
         "seo_audit_url": None,
         "seo_audit_scope": "site",
+        "seo_task": "remediate",
         "places_query": None,
         "needs_debate": False,
         "method_skills": [],
@@ -119,6 +122,7 @@ def test_deep_intensity_guarantees_visible_debate(monkeypatch):
     payload = {
         "recall_queries": [], "connector_calls": [], "web_query": None,
         "seo_audit_url": None, "seo_audit_scope": "none", "places_query": None,
+        "seo_task": "none",
         "needs_debate": False, "method_skills": [], "campaign_method_assignments": [],
         "turn_mode": "task", "collaboration_intensity": "deep",
         "response_depth": "operating", "evidence_mode": "standard",
@@ -133,3 +137,23 @@ def test_deep_intensity_guarantees_visible_debate(monkeypatch):
 
     assert plan["collaboration_intensity"] == "deep"
     assert plan["needs_debate"] is True
+
+
+def test_remediation_report_does_not_claim_unmeasured_or_applied_fixes():
+    report = render_remediation_report({
+        "seed_url": "https://singulancelabs.com/",
+        "capability": {"artifact_id": "artifact-1"},
+        "coverage": {"pages_scanned": 24},
+        "severity": {"critical": 0, "high": 0, "medium": 1, "low": 2},
+        "findings": [{
+            "id": "title-length", "severity": "medium", "title": "Title length",
+            "template": "/research/:slug", "instances": 3,
+            "evidence": {"title_length": 79}, "recommendation": "Shorten the measured titles.",
+        }],
+    })
+
+    assert "0 critical" in report
+    assert "0 high" in report
+    assert "Title length" in report
+    assert "No website change was claimed" in report
+    assert "30%" not in report

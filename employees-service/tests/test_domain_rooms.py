@@ -51,6 +51,12 @@ def test_domain_skills_use_progressive_disclosure():
     assert "javascript-seo" in catalog
     assert "international-and-local" in catalog
     assert "seo-measurement" in catalog
+    seo_pack = get_domain_pack("seo")
+    assert seo_pack.capabilities == ({
+        "id": "seo.site-intelligence",
+        "version": "1.0.0",
+        "when": "A public website must be discovered, rendered, technically audited, or mapped before SEO recommendations are made.",
+    },)
 
 
 def test_domain_pack_controls_room_lead_shape():

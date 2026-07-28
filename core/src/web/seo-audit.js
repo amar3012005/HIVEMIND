@@ -15,6 +15,16 @@ function pathnameOf(value) {
   try { return new URL(value).pathname || '/'; } catch { return '/'; }
 }
 
+function canonicalUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    return url.href;
+  } catch {
+    return text(value);
+  }
+}
+
 function templateFor(url) {
   const parts = pathnameOf(url).split('/').filter(Boolean);
   if (!parts.length) return 'homepage';
@@ -61,6 +71,14 @@ function auditPage(page) {
   const images = asArray(pageSignal(page, 'images'));
   const links = asArray(pageSignal(page, 'links'));
   const url = text(page.url);
+  const origin = (() => { try { return new URL(url).origin; } catch { return ''; } })();
+  const internalLinkTargets = [...new Set(links.map((link) => {
+    try {
+      const target = new URL(typeof link === 'string' ? link : link?.href, url);
+      target.hash = '';
+      return target.origin === origin ? target.href : null;
+    } catch { return null; }
+  }).filter(Boolean))];
 
   if (status >= 400) findings.push(finding('http_status', 'critical', 'crawlability', `Page returns HTTP ${status}`, 'Repair or remove internal links to this URL and restore the intended destination.', page, { status }));
   if (robots.includes('noindex')) findings.push(finding('noindex', 'critical', 'indexability', 'Page is marked noindex', 'Confirm intent. Remove the noindex directive from pages that should appear in search.', page, { robots }));
@@ -83,7 +101,9 @@ function auditPage(page) {
     canonical,
     status,
     word_count: wordCount,
-    internal_links: links.length,
+    internal_links: internalLinkTargets.length,
+    internal_link_targets: internalLinkTargets,
+    discovery: page?.discovery || null,
     template: templateFor(url),
     findings,
   };
@@ -101,8 +121,20 @@ function aggregateFindings(findings) {
   return [...grouped.values()].sort((a, b) => WEIGHTS[b.severity] - WEIGHTS[a.severity] || b.instances - a.instances);
 }
 
-export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null } = {}) {
+export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null, capability = null } = {}) {
   const auditedPages = asArray(pages).filter((page) => text(page?.url)).map(auditPage);
+  const discoveredUrls = new Set([
+    canonicalUrl(seedUrl),
+    ...asArray(siteFiles?.discovery?.urls).map(canonicalUrl),
+    ...auditedPages.map((page) => canonicalUrl(page.url)),
+  ].filter(Boolean));
+  const auditedUrls = new Set(auditedPages.map((page) => page.url));
+  const incomingLinks = new Map(auditedPages.map((page) => [page.url, 0]));
+  for (const page of auditedPages) {
+    for (const target of page.internal_link_targets) {
+      if (auditedUrls.has(target)) incomingLinks.set(target, (incomingLinks.get(target) || 0) + 1);
+    }
+  }
   const findings = auditedPages.flatMap((page) => page.findings);
   const penalty = findings.reduce((sum, item) => sum + WEIGHTS[item.severity], 0);
   const denominator = Math.max(1, auditedPages.length);
@@ -125,15 +157,33 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
 
   return {
     schema: AUDIT_VERSION,
+    capability,
     seed_url: text(seedUrl || auditedPages[0]?.url),
     scanned_at: scannedAt,
     runtime: runtimeUsed,
     score,
-    coverage: { pages_scanned: auditedPages.length, crawl_errors: normalizedErrors.length },
+    coverage: {
+      pages_scanned: auditedPages.length,
+      pages_discovered: discoveredUrls.size,
+      sitemap_urls_found: Number(siteFiles?.discovery?.sitemap_urls_found || 0),
+      crawl_errors: normalizedErrors.length,
+    },
     severity,
     categories,
     findings: aggregateFindings(findings),
-    pages: auditedPages.map(({ findings: pageFindings, ...page }) => ({ ...page, issue_count: pageFindings.length })),
+    pages: auditedPages.map(({ findings: pageFindings, internal_link_targets: _targets, ...page }) => ({
+      ...page,
+      crawl_depth: page.discovery?.depth ?? null,
+      discovery_source: page.discovery?.source || 'unknown',
+      internal_inlinks: incomingLinks.get(page.url) || 0,
+      orphan_candidate: page.url !== text(seedUrl) && page.discovery?.source === 'sitemap' && !(incomingLinks.get(page.url) > 0),
+      issue_count: pageFindings.length,
+    })),
+    architecture: {
+      orphan_candidates: auditedPages.filter((page) => page.url !== text(seedUrl) && page.discovery?.source === 'sitemap' && !(incomingLinks.get(page.url) > 0)).length,
+      max_crawl_depth: auditedPages.reduce((max, page) => Math.max(max, Number(page.discovery?.depth || 0)), 0),
+      pages_without_internal_inlinks: auditedPages.filter((page) => page.url !== text(seedUrl) && !(incomingLinks.get(page.url) > 0)).length,
+    },
     templates: Object.values(templates).sort((a, b) => b.issues - a.issues),
     crawl_errors: normalizedErrors,
     site_files: siteFiles,
@@ -147,24 +197,60 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
 
 export async function inspectSeoSiteFiles(seedUrl, fetchImpl = globalThis.fetch) {
   const origin = new URL(seedUrl).origin;
-  async function read(path) {
+  async function read(target) {
     try {
-      const response = await fetchImpl(`${origin}${path}`, {
+      const url = new URL(target, origin);
+      if (url.origin !== origin) throw new Error('cross_origin_site_file');
+      const response = await fetchImpl(url.href, {
         redirect: 'follow',
         headers: { 'User-Agent': 'HIVEMIND SEO Audit/1.0' },
         signal: AbortSignal.timeout(8000),
       });
+      if (!sameOrigin(response.url || url.href)) throw new Error('cross_origin_redirect');
       return { url: response.url, status: response.status, body: response.ok ? await response.text() : '' };
     } catch (error) {
-      return { url: `${origin}${path}`, status: 0, body: '', error: error.message };
+      return { url: new URL(target, origin).href, status: 0, body: '', error: error.message };
     }
   }
+  function sitemapLocations(xml) {
+    return [...String(xml || '').matchAll(/<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/gi)]
+      .map((match) => match[1].replace(/&amp;/g, '&').trim())
+      .filter(Boolean);
+  }
+  function sameOrigin(url) {
+    try { return new URL(url, origin).origin === origin; } catch { return false; }
+  }
+
   const robots = await read('/robots.txt');
   const declared = [...robots.body.matchAll(/^sitemap:\s*(\S+)/gim)].map((match) => match[1]);
-  const sitemap = declared.length ? await read(new URL(declared[0], origin).pathname) : await read('/sitemap.xml');
+  const sitemapTargets = (declared.length ? declared : ['/sitemap.xml']).filter(sameOrigin).slice(0, 5);
+  const sitemapFiles = await Promise.all(sitemapTargets.map(read));
+  const childTargets = sitemapFiles
+    .flatMap((file) => /<sitemapindex[\s>]/i.test(file.body) ? sitemapLocations(file.body) : [])
+    .filter(sameOrigin)
+    .slice(0, 10);
+  const childFiles = await Promise.all(childTargets.map(read));
+  const allSitemaps = [...sitemapFiles, ...childFiles];
+  const discoveredUrls = [...new Set(allSitemaps
+    .flatMap((file) => sitemapLocations(file.body))
+    .filter((url) => sameOrigin(url) && !/\.xml(?:$|[?#])/i.test(url)))]
+    .slice(0, 500);
+  const primarySitemap = sitemapFiles[0] || { url: `${origin}/sitemap.xml`, status: 0 };
   return {
     robots: { url: robots.url, status: robots.status, present: robots.status === 200, sitemap_urls: declared.slice(0, 10) },
-    sitemap: { url: sitemap.url, status: sitemap.status, present: sitemap.status === 200, declared_in_robots: declared.length > 0 },
+    sitemap: {
+      url: primarySitemap.url,
+      status: primarySitemap.status,
+      present: allSitemaps.some((file) => file.status === 200),
+      declared_in_robots: declared.length > 0,
+      files_checked: allSitemaps.length,
+    },
+    discovery: {
+      source: discoveredUrls.length ? 'sitemap_and_rendered_links' : 'rendered_links',
+      urls_found: discoveredUrls.length,
+      sitemap_urls_found: discoveredUrls.length,
+      urls: discoveredUrls,
+    },
   };
 }
 

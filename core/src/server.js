@@ -40,7 +40,7 @@ import { handleCampaignRequest } from './campaigns/routes.js';
 import { processDueCampaignActions } from './campaigns/worker.js';
 import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
-import { compileSeoAudit, inspectSeoSiteFiles } from './web/seo-audit.js';
+import { SEO_SITE_INTELLIGENCE, runSeoSiteIntelligence } from './capabilities/seo-site-intelligence.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -16200,23 +16200,20 @@ exit \$RC
                 const started = Date.now();
                 try {
                   await webJobStore.update(job.id, { status: 'running' });
-                  const [crawl, siteFiles] = await Promise.all([
-                    browserRuntime.seoAudit({ urls: [seedUrl], depth, pageLimit }),
-                    inspectSeoSiteFiles(seedUrl),
-                  ]);
-                  const audit = compileSeoAudit({
-                    seedUrl,
-                    pages: crawl.pages,
-                    errors: crawl.errors,
-                    runtimeUsed: crawl.runtime_used,
-                    siteFiles,
+                  const execution = await runSeoSiteIntelligence({
+                    seedUrl, depth, pageLimit, browserRuntime,
+                    onStage: async (stage) => webJobStore.update(job.id, {
+                      capability: `${SEO_SITE_INTELLIGENCE.id}@${SEO_SITE_INTELLIGENCE.version}`,
+                      capability_stage: stage,
+                    }),
                   });
+                  const audit = execution.audit;
                   await webJobStore.update(job.id, {
                     status: audit.coverage.pages_scanned > 0 ? 'succeeded' : 'failed',
                     error: audit.coverage.pages_scanned > 0 ? null : (audit.crawl_errors[0]?.message || 'seo_audit_failed'),
                     results: [audit],
-                    runtime_used: crawl.runtime_used,
-                    fallback_applied: crawl.fallback_applied,
+                    runtime_used: execution.runtime_used,
+                    fallback_applied: execution.fallback_applied,
                     duration_ms: Date.now() - started,
                     pages_processed: audit.coverage.pages_scanned,
                   });
@@ -16389,16 +16386,19 @@ exit \$RC
                   const result = newJob.type === 'search'
                     ? await browserRuntime.search({ query: p.query, domains: p.domains || [], limit: p.limit || 10 })
                     : newJob.type === 'seo_audit'
-                      ? await browserRuntime.seoAudit({ urls: p.urls, depth: p.depth || 2, pageLimit: p.pageLimit || 25 })
+                      ? await runSeoSiteIntelligence({ seedUrl: p.url || p.urls?.[0], depth: p.depth || 2, pageLimit: p.pageLimit || 25, browserRuntime })
                     : await browserRuntime.crawl({ urls: p.urls, depth: p.depth || 1, pageLimit: p.pageLimit || 50, include: p.include, exclude: p.exclude });
                   const items = newJob.type === 'search'
                     ? result.results
                     : newJob.type === 'seo_audit'
-                      ? [compileSeoAudit({ seedUrl: p.url || p.urls?.[0], pages: result.pages, errors: result.errors, runtimeUsed: result.runtime_used })]
+                      ? [result.audit]
                       : result.pages;
                   const count = Array.isArray(items) ? items.length : 0;
-                  const errors = Array.isArray(result.errors) ? result.errors : [];
-                  if (count === 0 && errors.length > 0) {
+                  const errors = newJob.type === 'seo_audit'
+                    ? (result.audit?.crawl_errors || []).map((item) => ({ error: item.message }))
+                    : Array.isArray(result.errors) ? result.errors : [];
+                  const seoHasPages = newJob.type !== 'seo_audit' || (items[0]?.coverage?.pages_scanned || 0) > 0;
+                  if (!seoHasPages || (count === 0 && errors.length > 0)) {
                     await webJobStore.update(newJob.id, { status: 'failed', error: errors[0]?.error || `${newJob.type}_failed`, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [] });
                   } else {
                     await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'seo_audit' ? (items[0]?.coverage?.pages_scanned || 0) : newJob.type === 'crawl' ? count : undefined });

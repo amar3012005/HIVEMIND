@@ -236,7 +236,7 @@ async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Opt
 
 async def seo_audit_emulated(url: str, *, user_id: Optional[str], org_id: Optional[str],
                              api_key: str = "", page_limit: int = 25,
-                             timeout_s: float = 180.0) -> Dict[str, Any]:
+                             timeout_s: float = 180.0, on_progress=None) -> Dict[str, Any]:
     """Run the deterministic Core SEO audit as the current tenant and poll its web job.
 
     The returned payload contains one seo-audit-v1 result. It is crawler evidence,
@@ -261,12 +261,20 @@ async def seo_audit_emulated(url: str, *, user_id: Optional[str], org_id: Option
             job_id = (sub.json() or {}).get("job_id")
             if not job_id:
                 return {"error": "no job_id"}
+            last_stage = None
             for _ in range(max(12, int(timeout_s / 2))):
                 await asyncio.sleep(2)
                 response = await c.get(f"/api/web/jobs/{job_id}")
                 if response.status_code != 200:
                     continue
                 payload = response.json() or {}
+                stage = payload.get("capability_stage")
+                stage_key = (stage or {}).get("stage") if isinstance(stage, dict) else None
+                stage_status = (stage or {}).get("status") if isinstance(stage, dict) else None
+                current_stage = (stage_key, stage_status)
+                if on_progress and stage_key and current_stage != last_stage:
+                    await on_progress(stage)
+                    last_stage = current_stage
                 if payload.get("status") in ("succeeded", "failed", "completed", "error", "done"):
                     return payload
             return {"status": "timeout", "job_id": job_id}

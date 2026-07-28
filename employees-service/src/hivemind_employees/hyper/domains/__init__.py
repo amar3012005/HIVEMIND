@@ -33,6 +33,7 @@ class DomainPack:
     report_contract: str
     skills: Dict[str, Tuple[str, str]]
     default_skill: str
+    capabilities: Tuple[Dict[str, str], ...]
 
     def skill_catalog(self) -> List[Tuple[str, str]]:
         return [(name, when) for name, (when, _body) in self.skills.items()]
@@ -69,6 +70,19 @@ def _load_pack(path: str) -> Optional[DomainPack]:
         default_skill = str(manifest.get("default_skill") or "").strip()
         if default_skill and default_skill not in skills:
             raise ValueError("default_skill must name a skill in this pack")
+        capabilities = []
+        for capability in manifest.get("capabilities") or []:
+            capability_id = str(capability.get("id") or "").strip()
+            capability_version = str(capability.get("version") or "").strip()
+            if not re.match(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$", capability_id):
+                raise ValueError("invalid capability id")
+            if not re.match(r"^\d+\.\d+\.\d+$", capability_version):
+                raise ValueError("invalid capability version")
+            capabilities.append({
+                "id": capability_id,
+                "version": capability_version,
+                "when": str(capability.get("when") or "").strip(),
+            })
 
         return DomainPack(
             slug=slug,
@@ -81,6 +95,7 @@ def _load_pack(path: str) -> Optional[DomainPack]:
             report_contract=_read(os.path.join(path, "report.md")),
             skills=skills,
             default_skill=default_skill or next(iter(skills), ""),
+            capabilities=tuple(capabilities),
         )
     except Exception as exc:  # noqa: BLE001 - one pack must never break general Rooms
         log.warning("[domains] skipped %s: %s", os.path.basename(path), exc)

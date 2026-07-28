@@ -672,8 +672,16 @@ class LightpandaRuntime {
    */
   async crawl({ urls, depth = 1, pageLimit = 50, include, exclude }) {
     const queue = Array.isArray(urls)
-      ? urls.map((url) => ({ url: normalizeUrl(url), currentDepth: 0 })).filter((x) => x.url)
+      ? urls.map((url, index) => ({
+          url: normalizeUrl(url),
+          currentDepth: 0,
+          discoverySource: index === 0 ? 'seed' : 'sitemap',
+          discoveredFrom: null,
+        })).filter((x) => x.url)
       : [];
+    const allowedOrigins = new Set(queue.map((item) => {
+      try { return new URL(item.url).origin; } catch { return null; }
+    }).filter(Boolean));
     const safeDepth = Math.max(0, Math.min(Number(depth) || 1, 4));
     const safePageLimit = Math.max(1, Math.min(Number(pageLimit) || 50, 500));
     const visited = new Set();
@@ -690,7 +698,7 @@ class LightpandaRuntime {
 
       try {
         while (queue.length > 0 && pages.length < safePageLimit) {
-          const { url, currentDepth } = queue.shift();
+          const { url, currentDepth, discoverySource, discoveredFrom } = queue.shift();
           if (!url || visited.has(url)) continue;
           visited.add(url);
 
@@ -862,6 +870,7 @@ class LightpandaRuntime {
               jsonLd: data.jsonLd ? JSON.stringify(data.jsonLd).slice(0, 1000) : null,
               status: response?.status?.() || 200,
               seo: data.seo,
+              discovery: { source: discoverySource, depth: currentDepth, discovered_from: discoveredFrom },
             });
 
             // Queue links for crawling if depth allows
@@ -869,18 +878,25 @@ class LightpandaRuntime {
               const sameDomainLinks = data.links
                 .filter(link => {
                   try {
-                    const linkDomain = new URL(link.href).hostname;
-                    return linkDomain === domain || linkDomain.endsWith('.' + domain);
+                    return allowedOrigins.has(new URL(link.href).origin);
                   } catch {
                     return false;
                   }
                 })
-                .map(link => ({ url: link.href, currentDepth: currentDepth + 1 }));
+                .map(link => ({
+                  url: link.href,
+                  currentDepth: currentDepth + 1,
+                  discoverySource: 'rendered_link',
+                  discoveredFrom: data.url,
+                }));
 
               // Add to queue (avoid exceeding limit)
-              for (const link of sameDomainLinks) {
+              for (const link of sameDomainLinks.reverse()) {
                 if (!visited.has(link.url) && queue.length + pages.length < safePageLimit * 3) {
-                  queue.push(link);
+                  // Rendered navigation describes the real site architecture.
+                  // Visit it before remaining sitemap seeds so depth and source
+                  // reflect how users and crawlers can actually reach the page.
+                  queue.unshift(link);
                 }
               }
             }
@@ -1054,15 +1070,21 @@ class FetchFallbackRuntime {
     const safeDepth = Math.max(0, Math.min(Number(depth) || 1, 4));
     const safePageLimit = Math.max(1, Math.min(Number(pageLimit) || 50, 500));
     const queue = Array.isArray(urls)
-      ? urls.map((u) => ({ url: normalizeUrl(u), currentDepth: 0 })).filter((x) => x.url)
+      ? urls.map((u, index) => ({
+          url: normalizeUrl(u), currentDepth: 0,
+          discoverySource: index === 0 ? 'seed' : 'sitemap', discoveredFrom: null,
+        })).filter((x) => x.url)
       : [];
+    const allowedOrigins = new Set(queue.map((item) => {
+      try { return new URL(item.url).origin; } catch { return null; }
+    }).filter(Boolean));
 
     const pages = [];
     const errors = [];
     const visited = new Set();
 
     while (queue.length > 0 && pages.length < safePageLimit) {
-      const { url, currentDepth } = queue.shift();
+      const { url, currentDepth, discoverySource, discoveredFrom } = queue.shift();
       if (!url || visited.has(url)) continue;
       visited.add(url);
 
@@ -1079,6 +1101,12 @@ class FetchFallbackRuntime {
         const ogDescription = this._extractMeta(html, 'og:description');
         const ogImage = this._extractMeta(html, 'og:image');
         const author = this._extractMeta(html, 'author');
+        const canonical = html.match(/<link[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*href=["']([^"']+)["']/i)?.[1]
+          || html.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["'][^"']*canonical[^"']*["']/i)?.[1] || '';
+        const robots = this._extractMeta(html, 'robots');
+        const h1s = [...html.matchAll(/<h1(?:\s[^>]*)?>([\s\S]*?)<\/h1>/gi)]
+          .map((match) => stripHtmlToText(match[1])).filter(Boolean);
+        const jsonLd = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i)?.[1]?.trim() || '';
         const text = stripHtmlToText(html);
         const wordCount = text.split(/\s+/).filter(w => w.length > 1).length;
         const readingTime = Math.ceil(wordCount / 200);
@@ -1098,19 +1126,32 @@ class FetchFallbackRuntime {
           description: ogDescription || description,
           text,
           content: text,
-          word_count: wordCount,
+          wordCount,
           readingTime,
           images,
           links: links.map(href => ({ href, text: '' })),
           author,
           favicon: this._extractFavicon(html, url),
-          qualityScore
+          qualityScore,
+          status: 200,
+          jsonLd: jsonLd.slice(0, 1000) || null,
+          seo: {
+            title,
+            description,
+            canonical: canonical ? new URL(canonical, url).href : '',
+            robots,
+            h1: h1s,
+          },
+          discovery: { source: discoverySource, depth: currentDepth, discovered_from: discoveredFrom },
         });
 
         if (currentDepth < safeDepth) {
           for (const link of links) {
-            if (!visited.has(link) && queue.length + pages.length < safePageLimit * 3) {
-              queue.push({ url: link, currentDepth: currentDepth + 1 });
+            if (allowedOrigins.has(new URL(link).origin) && !visited.has(link) && queue.length + pages.length < safePageLimit * 3) {
+              queue.unshift({
+                url: link, currentDepth: currentDepth + 1,
+                discoverySource: 'rendered_link', discoveredFrom: url,
+              });
             }
           }
         }

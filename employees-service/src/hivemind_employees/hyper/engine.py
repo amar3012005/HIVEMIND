@@ -1871,9 +1871,19 @@ class Director:
         target = (url or "").strip()
         if not target:
             return json.dumps({"error": "website URL is required", "is_error": True})
+        async def emit_capability_stage(stage: Dict[str, Any]) -> None:
+            await self.emit({
+                "t": "seo_capability_stage",
+                "capability": "seo.site-intelligence@1.0.0",
+                "stage": stage.get("stage"),
+                "status": stage.get("status"),
+                "details": {key: value for key, value in stage.items() if key not in {"stage", "status", "at"}},
+            })
+
         result = await seo_audit_emulated(
             target, user_id=self.user_id, org_id=self.org_id,
             page_limit=max(1, min(page_limit, 50)), timeout_s=180.0,
+            on_progress=emit_capability_stage,
         )
         if result.get("error") or result.get("status") == "failed":
             return json.dumps({"error": result.get("error") or "seo audit failed", "is_error": True})
@@ -1883,8 +1893,8 @@ class Director:
         # Put compact deterministic evidence first so the bounded synthesis board
         # cannot lose it behind recall chatter. Full evidence remains in the web job.
         board_audit = {key: audit.get(key) for key in (
-            "schema", "seed_url", "scanned_at", "score", "coverage", "severity",
-            "categories", "templates", "site_files", "crawl_errors", "limitations",
+            "schema", "capability", "seed_url", "scanned_at", "score", "coverage", "severity",
+            "categories", "templates", "architecture", "site_files", "crawl_errors", "limitations",
         )}
         board_audit["findings"] = (audit.get("findings") or [])[:6]
         board_audit["pages"] = (audit.get("pages") or [])[:8]
@@ -1895,6 +1905,9 @@ class Director:
             "url": audit.get("seed_url"),
             "score": audit.get("score"),
             "pages": (audit.get("coverage") or {}).get("pages_scanned", 0),
+            "discovered": (audit.get("coverage") or {}).get("pages_discovered", 0),
+            "capability": (audit.get("capability") or {}).get("id"),
+            "capability_version": (audit.get("capability") or {}).get("version"),
             "critical": (audit.get("severity") or {}).get("critical", 0),
             "high": (audit.get("severity") or {}).get("high", 0),
         })
@@ -3125,6 +3138,7 @@ class Director:
                 "display_name": self.domain_pack.display_name,
                 "pack_version": self.domain_pack.version,
                 "skills_available": [name for name, _when in self.domain_pack.skill_catalog()],
+                "capabilities_available": list(self.domain_pack.capabilities),
                 "report_contract": True,
             })
         await self._init_connector_tools()  # register toggled connectors as read tools

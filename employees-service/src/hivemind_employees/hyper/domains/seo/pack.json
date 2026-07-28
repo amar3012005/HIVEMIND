@@ -4,5 +4,12 @@
   "display_name": "SEO",
   "description": "Search demand, technical discoverability, content gaps, and measurable organic growth.",
   "lead_shape": "maker",
-  "default_skill": "technical-seo-audit"
+  "default_skill": "technical-seo-audit",
+  "capabilities": [
+    {
+      "id": "seo.site-intelligence",
+      "version": "1.0.0",
+      "when": "A public website must be discovered, rendered, technically audited, or mapped before SEO recommendations are made."
+    }
+  ]
 }

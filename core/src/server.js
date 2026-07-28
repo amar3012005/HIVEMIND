@@ -5717,6 +5717,17 @@ exit \$RC
       // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
       if (pathname === '/api/meetings/transcribe' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'stt_unavailable' }, 503);
+        // Meeting-notes minutes are a plan limit (see src/billing/plans.js —
+        // meetingMinutesPerMonth). Checked BEFORE we burn a transcription call,
+        // and charged 1 minute here as the admission floor; the real duration is
+        // derived from meetings.duration_sec, so this gate only has to stop an
+        // org that is already at the ceiling.
+        if (planEnforcer && orgId) {
+          const minCheck = await planEnforcer.checkLimit(orgId, 'meetingMinutes', 1);
+          if (!minCheck.allowed) {
+            return jsonResponse(res, planLimitBody(minCheck, 'meetingMinutes'), minCheck.status || 402);
+          }
+        }
         try {
           const chunks = [];
           for await (const c of req) chunks.push(c);
@@ -10211,6 +10222,21 @@ exit \$RC
           // }
           if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
             return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+          }
+          // Cognitive layer / dreaming — Scale and Enterprise only (capability
+          // gate, not a meter; see features.cognitiveDreaming in plans.js). 402
+          // rather than 403 so the FE PlanLimitModal offers the upgrade inline
+          // instead of the user hitting an opaque "forbidden".
+          if (!orgPlan.features.cognitiveDreaming
+              && (pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
+              && req.method !== 'GET') {
+            return jsonResponse(res, {
+              error: 'Cognitive layer (dreaming) requires the Scale plan or higher',
+              code: 'plan_limit_exceeded', reason: 'PLAN_FEATURE',
+              message: 'Cognitive layer (dreaming) requires the Scale plan or higher',
+              resource: 'cognitiveDreaming', plan: orgPlan.id,
+              suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing',
+            }, 402);
           }
         }
       }

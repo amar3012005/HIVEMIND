@@ -1,9 +1,24 @@
 /**
  * HIVEMIND Subscription Plans
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THIS FILE IS THE SINGLE GROUND TRUTH FOR EVERY PLAN LIMIT AND FEATURE GATE.
+ *
+ * To change what a plan allows, edit the numbers HERE and nowhere else. Nothing
+ * downstream may hardcode a limit: the enforcer, the API gates, the usage
+ * endpoint and the frontend plan cards all read these values. If you find a
+ * limit written somewhere else, that is a bug — delete it and read from here.
+ *
+ * Conventions:
+ *   -1  = unlimited
+ *    0  = feature effectively off for this plan
+ *   Keys ending PerDay / PerMonth are usage meters (reset on that period).
+ *   Keys starting max* are ceilings on a live count (memories, seats, projects).
+ *   `features` are boolean capability gates — on/off, not metered.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * Pricing: flat monthly + overage. EUR currency.
- * Philosophy: all features available on all plans — pay for volume, not capabilities.
- * Limits: memories, LLM tokens/mo, deep research/mo, web intel/day, connectors, users, KB pages/mo.
+ * Philosophy: most capabilities on all plans — pay for volume, not features.
  */
 
 const BASE_FEATURES = {
@@ -17,6 +32,10 @@ const BASE_FEATURES = {
   llmObserver: true,
   secondBrain: true,
   // Plan-gated (not usage-gated):
+  // Cognitive layer / "dreaming" — background synthesis over the org's memories.
+  // Scale and Enterprise only: it runs continuous LLM work per org, so it is a
+  // capability gate rather than a meter.
+  cognitiveDreaming: false,
   ssoSaml: false,
   auditLogs: false,
   webhooks: false,
@@ -47,6 +66,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 100,
       knowledgeBasePagesPerDay: 25,
       maxHyperRooms: 1,
+      // Meeting notes: 60 minutes of transcription per month.
+      meetingMinutesPerMonth: 60,
       hyperAgentRunsPerDay: 5,
       hyperAgentRunsPerMonth: 25,
       taraTalkSecondsPerDay: 300,
@@ -83,6 +104,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 1_000,
       knowledgeBasePagesPerDay: 250,
       maxHyperRooms: 5,
+      // Meeting notes: 5 hours per month.
+      meetingMinutesPerMonth: 300,
       hyperAgentRunsPerDay: 50,
       hyperAgentRunsPerMonth: 500,
       taraTalkSecondsPerDay: 1_800,
@@ -118,6 +141,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 10_000,
       knowledgeBasePagesPerDay: 2_500,
       maxHyperRooms: 25,
+      // Meeting notes: 10 hours per month.
+      meetingMinutesPerMonth: 600,
       hyperAgentRunsPerDay: 500,
       hyperAgentRunsPerMonth: 5_000,
       taraTalkSecondsPerDay: 14_400,
@@ -125,6 +150,7 @@ export const PLANS = {
     },
     features: {
       ...BASE_FEATURES,
+      cognitiveDreaming: true,
       ssoSaml: true,
       auditLogs: true,
       webhooks: true,
@@ -157,6 +183,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: -1,
       knowledgeBasePagesPerDay: -1,
       maxHyperRooms: -1,
+      // Enterprise onboarding: unmetered for now.
+      meetingMinutesPerMonth: -1,
       hyperAgentRunsPerDay: -1,
       hyperAgentRunsPerMonth: -1,
       taraTalkSecondsPerDay: -1,
@@ -164,6 +192,7 @@ export const PLANS = {
     },
     features: {
       ...BASE_FEATURES,
+      cognitiveDreaming: true,
       ssoSaml: true,
       auditLogs: true,
       webhooks: true,

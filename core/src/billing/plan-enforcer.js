@@ -265,6 +265,43 @@ export class PlanEnforcer {
       }
     }
 
+    // Meeting-notes minutes. DERIVED from meetings.duration_sec for the current
+    // calendar month rather than kept in a counter column: the meetings rows are
+    // the truth, so a derived number cannot drift from them, needs no schema
+    // change, and self-heals if a transcription is deleted. Same reasoning as
+    // 'memories', which reads its live count instead of a counter.
+    if (type === 'meetingMinutes') {
+      const limit = limits.meetingMinutesPerMonth;
+      if (!limit || limit === -1) return { allowed: true };
+      let usedMinutes = 0;
+      try {
+        const rows = await this.prisma.$queryRawUnsafe(
+          `SELECT COALESCE(SUM("duration_sec"), 0) AS secs
+             FROM hivemind.meetings
+            WHERE "org_id" = $1::uuid
+              AND "created_at" >= date_trunc('month', CURRENT_DATE)`,
+          orgId,
+        );
+        usedMinutes = Math.ceil(Number(rows?.[0]?.secs || 0) / 60);
+      } catch (err) {
+        // Fail OPEN on a metering read error. Refusing to transcribe because a
+        // usage query failed punishes the customer for our outage; the monthly
+        // ceiling will still catch them on the next successful read.
+        console.warn('[plan-enforcer] meeting minutes read failed:', err.message);
+        return { allowed: true };
+      }
+      if (usedMinutes + amount > limit) {
+        return {
+          allowed: false,
+          reason: `Meeting notes limit reached (${planDef.name} plan: ${limit} minutes/month)`,
+          limit,
+          current: usedMinutes,
+          plan: planDef.id,
+          period: 'month',
+        };
+      }
+    }
+
     if (type === 'deepResearch') {
       const limit = limits.deepResearchPerMonth;
       if (!limit || limit === -1) return { allowed: true };

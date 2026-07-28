@@ -96,7 +96,12 @@ export async function buildOrgBrief(prisma, orgId, { userId = null, maxChars = M
       // segments" tells TARA a topic exists without telling her what it is, which
       // is worse than useless on a live call because it invites her to fill the
       // gap herself.
-      const label = stripOrgPrefix(title, org?.name);
+      // tidy() BOTH sides. The title is already normalized, and this org's name
+      // holds a U+202F narrow no-break space — \s matches it, so the title's copy
+      // became a plain space while the raw name kept it, and the prefix never
+      // matched. Comparing normalized-to-raw is the bug; comparing like to like
+      // is the fix.
+      const label = stripOrgPrefix(title, tidy(org?.name));
       const line = (label && body && !body.toLowerCase().startsWith(label.toLowerCase())
         ? `${label}: ${body}`
         : (body || label)).slice(0, 150);

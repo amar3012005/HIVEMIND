@@ -210,7 +210,8 @@ most 2. Human, not scripted. Never invent facts."""
 async def plan_opening(*, persona_prompt: str, goal: str, company: str,
                        language: str) -> dict:
     """One fast-model call at call start → {opening, strategy, goal_state}."""
-    fallback = {"opening": "", "strategy": "", "goal_state": f"Objective: {goal}" if goal else ""}
+    fallback = {"opening": "", "strategy": "", "goal_state": f"Objective: {goal}" if goal else "",
+                "hypotheses": []}
     if not config.OPENROUTER_API_KEY or not goal:
         return fallback
     user = (
@@ -227,7 +228,7 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
                     "model": config.DIRECT_MODEL,
                     "messages": [{"role": "system", "content": _PLAN_SYS},
                                  {"role": "user", "content": user}],
-                    "max_tokens": 300, "temperature": 0.4,
+                    "max_tokens": 600, "temperature": 0.4,
                     "provider": ({"order": config.DIRECT_PROVIDER, "allow_fallbacks": True}
                                  if config.DIRECT_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
                     **({"reasoning": {"effort": config.DIRECT_REASONING_EFFORT}}
@@ -239,10 +240,26 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
         text = r.json()["choices"][0]["message"]["content"] or ""
         m = _JSON_RE.search(text)
         out = json.loads(m.group(0)) if m else {}
+        # The seeded set is the whole point of planning — normalize it here so the
+        # session starts steering on turn 1 instead of re-deriving mid-call.
+        seeded: List[Dict[str, Any]] = []
+        for item in (out.get("hypotheses") or []):
+            if not isinstance(item, dict):
+                continue
+            h = str(item.get("h") or "").strip()[:160]
+            if not h:
+                continue
+            try:
+                w = max(0, min(100, int(item.get("w", 50))))
+            except (TypeError, ValueError):
+                w = 50
+            seeded.append({"h": h, "w": w})
+        seeded.sort(key=lambda x: x["w"], reverse=True)
         return {
             "opening": str(out.get("opening") or "")[:400],
             "strategy": str(out.get("strategy") or "")[:300],
             "goal_state": str(out.get("goal_state") or (f"Objective: {goal}" if goal else ""))[:300],
+            "hypotheses": seeded[:4],
         }
     except Exception as e:  # noqa: BLE001
         log.warning("plan_opening failed: %s", e)

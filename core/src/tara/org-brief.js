@@ -21,10 +21,28 @@
 
 const CACHE = new Map(); // `${orgId}:${userId}` → { brief, at }
 const TTL_MS = 5 * 60 * 1000;
-const MAX_CHARS = 500;
+const MAX_CHARS = 700;
 
 function tidy(line) {
   return String(line || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * "Acme GmbH — Positioning" → "Positioning". Many memories are titled with their
+ * own org as a prefix, which is pure repetition inside a brief that already names
+ * the org on line one — and repetition is expensive when the whole thing is capped.
+ */
+function stripOrgPrefix(title, orgName) {
+  if (!orgName) return title;
+  const name = orgName.trim();
+  if (!title.toLowerCase().startsWith(name.toLowerCase())) return title;
+  // Strip whatever separator follows: hyphen, en/em dash, colon, pipe, bullet.
+  // Written with \u escapes on purpose — a literal em dash in this source once
+  // failed to match a literal em dash in the data, and unicode escapes remove
+  // any doubt about what byte is actually in the pattern.
+  const rest = title.slice(name.length)
+    .replace(/^[\s\u2010-\u2015\u2212:|\u00b7_-]+/, '');
+  return rest || title;
 }
 
 /**
@@ -60,7 +78,7 @@ export async function buildOrgBrief(prisma, orgId, { userId = null, maxChars = M
         memoryType: { in: ['fact', 'decision'] },
       },
       orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
-      take: 12,
+      take: 24,
       select: { title: true, content: true },
     });
 
@@ -68,12 +86,23 @@ export async function buildOrgBrief(prisma, orgId, { userId = null, maxChars = M
     if (org?.name) bits.push(`Organization: ${tidy(org.name)}`);
     const seen = new Set();
     for (const row of rows) {
-      // Title when there is one (already a human-written one-liner), else a
-      // clipped first sentence of the body.
-      const raw = tidy(row.title) || tidy(row.content).split(/(?<=[.!?])\s/)[0];
-      const line = raw.slice(0, 120);
-      if (!line || seen.has(line.toLowerCase())) continue;
-      seen.add(line.toLowerCase());
+      const title = tidy(row.title);
+      const body = tidy(row.content);
+      // The agent stores its own settings as ordinary `fact` memories. Those are
+      // app configuration, not knowledge about the org, and read as pure noise on
+      // a call ("TARA Config: default"), so they never belong in the brief.
+      if (/^(tara (config|skill)|assistant (name|onboarding)|voice preference|onboarding )/i.test(title)) continue;
+      // Title AND substance. A title alone is a table of contents — "ICP / target
+      // segments" tells TARA a topic exists without telling her what it is, which
+      // is worse than useless on a live call because it invites her to fill the
+      // gap herself.
+      const label = stripOrgPrefix(title, org?.name);
+      const line = (label && body && !body.toLowerCase().startsWith(label.toLowerCase())
+        ? `${label}: ${body}`
+        : (body || label)).slice(0, 150);
+      const key = line.toLowerCase().slice(0, 60);
+      if (!line || seen.has(key)) continue;
+      seen.add(key);
       bits.push(`- ${line}`);
       if (bits.join('\n').length >= maxChars) break;
     }

@@ -95,7 +95,20 @@ TELNYX_ALLOWED_NUMBERS = ALLOWED_NUMBERS  # alias
 VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-20b")
+# Strategist model. The whole deepgram path runs on Cerebras gpt-oss-120b —
+# same model as the direct answer and spoken recall, so one engine reasons about
+# the call and one engine talks. The router previously ran gemini-2.5-flash-lite,
+# which reweighted and dropped branches fine but would not reliably ADD a new read
+# or carry the tell that justified one, and had a 5s latency tail. Grok is
+# unaffected: it reasons with its own native model.
+ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-120b")
+# Provider pin + reasoning effort for the router, mirroring the direct path.
+# Without the pin OpenRouter latency-sorts across hosts and the strategist's
+# speed becomes whoever answers first, which is what produced the fat tail.
+ROUTER_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_ROUTER_PROVIDER", "Cerebras").split(",") if p.strip()]
+# The router emits a hypothesis set, not prose — it earns more reasoning than the
+# speaking path. Cerebras is fast enough that medium still lands inside a turn.
+ROUTER_REASONING_EFFORT = os.getenv("TARA_DG_ROUTER_REASONING", "medium")
 # Direct-answer model. gpt-oss-120b on Cerebras = ~3x faster full completion
 # than llama-70b (the TTS-blocking metric). Provider pin + low reasoning effort.
 DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "openai/gpt-oss-120b")

@@ -152,7 +152,10 @@ async def route(*, persona_name: str, goal: str,
                     # silently fell back to its default (empty directive, frozen set).
                     "max_tokens": 700,
                     "temperature": 0.2,
-                    "provider": {"sort": "latency", "allow_fallbacks": True},
+                    "provider": ({"order": config.ROUTER_PROVIDER, "allow_fallbacks": True}
+                                 if config.ROUTER_PROVIDER else {"sort": "latency", "allow_fallbacks": True}),
+                    **({"reasoning": {"effort": config.ROUTER_REASONING_EFFORT}}
+                       if "gpt-oss" in config.ROUTER_MODEL and config.ROUTER_REASONING_EFFORT else {}),
                 },
             )
         if r.status_code != 200:

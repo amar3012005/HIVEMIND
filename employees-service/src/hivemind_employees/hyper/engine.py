@@ -2549,6 +2549,10 @@ class Director:
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
+        brief_payload = self.campaign_brief.get("brief") if isinstance(self.campaign_brief.get("brief"), dict) else self.campaign_brief
+        duration_days = max(1, int(brief_payload.get("duration_days") or 14))
+        last_action_minimum = max(0, (duration_days - 2) * 1440)
+        last_action_maximum = max(0, (duration_days - 1) * 1440)
         from .campaign_contract import (
             CAMPAIGN_CONTRACT_VERSION,
             assemble_campaign_bundle,
@@ -2559,7 +2563,8 @@ class Director:
             "You are the final Campaign Intelligence synthesizer. Return one compact JSON object with exactly "
             "report_markdown and plan. Write the polished user-facing operating report once, then provide only the "
             "semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
-            "rows, payload mirrors, schedule defaults, safety scaffolding, launch controls, and requirement coverage. "
+            "rows, payload mirrors, safety scaffolding, launch controls, and requirement coverage; it does not repair "
+            "missing strategy, evidence, copy, timing, hypotheses, or action controls. "
             "The report must contain Recommendation, Audience, Positioning, Content System, Campaign Sequence, "
             "Schedule, Measurement, Risks, and Launch Readiness. Do not repeat internal prompts, method names, or IDs. "
             "Required plan shape: {objective:string,strategy:string,"
@@ -2570,15 +2575,19 @@ class Director:
             "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],"
             "actions:[{id:string,channel:string,title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
             "creative_brief:{required:boolean,concept:string,alt_text:string},"
-            "claim_status:verified|assumption|no_claim,evidence_ids:string[],hypothesis_id:string}],"
+            "claim_status:verified|no_claim,evidence_ids:string[],hypothesis_id:string,dependencies:string[],"
+            "success_measure:string,rollback_or_exit:string}],"
             "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},debate_conflicts_present:boolean,"
             "debate_decisions:[{conflict:string,decision:string,rationale:string,dissent:string}],"
             "evidence:[{id:string,claim:string,source:string,status:verified|assumption|missing,url:string,source_type:string,confidence:string}],"
             "creative_system:{approved_claim_ids:string[],hypotheses:[{id:string,insight:string,promise:string,hook:string,cta:string,channels:string[],experiment_hypothesis:string}]},"
             "assumptions:string[],risks:string[]}. "
             "Record material debate decisions. Generate the full action range for every selected channel. Every action "
-            "must reference a declared hypothesis. Verified claims may reference only verified evidence; assumptions must "
-            "never appear as factual public copy. Every KPI must label its target_type. No placeholders or invented URLs. "
+            "must reference a declared hypothesis and contain rationale, dependencies, success_measure, and rollback_or_exit. "
+            "Executable actions may use only claim_status verified or no_claim: verified requires directly supporting "
+            "verified evidence_ids; no_claim copy must contain no customer, performance, numerical, compliance, or outcome "
+            "claim. Keep assumptions in plan.assumptions, never in final_copy. Every KPI must label its target_type. "
+            "No placeholders or invented URLs. "
             "NON-NEGOTIABLE COMPLETENESS: include at least three genuinely different strategy_options, set selected_strategy_id "
             "to one of them, give every creative hypothesis a CTA, and include every required action before returning. "
             "For Gmail payload include verified to, subject, and recipient_policy. For TARA include verified E.164 to, "
@@ -2586,6 +2595,8 @@ class Director:
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
             "The report and plan must agree exactly on action count, timing, claims, metrics, and launch readiness. "
+            f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
+            f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
             "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )

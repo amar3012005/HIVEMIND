@@ -677,6 +677,11 @@ def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
     assert errors == ["strategy needs delivery"]
     assert models == [director.synth_model]
     assert len(message_sets) == 1
+    system = message_sets[0][0]["content"]
+    assert "success_measure:string" in system
+    assert "rollback_or_exit:string" in system
+    assert "final action must be between 17280 and 18720 inclusive" in system
+    assert "it does not repair" in system
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

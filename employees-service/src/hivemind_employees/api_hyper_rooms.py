@@ -3196,7 +3196,7 @@ async def _orchestrate_single_agent(
             "assignments_ok": bool(contributions),
             "grounded_ok": accepted,
             "gaps": [] if accepted else ["The deterministic Campaign Contract was not accepted."],
-            "note": "Campaign Contract accepted." if accepted else "Campaign Contract needs repair.",
+            "note": "Campaign delivery accepted by governance." if accepted else "Campaign governance found unmet deliverables; nothing was approved.",
             "produced_artifacts": [],
             "pending_writes": [],
             "intended_output": "campaign_contract",

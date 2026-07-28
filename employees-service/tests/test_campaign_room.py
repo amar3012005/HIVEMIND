@@ -102,6 +102,23 @@ def test_campaign_compiler_does_not_hide_action_overdelivery():
     assert len(bundle["timeline"]) == 7
 
 
+def test_campaign_compiler_normalizes_offsets_to_the_promised_horizon():
+    semantic = {
+        "actions": [
+            {"id": "one", "channel": "x_organic", "final_copy": "First", "scheduled_offset_minutes": 0},
+            {"id": "two", "channel": "x_organic", "final_copy": "Second", "scheduled_offset_minutes": 1440},
+            {"id": "three", "channel": "x_organic", "final_copy": "Third", "scheduled_offset_minutes": 2880},
+        ],
+    }
+    bundle = assemble_campaign_bundle(
+        semantic, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
+
+    assert [action["scheduled_offset_minutes"] for action in bundle["actions"]] == [0, 9360, 18720]
+    assert [row["scheduled_offset_minutes"] for row in bundle["timeline"]] == [0, 9360, 18720]
+
+
 def test_campaign_governance_does_not_mutate_missing_semantics():
     bundle = {"contract_version": CAMPAIGN_CONTRACT_VERSION, "actions": [], "evidence": []}
     before = copy.deepcopy(bundle)

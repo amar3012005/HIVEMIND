@@ -202,6 +202,15 @@ def assemble_campaign_bundle(
             for field in ("required_elements", "forbidden_elements", "unsupported_claims", "visual_references"):
                 creative_brief.setdefault(field, [])
         action["creative_brief"] = creative_brief
+    # Minute offsets are an operational representation, not campaign judgment.
+    # Preserve action order but ensure the normalized sequence actually occupies
+    # the requested horizon. Governance still rejects missing/invalid actions.
+    if len(actions) > 1:
+        offsets = [action.get("scheduled_offset_minutes") for action in actions]
+        minimum_final_offset = max(0, (duration - 2) * 1440)
+        if all(isinstance(offset, int) and not isinstance(offset, bool) for offset in offsets) and max(offsets) < minimum_final_offset:
+            for index, action in enumerate(actions):
+                action["scheduled_offset_minutes"] = round(final_offset * index / (len(actions) - 1))
     plan["actions"] = actions
 
     plan["timeline"] = [{

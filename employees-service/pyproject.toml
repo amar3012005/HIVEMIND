@@ -37,6 +37,9 @@ loguru = "^0.7.2"
 # ReActAgent for each employee, MsgHub for inter-agent broadcasting,
 # Toolkit for HIVEMIND tool registration.
 agentscope = "^1.0.19"
+# AgentScope 1.0.x imports the MCP 1.x streamable HTTP symbol. MCP 2.0
+# renamed that API and makes the service fail during module import.
+mcp = ">=1.13,<2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

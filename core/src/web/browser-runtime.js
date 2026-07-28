@@ -16,6 +16,7 @@
 import fs from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import { getTavilyClient } from './tavily-client.js';
+import { PlaywrightServiceRuntime } from './playwright-service-runtime.js';
 
 // ---------------------------------------------------------------------------
 // Reliability primitives
@@ -316,13 +317,18 @@ function classifyError(error, context = {}) {
 // Job timeout wrapper
 // ---------------------------------------------------------------------------
 
-function withJobTimeout(promise) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(Object.assign(new Error('job_timeout'), { _jobTimeout: true })), JOB_TIMEOUT_MS)
-    )
-  ]);
+async function withJobTimeout(promise) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('job_timeout'), { _jobTimeout: true })), JOB_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,6 +1313,7 @@ export class BrowserRuntime {
   constructor() {
     this.primary = new TavilyRuntime();
     this.lightpanda = new LightpandaRuntime();
+    this.playwrightService = new PlaywrightServiceRuntime();
     this.fallback = new FetchFallbackRuntime();
     this._tavilyUnavailable = false;
   }
@@ -1489,25 +1496,33 @@ export class BrowserRuntime {
 
   /**
    * SEO audits require rendered DOM metadata that Tavily's markdown crawl does
-   * not expose. Use the browser runtime first and only fall back to static fetch.
+   * not expose. Use the shared Playwright service first, then local Lightpanda,
+   * and make any static fallback explicit in the evidence.
    */
   async seoAudit({ urls, depth = 2, pageLimit = 25 }) {
     const start = Date.now();
     try {
-      const result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit }));
-      return { ...result, runtime_used: 'lightpanda', fallback_applied: false, duration_ms: Date.now() - start };
-    } catch (browserError) {
+      const result = await withJobTimeout(this.playwrightService.crawl({ urls, depth, pageLimit }));
+      return { ...result, runtime_used: 'playwright-service', fallback_applied: false, duration_ms: Date.now() - start };
+    } catch (serviceError) {
       try {
-        const result = await withJobTimeout(this.fallback.crawl({ urls, depth, pageLimit }));
-        return {
-          ...result,
-          runtime_used: 'fetch',
-          fallback_applied: true,
-          duration_ms: Date.now() - start,
-          errors: [...(result.errors || []), { target: urls?.[0], type: 'render_fallback', error: browserError.message }],
-        };
-      } catch (fallbackError) {
-        throw new Error(`SEO rendering failed. Browser: ${browserError.message}; Fetch: ${fallbackError.message}`);
+        const result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit }));
+        return { ...result, runtime_used: 'lightpanda', fallback_applied: true, duration_ms: Date.now() - start,
+          errors: [...(result.errors || []), { target: urls?.[0], type: 'renderer_fallback', error: serviceError.message }] };
+      } catch (localBrowserError) {
+        try {
+          const result = await withJobTimeout(this.fallback.crawl({ urls, depth, pageLimit }));
+          return {
+            ...result,
+            runtime_used: 'fetch',
+            fallback_applied: true,
+            duration_ms: Date.now() - start,
+            errors: [...(result.errors || []),
+              { target: urls?.[0], type: 'render_fallback', error: `Playwright: ${serviceError.message}; Lightpanda: ${localBrowserError.message}` }],
+          };
+        } catch (fallbackError) {
+          throw new Error(`SEO rendering failed. Playwright: ${serviceError.message}; Lightpanda: ${localBrowserError.message}; Fetch: ${fallbackError.message}`);
+        }
       }
     }
   }

@@ -21,6 +21,7 @@ test('SEO static fallback preserves metadata and discovery provenance', async ()
   });
   try {
     const runtime = new BrowserRuntime();
+    runtime.playwrightService.crawl = async () => { throw new Error('service unavailable'); };
     runtime.lightpanda.crawl = async () => { throw new Error('browser unavailable'); };
     const result = await runtime.seoAudit({
       urls: ['https://example.com/', 'https://example.com/sitemap-page'], depth: 1, pageLimit: 3,

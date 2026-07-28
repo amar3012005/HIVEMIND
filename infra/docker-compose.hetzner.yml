@@ -336,6 +336,14 @@ services:
     mem_limit: 1536m
     memswap_limit: 2304m
     cpus: 0.75
+    environment:
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8932/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
   #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.

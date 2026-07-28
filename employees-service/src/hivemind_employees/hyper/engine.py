@@ -3102,6 +3102,23 @@ class Director:
                 f"Open with a 2-3 sentence executive summary BEFORE the first heading; close with "
                 f"'## Gaps to confirm' when anything is UNVERIFIED."
             )
+        if self.room_kind == "seo" and depth == "operating":
+            sysp += (
+                "\n\nSEO FINAL EVIDENCE LOCK:\n"
+                "- The completed SEO_AUDIT_EVIDENCE object is the only authority for current site state. "
+                "Copy its maturity stage, measurements, artifact ID, findings, templates, and limitations exactly.\n"
+                "- A declared canonical mismatch does NOT prove a page is unindexed, poorly indexed, hidden, or "
+                "de-indexed. Public crawl evidence never proves Google index status.\n"
+                "- Recommend ONLY defect types explicitly present in findings. If structured data, metadata, "
+                "Core Web Vitals, duplicates, robots blocks, or noindex are absent from findings, do not claim or fix them.\n"
+                "- Never create a second audit ID, source, role, benchmark, target, threshold, time window, word-count "
+                "standard, page-count goal, ranking goal, traffic goal, or expected lift. Use only measured numbers on "
+                "the board. Process dates may come from the user's requested 7/30/90-day horizon.\n"
+                "- Owners are the named participants as planning owners only. Do not invent their job titles or "
+                "unnamed teams. Mark an implementation owner as 'confirm' when the board does not identify one.\n"
+                "- Search opportunity demand remains UNKNOWN until connected evidence exists. Roadmap gates verify "
+                "implementation and rescans, not rankings, indexation, impressions, or traffic."
+            )
 
         _org = (self.company_brief or "").strip()
         _org_block = (f"COMPANY CONTEXT (write FOR this organisation — in its voice, about its products, customers, "

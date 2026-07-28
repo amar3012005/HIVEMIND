@@ -50,6 +50,11 @@ class DialRequest(BaseModel):
     company: Optional[str] = None
     mode: Optional[str] = None
     context: Optional[str] = None
+    # Compact org brief built by core at dial time (who TARA works for). Pydantic
+    # DROPS unknown fields silently, so core was sending this and both adapters were
+    # throwing it away — the field must be declared to exist. It reaches session meta
+    # via **req.model_dump() below.
+    org_brief: Optional[str] = None
 
 
 async def _zernio(method: str, path: str, extra_headers: Optional[dict] = None, **kwargs) -> dict:

@@ -51,6 +51,11 @@ class DialRequest(BaseModel):
     # Outreach campaigns: per-prospect brief (firm, website, why-fit, prior-call
     # learnings) — grounds the strategist + prompt so TARA knows WHO it's calling.
     context: Optional[str] = None
+    # Compact org brief built by core at dial time (who TARA works for). Pydantic
+    # DROPS unknown fields silently, so core was sending this and both adapters were
+    # throwing it away — the field must be declared to exist. It reaches session meta
+    # via **req.model_dump() below.
+    org_brief: Optional[str] = None
 
 
 def _b64_basic(user: str, pw: str) -> str:

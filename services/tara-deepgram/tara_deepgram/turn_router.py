@@ -133,7 +133,10 @@ async def route(*, persona_name: str, goal: str,
                     "model": config.ROUTER_MODEL,
                     "messages": [{"role": "system", "content": _ROUTER_SYS},
                                  {"role": "user", "content": user}],
-                    "max_tokens": 300,
+                    # The set is emitted every turn, so the budget must fit schema +
+                    # up to 4 hypotheses. At 300 the JSON truncated and EVERY field
+                    # silently fell back to its default (empty directive, frozen set).
+                    "max_tokens": 700,
                     "temperature": 0.2,
                     "provider": {"sort": "latency", "allow_fallbacks": True},
                 },
@@ -144,6 +147,9 @@ async def route(*, persona_name: str, goal: str,
         text = r.json()["choices"][0]["message"]["content"] or ""
         m = _JSON_RE.search(text)
         out = json.loads(m.group(0)) if m else {}
+        if not out:
+            log.warning("router returned unparseable output (%d chars) — defaults applied: %s",
+                        len(text), text[:200])
         action = out.get("action") if out.get("action") in ("direct", "recall") else "recall"
         turns = min(max(int(out.get("history_turns", 3) or 3), 2), 8)
         directive = str(out.get("directive") or "")[:300]
@@ -172,6 +178,11 @@ async def route(*, persona_name: str, goal: str,
         hyps = sorted(hyps, key=lambda x: x["w"], reverse=True)[:4]
         if not hyps:
             hyps = hypotheses or []
+        # The doctrine defines confidence as the weight of the LEAD hypothesis, so
+        # derive it instead of trusting a second self-reported number that can drift
+        # out of step with the set the thresholds actually read.
+        if hyps:
+            confidence = hyps[0]["w"]
         ms = round((time.monotonic() - t0) * 1000)
         log.info("router action=%s turns=%d facts+%d ms=%d phase=%s conf=%d goal=%s",
                  action, turns, len(new_facts), ms, phase, confidence, new_goal[:60])

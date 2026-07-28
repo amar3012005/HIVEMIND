@@ -106,9 +106,13 @@ ROUTER_MODEL = os.getenv("TARA_DG_ROUTER_MODEL", "openai/gpt-oss-120b")
 # Without the pin OpenRouter latency-sorts across hosts and the strategist's
 # speed becomes whoever answers first, which is what produced the fat tail.
 ROUTER_PROVIDER = [p.strip() for p in os.getenv("TARA_DG_ROUTER_PROVIDER", "Cerebras").split(",") if p.strip()]
-# The router emits a hypothesis set, not prose — it earns more reasoning than the
-# speaking path. Cerebras is fast enough that medium still lands inside a turn.
-ROUTER_REASONING_EFFORT = os.getenv("TARA_DG_ROUTER_REASONING", "medium")
+# LOW, measured — not assumed. On Cerebras gpt-oss-120b low returns a parsed
+# decision in ~580ms AND adds the new read (it caught "my brother runs scheduling"
+# as an authority signal, which gemini-flash-lite never did). Medium took 933ms and
+# came back UNPARSEABLE: reasoning tokens are billed against max_tokens, so a
+# bigger effort starves the JSON it is supposed to produce. More effort is a
+# regression here, not an upgrade.
+ROUTER_REASONING_EFFORT = os.getenv("TARA_DG_ROUTER_REASONING", "low")
 # Direct-answer model. gpt-oss-120b on Cerebras = ~3x faster full completion
 # than llama-70b (the TTS-blocking metric). Provider pin + low reasoning effort.
 DIRECT_MODEL = os.getenv("TARA_DG_DIRECT_MODEL", "openai/gpt-oss-120b")

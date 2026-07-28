@@ -248,7 +248,7 @@ services:
       # rather than in an untracked env file nobody can review.
       TARA_DG_ROUTER_MODEL: ${TARA_DG_ROUTER_MODEL:-openai/gpt-oss-120b}
       TARA_DG_ROUTER_PROVIDER: ${TARA_DG_ROUTER_PROVIDER:-Cerebras}
-      TARA_DG_ROUTER_REASONING: ${TARA_DG_ROUTER_REASONING:-medium}
+      TARA_DG_ROUTER_REASONING: ${TARA_DG_ROUTER_REASONING:-low}
       # AMD is OFF. Controlled A/B on one number with a stable baseline:
       # without AMD 38s/35s/35s/37s and the media bridge opened every time;
       # with AMD 6s and the bridge NEVER opened. Zernio's "defer the bridge

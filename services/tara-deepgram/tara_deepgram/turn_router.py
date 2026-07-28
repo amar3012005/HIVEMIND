@@ -116,7 +116,11 @@ async def route(*, persona_name: str, goal: str,
     fallback = {"action": "recall", "history_turns": 3, "directive": prev_directive or "",
                 "goal_state": goal_state, "new_facts": [],
                 "phase": phase, "confidence": confidence,
-                "hypotheses": hypotheses or []}
+                # lead/router_ms belong here too: callers read decision["lead"], and a
+                # fallback missing the key turns a slow model into a KeyError crash.
+                "hypotheses": hypotheses or [],
+                "lead": (hypotheses[0]["h"] if hypotheses else ""),
+                "router_ms": 0}
     if not config.OPENROUTER_API_KEY:
         return fallback
 

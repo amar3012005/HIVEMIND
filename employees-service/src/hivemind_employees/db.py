@@ -5,6 +5,7 @@ lifecycle stays in control-plane), but writes happen for metric bumps.
 from __future__ import annotations
 
 import asyncpg
+import json
 import logging
 from typing import Optional, List, Dict, Any
 

@@ -551,10 +551,12 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
         // then stayed status=live with empty lines forever (FE spins, nothing renders).
         let _sweepProjectId = null;
         let _sweepGoal = '';
+        let _sweepRoomTag = 'general';
         try {
-          const _pr = await prisma.$queryRawUnsafe('SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
+          const _pr = await prisma.$queryRawUnsafe('SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
           _sweepProjectId = _pr?.[0]?.project_id || null;
           _sweepGoal = _pr?.[0]?.goal || '';
+          _sweepRoomTag = _pr?.[0]?.room_tag || 'general';
         } catch { /* org-wide re-kick is acceptable for recovery */ }
         _sweepKicked.add(t.id);
         console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
@@ -566,6 +568,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
             room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
             user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: _sweepProjectId,
             room_goal: _sweepGoal,
+            task_tag: `ROOM_${String(_sweepRoomTag).toUpperCase()}`,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           },
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));

@@ -21,6 +21,17 @@ test('compileSeoAudit turns crawler evidence into stable prioritized findings', 
     assert.equal(audit.pages[0].template, 'homepage');
     assert.ok(audit.score < 100);
     assert.equal(audit.limitations.length, 3);
+    assert.equal(audit.evidence_quality.level, 'rendered');
+});
+
+test('compileSeoAudit marks static fallback evidence and health as provisional', () => {
+  const audit = compileSeoAudit({
+    seedUrl: 'https://example.com/', runtimeUsed: 'fetch',
+    pages: [{ url: 'https://example.com/', title: 'Static response', wordCount: 100, links: [] }],
+  });
+  assert.equal(audit.evidence_quality.level, 'degraded');
+  assert.equal(audit.evidence_quality.score_status, 'provisional');
+  assert.match(audit.limitations[0], /degraded static-HTML audit/);
 });
 
 test('inspectSeoSiteFiles follows robots sitemap declarations', async () => {

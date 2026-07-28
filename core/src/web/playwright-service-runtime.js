@@ -2,7 +2,7 @@ import { validateDomain } from './web-policy.js';
 
 const DEFAULT_ENDPOINT = 'http://hm-playwright:8932/v1/crawl';
 const DEFAULT_SETTLE_MS = 350;
-const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_TIMEOUT_MS = 270_000;
 
 function normalizeUrl(value) {
   try {

@@ -154,6 +154,10 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
     type: text(error?.type || 'crawl_error'),
     message: text(error?.error || error?.message || 'Unable to inspect URL'),
   }));
+  const renderedEvidence = ['playwright-service', 'lightpanda', 'playwright'].includes(runtimeUsed);
+  const evidenceQuality = renderedEvidence
+    ? { level: 'rendered', score_status: 'comparable', reason: 'Pages were inspected from a browser-rendered DOM.' }
+    : { level: 'degraded', score_status: 'provisional', reason: 'The browser renderer was unavailable; static HTML can miss client-rendered content and links.' };
 
   return {
     schema: AUDIT_VERSION,
@@ -162,6 +166,7 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
     scanned_at: scannedAt,
     runtime: runtimeUsed,
     score,
+    evidence_quality: evidenceQuality,
     coverage: {
       pages_scanned: auditedPages.length,
       pages_discovered: discoveredUrls.size,
@@ -193,6 +198,7 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
       status: 'not_connected', connected: false,
     },
     limitations: [
+      ...(renderedEvidence ? [] : ['This is a degraded static-HTML audit. Treat its health score, content depth, internal-link graph, and orphan-page signals as provisional.']),
       ...(searchConsole?.status === 'connected' ? [] : ['Public crawl evidence does not prove Google index status or search demand.']),
       'Core Web Vitals require field or Lighthouse measurements and are not inferred from HTML.',
       ...(searchConsole?.status === 'connected' ? [] : ['Connect Search Console to add first-party query, page, click, impression, CTR, and position evidence.']),

@@ -22,7 +22,10 @@ import { PlaywrightServiceRuntime } from './playwright-service-runtime.js';
 // Reliability primitives
 // ---------------------------------------------------------------------------
 
-const JOB_TIMEOUT_MS = Number(process.env.HIVEMIND_WEB_JOB_TIMEOUT_MS || 120000);
+// Browser audits are background jobs. A multi-page rendered crawl can
+// legitimately exceed two minutes on script-heavy sites, so the orchestration
+// timeout must remain above the renderer client's own deadline.
+const JOB_TIMEOUT_MS = Number(process.env.HIVEMIND_WEB_JOB_TIMEOUT_MS || 300000);
 
 class DomainConcurrencyTracker {
   constructor(maxPerDomain = 3) {

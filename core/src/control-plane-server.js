@@ -47,7 +47,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires } from './onboarding/company-discovery.js';
-import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -786,6 +786,30 @@ async function storeOfficialWebsiteVisual({ html, pageUrl, orgId }) {
   return null;
 }
 
+async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
+  if (!screenshot) return null;
+  try {
+    let image = null;
+    const dataMatch = String(screenshot).match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/i);
+    if (dataMatch) {
+      const buffer = Buffer.from(dataMatch[2], 'base64');
+      const contentType = buffer.length <= HYPER_VISUAL_MAX_BYTES ? verifiedImageType(buffer, dataMatch[1]) : null;
+      if (contentType) image = { buffer, contentType, sourceUrl: 'firecrawl-screenshot' };
+    } else if (/^https:\/\//i.test(String(screenshot))) {
+      image = await fetchWebsiteImage(String(screenshot));
+    }
+    if (!image) return null;
+    const paths = companyVisualPaths(orgId);
+    fs.writeFileSync(paths.official, image.buffer);
+    fs.writeFileSync(paths.metadata, JSON.stringify({ contentType: image.contentType, sourceUrl: image.sourceUrl }));
+    try { fs.rmSync(paths.screenshot, { force: true }); } catch { /* best-effort */ }
+    return `/v1/hyper/company/screenshot?v=${Date.now()}`;
+  } catch (error) {
+    console.warn('[hyper-onboarding] Firecrawl screenshot skipped:', error.message);
+    return null;
+  }
+}
+
 // ── HyperAgents nightly operating cycle (Polsia's "works while you sleep") ──
 // Once a day (HYPER_CYCLE_HOUR_UTC) every onboarded org gets ONE todo task
 // picked up and executed in its workroom, then the owner gets a morning
@@ -919,9 +943,6 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
 
 // Chromium is heavy; cap concurrent captures so parallel onboardings can't
 // thrash the single hm-playwright browser. A tiny FIFO semaphore.
-const HYPER_SHOT_MAX = parseInt(process.env.HYPER_SHOT_CONCURRENCY || '2', 10);
-let _hyperShotActive = 0;
-const _hyperShotQueue = [];
 const HYPER_SIDECAR_BASE_URL = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
 
 // Outreach campaign runner (batch email/call over Places prospects) — lazy
@@ -954,16 +975,6 @@ function dispatchHyperRoomTurn(body) {
   });
 }
 
-async function _acquireShotSlot() {
-  if (_hyperShotActive < HYPER_SHOT_MAX) { _hyperShotActive++; return; }
-  await new Promise((resolve) => _hyperShotQueue.push(resolve));
-  _hyperShotActive++;
-}
-function _releaseShotSlot() {
-  _hyperShotActive = Math.max(0, _hyperShotActive - 1);
-  const next = _hyperShotQueue.shift();
-  if (next) next();
-}
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = requireAdminSecret();
 const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
@@ -7648,7 +7659,8 @@ Write the persona now.`;
       _hyperOnboardJobs.set(orgId, job);
       const say = (text) => { job.lines.push({ ts: Date.now(), text }); };
 
-      // LLM helper — Groq primary with the file-wide OpenRouter failover.
+      // The shared fetch router rewrites this legacy-compatible request onto the
+      // canonical Cerebras gpt-oss-120b route, with the configured provider failover.
       const llm = async (sys, user, { json = false, maxTokens = 900 } = {}) => {
         const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
@@ -7719,95 +7731,6 @@ Write the persona now.`;
         'x-hm-user-id': userId,
         'x-hm-org-id': orgId,
       };
-      // Homepage screenshot via the hm-playwright MCP server (@playwright/mcp,
-      // streamable HTTP :8931). Minimal JSON-RPC client: initialize → navigate →
-      // take_screenshot; responses may arrive SSE-framed. Best-effort with a hard
-      // time budget — no screenshot never blocks onboarding.
-      // Capture the homepage and WRITE IT TO DISK (out of PG). Returns the
-      // served URL path or null. Concurrency-capped, with a post-load settle so
-      // JS-heavy sites paint before the shot. Best-effort — never blocks onboarding.
-      const screenshotSite = async (targetUrl) => {
-        const base = process.env.HYPER_PLAYWRIGHT_URL || 'http://hm-playwright:8931/mcp';
-        const toolError = (json) => {
-          const content = json?.result?.content || [];
-          const line = content.find((item) => item?.type === 'text' && /(?:^|\n)### Error\b/.test(item.text || ''));
-          return line ? String(line.text || '').replace(/^### Error\s*/i, '').trim() : '';
-        };
-        const parseMcp = async (r) => {
-          const txt = await r.text();
-          const m = txt.match(/data:\s*(\{[\s\S]*?\})\s*(?:\n\n|$)/);
-          try { return JSON.parse(m ? m[1] : txt); } catch { return null; }
-        };
-        const call = async (sessionId, payload, timeoutMs) => {
-          const ac = new AbortController();
-          const t = setTimeout(() => ac.abort(), timeoutMs);
-          try {
-            const r = await fetch(base, {
-              method: 'POST', signal: ac.signal,
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json, text/event-stream',
-                ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-              },
-              body: JSON.stringify(payload),
-            });
-            clearTimeout(t);
-            return { sid: r.headers.get('mcp-session-id') || sessionId, json: await parseMcp(r) };
-          } catch (error) {
-            clearTimeout(t);
-            console.warn('[hyper-onboarding] Playwright MCP call failed:', error.message);
-            return { sid: sessionId, json: null };
-          }
-        };
-        await _acquireShotSlot();
-        try {
-          const init = await call(null, {
-            jsonrpc: '2.0', id: 1, method: 'initialize',
-            params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'hivemind-onboarding', version: '1.0' } },
-          }, 8000);
-          if (!init.sid) return null;
-          await call(init.sid, { jsonrpc: '2.0', method: 'notifications/initialized' }, 4000);
-          const navigated = await call(init.sid, {
-            jsonrpc: '2.0', id: 2, method: 'tools/call',
-            params: { name: 'browser_navigate', arguments: { url: targetUrl } },
-          }, 25000);
-          const navigationError = toolError(navigated.json);
-          if (navigationError) {
-            console.warn('[hyper-onboarding] Playwright navigation failed:', navigationError);
-            return null;
-          }
-          // Settle: let lazy-loaded/hero JS paint before the capture (best-effort;
-          // browser_wait_for {time} just sleeps browser-side).
-          await call(init.sid, {
-            jsonrpc: '2.0', id: 3, method: 'tools/call',
-            params: { name: 'browser_wait_for', arguments: { time: 2.5 } },
-          }, 6000);
-          const shot = await call(init.sid, {
-            jsonrpc: '2.0', id: 4, method: 'tools/call',
-            params: { name: 'browser_take_screenshot', arguments: { type: 'jpeg' } },
-          }, 20000);
-          const screenshotError = toolError(shot.json);
-          if (screenshotError) {
-            console.warn('[hyper-onboarding] Playwright screenshot failed:', screenshotError);
-            return null;
-          }
-          const content = shot.json?.result?.content || [];
-          const img = content.find((c) => c.type === 'image' && c.data);
-          if (!img?.data) return null;
-          try {
-            const paths = companyVisualPaths(orgId);
-            fs.writeFileSync(paths.screenshot, Buffer.from(img.data, 'base64'));
-            try { fs.rmSync(paths.official, { force: true }); } catch { /* best-effort */ }
-            try { fs.rmSync(paths.metadata, { force: true }); } catch { /* best-effort */ }
-          } catch (e) { console.warn('[hyper-onboarding] screenshot write failed:', e.message); return null; }
-          // Cache-bust so a re-onboard's new capture isn't served stale.
-          return `/v1/hyper/company/screenshot?v=${Date.now()}`;
-        } catch (error) {
-          console.warn('[hyper-onboarding] screenshot capture failed:', error.message);
-          return null;
-        }
-        finally { _releaseShotSlot(); }
-      };
       const webSearch = async (query, { limit = 5 } = {}) => {
         try {
           const start = await fetch(`${CONFIG.coreApiBaseUrl}/api/web/search/jobs`, {
@@ -7848,7 +7771,6 @@ Write the persona now.`;
           // links that the company actually exposes. Never invent conventional
           // /about, /product, or /pricing paths.
           const homepageUrl = `https://${host}/`;
-          const screenshotPromise = screenshotSite(homepageUrl);
           const fetchPage = async (pageUrl) => {
             say(`Fetching: ${pageUrl}...`);
             const ac = new AbortController();
@@ -7861,20 +7783,10 @@ Write the persona now.`;
               return { url: resolvedUrl, text: stripHtml(html), html, links: discoverHttpLinks(html, resolvedUrl) };
             } catch { return { url: pageUrl, text: '', html: '', links: [] }; } finally { clearTimeout(t); }
           };
-          const selectResearchPages = async (candidates, { maxPages = 6 } = {}) => {
-            if (!Array.isArray(candidates) || !candidates.length) return [];
-            try {
-              const result = JSON.parse(await llm(
-                'You select complementary first-party website pages for company onboarding. Understand page titles, descriptions, and paths in ANY language. Output ONLY JSON: {"pages":[{"url":"","purpose":"identity|offering|location|proof|team|commercial|company"}]}. Select up to the requested limit. Prefer pages that together establish exact identity, offerings, company location or legal identity, customer proof, team, and commercial model when those pages actually exist. Do not invent URLs, translate paths, or select a page absent from CANDIDATES. Include the homepage. A deterministic validator will reject every URL not present in CANDIDATES.',
-                `REQUESTED LIMIT: ${maxPages}\nCANDIDATES:\n${JSON.stringify(candidates.slice(0, 80))}`,
-                { json: true, maxTokens: 700 },
-              ));
-              return Array.isArray(result?.pages) ? result.pages : [];
-            } catch { return []; }
-          };
-          const [homepage, firecrawlResearch] = await Promise.all([
+          const [homepage, firecrawlResearch, initialCoverage] = await Promise.all([
             fetchPage(homepageUrl),
-            researchCompanyWebsite(homepageUrl, { maxPages: 8, onProgress: say }),
+            researchCompanyWebsite(homepageUrl, { maxPages: 5, onProgress: say }),
+            searchCompanyMarket(`${host} company official social contact competitors`, { limit: 10 }),
           ]);
           let pages = firecrawlResearch.pages;
           if (firecrawlResearch.provider !== 'firecrawl') {
@@ -7882,8 +7794,7 @@ Write the persona now.`;
               say('Firecrawl was unavailable; using direct first-party website reading');
             }
             const candidates = discoverCompanyPages(homepage.html, homepage.url || homepageUrl, { maxPages: 40 });
-            const semanticSelection = await selectResearchPages(candidates, { maxPages: 6 });
-            const selected = selectCompanyResearchPages(candidates, homepage.url || homepageUrl, { maxPages: 6, semanticSelection });
+            const selected = selectCompanyResearchPages(candidates, homepage.url || homepageUrl, { maxPages: 5 });
             const discovered = selected.filter((page) => page.depth > 0);
             if (discovered.length) say(`Selected ${discovered.length} complementary pages from the homepage navigation`);
             else say('No additional company pages were linked from the homepage');
@@ -7903,8 +7814,8 @@ Write the persona now.`;
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
 
           say(`Capturing homepage: https://${host}/...`);
-          let screenshot = await screenshotPromise;
-          let websiteVisualSource = screenshot ? 'homepage-screenshot' : null;
+          let screenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlResearch.screenshot, orgId });
+          let websiteVisualSource = screenshot ? 'firecrawl-screenshot' : null;
           if (!screenshot) {
             screenshot = await storeOfficialWebsiteVisual({
               html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId,
@@ -7917,9 +7828,9 @@ Write the persona now.`;
             }
           }
 
-          // Identity is synthesized from first-party pages only. External search
-          // happens after identity resolution, so a same-name company can never
-          // rename this organization or supply its location/offering.
+          // Identity is synthesized from first-party pages only. The parallel
+          // external search is used later for corroboration and never supplies
+          // the company name, location, or offering.
           say('Verifying company identity and location');
           const research = [];
 
@@ -7942,6 +7853,7 @@ Write the persona now.`;
           profile.social_profiles = Array.isArray(firecrawlResearch.social_profiles)
             ? firecrawlResearch.social_profiles
             : [];
+          profile.contact_details = firecrawlResearch.contacts || extractCompanyContacts(pages);
           // Clamp: the LLM sometimes copies the site <title> verbatim
           // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
           // the segment before any "|"/"–" separator, cap length hard.
@@ -7952,12 +7864,21 @@ Write the persona now.`;
           const locationContext = profile.location || profile.location_country || '';
           const evidenceQuery = `${companyName} ${host}`;
           say(`Running one company and social-presence search for ${companyName}...`);
-          let coverage = await searchCompanyMarket(evidenceQuery, {
-            limit: 10,
-            location: locationContext,
-            country: profile.location_country,
-          });
-          if (!coverage.length) coverage = await webSearch(evidenceQuery, { limit: 10 });
+          say('Writing your mission');
+          const coveragePromise = initialCoverage.length ? Promise.resolve(initialCoverage) : (async () => {
+            let findings = await searchCompanyMarket(evidenceQuery, {
+              limit: 10,
+              location: locationContext,
+              country: profile.location_country,
+            });
+            if (!findings.length) findings = await webSearch(evidenceQuery, { limit: 10 });
+            return findings;
+          })();
+          const missionPromise = llm(
+            'Write a crisp 2-3 sentence company mission statement grounded in the profile. Output only the mission text.',
+            JSON.stringify(profile), { maxTokens: 200 },
+          ).catch(() => `Build ${companyName} into the category leader.`);
+          let [coverage, mission] = await Promise.all([coveragePromise, missionPromise]);
           profile.social_profiles = verifiedSocialProfiles(pages, coverage);
           const officialSocialUrls = new Set(profile.social_profiles.map((social) => social.url));
           coverage = coverage.filter((item) => {
@@ -7979,14 +7900,12 @@ Write the persona now.`;
             evidence_scope: isFirstPartyUrl(item.url, homepageUrl) ? 'first-party-search' : 'external-market',
           })));
 
-          say('Writing your mission');
-          let mission = '';
-          try {
-            mission = await llm(
-              'Write a crisp 2-3 sentence company mission statement grounded in the profile. Output only the mission text.',
-              JSON.stringify(profile), { maxTokens: 200 },
-            );
-          } catch { mission = `Build ${companyName} into the category leader.`; }
+          const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
+          const starterTaskGenerationPromise = llm(
+            'Create one immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 10 words. Each detail must be 30-60 words, company-specific, and explain the work, evidence, decision, and business value. Each deliverable must name one concrete output in at most 8 words. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
+            `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}\nCURRENT SOURCES: ${JSON.stringify(research.slice(0, 6))}${userGoal ? `\nUSER PRIORITY: ${userGoal}` : ''}`,
+            { json: true, maxTokens: 1800 },
+          ).catch(() => null);
 
           say('Assembling your team');
           // One company per org: retire the prior company's agents + rooms + canon
@@ -8177,9 +8096,7 @@ Write the persona now.`;
             { title: `${companyName} — Competitors & market`, memoryType: 'fact',
               content: `COMPETITORS of ${companyName}: ${(profile.competitors || []).join(', ') || '(none identified)'}.\nMARKET RESEARCH:\n${research.map((r) => `• ${r.title}: ${r.snippet}`).join('\n')}`.slice(0, 6000) },
           ];
-          for (const sec of sections) {
-            await saveMemory({ ...sec, tags: canonTags });
-          }
+          await Promise.all(sections.map((section) => saveMemory({ ...section, tags: canonTags })));
 
           // Mirror the company identity into ORG-SCOPED profile facts so the
           // /hivemind/app/profile page + the get_user_profile chat tool show the
@@ -8204,26 +8121,20 @@ Write the persona now.`;
               { key: 'company:location_region', value: profile.location_region || null },
               { key: 'company:location_country', value: profile.location_country || null },
             ].filter((f) => f.value && String(f.value).trim());
-            for (const f of companyFacts) {
-              await _ps.upsertFact({
+            await Promise.all(companyFacts.map((fact) => _ps.upsertFact({
                 userId, orgId, category: 'static',
-                key: f.key, value: String(f.value).slice(0, 500),
+                key: fact.key, value: String(fact.value).slice(0, 500),
                 confidence: 0.95, sourceMemoryId: null,
-              }).catch(() => {});
-            }
+              }).catch(() => {})));
           } catch (err) {
             console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
           }
 
           say('Planning your first tasks');
           let tasks = [];
-          const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
           try {
-            const tj = JSON.parse(await llm(
-              'Create one immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 10 words. Each detail must be 30-60 words, company-specific, and explain the work, evidence, decision, and business value. Each deliverable must name one concrete output in at most 8 words. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
-              `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}\nCURRENT SOURCES: ${JSON.stringify(research.slice(0, 6))}${userGoal ? `\nUSER PRIORITY: ${userGoal}` : ''}`,
-              { json: true, maxTokens: 1800 },
-            ));
+            const generatedTasks = await starterTaskGenerationPromise;
+            const tj = generatedTasks ? JSON.parse(generatedTasks) : { tasks: [] };
             const proposed = new Map((Array.isArray(tj.tasks) ? tj.tasks : [])
               .filter((task) => task && starterRooms.some((roomDefinition) => roomDefinition.key === task.room_tag))
               .map((task) => [task.room_tag, task]));
@@ -8314,6 +8225,7 @@ Write the persona now.`;
             room_id: room.id,
             room_name: room.name,
             onboarded_at: new Date().toISOString(),
+            onboarding_duration_ms: Date.now() - job.startedAt,
           };
           try {
             resultPayload.domain_rooms = await ensureDomainRooms({
@@ -8338,7 +8250,7 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
-          say('Completed · onboarding');
+          say(`Completed · onboarding in ${Math.max(1, Math.round((Date.now() - job.startedAt) / 1000))}s`);
           job.result = resultPayload;
           job.done = true;
         } catch (err) {

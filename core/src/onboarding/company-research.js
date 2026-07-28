@@ -145,6 +145,31 @@ export function verifiedSocialProfiles(pages, searchResults = []) {
     : profile);
 }
 
+export function extractCompanyContacts(pages) {
+  const emails = new Set();
+  const phones = new Set();
+  const addEmail = (value) => {
+    const email = String(value || '').trim().toLowerCase().replace(/[),.;]+$/, '');
+    if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email) && !/\.(?:png|jpe?g|gif|webp|svg)$/i.test(email)) emails.add(email);
+  };
+  const addPhone = (value) => {
+    const phone = decodeURIComponent(String(value || '')).replace(/^tel:/i, '').trim().replace(/[).,;]+$/, '').trim();
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length >= 8 && digits.length <= 16) phones.add(phone.replace(/\s+/g, ' '));
+  };
+  for (const page of Array.isArray(pages) ? pages : []) {
+    const content = String(page?.content || '');
+    for (const match of content.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) addEmail(match[0]);
+    for (const match of content.matchAll(/(?:tel:|phone:\s*)(\+?[\d][\d\s()./-]{7,20})/gi)) addPhone(match[1]);
+    for (const match of content.matchAll(/(?:^|[^\w])((?:\+|00)\d[\d\s()./-]{7,20})/g)) addPhone(match[1]);
+    for (const rawLink of Array.isArray(page?.links) ? page.links : []) {
+      if (/^mailto:/i.test(rawLink)) addEmail(rawLink.replace(/^mailto:/i, '').split('?')[0]);
+      if (/^tel:/i.test(rawLink)) addPhone(rawLink);
+    }
+  }
+  return { emails: [...emails].slice(0, 5), phones: [...phones].slice(0, 5) };
+}
+
 const COUNTRY_CODES = new Map(Object.entries({
   austria: 'AT', belgium: 'BE', bulgaria: 'BG', croatia: 'HR', cyprus: 'CY', czechia: 'CZ',
   denmark: 'DK', estonia: 'EE', finland: 'FI', france: 'FR', germany: 'DE', greece: 'GR',
@@ -173,8 +198,8 @@ export async function searchCompanyMarket(query, {
       ...(cleanString(location, 200) ? { location: cleanString(location, 200) } : {}),
       ...(countryCode ? { country: countryCode } : {}),
       ...(Array.isArray(includeDomains) && includeDomains.length ? { includeDomains: includeDomains.slice(0, 10) } : {}),
-      timeout: 45000,
-    }, { apiKey, timeoutMs: 55000 });
+      timeout: 15000,
+    }, { apiKey, timeoutMs: 20000 });
     return (Array.isArray(payload?.data?.web) ? payload.data.web : []).map((item) => ({
       title: cleanString(item?.title || item?.metadata?.title, 300),
       url: cleanString(item?.url || item?.metadata?.sourceURL || item?.metadata?.url, 1000),
@@ -188,24 +213,34 @@ export async function searchCompanyMarket(query, {
 
 export async function researchCompanyWebsite(websiteUrl, {
   apiKey = process.env.FIRECRAWL_API_KEY,
-  maxPages = 8,
+  maxPages = 5,
   onProgress = () => {},
-  pollDelays = [12000, 24000, 30000],
+  pollDelays = Array(10).fill(2000),
 } = {}) {
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
-    const limit = Math.min(10, Math.max(5, Number(maxPages) || 8));
+    const limit = Math.min(6, Math.max(3, Number(maxPages) || 5));
     onProgress(`Crawling up to ${limit} first-party pages with Firecrawl`);
+    const homepagePromise = firecrawlRequest('/scrape', {
+      url: websiteUrl,
+      formats: ['markdown', 'links', { type: 'screenshot', fullPage: false, quality: 70, viewport: { width: 1280, height: 720 } }],
+      onlyMainContent: false,
+      removeBase64Images: true,
+      blockAds: true,
+      waitFor: 0,
+      timeout: 25000,
+      maxAge: 86400000,
+    }, { apiKey, timeoutMs: 30000 }).catch(() => null);
     const started = await firecrawlRequest('/crawl', {
       url: websiteUrl,
       limit,
-      maxDiscoveryDepth: 2,
-      crawlEntireDomain: true,
+      maxDiscoveryDepth: 1,
+      crawlEntireDomain: false,
       sitemap: 'include',
       allowSubdomains: false,
       allowExternalLinks: false,
       ignoreQueryParameters: true,
-      maxConcurrency: 1,
+      maxConcurrency: 3,
       scrapeOptions: {
         formats: ['markdown', 'links'],
         onlyMainContent: true,
@@ -213,12 +248,32 @@ export async function researchCompanyWebsite(websiteUrl, {
         blockAds: true,
         maxAge: 86400000,
       },
-    }, { apiKey, timeoutMs: 50000 });
+    }, { apiKey, timeoutMs: 10000 }).catch(() => null);
     const jobId = started?.id;
-    if (!jobId) throw new Error('Firecrawl crawl did not return a job id');
+    if (!jobId) {
+      const homepagePayload = await homepagePromise;
+      const homepageData = homepagePayload?.data || homepagePayload;
+      const homepage = homepageData?.markdown ? {
+        url: homepageData?.metadata?.sourceURL || homepageData?.metadata?.url || websiteUrl,
+        title: cleanString(homepageData?.metadata?.title, 300),
+        description: cleanString(homepageData?.metadata?.description, 500),
+        content: compactText(homepageData.markdown, 9000),
+        links: Array.isArray(homepageData?.links) ? homepageData.links.slice(0, 300) : [],
+        purpose: 'company',
+        provider: 'firecrawl',
+      } : null;
+      if (!homepage?.content || !isFirstPartyUrl(homepage.url, websiteUrl)) throw new Error('Firecrawl returned no usable first-party pages');
+      return {
+        provider: 'firecrawl', pages: [homepage], mapped: 1,
+        social_profiles: verifiedSocialProfiles([homepage]),
+        contacts: extractCompanyContacts([homepage]),
+        screenshot: cleanString(homepageData?.screenshot, 2000000) || null,
+        credits_used: 1, error: null,
+      };
+    }
     let status = null;
-    const boundedPollDelays = (Array.isArray(pollDelays) && pollDelays.length ? pollDelays : [12000, 24000, 30000])
-      .slice(0, 3)
+    const boundedPollDelays = (Array.isArray(pollDelays) && pollDelays.length ? pollDelays : Array(10).fill(2000))
+      .slice(0, 12)
       .map((value) => Math.max(0, Number(value) || 0));
     for (const delayMs of boundedPollDelays) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -226,7 +281,7 @@ export async function researchCompanyWebsite(websiteUrl, {
         status = await firecrawlGet(`/crawl/${encodeURIComponent(jobId)}`, { apiKey, timeoutMs: 15000 });
       } catch (error) {
         if (error?.status === 429) {
-          await new Promise((resolve) => setTimeout(resolve, Math.max(error.retryAfterMs || 0, 30000)));
+          await new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(error.retryAfterMs || 0, 1500), 4000)));
           continue;
         }
         throw error;
@@ -238,12 +293,19 @@ export async function researchCompanyWebsite(websiteUrl, {
       if (status?.status === 'completed' || dataComplete) break;
       if (status?.status === 'failed' || status?.status === 'cancelled') throw new Error(status?.error || `Firecrawl crawl ${status.status}`);
     }
+    const homepagePayload = await homepagePromise;
+    const homepageData = homepagePayload?.data || homepagePayload;
     const dataComplete = Array.isArray(status?.data)
       && status.data.length > 0
       && Number(status?.total) > 0
       && Number(status?.completed) >= Number(status.total);
-    if (status?.status !== 'completed' && !dataComplete) throw new Error('Firecrawl crawl timed out');
-    const pages = (Array.isArray(status?.data) ? status.data : []).map((data) => ({
+    const crawlRows = status?.status === 'completed' || dataComplete ? (Array.isArray(status?.data) ? status.data : []) : [];
+    const rows = [
+      ...(homepageData?.markdown ? [{ ...homepageData, metadata: { ...(homepageData.metadata || {}), sourceURL: homepageData.metadata?.sourceURL || websiteUrl } }] : []),
+      ...crawlRows,
+    ];
+    const seen = new Set();
+    const pages = rows.map((data) => ({
       url: data?.metadata?.sourceURL || data?.metadata?.url || '',
       title: cleanString(data?.metadata?.title, 300),
       description: cleanString(data?.metadata?.description, 500),
@@ -251,7 +313,11 @@ export async function researchCompanyWebsite(websiteUrl, {
       links: Array.isArray(data?.links) ? data.links.slice(0, 300) : [],
       purpose: 'company',
       provider: 'firecrawl',
-    })).filter((page) => page.content && isFirstPartyUrl(page.url, websiteUrl)).slice(0, limit);
+    })).filter((page) => {
+      if (!page.content || !isFirstPartyUrl(page.url, websiteUrl) || seen.has(page.url)) return false;
+      seen.add(page.url);
+      return true;
+    }).slice(0, limit);
     if (!pages.length) throw new Error('Firecrawl returned no usable first-party pages');
     onProgress(`Read ${pages.length} first-party pages in one bounded crawl`);
     return {
@@ -259,6 +325,8 @@ export async function researchCompanyWebsite(websiteUrl, {
       pages,
       mapped: Number(status?.total || pages.length),
       social_profiles: verifiedSocialProfiles(pages),
+      contacts: extractCompanyContacts(pages),
+      screenshot: cleanString(homepageData?.screenshot, 2000000) || null,
       credits_used: Number(status?.creditsUsed || pages.length),
       error: null,
     };

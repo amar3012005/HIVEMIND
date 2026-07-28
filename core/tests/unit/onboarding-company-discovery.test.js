@@ -193,9 +193,38 @@ test('bounded Firecrawl crawl accepts complete data before the status label catc
     assert.equal(result.provider, 'firecrawl');
     assert.equal(result.pages.length, 1);
     assert.equal(result.credits_used, 1);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].body.limit, 5);
-    assert.equal(calls[0].body.maxConcurrency, 1);
+    assert.equal(calls.length, 3);
+    const crawlCall = calls.find((call) => call.body?.limit === 5);
+    assert.equal(crawlCall.body.maxConcurrency, 3);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Firecrawl homepage preview survives a crawl-start failure', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : {};
+    if (String(url).endsWith('/scrape')) {
+      assert.equal(body.formats.some((format) => format?.type === 'screenshot'), true);
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          markdown: 'Contact hello@example.com or [call](tel:+49 511 12345678).',
+          links: ['https://linkedin.com/company/example', 'mailto:hello@example.com', 'tel:+49 511 12345678'],
+          screenshot: 'https://cdn.example.com/homepage.png',
+          metadata: { sourceURL: 'https://example.com/', title: 'Example' },
+        },
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ success: false, error: 'crawl unavailable' }), { status: 503 });
+  };
+  try {
+    const result = await researchCompanyWebsite('https://example.com/', { apiKey: 'test-key', maxPages: 5 });
+    assert.equal(result.provider, 'firecrawl');
+    assert.equal(result.pages.length, 1);
+    assert.equal(result.screenshot, 'https://cdn.example.com/homepage.png');
+    assert.deepEqual(result.contacts, { emails: ['hello@example.com'], phones: ['+49 511 12345678'] });
   } finally {
     global.fetch = originalFetch;
   }

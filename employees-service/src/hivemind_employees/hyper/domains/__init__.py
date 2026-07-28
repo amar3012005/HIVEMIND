@@ -34,6 +34,8 @@ class DomainPack:
     skills: Dict[str, Tuple[str, str]]
     default_skill: str
     capabilities: Tuple[Dict[str, str], ...]
+    models: Dict[str, str]
+    strict_model_provider: bool
 
     def skill_catalog(self) -> List[Tuple[str, str]]:
         return [(name, when) for name, (when, _body) in self.skills.items()]
@@ -84,6 +86,15 @@ def _load_pack(path: str) -> Optional[DomainPack]:
                 "when": str(capability.get("when") or "").strip(),
             })
 
+        models = {}
+        for lane, model in (manifest.get("models") or {}).items():
+            if lane not in {"director", "persona", "synthesis"}:
+                raise ValueError("models may only configure director, persona, or synthesis")
+            model_id = str(model or "").strip()
+            if not model_id or len(model_id) > 120:
+                raise ValueError("invalid domain model id")
+            models[lane] = model_id
+
         return DomainPack(
             slug=slug,
             version=version,
@@ -96,6 +107,8 @@ def _load_pack(path: str) -> Optional[DomainPack]:
             skills=skills,
             default_skill=default_skill or next(iter(skills), ""),
             capabilities=tuple(capabilities),
+            models=models,
+            strict_model_provider=bool(manifest.get("strict_model_provider", False)),
         )
     except Exception as exc:  # noqa: BLE001 - one pack must never break general Rooms
         log.warning("[domains] skipped %s: %s", os.path.basename(path), exc)

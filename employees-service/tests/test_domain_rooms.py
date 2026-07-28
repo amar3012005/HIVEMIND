@@ -52,11 +52,38 @@ def test_domain_skills_use_progressive_disclosure():
     assert "international-and-local" in catalog
     assert "seo-measurement" in catalog
     seo_pack = get_domain_pack("seo")
-    assert seo_pack.capabilities == ({
+    assert seo_pack.capabilities[0] == {
         "id": "seo.site-intelligence",
         "version": "1.0.0",
         "when": "A public website must be discovered, rendered, technically audited, or mapped before SEO recommendations are made.",
-    },)
+    }
+    assert seo_pack.capabilities[1]["id"] == "seo.search-console"
+
+
+def test_seo_room_enforces_cerebras_gpt_oss_for_every_reasoning_lane():
+    director = Director(
+        user_message="audit example.com", user_id="user", org_id="org", project_id=None,
+        participants=[], room_template="auto", room_goal="SEO audit",
+        enabled_connectors=[], emit=lambda event: None, room_kind="seo",
+        director_model="another/director", persona_model="another/persona", synth_model="another/synth",
+    )
+    assert director.director_model == "gpt-oss-120b"
+    assert director.persona_model == "gpt-oss-120b"
+    assert director.synth_model == "gpt-oss-120b"
+    assert director.strict_model_provider is True
+
+
+def test_non_seo_room_keeps_caller_model_selection():
+    director = Director(
+        user_message="research competitors", user_id="user", org_id="org", project_id=None,
+        participants=[], room_template="auto", room_goal="Research",
+        enabled_connectors=[], emit=lambda event: None, room_kind="research",
+        director_model="custom/director", persona_model="custom/persona", synth_model="custom/synth",
+    )
+    assert director.director_model == "custom/director"
+    assert director.persona_model == "custom/persona"
+    assert director.synth_model == "custom/synth"
+    assert director.strict_model_provider is False
 
 
 def test_domain_pack_controls_room_lead_shape():

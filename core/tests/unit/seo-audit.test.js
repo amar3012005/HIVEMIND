@@ -22,6 +22,8 @@ test('compileSeoAudit turns crawler evidence into stable prioritized findings', 
     assert.ok(audit.score < 100);
     assert.equal(audit.limitations.length, 3);
     assert.equal(audit.evidence_quality.level, 'rendered');
+    assert.equal(audit.maturity.stage, 'technical_foundation');
+    assert.equal(audit.optimization_procedure[1].status, 'current');
 });
 
 test('compileSeoAudit marks static fallback evidence and health as provisional', () => {
@@ -31,7 +33,46 @@ test('compileSeoAudit marks static fallback evidence and health as provisional',
   });
   assert.equal(audit.evidence_quality.level, 'degraded');
   assert.equal(audit.evidence_quality.score_status, 'provisional');
+  assert.equal(audit.maturity.stage, 'assessment_incomplete');
   assert.match(audit.limitations[0], /degraded static-HTML audit/);
+});
+
+test('compileSeoAudit identifies measurement setup after a clean rendered crawl', () => {
+  const audit = compileSeoAudit({
+    seedUrl: 'https://example.com/', runtimeUsed: 'playwright-service',
+    siteFiles: {
+      robots: { status: 200, present: true },
+      sitemap: { status: 200, present: true },
+      discovery: { urls_found: 1, sitemap_urls_found: 1 },
+    },
+    pages: [{
+      url: 'https://example.com/', title: 'A useful and descriptive homepage title',
+      description: 'A useful search result description for this example website.',
+      canonical: 'https://example.com/', h1: ['Example'], wordCount: 500,
+      jsonLd: '{}', images: [], links: [], discovery: { source: 'seed', depth: 0 },
+    }],
+  });
+  assert.equal(audit.maturity.stage, 'measurement_setup');
+  assert.match(audit.maturity.rationale, /first-party Google/);
+  assert.equal(audit.optimization_procedure[2].status, 'current');
+  assert.ok(audit.optimization_procedure.every((step) => step.verification));
+});
+
+test('compileSeoAudit advances to opportunity execution with first-party evidence', () => {
+  const audit = compileSeoAudit({
+    seedUrl: 'https://example.com/', runtimeUsed: 'playwright-service',
+    siteFiles: { robots: { status: 200, present: true }, sitemap: { status: 200, present: true } },
+    searchConsole: { status: 'connected', connected: true, opportunities: [{ type: 'high_impression_low_ctr', query: 'example' }] },
+    pages: [{
+      url: 'https://example.com/', title: 'A useful and descriptive homepage title',
+      description: 'A useful search result description for this example website.',
+      canonical: 'https://example.com/', h1: ['Example'], wordCount: 500,
+      jsonLd: '{}', images: [], links: [], discovery: { source: 'seed', depth: 0 },
+    }],
+  });
+  assert.equal(audit.maturity.stage, 'opportunity_execution');
+  assert.equal(audit.optimization_procedure[3].status, 'current');
+  assert.match(audit.optimization_procedure[3].actions[0], /1 deterministic/);
 });
 
 test('inspectSeoSiteFiles follows robots sitemap declarations', async () => {

@@ -121,6 +121,110 @@ function aggregateFindings(findings) {
   return [...grouped.values()].sort((a, b) => WEIGHTS[b.severity] - WEIGHTS[a.severity] || b.instances - a.instances);
 }
 
+function seoMaturity({ renderedEvidence, auditedPages, normalizedErrors, severity, siteFiles, searchConsole, findings }) {
+  const searchConnected = searchConsole?.status === 'connected';
+  const opportunities = asArray(searchConsole?.opportunities);
+  const robotsKnown = siteFiles?.robots?.status !== undefined;
+  const sitemapKnown = siteFiles?.sitemap?.status !== undefined;
+  const technicalBlockers = [
+    ...(severity.critical ? [`${severity.critical} critical page finding(s)`] : []),
+    ...(severity.high ? [`${severity.high} high-priority page finding(s)`] : []),
+    ...(normalizedErrors.length ? [`${normalizedErrors.length} crawl error(s)`] : []),
+    ...(robotsKnown && !siteFiles?.robots?.present ? ['robots.txt was not detected'] : []),
+    ...(sitemapKnown && !siteFiles?.sitemap?.present ? ['an XML sitemap was not detected'] : []),
+  ];
+
+  let maturity;
+  if (!renderedEvidence || !auditedPages.length) {
+    maturity = {
+      stage: 'assessment_incomplete', stage_number: 0, stage_count: 4,
+      label: 'Assessment incomplete',
+      rationale: !auditedPages.length ? 'No crawlable pages were inspected.' : 'The crawl used degraded static evidence and must be confirmed with a rendered scan.',
+      next_stage: 'technical_foundation',
+      blockers: !auditedPages.length ? ['No rendered page evidence is available'] : ['Rendered browser evidence is not available'],
+      exit_criteria: ['Complete a rendered crawl with page discovery, site-file inspection, and no unresolved crawl failure.'],
+    };
+  } else if (technicalBlockers.length) {
+    maturity = {
+      stage: 'technical_foundation', stage_number: 1, stage_count: 4,
+      label: 'Technical foundation',
+      rationale: 'Search growth is constrained by crawl, indexation, or recurring page-template defects.',
+      next_stage: 'measurement_setup', blockers: technicalBlockers,
+      exit_criteria: ['Resolve critical and high findings, clear crawl errors, and rerun the rendered audit.'],
+    };
+  } else if (!searchConnected) {
+    maturity = {
+      stage: 'measurement_setup', stage_number: 2, stage_count: 4,
+      label: 'Measurement setup',
+      rationale: 'The rendered technical baseline is usable, but first-party Google query and landing-page evidence is not connected.',
+      next_stage: 'opportunity_execution', blockers: ['Google Search Console evidence is not connected'],
+      exit_criteria: ['Connect and select the verified Search Console property, then establish query and landing-page baselines.'],
+    };
+  } else if (opportunities.length || findings.length) {
+    maturity = {
+      stage: 'opportunity_execution', stage_number: 3, stage_count: 4,
+      label: 'Opportunity execution',
+      rationale: 'Technical and measurement foundations are available; the site can execute prioritized content, architecture, and search-demand opportunities.',
+      next_stage: 'continuous_optimization', blockers: [],
+      exit_criteria: ['Ship the prioritized changes, verify them with a rendered rescan, and measure impact against the Search Console baseline.'],
+    };
+  } else {
+    maturity = {
+      stage: 'continuous_optimization', stage_number: 4, stage_count: 4,
+      label: 'Continuous optimization',
+      rationale: 'No current deterministic blocker or opportunity crossed the audit thresholds.',
+      next_stage: null, blockers: [],
+      exit_criteria: ['Continue scheduled rescans and monitor Search Console for material regressions or new opportunities.'],
+    };
+  }
+
+  const recurring = findings.filter((item) => Number(item.instances || 0) > 1).length;
+  const phases = [
+    {
+      id: 'rendered_baseline', phase: 'Confirm the baseline', objective: 'Establish trustworthy crawl and discovery evidence.',
+      actions: ['Run a rendered crawl', 'Inspect robots.txt and XML sitemaps', 'Record crawl coverage and evidence limitations'],
+      verification: 'Rendered evidence is comparable and every crawl error is recorded.',
+    },
+    {
+      id: 'technical_foundation', phase: 'Stabilize technical foundations', objective: 'Remove issues that prevent reliable discovery, indexation, and page understanding.',
+      actions: [
+        `Resolve ${severity.critical || 0} critical and ${severity.high || 0} high finding(s)`,
+        `Fix recurring defects across ${recurring} affected template pattern(s)`,
+        'Rerun the crawl and compare page, template, and architecture evidence',
+      ],
+      verification: 'No critical or high findings remain and the rendered rescan introduces no crawl regression.',
+    },
+    {
+      id: 'measurement_setup', phase: 'Connect search measurement', objective: 'Replace inferred demand with first-party query and landing-page performance.',
+      actions: searchConnected
+        ? ['Maintain the selected Search Console property', 'Record current query and landing-page baselines']
+        : ['Connect Google Search Console', 'Select the verified organization property', 'Record query, page, click, impression, CTR, and position baselines'],
+      verification: 'Search Console evidence is connected and a dated baseline is available.',
+    },
+    {
+      id: 'opportunity_execution', phase: 'Execute prioritized growth work', objective: 'Improve the pages, content, and internal paths supported by crawl and demand evidence.',
+      actions: opportunities.length
+        ? [`Work the ${opportunities.length} deterministic Search Console opportunity item(s)`, 'Prioritize by expected impact, evidence confidence, and implementation effort', 'Ship changes with page-level ownership']
+        : ['Prioritize content and architecture findings by evidence and effort', 'Create or consolidate pages only where a distinct search intent is supported', 'Assign page-level owners and release dates'],
+      verification: 'Every shipped change has a URL, owner, release date, and before/after measurement.',
+    },
+    {
+      id: 'continuous_optimization', phase: 'Verify and compound', objective: 'Detect regressions and learn which changes improve organic performance.',
+      actions: ['Rerun the rendered audit after releases', 'Review Search Console on a fixed cadence', 'Promote verified learnings into the next optimization cycle'],
+      verification: 'Technical regressions are closed and measured outcomes inform the next prioritized cycle.',
+    },
+  ];
+  const activeIndex = Math.min(maturity.stage_number, phases.length - 1);
+  return {
+    maturity,
+    procedure: phases.map((phase, index) => ({
+      order: index + 1,
+      status: index < activeIndex ? 'complete' : index === activeIndex ? 'current' : 'upcoming',
+      ...phase,
+    })),
+  };
+}
+
 export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null, capability = null, searchConsole = null } = {}) {
   const auditedPages = asArray(pages).filter((page) => text(page?.url)).map(auditPage);
   const discoveredUrls = new Set([
@@ -158,6 +262,10 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
   const evidenceQuality = renderedEvidence
     ? { level: 'rendered', score_status: 'comparable', reason: 'Pages were inspected from a browser-rendered DOM.' }
     : { level: 'degraded', score_status: 'provisional', reason: 'The browser renderer was unavailable; static HTML can miss client-rendered content and links.' };
+  const maturityPlan = seoMaturity({
+    renderedEvidence, auditedPages, normalizedErrors, severity, siteFiles,
+    searchConsole, findings: aggregateFindings(findings),
+  });
 
   return {
     schema: AUDIT_VERSION,
@@ -167,6 +275,8 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
     runtime: runtimeUsed,
     score,
     evidence_quality: evidenceQuality,
+    maturity: maturityPlan.maturity,
+    optimization_procedure: maturityPlan.procedure,
     coverage: {
       pages_scanned: auditedPages.length,
       pages_discovered: discoveredUrls.size,

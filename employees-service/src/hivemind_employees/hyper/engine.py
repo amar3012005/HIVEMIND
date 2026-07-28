@@ -57,7 +57,7 @@ _CEREBRAS_URL = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai
 # Bare (slash-less) ids Cerebras serves on its own API. Env-overridable CSV. The GLM
 # final-report synth writer (zai-glm-4.7, measured ~4s/2.8k-char report) lives here.
 _CEREBRAS_DIRECT_MODELS = {m.strip() for m in
-    (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7")).split(",") if m.strip()}
+    (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7,gpt-oss-120b")).split(",") if m.strip()}
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 # Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
@@ -1228,8 +1228,9 @@ class Director:
         self.connectors = [str(c).lower() for c in (enabled_connectors or [])]
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
-        self.director_model = director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
-        self.persona_model = persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
+        domain_models = self.domain_pack.models if self.domain_pack else {}
+        self.director_model = domain_models.get("director") or director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
+        self.persona_model = domain_models.get("persona") or persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
         # Dedicated model for the FINAL deliverable. The gather loop + debate can run
         # on a cheap model (orchestration), but the synthesis is the product — so a
         # strong model writes it. When equal to director_model, no extra call (the
@@ -1238,7 +1239,8 @@ class Director:
         # (HYPER_SYNTH_MODEL). A Cerebras-hosted id (zai-glm-4.7) → _cerebras_chat DIRECT;
         # a namespaced slug (deepseek/…, google/…) → _openrouter_chat direct. Default =
         # director model (gpt-oss-120b) so unset = no behavior change.
-        self.synth_model = synth_model or os.environ.get("HYPER_SYNTH_MODEL") or self.director_model
+        self.synth_model = domain_models.get("synthesis") or synth_model or os.environ.get("HYPER_SYNTH_MODEL") or self.director_model
+        self.strict_model_provider = bool(self.domain_pack and self.domain_pack.strict_model_provider)
         # Live public-web search uses Groq's built-in web search (only on the
         # `groq/compound*` systems — gpt-oss can't run it directly). compound-mini is
         # cheaper/faster and fine for in-room gathering; env-tunable.
@@ -1343,7 +1345,14 @@ class Director:
         # Cerebras + hits its automatic prompt cache. A stable per-room+bucket cache_key
         # routes a room's repeat turns to the same cache backend (sent only when the
         # account has prompt_cache_key enabled — see _cerebras_chat).
-        if _route_cerebras_direct(body.get("model")):
+        cerebras_direct = _route_cerebras_direct(body.get("model"))
+        if self.strict_model_provider and not cerebras_direct:
+            log.error(
+                "[hyper-engine] strict provider route unavailable model=%s room_kind=%s",
+                body.get("model"), self.room_kind,
+            )
+            return None
+        if cerebras_direct:
             _ck = f"hyper:{self.org_id or 'x'}:{getattr(self, 'project_id', None) or 'x'}:{bucket}"
             j = await _cerebras_chat(body, timeout=httpx.Timeout(_to, connect=5.0), cache_key=_ck)
             if j is not None:
@@ -1356,6 +1365,9 @@ class Director:
                 self.io["output"] += int(u.get("completion_tokens", 0) or 0)
                 self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
                 return (j.get("choices") or [{}])[0].get("message") or None
+            if self.strict_model_provider:
+                log.error("[hyper-engine] strict provider unavailable model=%s room_kind=%s", body.get("model"), self.room_kind)
+                return None
             # Cerebras-direct unavailable → emergency failover to the SAME model on
             # OpenRouter (still GLM, other host) so the room still produces a report.
             _or = _or_model(body.get("model"))
@@ -1894,7 +1906,8 @@ class Director:
         # cannot lose it behind recall chatter. Full evidence remains in the web job.
         board_audit = {key: audit.get(key) for key in (
             "schema", "capability", "seed_url", "scanned_at", "score", "coverage", "severity",
-            "categories", "templates", "architecture", "site_files", "crawl_errors", "limitations",
+            "evidence_quality", "maturity", "optimization_procedure", "categories", "templates",
+            "architecture", "site_files", "crawl_errors", "limitations",
         )}
         board_audit["findings"] = (audit.get("findings") or [])[:6]
         board_audit["pages"] = (audit.get("pages") or [])[:8]

@@ -1,10 +1,16 @@
 {
   "slug": "seo",
-  "version": 3,
+  "version": 4,
   "display_name": "SEO",
   "description": "Search demand, technical discoverability, content gaps, and measurable organic growth.",
   "lead_shape": "maker",
   "default_skill": "technical-seo-audit",
+  "models": {
+    "director": "gpt-oss-120b",
+    "persona": "gpt-oss-120b",
+    "synthesis": "gpt-oss-120b"
+  },
+  "strict_model_provider": true,
   "capabilities": [
     {
       "id": "seo.site-intelligence",

@@ -31,7 +31,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import httpx
 
 from ..config import get_settings
-from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
+from .skills import load_method_skill, resolve_room_kind, skill_catalog
 from .domains import get_domain_pack
 from ..hivemind_client import (
     campaign_create_emulated,
@@ -129,13 +129,6 @@ _OR_PROVIDER_PIN = {
 # route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
 # on process restart (re-probes Groq once), so funding Groq self-heals.
 _GROQ_DEAD = False
-# Judgment-shaped tasks (plans/strategy/recommendations/priorities/trade-offs) must
-# convene the room even when the model-judged gate says "lookup" — deterministic backstop.
-_JUDGMENT_RE = re.compile(
-    r"\b(plan|plans|planning|strateg\w*|recommend\w*|priorit\w*|roadmap|budget\w*|"
-    r"should we|what should|decide|decision|trade.?off|compare|versus|\bvs\b|"
-    r"campaign|approach|proposal|options?)\b", re.IGNORECASE)
-
 _BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
 
 # Leading meta-planning cues that mark reasoning-model chain-of-thought
@@ -581,13 +574,6 @@ _SELF_REVISE_MAX_CYCLES = max(1, min(4, int(os.environ.get("HYPER_SELF_REVISE_MA
 _GATHER_DEEPEN = (os.environ.get("HYPER_GATHER_DEEPEN", "true").strip().lower() not in ("0", "false", "no", "off"))
 _GATHER_DEEPEN_MAX_Q = max(1, min(6, int(os.environ.get("HYPER_GATHER_DEEPEN_MAX_Q", "4") or "4")))
 
-# Web PROSPECTING: a query needing real-world contacts/businesses/people gets the strict
-# verbatim-or-NOT-VERIFIED extraction contract on the deep compound crawl (web_search + visit_website).
-# The regex picks prospecting intent — prompt selection only, never an output gate → general for any room.
-_PROSPECT_RE = re.compile(
-    r"\b(e-?mail|contact|reach\s*out|outreach|prospect|lead|client|customer|compan(y|ies)|"
-    r"business(es)?|firm|gym|clinic|practice|phone|impressum|kontakt|recipient|address)\w*", re.I)
-
 # Run-wide output language (FE navbar toggle). locale code → language NAME; "" / English → no directive.
 _LANG_NAMES = {"en": "English", "de": "German", "fr": "French", "es": "Spanish", "it": "Italian",
                "pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "ru": "Russian",
@@ -617,60 +603,6 @@ def _resolve_language(lang: str) -> str:
         return ""
     name = _LANG_NAMES.get(s.split("-")[0]) or (lang.strip().title() if lang.strip().isalpha() else "")
     return "" if name.lower() == "english" else name
-
-
-# Maps/Places discovery is EXPENSIVE and pollutes the board when unwanted — run it
-# ONLY when THIS turn actually asks to find NEW real-world orgs/contacts. A turn that
-# drafts emails, writes a sequence, or reasons over already-known targets must NOT
-# re-run discovery. Verb-of-finding + a discoverable object; drafting verbs veto it.
-# Verbs that mean "source something new". `generate|build|create|compile|assemble`
-# were missing, so even the literal "generate leads" failed the gate and Maps
-# never ran.
-_DISCOVERY_VERBS = (
-    r"(?:find|get|source|sources?|list|give\s+me|need|pull|gather|identif\w+|show\s+me|"
-    r"look\s+up|search\s+for|discover|reach\s+out|prospect\w*|scrape|generate|build|"
-    r"create|compile|assemble|put\s+together)"
-)
-# Discoverable objects. The original list held only GENERIC nouns, so the most
-# natural way to ask for Maps prospects — naming the actual business type
-# ("dental clinics in Munich", "restaurants near Cologne") — was blocked.
-_DISCOVERY_NOUNS = (
-    r"(?:prospects?|leads?|clients?|customers?|contacts?|companies|compan\w+|firms?|"
-    r"institutions?|organi[sz]ations?|partners?|niches?|decision[-\s]?makers?|buyers?|"
-    r"accounts?|buisness\w*|businesses|business|venues?|practices?|clinics?|surgeries|"
-    r"shops?|stores?|agencies|agency|studios?|restaurants?|cafes?|hotels?|dealers?|"
-    r"dealerships?|suppliers?|manufacturers?|distributors?|retailers?|wholesalers?|"
-    r"contractors?|providers?|offices?|centers?|centres?|schools?|gyms?|salons?|"
-    r"pharmacies|hospitals?|labs?|laboratories|startups?|vendors?)"
-)
-_DISCOVERY_RE = re.compile(
-    rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,60}}?\b{_DISCOVERY_NOUNS}\b", re.I)
-# Geo-anchored fallback: a find-verb plus an explicit PLACE is a Maps query even
-# when the business type isn't in the noun list ("find Steuerberater in Hamburg").
-# The negative lookahead keeps "leads in our pipeline" / "in the market" out.
-_DISCOVERY_GEO_RE = re.compile(
-    rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,80}}?\b(?:in|near|around|within|across)\s+"
-    r"(?!our\b|the\b|this\b|that\b|these\b|those\b|your\b|my\b|their\b|its\b|it\b|"
-    r"order\b|general\b|mind\b|total\b|time\b|advance\b|house\b|scope\b|charge\b)"
-    r"[A-Za-zÄÖÜäöüß][\w\-]{2,}",
-    re.I)
-_DRAFTING_RE = re.compile(
-    r"\b(draft|write|compose|rewrite|edit|revise|sequence|template|email\s+copy|"
-    r"subject\s+line|follow[-\s]?up|cadence|send\s+(?:the|this|these|it|them)|"
-    r"summari[sz]e|translate|explain|analy[sz]e|compare|plan\b|strategy|roadmap)\b", re.I)
-
-
-def _wants_discovery(user_message: str) -> bool:
-    """True only when THIS turn's message asks to source NEW real-world orgs/contacts."""
-    msg = str(user_message or "")
-    if not (_DISCOVERY_RE.search(msg) or _DISCOVERY_GEO_RE.search(msg)):
-        return False
-    # A drafting/analysis turn with NO explicit find-verb-on-contacts stays off, but
-    # an explicit "find/give me contacts" wins even if drafting words co-occur.
-    if _DRAFTING_RE.search(msg) and not re.search(
-            rf"\b{_DISCOVERY_VERBS}\b[^.\n]{{0,40}}?\b{_DISCOVERY_NOUNS}\b", msg, re.I):
-        return False
-    return True
 
 
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -1308,6 +1240,8 @@ class Director:
         # The planner sets this per turn. It changes how much work the Room does,
         # while keeping one Director and one set of SEO capabilities.
         self.response_depth = "operating"
+        self.collaboration_intensity = "deep"
+        self.evidence_mode = "standard"
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -1858,7 +1792,7 @@ class Director:
         if self._web_calls >= self._web_budget:
             return json.dumps({"error": "web-search budget for this turn is used — rely on what you already gathered."})
         self._web_calls += 1
-        prospect = bool(_PROSPECT_RE.search(query))
+        prospect = self.evidence_mode == "prospecting"
         keep = 3000 if prospect else 1500
         # Reuse HIVEMIND core's Tavily-backed web-intel (the SAME engine behind the
         # hivemind_web_search MCP tool) — provider-independent, survives a Groq outage,
@@ -2187,9 +2121,7 @@ class Director:
     def _uses_prospect_debate(self, campaign_channels: List[str]) -> bool:
         if self.room_kind != "campaign":
             return True
-        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or bool(
-            _PROSPECT_RE.search(self.user_message or "")
-        )
+        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or self.evidence_mode == "prospecting"
 
     def _campaign_recall_query_is_grounded(self, query: str) -> bool:
         # The broad company brief can contain imported client/project memories.
@@ -2352,32 +2284,6 @@ class Director:
             log.warning("[hyper-engine] places query composer failed: %s", exc)
             return []
 
-    def _allows_places_discovery(self) -> bool:
-        # Places is a lead/prospect capability. Search opportunities in an SEO
-        # brief mean query/page demand, never local agencies to contact.
-        if self.room_kind == "seo":
-            return False
-        if self.room_kind != "campaign":
-            return _wants_discovery(self.user_message)
-        policy = self.campaign_brief.get("audiencePolicy") or self.campaign_brief.get("audience_policy") or {}
-        if isinstance(policy, dict) and policy.get("discover_if_insufficient") is False:
-            return False
-        # A campaign audience such as "for law firms" describes targeting; it does
-        # not ask Maps to source contacts. Discovery requires an explicit sourcing
-        # verb and an explicit market location. This prevents a generic awareness
-        # brief from silently inventing a city and replacing the intended audience.
-        goal = str(self.campaign_brief.get("goal") or "")
-        explicit_source = re.search(
-            r"\b(?:find|source|discover|identify|list|get|look\s+up|search\s+for)\b"
-            r"[^.\n]{0,80}\b(?:prospects?|leads?|contacts?|firms?|companies|businesses|clients?)\b",
-            goal, re.I)
-        explicit_geo = re.search(
-            r"\b(?:in|near|around|within|across)\s+(?!our\b|the\b|this\b|that\b|your\b|my\b)"
-            r"[A-Za-zÄÖÜäöüß][\w\- ]{2,50}", goal, re.I)
-        nested_brief = self.campaign_brief.get("brief") if isinstance(self.campaign_brief.get("brief"), dict) else {}
-        brief_geo = self.campaign_brief.get("geography") or nested_brief.get("geography") or []
-        return bool(explicit_source and (explicit_geo or brief_geo))
-
     def _allows_seo_external_web(self) -> bool:
         """SEO site audits stay first-party unless the active task asks for an external lane."""
         return bool(re.search(
@@ -2392,7 +2298,11 @@ class Director:
         tool-calling — reliable on gpt-oss + a single round-trip (replaces the old 15-call
         sequential agentic loop). connection_search (flag) trims the surfaced tool list."""
         conn_all = list(self._connector_routes.keys())
-        conn = self._relevant_connector_names(conn_all, f"{self.user_message or ''} {self.room_goal or ''}")
+        # Campaign intent and tool choice must work in every language. Expose the
+        # complete bounded connector catalog and let the structured Director choose;
+        # lexical token overlap silently hid tools for non-English requests.
+        conn = conn_all if self.room_kind == "campaign" else self._relevant_connector_names(
+            conn_all, f"{self.user_message or ''} {self.room_goal or ''}")
         if _CONNECTION_SEARCH and len(conn) < len(conn_all):
             log.info("[hyper-engine] connection_search: surfaced %d/%d connector tools", len(conn), len(conn_all))
         conn_line = (f"Connector READ tools available (use these EXACT names): {conn}."
@@ -2421,18 +2331,20 @@ class Director:
                     },
                     "required": ["role", "task", "query"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
+                "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
                 "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
+                "evidence_mode": {"type": "string", "enum": ["standard", "prospecting"]},
                 "campaign_request": {"type": ["object", "null"], "properties": {
                     "goal": {"type": "string"},
                     "name": {"type": ["string", "null"]},
                     "objective": {"type": "string", "enum": ["AWARENESS", "PRODUCT_LAUNCH", "LEAD_GENERATION", "WEBSITE_TRAFFIC", "THOUGHT_LEADERSHIP", "EVENT_PROMOTION", "RE_ENGAGEMENT", "CUSTOM"]},
-                    "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "gmail", "tara", "x_ads", "google_ads", "meta", "linkedin", "youtube_ads", "tiktok_ads", "microsoft_ads", "apple_ads", "amazon_ads", "reddit_ads", "pinterest_ads", "snapchat_ads"]}},
+                    "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "linkedin", "instagram", "facebook", "tiktok", "youtube", "pinterest", "reddit", "threads", "bluesky", "google_business", "gmail", "tara", "x_ads", "google_ads", "meta", "linkedin_ads", "youtube_ads", "tiktok_ads", "microsoft_ads", "apple_ads", "amazon_ads", "reddit_ads", "pinterest_ads", "snapchat_ads"]}},
                     "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
                     "intensity": {"type": "string", "enum": ["LIGHT", "FOCUSED", "HIGH"]},
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "response_depth", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2444,11 +2356,17 @@ class Director:
             "deliverable ('hallo', 'who are you?', 'thanks!', 'what can you do?') — the room just REPLIES "
             "as people; every other field must then be empty/null/false. 'task' = real work is requested. "
             "The ROOM GOAL does NOT make a greeting a task — judge the MESSAGE, not the goal.\n"
-            "- response_depth: size the work to the USER MESSAGE, never to the standing Room goal. "
-            "direct = one factual or tightly scoped question that needs a concise answer; focused = one bounded "
-            "diagnosis, comparison, page/template analysis, or recommendation; operating = an explicit broad "
-            "audit, strategy, roadmap, optimization program, or multi-stage operating plan. Chat uses direct. "
-            "Do not run an operating pipeline merely because this is a specialist Room.\n"
+            "- collaboration_intensity: FIRST size how much of the team this ACTIVE MESSAGE needs, never from "
+            "the standing Room goal. light = greeting, capability question, quick answer, small copy change, "
+            "or tentative/exploratory request; standard = bounded planning, diagnosis, research, or a decision "
+            "that benefits from a few specialist views; deep = explicit launch, broad audit, multi-channel plan, "
+            "scheduling, analytics, major strategy, or an operating program. A specialist Room does not make a "
+            "simple message deep. Chat is light.\n"
+            "- response_depth: the matching deliverable size. light maps to direct, standard maps to focused, "
+            "and deep maps to operating. Use that mapping exactly.\n"
+            "- evidence_mode: prospecting only when this turn must discover or verify real organisations, "
+            "people, or contact coordinates; standard for every other task. Decide from meaning in the user's "
+            "language, not from English keywords. Chat always uses standard.\n"
             "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
             "RUN, START, or SET UP an operational campaign, return its complete brief here. This delegates to a "
             "dedicated Campaign Room, so every gather field must be empty/null and needs_debate=false. Map X to "
@@ -2478,10 +2396,10 @@ class Director:
             "Do NOT re-discover leads the company already has. When in doubt, null.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
-            "- needs_debate: true when the task needs a decision, judgment, trade-off, or genuine discussion — "
-            "and PLANS, STRATEGIES, RECOMMENDATIONS, prioritisations, budget splits, and 'what should we do' "
-            "deliverables ALWAYS qualify (they are judgment, not lookup). false ONLY for a pure factual "
-            "lookup or a mechanical retrieval/formatting task.\n"
+            "- needs_debate: false for light work. For standard work, true only when independent specialist "
+            "judgment or a material trade-off improves the answer; mechanical remediation of an already measured "
+            "issue does not need debate. For deep work, true when strategy, sequencing, budget, channel, risk, or "
+            "priority choices must be challenged. Debate is never a ritual.\n"
             "- campaign_method_assignments: ONLY in a Campaign Room, assign up to four bounded jobs to "
             "Strategist, Builder, Skeptic, or Final Synthesizer. Each query describes the advertising method "
             "needed, such as 'organic X copy framework', 'campaign measurement', 'source verification', or "
@@ -2540,14 +2458,25 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
-        depth = str(plan.get("response_depth") or "focused").strip().lower()
+        intensity = str(plan.get("collaboration_intensity") or "").strip().lower()
+        if intensity not in {"light", "standard", "deep"}:
+            legacy_depth = str(plan.get("response_depth") or "focused").strip().lower()
+            intensity = {"direct": "light", "focused": "standard", "operating": "deep"}.get(
+                legacy_depth, "standard")
+        depth = {"light": "direct", "standard": "focused", "deep": "operating"}[intensity]
+        plan["collaboration_intensity"] = intensity
         if depth not in {"direct", "focused", "operating"}:
             depth = "focused"
         plan["response_depth"] = depth
+        evidence_mode = str(plan.get("evidence_mode") or "standard").strip().lower()
+        plan["evidence_mode"] = evidence_mode if evidence_mode in {"standard", "prospecting"} else "standard"
         rq = [q for q in (plan.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:3]
         if self.room_kind == "campaign":
             rq = [q for q in rq if self._campaign_recall_query_is_grounded(q)]
-        plan["recall_queries"] = rq or [(self.user_message or self.room_goal or "")[:200]]
+        # An empty list is a valid Director decision. Company context is already
+        # present in the synthesis prompt, so a fixed recall here only adds latency,
+        # tokens, and stale-memory risk to Light turns.
+        plan["recall_queries"] = rq
         ccs: List[Dict[str, Any]] = []
         for c in (plan.get("connector_calls") or []):
             if not (isinstance(c, dict) and c.get("name") in self._connector_routes):
@@ -2564,16 +2493,24 @@ class Director:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
         audit_url = plan.get("seo_audit_url") if self.room_kind == "seo" else None
-        # A URL in the message is not itself permission to crawl a whole site.
-        # The planner must name the live-evidence gap. The deterministic fallback
-        # exists only for explicit broad operating runs when the model omitted a URL.
-        if (self.room_kind == "seo" and depth == "operating"
+        # Commands referring to current SEO findings require the measured artifact
+        # even when they are concise. Without it, the room previously invented
+        # robots rules, templates, URL counts and traffic lifts. This backstop only
+        # supplies the onboarded URL; it does not broaden the requested deliverable.
+        seo_remediation = bool(re.search(
+            r"\b(?:resolve|fix|repair|remediate|verify|rescan)\b[^.\n]{0,80}"
+            r"\b(?:seo|critical|high|finding|findings|issue|issues|error|errors|blocker|blockers)\b",
+            self.user_message or "", re.I,
+        ))
+        if (self.room_kind == "seo" and (depth == "operating" or seo_remediation)
                 and not (isinstance(audit_url, str) and audit_url.strip())):
             candidate = f"{self.user_message or ''}\n{self.company_brief or ''}"
             match = re.search(r"https?://[^\s<>\]\[\)\(\"']+", candidate, re.I)
             audit_url = match.group(0).rstrip(".,;") if match else None
         plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
-        plan["seo_audit_page_limit"] = {"direct": 1, "focused": 8, "operating": 25}[depth]
+        plan["seo_audit_page_limit"] = 25 if seo_remediation else {
+            "direct": 1, "focused": 8, "operating": 25,
+        }[depth]
         # The onboarding company brief already carries canonical product/audience
         # context. An SEO scan supplies current site truth. Pulling arbitrary room
         # memory on every audit imported stale prospect and outreach records into
@@ -2591,19 +2528,9 @@ class Director:
             plan["web_query"] = None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
-        if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():
-            try:
-                composed = await self._compose_places_queries()
-                pq = composed[0] if composed else None
-                if pq:
-                    log.info("[hyper-engine] places query FORCED by explicit prospect/lead request: %s", str(pq)[:80])
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[hyper-engine] places query backstop failed: %s", exc)
-        # Deterministic backstop: even if the planner emits a query, only run Maps
-        # when THIS turn genuinely asks to source new prospects (not a drafting/
-        # strategy turn). Stops the "20 firms every run" noise the user flagged.
-        plan["places_query"] = (pq if (isinstance(pq, str) and pq.strip() and _places_on
-                                       and self._allows_places_discovery()) else None)
+        # The structured Director is the sole semantic gate. Runtime code only
+        # enforces availability and shape; it never reclassifies multilingual intent.
+        plan["places_query"] = pq if isinstance(pq, str) and pq.strip() and _places_on else None
         if self.room_kind == "seo":
             plan["places_query"] = None
         # Method skills: keep only real catalog names; auto-load the kind default
@@ -2613,8 +2540,8 @@ class Director:
               if isinstance(s, str) and load_method_skill(s)][:skill_limit]
         if self.room_kind == "campaign" and "campaign-operating-system" not in ms:
             ms = ["campaign-operating-system", *ms][:skill_limit]
-        if _METHOD_SKILLS_ENABLED and not ms:
-            ms = [default_skill_for(self.room_kind)]
+        # Skills are event-driven. Campaign keeps its mandatory operating method
+        # above; every other room loads only what the Director selected for this task.
         plan["method_skills"] = ms if _METHOD_SKILLS_ENABLED else []
         assignments: List[Dict[str, str]] = []
         if self.room_kind == "campaign":
@@ -2635,15 +2562,7 @@ class Director:
                 ]
         plan["campaign_method_assignments"] = assignments
         plan["needs_debate"] = bool(plan.get("needs_debate"))
-        # Deterministic backstop — the model-judged gate misclassified judgment tasks as
-        # lookups twice in live use ("marketing plan", "social media plan" → no debate,
-        # the room's core feature silently skipped). A judgment-shaped task with a real
-        # team ALWAYS convenes the room; the LLM gate now only decides the ambiguous rest.
-        if not plan["needs_debate"] and len(self.participants) >= 2 and _JUDGMENT_RE.search(
-                f"{self.user_message or ''} {self.room_goal or ''}"):
-            plan["needs_debate"] = True
-            log.info("[hyper-engine] debate FORCED by judgment backstop (model gate said lookup)")
-        if depth == "direct":
+        if intensity == "light":
             # Direct is a product contract, not a suggestion to the model. One
             # bounded question never convenes a committee or fans out a broad
             # evidence plan. The planner still chooses the one relevant source.
@@ -2654,7 +2573,8 @@ class Director:
             plan["needs_debate"] = False
             if plan.get("seo_audit_url"):
                 plan["web_query"] = None
-        log.info("[hyper-engine] plan recalls=%d connectors=%d web=%s debate=%s",
+        log.info("[hyper-engine] plan intensity=%s recalls=%d connectors=%d web=%s debate=%s",
+                 intensity,
                  len(plan["recall_queries"]), len(plan["connector_calls"]),
                  bool(plan["web_query"]), plan["needs_debate"])
         return plan
@@ -3121,7 +3041,7 @@ class Director:
                 f"Open with a 2-3 sentence executive summary BEFORE the first heading; close with "
                 f"'## Gaps to confirm' when anything is UNVERIFIED."
             )
-        if self.room_kind == "seo" and depth == "operating":
+        if self.room_kind == "seo" and self._seo_audit_evidence:
             sysp += (
                 "\n\nSEO FINAL EVIDENCE LOCK:\n"
                 "- The completed SEO_AUDIT_EVIDENCE object is the only authority for current site state. "
@@ -3137,6 +3057,9 @@ class Director:
                 "unnamed teams. Mark an implementation owner as 'confirm' when the board does not identify one.\n"
                 "- Search opportunity demand remains UNKNOWN until connected evidence exists. Roadmap gates verify "
                 "implementation and rescans, not rankings, indexation, impressions, or traffic."
+                "\n- A request to resolve, fix, or repair a finding is not proof that any change was applied. Claim "
+                "resolution only when a write-capable tool returned success and a post-change rescan verified it; "
+                "otherwise state the measured finding and the exact next executable action."
             )
 
         _org = (self.company_brief or "").strip()
@@ -3343,6 +3266,37 @@ class Director:
         return {"cost_tokens": self.tokens, "final_text": reply, "transcript": self.transcript,
                 "gather_count": 0, "tool_calls": 0, "sim_report": None}
 
+    async def _emit_light_collaboration(self, plan: Dict[str, Any]) -> None:
+        """Show the crew's bounded Light-turn assignments without persona calls.
+
+        These are status notes, not fabricated specialist conclusions. The actual
+        answer still comes from the Director after any selected evidence tool runs.
+        """
+        if str(plan.get("turn_mode") or "task").lower() == "chat":
+            return
+        has_evidence_work = bool(
+            plan.get("recall_queries") or plan.get("connector_calls")
+            or plan.get("web_query") or plan.get("seo_audit_url")
+        )
+        notes = (
+            "I’m narrowing this to the decision the user actually asked for.",
+            "I’m checking the relevant evidence before the room answers." if has_evidence_work
+            else "I’m checking whether any additional evidence is actually needed.",
+            "I’m keeping the response concise and ready to act on.",
+        )
+        for participant, note in zip((self.participants or [])[:3], notes):
+            await self.emit({
+                "t": "react",
+                "agent": participant.get("slug"),
+                "name": participant.get("name") or participant.get("slug"),
+                "lane": participant.get("_lane") or "Communicator",
+                "agreement": "contribute",
+                "content": note,
+                "line": note,
+                "confidence": 1.0,
+                "activity_only": True,
+            })
+
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
         # Instant feedback from t=0: connector-tool init + the first model call run
@@ -3367,9 +3321,12 @@ class Director:
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
         plan = await self._plan_gather()
         self.response_depth = str(plan.get("response_depth") or "focused")
+        self.collaboration_intensity = str(plan.get("collaboration_intensity") or "standard")
+        self.evidence_mode = str(plan.get("evidence_mode") or "standard")
         await self.emit({
             "t": "work_scope",
             "room_kind": self.room_kind,
+            "intensity": self.collaboration_intensity,
             "depth": self.response_depth,
             "audit_page_limit": plan.get("seo_audit_page_limit") if plan.get("seo_audit_url") else 0,
             "debate": bool(plan.get("needs_debate")),
@@ -3380,6 +3337,8 @@ class Director:
         # pipeline ending in a fabricated report.
         if str(plan.get("turn_mode") or "task").lower() == "chat":
             return await self._chat_turn(t0)
+        if self.collaboration_intensity == "light":
+            await self._emit_light_collaboration(plan)
         if self.room_kind == "campaign":
             await self.emit({"t": "campaign_stage", "stage": "brief", "status": "complete",
                              "title": "Campaign brief understood", "detail": "Objective, channels, horizon, pace, and operating constraints are set."})
@@ -3439,7 +3398,7 @@ class Director:
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
         # report the FE shows as a hideable popup, and feeds that report into the synthesis. Fully
         # wrapped — a failure just skips it; the main turn (debate + synth) is never affected.
-        if self.sim_mode in _SIM_ON:
+        if self.collaboration_intensity != "light" and self.sim_mode in _SIM_ON:
             self._sim_payload = await self._population_sim(self.room_goal or self.user_message or "")
             if self._sim_payload:
                 self._sim_report = self._sim_payload.get("report")
@@ -3475,7 +3434,7 @@ class Director:
         try:
             # Event-driven gate: the planner (LLM) asking for a places_query IS the
             # discovery signal — works in any language; the regex is only a fallback.
-            _wants_contacts = bool(plan.get("places_query")) or self._allows_places_discovery()
+            _wants_contacts = bool(plan.get("places_query"))
             _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
             if _wants_contacts and len(_prospect_rows) < 3:
                 await self.emit({"t": "typing", "agent": "director",
@@ -3573,6 +3532,7 @@ class Director:
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)
             "room_kind": self.room_kind,
+            "collaboration_intensity": self.collaboration_intensity,
             "seo_evidence_governed": bool(self.room_kind == "seo" and self._seo_audit_evidence),
             "seo_artifact_id": (
                 ((self._seo_audit_evidence or {}).get("capability") or {}).get("artifact_id")

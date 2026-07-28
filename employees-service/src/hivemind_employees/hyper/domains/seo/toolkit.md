@@ -1,5 +1,5 @@
 SEO TOOLKIT POLICY
-- Recall first for products, customers, positioning, existing pages, and prior performance.
+- Use the canonical onboarding company brief first for products, customers, and positioning. Recall room memory only when the user explicitly asks for prior work, history, or internal knowledge; a live audit must not import unrelated prospect, outreach, campaign, contact, or legal records.
 - Invoke `seo.site-intelligence@1.0.0` through `hivemind_seo_audit` only when live website evidence closes the user's named gap. Direct page-state questions inspect one page, focused diagnoses inspect a bounded sample, and explicit operating audits use broader discovery and crawling. Do not replace measured website evidence with web search.
 - Use web search for current SERP competitors, result formats, and source-backed demand signals.
 - Use connected analytics, search-console, docs, and website tools when available; never imply access when absent.

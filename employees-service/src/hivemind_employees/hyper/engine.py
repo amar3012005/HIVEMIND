@@ -310,6 +310,22 @@ async def _cerebras_chat(body: Dict[str, Any], *, timeout: httpx.Timeout,
     if not key:
         return None
     cb = {k: v for k, v in body.items() if k not in ("provider", "reasoning")}
+    # Cerebras strict output supports the structural JSON Schema subset but
+    # rejects validation-only array constraints such as maxItems. Keep the
+    # planner schema small and portable instead of paying for a failed request
+    # and provider retry.
+    if isinstance(cb.get("response_format"), dict):
+        def _portable_schema(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: _portable_schema(item)
+                    for key, item in value.items()
+                    if key not in {"maxItems", "minItems", "uniqueItems"}
+                }
+            if isinstance(value, list):
+                return [_portable_schema(item) for item in value]
+            return value
+        cb["response_format"] = _portable_schema(cb["response_format"])
     cb.pop("stream", None)
     if cache_key and os.environ.get("HYPER_CEREBRAS_PROMPT_CACHE_KEY", "").lower() in ("1", "true", "yes", "on"):
         cb["prompt_cache_key"] = str(cache_key)[:1024]
@@ -1910,9 +1926,6 @@ class Director:
             return json.dumps({"error": "SEO audit returned no structured evidence", "is_error": True})
         # Put compact deterministic evidence first so the bounded synthesis board
         # cannot lose it behind recall chatter. Full evidence remains in the web job.
-        # Put page-level measured facts before aggregate procedures. Direct and
-        # focused turns intentionally use a smaller synthesis board; canonical,
-        # status, title, headings, and findings must survive that truncation.
         board_audit = {key: audit.get(key) for key in (
             "schema", "seed_url", "scanned_at", "score", "coverage", "severity",
         )}
@@ -1920,12 +1933,17 @@ class Director:
         board_audit["capability"] = {key: capability.get(key) for key in (
             "schema", "id", "version", "artifact_id", "worker_class",
         )}
-        board_audit["pages"] = (audit.get("pages") or [])[:8]
-        board_audit["findings"] = (audit.get("findings") or [])[:6]
         board_audit.update({key: audit.get(key) for key in (
-            "evidence_quality", "maturity", "optimization_procedure", "categories", "templates",
-            "architecture", "site_files", "crawl_errors", "limitations",
+            "evidence_quality", "maturity", "categories", "templates", "architecture",
+            "site_files", "crawl_errors", "limitations",
         )})
+        board_audit["optimization_procedure"] = [
+            {key: phase.get(key) for key in (
+                "order", "status", "id", "phase", "objective", "verification",
+            ) if key in phase}
+            for phase in (audit.get("optimization_procedure") or [])
+            if isinstance(phase, dict)
+        ]
         search_console = audit.get("search_console") or {}
         board_audit["search_console"] = {
             key: search_console.get(key) for key in (
@@ -1935,8 +1953,26 @@ class Director:
         }
         board_audit["search_console"]["opportunities"] = (search_console.get("opportunities") or [])[:20]
         board_audit["search_console"]["queries"] = (search_console.get("queries") or [])[:20]
-        board_audit["search_console"]["pages"] = (search_console.get("pages") or [])[:20]
         board_audit["search_console"]["query_pages"] = (search_console.get("query_pages") or [])[:20]
+        finding_keys = (
+            "id", "category", "severity", "title", "description", "url", "template",
+            "instances", "evidence", "recommendation",
+        )
+        board_audit["findings"] = [
+            {key: finding.get(key) for key in finding_keys if key in finding}
+            for finding in (audit.get("findings") or [])[:8]
+            if isinstance(finding, dict)
+        ]
+        page_keys = (
+            "url", "status", "title", "canonical", "word_count", "template",
+            "internal_inlinks", "orphan_candidate", "issue_count",
+        )
+        board_audit["pages"] = [
+            {key: page.get(key) for key in page_keys if key in page}
+            for page in (audit.get("pages") or [])[:8]
+            if isinstance(page, dict)
+        ]
+        board_audit["search_console"]["pages"] = (search_console.get("pages") or [])[:20]
         board_audit["search_console"]["daily"] = (search_console.get("daily") or [])[-35:]
         self.blackboard.insert(0, "SEO_AUDIT_EVIDENCE:\n" + json.dumps(board_audit, ensure_ascii=False))
         self.gather_count += 1
@@ -1991,13 +2027,22 @@ class Director:
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
             campaign_contract = campaign_system_contract()
+        domain_guard = ""
+        if self.room_kind == "seo":
+            domain_guard = (
+                " SEO EVIDENCE FIREWALL: discuss only the active SEO task. "
+                "SEO_AUDIT_EVIDENCE is authoritative for current website state. Company context may establish "
+                "the product and audience, but ignore recalled prospects, contacts, outreach, campaigns, and "
+                "unrelated legal work. Do not invent issue types, rankings, traffic, volume, lift, or numeric "
+                "targets absent from the board."
+            )
         _messages = [
             {"role": "system", "content": (
                 _now_block() +
                 f"You are {name}, a {lane} on this team.{bias} {sysp}{evo_block}{self._room_instr_block}"
                 f"\nRespond IN CHARACTER, CONCISELY "
                 f"(3-5 sentences), grounded ONLY in the CONTEXT. If you disagree, challenge with specifics; "
-                f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}"
+                f"mark anything unverifiable as UNVERIFIED; never invent facts.{skill_line}{need_line}{domain_guard}"
                 f"{campaign_contract}")},
             {"role": "user", "content": f"CONTEXT (room's shared board):\n{ctx}\n\n[Debate round {round_no}] {prompt}"},
         ]
@@ -2512,6 +2557,15 @@ class Director:
             audit_url = match.group(0).rstrip(".,;") if match else None
         plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
         plan["seo_audit_page_limit"] = {"direct": 1, "focused": 8, "operating": 25}[depth]
+        # The onboarding company brief already carries canonical product/audience
+        # context. An SEO scan supplies current site truth. Pulling arbitrary room
+        # memory on every audit imported stale prospect and outreach records into
+        # the SEO debate. Historical recall remains available when the user asks
+        # for prior work, memory, history, or earlier findings explicitly.
+        if (self.room_kind == "seo" and plan["seo_audit_url"] and self.company_brief
+                and not re.search(r"\b(?:memory|history|historical|previous|prior|earlier|last\s+(?:audit|run))\b",
+                                  self.user_message or "", re.I)):
+            plan["recall_queries"] = []
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():
@@ -2899,7 +2953,7 @@ class Director:
         if self.room_kind == "campaign":
             raise RuntimeError("Campaign Rooms may complete only through campaign__govern_delivery")
         depth = self.response_depth if self.response_depth in {"direct", "focused", "operating"} else "focused"
-        board_limit = {"direct": 3000, "focused": 4500, "operating": 6000}[depth]
+        board_limit = {"direct": 3000, "focused": 4500, "operating": 8000}[depth]
         board = "\n".join(self.blackboard)[:board_limit] or "(no grounded facts were gathered)"
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")
@@ -3328,7 +3382,9 @@ class Director:
                 # debate; using room_goal first made unrelated campaigns debate
                 # the same generic room mission and reuse stale prospect context.
                 topic = self._debate_topic()
-                transcript_json = await self._debate(topic, 1 if self.room_kind == "campaign" else self.debate_max_rounds)
+                transcript_json = await self._debate(
+                    topic, 1 if self.room_kind in {"campaign", "seo"} else self.debate_max_rounds
+                )
                 forced_debate = True
                 if self.room_kind == "campaign":
                     await self.emit({"t": "campaign_stage", "stage": "debate", "status": "complete",

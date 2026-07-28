@@ -97,7 +97,15 @@ _KIND_KEYWORDS = [
 
 def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
     """Map a turn to a room kind: explicit task tag first, then goal/message keywords."""
-    kind = _TAG_TO_KIND.get(str(task_tag or "").strip().upper())
+    raw_tag = str(task_tag or "").strip()
+    # Permanent rooms persist the canonical domain slug (for example `seo`),
+    # while older task callers send aliases such as `ROOM_SEO` or `RESEARCH`.
+    # A canonical slug is already authoritative and must not fall through to a
+    # keyword such as "content" in the active message.
+    canonical = raw_tag.lower().replace("-", "_")
+    if canonical and get_domain_pack(canonical):
+        return canonical
+    kind = _TAG_TO_KIND.get(raw_tag.upper())
     if kind and (kind in METHOD_SKILLS or get_domain_pack(kind)):
         return kind
     # The TURN MESSAGE outranks the room goal: an HQ/task room's goal often

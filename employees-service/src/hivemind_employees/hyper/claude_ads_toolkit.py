@@ -13,7 +13,13 @@ from typing import Any
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]+", re.I)
 _DESCRIPTION_RE = re.compile(r'^description:\s*["\']?(.*?)["\']?\s*$', re.M)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
-_ALLOWED_PATTERNS = ("skills/*/SKILL.md", "agents/*.md", "ads/references/*.md")
+_ALLOWED_PATTERNS = (
+    "ads/SKILL.md",
+    "skills/*/SKILL.md",
+    "agents/*.md",
+    "ads/references/*.md",
+    "control-plane/*.md",
+)
 _ROLE_LIMIT = 2
 _RUN_LIMIT = 8
 _BODY_LIMIT = 4500

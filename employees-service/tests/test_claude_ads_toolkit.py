@@ -42,6 +42,22 @@ def test_campaign_toolkit_bounds_resources_per_role_and_run(tmp_path, monkeypatc
     assert len([row for row in loaded if row["role"] == "Role 0"]) <= 2
 
 
+def test_campaign_toolkit_exposes_canonical_workflow_and_publishing_policy(tmp_path, monkeypatch):
+    root = tmp_path / "claude-ads"
+    workflow = root / "ads" / "SKILL.md"
+    policy = root / "control-plane" / "PUBLISHING_POLICY.md"
+    workflow.parent.mkdir(parents=True)
+    policy.parent.mkdir(parents=True)
+    workflow.write_text("# Ads workflow\nPlan launch campaign workflow.", encoding="utf-8")
+    policy.write_text("# Publishing policy\nApproval and publishing controls.", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_ADS_RESOURCE_ROOT", str(root))
+    claude_ads_toolkit._catalog.cache_clear()
+
+    names = {item.name for item in claude_ads_toolkit.search("campaign workflow publishing approval", limit=2)}
+
+    assert names == {"ads/SKILL.md", "control-plane/PUBLISHING_POLICY.md"}
+
+
 def test_campaign_room_emits_user_safe_skill_event(tmp_path, monkeypatch):
     root = tmp_path / "claude-ads"
     skill = root / "skills" / "launch-plan" / "SKILL.md"

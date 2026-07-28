@@ -65,6 +65,11 @@ def test_campaign_intelligence_pack_exposes_bounded_specialist_methods():
     assert "paid-social-platforms" in catalog
     assert "intent-and-marketplace-ads" in catalog
     assert "organic-and-direct-channels" in catalog
+    assert "attribution-and-tracking" in catalog
+    assert "landing-and-funnel" in catalog
+    assert "audit-and-optimization" in catalog
+    assert "copy-and-format-adaptation" in catalog
+    assert "campaign-reporting" in catalog
     assert default_skill_for("campaign") == "campaign-operating-system"
 
 

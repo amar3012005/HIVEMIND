@@ -234,6 +234,46 @@ async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Opt
         return {"error": str(exc)[:200]}
 
 
+async def seo_audit_emulated(url: str, *, user_id: Optional[str], org_id: Optional[str],
+                             api_key: str = "", page_limit: int = 25,
+                             timeout_s: float = 180.0) -> Dict[str, Any]:
+    """Run the deterministic Core SEO audit as the current tenant and poll its web job.
+
+    The returned payload contains one seo-audit-v1 result. It is crawler evidence,
+    not an LLM interpretation, and remains subject to Core URL policy and quotas.
+    """
+    import asyncio
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(timeout_s, connect=5.0),
+            headers=headers,
+        ) as c:
+            sub = await c.post("/api/web/seo-audit/jobs", json={
+                "url": str(url or "").strip(),
+                "page_limit": max(1, min(int(page_limit or 25), 50)),
+                "depth": 2,
+            })
+            if sub.status_code not in (200, 202):
+                return {"error": f"seo audit submit {sub.status_code}", "detail": sub.text[:300]}
+            job_id = (sub.json() or {}).get("job_id")
+            if not job_id:
+                return {"error": "no job_id"}
+            for _ in range(max(12, int(timeout_s / 2))):
+                await asyncio.sleep(2)
+                response = await c.get(f"/api/web/jobs/{job_id}")
+                if response.status_code != 200:
+                    continue
+                payload = response.json() or {}
+                if payload.get("status") in ("succeeded", "failed", "completed", "error", "done"):
+                    return payload
+            return {"status": "timeout", "job_id": job_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
+
+
 async def org_members_emulated(
     query: str = "", *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
 ) -> Dict[str, Any]:

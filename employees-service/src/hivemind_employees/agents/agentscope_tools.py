@@ -1582,5 +1582,33 @@ def build_hivemind_toolkit(
                 return _tool_response({"status": "timeout", "job_id": job_id})
         tk.register_tool_function(web_research)
 
+    if "hivemind_seo_audit" in enabled_tool_names:
+        def seo_audit(url: str, page_limit: int = 25) -> ToolResponse:
+            """Audit a public website with deterministic SEO rules.
+
+            Use in SEO Rooms when the task names a website URL. Returns crawl
+            coverage, page/template findings, evidence, severity and limitations.
+            It does not infer rankings, traffic, Search Console state or CWV.
+            """
+            import time
+            with _client(api_key, user_id, org_id) as c:
+                r = c.post("/api/web/seo-audit/jobs", json={
+                    "url": url, "page_limit": min(max(page_limit, 1), 50), "depth": 2,
+                })
+                r.raise_for_status()
+                job_id = r.json().get("job_id")
+                if not job_id:
+                    return _tool_response({"error": "no job_id"})
+                for _ in range(90):
+                    time.sleep(2)
+                    result = c.get(f"/api/web/jobs/{job_id}")
+                    if result.status_code != 200:
+                        continue
+                    payload = result.json()
+                    if payload.get("status") in {"succeeded", "failed"}:
+                        return _tool_response(payload)
+                return _tool_response({"status": "timeout", "job_id": job_id})
+        tk.register_tool_function(seo_audit)
+
     log.info("Built AgentScope toolkit (tools=%s)", enabled_tool_names)
     return tk

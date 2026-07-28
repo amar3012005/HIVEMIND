@@ -40,6 +40,7 @@ import { handleCampaignRequest } from './campaigns/routes.js';
 import { processDueCampaignActions } from './campaigns/worker.js';
 import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
+import { compileSeoAudit, inspectSeoSiteFiles } from './web/seo-audit.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -16160,6 +16161,78 @@ exit \$RC
           }
           break;
 
+        case '/api/web/seo-audit/jobs':
+          if (req.method === 'POST') {
+            try {
+              const rlCheck = webRateLimiter.check(userId);
+              if (!rlCheck.allowed) {
+                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
+              }
+              if (planEnforcer && orgId) {
+                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+                if (!webIntelCheck.allowed) {
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
+                }
+              }
+              const seedUrl = normalizeWebUrl(body.url);
+              if (!seedUrl) return jsonResponse(res, { error: 'A valid public website URL is required' }, 400);
+              const domainCheck = validateDomain(seedUrl);
+              if (!domainCheck.allowed) {
+                return jsonResponse(res, { error: 'URL blocked by policy', code: 'domain_blocked', reason: domainCheck.reason }, 403);
+              }
+              const usage = await webJobStore.getUsage(userId);
+              if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
+                return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
+              }
+              const requestedLimit = Number(body.page_limit ?? 25);
+              const pageLimit = Math.min(
+                Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 25, 1),
+                50,
+                WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages,
+              );
+              const requestedDepth = Number(body.depth ?? 2);
+              const depth = Math.min(Math.max(Number.isFinite(requestedDepth) ? requestedDepth : 2, 0), 3);
+              webRateLimiter.record(userId);
+              const job = await webJobStore.create({
+                type: 'seo_audit', params: { url: seedUrl, urls: [seedUrl], depth, pageLimit }, userId, orgId,
+              });
+              setImmediate(async () => {
+                const started = Date.now();
+                try {
+                  await webJobStore.update(job.id, { status: 'running' });
+                  const [crawl, siteFiles] = await Promise.all([
+                    browserRuntime.seoAudit({ urls: [seedUrl], depth, pageLimit }),
+                    inspectSeoSiteFiles(seedUrl),
+                  ]);
+                  const audit = compileSeoAudit({
+                    seedUrl,
+                    pages: crawl.pages,
+                    errors: crawl.errors,
+                    runtimeUsed: crawl.runtime_used,
+                    siteFiles,
+                  });
+                  await webJobStore.update(job.id, {
+                    status: audit.coverage.pages_scanned > 0 ? 'succeeded' : 'failed',
+                    error: audit.coverage.pages_scanned > 0 ? null : (audit.crawl_errors[0]?.message || 'seo_audit_failed'),
+                    results: [audit],
+                    runtime_used: crawl.runtime_used,
+                    fallback_applied: crawl.fallback_applied,
+                    duration_ms: Date.now() - started,
+                    pages_processed: audit.coverage.pages_scanned,
+                  });
+                  if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                } catch (err) {
+                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
+                  console.error(`[seo-audit] job ${job.id} failed:`, err.message);
+                }
+              });
+              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'seo_audit' }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/web/crawl/jobs':
           if (req.method === 'POST') {
             // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
@@ -16315,14 +16388,20 @@ exit \$RC
                   const p = newJob.params;
                   const result = newJob.type === 'search'
                     ? await browserRuntime.search({ query: p.query, domains: p.domains || [], limit: p.limit || 10 })
+                    : newJob.type === 'seo_audit'
+                      ? await browserRuntime.seoAudit({ urls: p.urls, depth: p.depth || 2, pageLimit: p.pageLimit || 25 })
                     : await browserRuntime.crawl({ urls: p.urls, depth: p.depth || 1, pageLimit: p.pageLimit || 50, include: p.include, exclude: p.exclude });
-                  const items = newJob.type === 'search' ? result.results : result.pages;
+                  const items = newJob.type === 'search'
+                    ? result.results
+                    : newJob.type === 'seo_audit'
+                      ? [compileSeoAudit({ seedUrl: p.url || p.urls?.[0], pages: result.pages, errors: result.errors, runtimeUsed: result.runtime_used })]
+                      : result.pages;
                   const count = Array.isArray(items) ? items.length : 0;
                   const errors = Array.isArray(result.errors) ? result.errors : [];
                   if (count === 0 && errors.length > 0) {
                     await webJobStore.update(newJob.id, { status: 'failed', error: errors[0]?.error || `${newJob.type}_failed`, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [] });
                   } else {
-                    await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'crawl' ? count : undefined });
+                    await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'seo_audit' ? (items[0]?.coverage?.pages_scanned || 0) : newJob.type === 'crawl' ? count : undefined });
 
                     // Record web intel usage
                     if (planEnforcer && orgId) {

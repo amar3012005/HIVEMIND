@@ -125,6 +125,7 @@ DEFAULT_HYPER_TOOLS = [
 WEB_INTEL_TOOLS = [
     "hivemind_web_search",
     "hivemind_web_research",
+    "hivemind_seo_audit",
 ]
 
 WEB_INTEL_HINTS = (

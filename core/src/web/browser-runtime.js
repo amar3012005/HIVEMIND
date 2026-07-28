@@ -705,7 +705,7 @@ class LightpandaRuntime {
           }
 
           try {
-            await page.goto(url, {
+            const response = await page.goto(url, {
               waitUntil: this.waitForNetworkIdle ? 'networkidle' : 'domcontentloaded',
               timeout: this.navigationTimeoutMs
             });
@@ -718,6 +718,7 @@ class LightpandaRuntime {
               // Extract title
               const title = (document.title || '').trim();
               const h1 = document.querySelector('h1')?.textContent?.trim() || '';
+              const h1s = Array.from(document.querySelectorAll('h1')).map(node => node.textContent?.trim()).filter(Boolean);
 
               // Extract metadata
               const description = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
@@ -728,6 +729,10 @@ class LightpandaRuntime {
                             document.querySelector('.byline, .author')?.textContent?.trim() || '';
               const publishedTime = document.querySelector('meta[property="article:published_time"]')?.getAttribute('content') ||
                                    document.querySelector('time[datetime]')?.getAttribute('datetime') || '';
+              const canonical = document.querySelector('link[rel="canonical"]')?.href || '';
+              const robots = document.querySelector('meta[name="robots"]')?.getAttribute('content') || '';
+              const viewport = document.querySelector('meta[name="viewport"]')?.getAttribute('content') || '';
+              const language = document.documentElement.lang || '';
 
               // Extract images
               const images = Array.from(mainContent.querySelectorAll('img[src]'))
@@ -828,6 +833,7 @@ class LightpandaRuntime {
                 wordCount,
                 readingTime,
                 qualityScore,
+                seo: { title, description, canonical, robots, viewport, language, h1: h1s },
                 favicon: document.querySelector('link[rel="icon"]')?.getAttribute('href') || ''
               };
             });
@@ -854,6 +860,8 @@ class LightpandaRuntime {
               qualityScore: data.qualityScore,
               favicon: data.favicon ? new URL(data.favicon, data.url).href : null,
               jsonLd: data.jsonLd ? JSON.stringify(data.jsonLd).slice(0, 1000) : null,
+              status: response?.status?.() || 200,
+              seo: data.seo,
             });
 
             // Queue links for crawling if depth allows
@@ -1436,6 +1444,31 @@ export class BrowserRuntime {
       runtime_used: runtimeUsed,
       duration_ms: Date.now() - start,
     };
+  }
+
+  /**
+   * SEO audits require rendered DOM metadata that Tavily's markdown crawl does
+   * not expose. Use the browser runtime first and only fall back to static fetch.
+   */
+  async seoAudit({ urls, depth = 2, pageLimit = 25 }) {
+    const start = Date.now();
+    try {
+      const result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit }));
+      return { ...result, runtime_used: 'lightpanda', fallback_applied: false, duration_ms: Date.now() - start };
+    } catch (browserError) {
+      try {
+        const result = await withJobTimeout(this.fallback.crawl({ urls, depth, pageLimit }));
+        return {
+          ...result,
+          runtime_used: 'fetch',
+          fallback_applied: true,
+          duration_ms: Date.now() - start,
+          errors: [...(result.errors || []), { target: urls?.[0], type: 'render_fallback', error: browserError.message }],
+        };
+      } catch (fallbackError) {
+        throw new Error(`SEO rendering failed. Browser: ${browserError.message}; Fetch: ${fallbackError.message}`);
+      }
+    }
   }
 
   /**

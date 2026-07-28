@@ -18,7 +18,10 @@ function pathnameOf(value) {
 function templateFor(url) {
   const parts = pathnameOf(url).split('/').filter(Boolean);
   if (!parts.length) return 'homepage';
-  const normalized = parts.map((part) => (/^\d+$/.test(part) || /^[0-9a-f-]{16,}$/i.test(part) ? ':id' : part));
+  const normalized = parts.map((part, index) => (
+    /^\d+$/.test(part) || /^[0-9a-f-]{16,}$/i.test(part) || (parts.length > 1 && index === parts.length - 1)
+      ? ':slug' : part
+  ));
   return `/${normalized.slice(0, 2).join('/')}`;
 }
 
@@ -98,7 +101,7 @@ function aggregateFindings(findings) {
   return [...grouped.values()].sort((a, b) => WEIGHTS[b.severity] - WEIGHTS[a.severity] || b.instances - a.instances);
 }
 
-export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString() } = {}) {
+export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null } = {}) {
   const auditedPages = asArray(pages).filter((page) => text(page?.url)).map(auditPage);
   const findings = auditedPages.flatMap((page) => page.findings);
   const penalty = findings.reduce((sum, item) => sum + WEIGHTS[item.severity], 0);
@@ -133,11 +136,35 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
     pages: auditedPages.map(({ findings: pageFindings, ...page }) => ({ ...page, issue_count: pageFindings.length })),
     templates: Object.values(templates).sort((a, b) => b.issues - a.issues),
     crawl_errors: normalizedErrors,
+    site_files: siteFiles,
     limitations: [
       'Public crawl evidence does not prove Google index status or search demand.',
       'Core Web Vitals require field or Lighthouse measurements and are not inferred from HTML.',
       'Connect Search Console to compare declared and Google-selected canonicals.',
     ],
+  };
+}
+
+export async function inspectSeoSiteFiles(seedUrl, fetchImpl = globalThis.fetch) {
+  const origin = new URL(seedUrl).origin;
+  async function read(path) {
+    try {
+      const response = await fetchImpl(`${origin}${path}`, {
+        redirect: 'follow',
+        headers: { 'User-Agent': 'HIVEMIND SEO Audit/1.0' },
+        signal: AbortSignal.timeout(8000),
+      });
+      return { url: response.url, status: response.status, body: response.ok ? await response.text() : '' };
+    } catch (error) {
+      return { url: `${origin}${path}`, status: 0, body: '', error: error.message };
+    }
+  }
+  const robots = await read('/robots.txt');
+  const declared = [...robots.body.matchAll(/^sitemap:\s*(\S+)/gim)].map((match) => match[1]);
+  const sitemap = declared.length ? await read(new URL(declared[0], origin).pathname) : await read('/sitemap.xml');
+  return {
+    robots: { url: robots.url, status: robots.status, present: robots.status === 200, sitemap_urls: declared.slice(0, 10) },
+    sitemap: { url: sitemap.url, status: sitemap.status, present: sitemap.status === 200, declared_in_robots: declared.length > 0 },
   };
 }
 

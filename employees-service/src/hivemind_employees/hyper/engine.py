@@ -42,6 +42,7 @@ from ..hivemind_client import (
     recall_emulated,
     report_llm_usage,
     save_prospect_emulated,
+    seo_audit_emulated,
     web_search_emulated,
 )
 
@@ -1631,6 +1632,9 @@ class Director:
             if name == "web_search":
                 return await self._web_search(str(args.get("query", "")))
 
+            if name == "seo_audit":
+                return await self._seo_audit(str(args.get("url", "")), int(args.get("page_limit", 25) or 25))
+
             if name == "places_search":
                 return await self._places_search(str(args.get("query", "")))
 
@@ -1861,6 +1865,40 @@ class Director:
         await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
                          "sources": sources[:5], "summary": answer[:400]})
         return json.dumps({"answer": answer, "sources": sources[:5]})
+
+    async def _seo_audit(self, url: str, page_limit: int = 25) -> str:
+        """Place deterministic website evidence on the SEO Room board."""
+        target = (url or "").strip()
+        if not target:
+            return json.dumps({"error": "website URL is required", "is_error": True})
+        result = await seo_audit_emulated(
+            target, user_id=self.user_id, org_id=self.org_id,
+            page_limit=max(1, min(page_limit, 50)), timeout_s=180.0,
+        )
+        if result.get("error") or result.get("status") == "failed":
+            return json.dumps({"error": result.get("error") or "seo audit failed", "is_error": True})
+        audit = ((result.get("results") or [{}])[0]) if isinstance(result.get("results"), list) else {}
+        if not isinstance(audit, dict) or audit.get("schema") != "seo-audit-v1":
+            return json.dumps({"error": "SEO audit returned no structured evidence", "is_error": True})
+        # Put compact deterministic evidence first so the bounded synthesis board
+        # cannot lose it behind recall chatter. Full evidence remains in the web job.
+        board_audit = {key: audit.get(key) for key in (
+            "schema", "seed_url", "scanned_at", "score", "coverage", "severity",
+            "categories", "templates", "site_files", "crawl_errors", "limitations",
+        )}
+        board_audit["findings"] = (audit.get("findings") or [])[:6]
+        board_audit["pages"] = (audit.get("pages") or [])[:8]
+        self.blackboard.insert(0, "SEO_AUDIT_EVIDENCE:\n" + json.dumps(board_audit, ensure_ascii=False))
+        self.gather_count += 1
+        await self.emit({
+            "t": "seo_audit",
+            "url": audit.get("seed_url"),
+            "score": audit.get("score"),
+            "pages": (audit.get("coverage") or {}).get("pages_scanned", 0),
+            "critical": (audit.get("severity") or {}).get("critical", 0),
+            "high": (audit.get("severity") or {}).get("high", 0),
+        })
+        return json.dumps(audit, ensure_ascii=False)
 
     # ── debate (the room) ─────────────────────────────────────────────
     async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int) -> Dict[str, Any]:
@@ -2252,6 +2290,7 @@ class Director:
                     "properties": {"name": {"type": "string"}, "args_json": {"type": "string"}},
                     "required": ["name", "args_json"], "additionalProperties": False}},
                 "web_query": {"type": ["string", "null"]},
+                "seo_audit_url": {"type": ["string", "null"]},
                 "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
@@ -2274,7 +2313,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2293,6 +2332,9 @@ class Director:
             "a channel; Core will select only channels that are connected and executable. Defaults: 14 days, "
             "FOCUSED, APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when this is "
             "already a Campaign Room. Starting a campaign NEVER means publishing it.\n"
+            "- seo_audit_url: ONLY in an SEO Room, provide the public company website URL when the task asks to "
+            "audit, improve, diagnose, or plan SEO for that website. This invokes the deterministic crawler and "
+            "rule engine before discussion. Use null outside SEO Rooms or when no website is known.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2391,6 +2433,12 @@ class Director:
         if self.room_kind == "campaign" and plan["web_query"]:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
+        audit_url = plan.get("seo_audit_url") if self.room_kind == "seo" else None
+        if self.room_kind == "seo" and not (isinstance(audit_url, str) and audit_url.strip()):
+            candidate = f"{self.user_message or ''}\n{self.company_brief or ''}"
+            match = re.search(r"https?://[^\s<>\]\[\)\(\"']+", candidate, re.I)
+            audit_url = match.group(0).rstrip(".,;") if match else None
+        plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():
@@ -2459,6 +2507,10 @@ class Director:
         if fn == "web_search":
             return (f"running a live web search for “{q}”…",
                     f"Brought back live web findings on “{q}” (sources on the board).")
+        if fn == "seo_audit":
+            site = str(args.get("url") or "")[:80]
+            return (f"auditing the website evidence for “{site}”…",
+                    f"Completed the deterministic SEO scan for “{site}”.")
         if fn == "places_search":
             return (f"scouting local businesses for “{q}”…",
                     f"Found real firms for “{q}” — names, phones, sites on the board.")
@@ -2544,6 +2596,9 @@ class Director:
                                           owner=self._gather_owner(_i, c["name"]))); _i += 1
         if plan["web_query"]:
             tasks.append(self._gather_one("web_search", {"query": plan["web_query"]},
+                                          owner=self._gather_owner(_i, "web_search"))); _i += 1
+        if plan.get("seo_audit_url"):
+            tasks.append(self._gather_one("seo_audit", {"url": plan["seo_audit_url"], "page_limit": 25},
                                           owner=self._gather_owner(_i, "web_search"))); _i += 1
         if plan.get("places_query"):
             tasks.append(self._gather_one("places_search", {"query": plan["places_query"]},

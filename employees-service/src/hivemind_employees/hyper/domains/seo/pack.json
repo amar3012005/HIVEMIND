@@ -1,7 +1,8 @@
 {
   "slug": "seo",
-  "version": 1,
+  "version": 2,
   "display_name": "SEO",
   "description": "Search demand, technical discoverability, content gaps, and measurable organic growth.",
-  "lead_shape": "maker"
+  "lead_shape": "maker",
+  "default_skill": "technical-seo-audit"
 }

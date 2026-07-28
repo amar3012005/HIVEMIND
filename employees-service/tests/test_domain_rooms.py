@@ -17,7 +17,7 @@ def test_initial_domain_packs_are_complete_and_versioned():
     for slug in EXPECTED:
         pack = get_domain_pack(slug)
         assert pack is not None
-        assert pack.version == 1
+        assert pack.version >= 1
         assert pack.director_prompt
         assert pack.toolkit_prompt
         assert "## " in pack.report_contract
@@ -42,6 +42,15 @@ def test_domain_skills_use_progressive_disclosure():
     default = default_skill_for("seo")
     assert default in catalog
     assert "intent clusters" in load_method_skill("keyword-intent-map")
+    assert default == "technical-seo-audit"
+    assert "crawl-and-indexability" in catalog
+    assert "site-architecture" in catalog
+    assert "content-opportunity" in catalog
+    assert "structured-data" in catalog
+    assert "performance-and-cwv" in catalog
+    assert "javascript-seo" in catalog
+    assert "international-and-local" in catalog
+    assert "seo-measurement" in catalog
 
 
 def test_domain_pack_controls_room_lead_shape():

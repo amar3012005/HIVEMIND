@@ -32,10 +32,30 @@ from . import config
 log = logging.getLogger("tara_dg.router")
 
 _ROUTER_SYS = """You are the turn-strategist for TARA, a spoken voice agent on a live call.
-You run a CONFIDENCE-DRIVEN plan: hold a hypothesis about the caller, update
-your confidence every turn, and CONVERGE — calls must move forward and END,
-never loop. Reply ONLY minified JSON:
-{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100}
+You run a WEIGHTED HYPOTHESIS SET seeded at planning time from the call goal, and
+you CONVERGE — calls move forward and END, never loop. Reply ONLY minified JSON:
+{"action":"direct|recall","history_turns":N,"directive":"...","goal_state":"...","new_facts":["..."],"phase":"discover|qualify|propose|close|wrapup","confidence":0-100,"hypotheses":[{"h":"...","w":0-100}],"lead":"..."}
+
+hypotheses — the steering wheel. Carry the set forward EVERY turn and rewrite the
+weights from what they just said AND how they said it:
+- RAISE the weight of any hypothesis their answer supports; LOWER it for any the
+  answer contradicts. Weights are independent; they need not sum to 100.
+- DROP any hypothesis below 15 — a dead branch must not cost you turns.
+- ADD a new one the moment they reveal something none of the current set predicts.
+  The set is alive: seeded, not fixed.
+- Each must stay SPECIFIC and FALSIFIABLE — a claim about THIS person that changes
+  what you say next, testable by ONE spoken question. Never "they may be
+  interested" or "they might have a need"; that steers nothing.
+- Keep at most 4. Deliberation is not free on a live call: pick and move.
+- "lead" = the single highest-weight hypothesis you are currently acting on.
+
+THRESHOLDS — this is what stops the call drifting:
+- lead >= 70 → STOP probing. You have your read. Commit to it, stop testing
+  alternatives, and drive them to the concrete conclusion the goal names.
+- lead < 40 with two hypotheses close together → you are guessing. Ask the ONE
+  question that best separates them. Never ask a question that cannot change a
+  weight.
+- every hypothesis below 40 after 2 phases → the premise was wrong: go to wrapup.
 
 action:
 - "recall": message needs facts about the company, products, prices, docs,
@@ -47,8 +67,7 @@ action:
 history_turns: previous turns the answer needs (2-8).
 
 phase + confidence — the convergence engine:
-- confidence = how sure you are of your hypothesis (caller's interest + fit
-  for the goal). Update it EVERY turn from what they say and HOW they say it.
+- confidence = the weight of your LEAD hypothesis (see above). Update EVERY turn.
 - Each phase gets AT MOST 2 questions. Then you MUST advance:
   discover → qualify → propose → close → wrapup. Never move backward.
 - confidence >= 70 (interested): stop probing, PROPOSE the concrete next step
@@ -58,7 +77,9 @@ phase + confidence — the convergence engine:
   thank them, say goodbye. A clean short call beats a dragging one.
 - In wrapup the directive must be: deliver closing line, then END the call.
 
-directive: ONE line = tone + the single concrete NEXT MOVE for this phase.
+directive: ONE line = tone + the single concrete NEXT MOVE for this phase, and
+it must serve the LEAD hypothesis — either testing it while it is unconfirmed, or
+acting on it once it passes 70.
 HARD RULES: max ONE question per reply — prefer statements that give value.
 Never ask anything already in goal_state/facts. Never repeat a previous move
 that didn't land — change angle or advance phase instead.
@@ -75,11 +96,13 @@ _JSON_RE = re.compile(r"\{.*\}", re.S)
 async def route(*, persona_name: str, goal: str,
                 messages: List[Dict[str, Any]], prev_directive: str = "",
                 goal_state: str = "", facts: List[str] | None = None,
-                phase: str = "discover", confidence: int = 50) -> Dict[str, Any]:
+                phase: str = "discover", confidence: int = 50,
+                hypotheses: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     """One fast-model call → route + confidence-driven directive + fact extraction."""
     fallback = {"action": "recall", "history_turns": 3, "directive": prev_directive or "",
                 "goal_state": goal_state, "new_facts": [],
-                "phase": phase, "confidence": confidence}
+                "phase": phase, "confidence": confidence,
+                "hypotheses": hypotheses or []}
     if not config.OPENROUTER_API_KEY:
         return fallback
 
@@ -90,6 +113,9 @@ async def route(*, persona_name: str, goal: str,
     user = (
         f"Persona: {persona_name or 'TARA'} | Call goal: {goal or 'assist the caller and advance the persona goal'}\n"
         + f"Current phase: {phase} | Current confidence: {confidence}\n"
+        + ("Current hypotheses (update the weights, drop <15, add if unexplained): "
+           + json.dumps(hypotheses)[:700] + "\n" if hypotheses else
+           "No hypotheses yet — derive 2-4 specific falsifiable ones from the goal NOW.\n")
         + (f"Goal state so far: {goal_state}\n" if goal_state else "")
         + (f"Known facts: {'; '.join(facts)}\n" if facts else "")
         + (f"Previous directive: {prev_directive}\n" if prev_directive else "")
@@ -128,21 +154,50 @@ async def route(*, persona_name: str, goal: str,
             confidence = min(max(int(out.get("confidence", 50) or 50), 0), 100)
         except (TypeError, ValueError):
             confidence = 50
+        # Keep the set alive across turns: normalise, drop dead branches (<15) and
+        # cap at 4 so deliberation never costs a live call more than it earns.
+        hyps: List[Dict[str, Any]] = []
+        for item in (out.get("hypotheses") or []):
+            if not isinstance(item, dict):
+                continue
+            text_h = str(item.get("h") or "").strip()[:160]
+            if not text_h:
+                continue
+            try:
+                weight = min(max(int(item.get("w", 50) or 50), 0), 100)
+            except (TypeError, ValueError):
+                weight = 50
+            if weight >= 15:
+                hyps.append({"h": text_h, "w": weight})
+        hyps = sorted(hyps, key=lambda x: x["w"], reverse=True)[:4]
+        if not hyps:
+            hyps = hypotheses or []
         ms = round((time.monotonic() - t0) * 1000)
         log.info("router action=%s turns=%d facts+%d ms=%d phase=%s conf=%d goal=%s",
                  action, turns, len(new_facts), ms, phase, confidence, new_goal[:60])
         return {"action": action, "history_turns": turns, "directive": directive,
                 "goal_state": new_goal, "new_facts": new_facts,
-                "phase": phase, "confidence": confidence, "router_ms": ms}
+                "phase": phase, "confidence": confidence, "router_ms": ms,
+                "hypotheses": hyps, "lead": (hyps[0]["h"] if hyps else "")}
     except Exception as e:  # noqa: BLE001
         log.warning("router failed (%s) — fallback to recall", e)
         return fallback
 
 
 _PLAN_SYS = """You are the call planner for TARA, a spoken voice agent. Given the
-agent's PERSONA (skill) and the CALL GOAL, plan the strategic opening.
+agent's PERSONA (skill) and the CALL GOAL, plan the strategic opening AND seed
+the hypothesis set the call will be steered by.
 Reply ONLY minified JSON:
-{"opening":"...","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress"}
+{"opening":"...","strategy":"one line: the plan to reach the goal","goal_state":"one line initial goal progress","hypotheses":[{"h":"...","w":0-100},...]}
+
+hypotheses — 2 to 4, SEEDED FROM THIS GOAL, and this is the part that decides
+whether the call works:
+- Each is a SPECIFIC, FALSIFIABLE claim about THIS person that, if true, changes
+  what you should say next. Derive them from the goal and persona.
+- BANNED because they steer nothing: "they may be interested", "they might have
+  a need", "the call could go well", "they are a potential customer".
+- Each must be testable by ONE spoken question.
+- w = your prior weight 0-100. They need not sum to 100.
 
 CRITICAL — the AI disclosure has ALREADY been spoken immediately before this
 ("Hi, this is TARA, an AI assistant calling on behalf of <company>..."). So the

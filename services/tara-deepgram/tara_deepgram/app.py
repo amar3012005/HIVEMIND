@@ -393,6 +393,12 @@ if config.TARA_DG_ENABLED:
                 # Prospect brief seeds the strategist's working memory so every
                 # turn plans around WHO is on the line, not just the objective.
                 "facts": ([f"Prospect: {call_context[:400]}"] if call_context else []),
+                # Seed the weighted hypothesis set from the GOAL at plan time, so
+                # turn 1 already steers instead of spending the call working out
+                # what to test. The set then evolves live — weights move, dead
+                # branches drop, new ones appear.
+                "hypotheses": [h for h in (plan.get("hypotheses") or [])
+                               if isinstance(h, dict) and h.get("h")][:4],
             }
         await run_bridge(
             ws, session_id=session_id,

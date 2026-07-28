@@ -238,11 +238,16 @@ async def think(request: Request):
                     goal_state=state.get("goal_state", ""),
                     facts=state.get("facts", []),
                     phase=state.get("phase", "discover"),
+                    hypotheses=state.get("hypotheses") or [],
                     confidence=int(state.get("confidence", 50)),
                 )
                 state["directive"] = decision.get("directive") or prev_directive
                 state["goal_state"] = decision.get("goal_state") or state.get("goal_state", "")
                 state["phase"] = decision.get("phase", state.get("phase", "discover"))
+                # The hypothesis set is the steering wheel — it MUST survive
+                # between turns or every turn re-guesses from scratch.
+                if decision.get("hypotheses"):
+                    state["hypotheses"] = decision["hypotheses"]
                 state["confidence"] = decision.get("confidence", state.get("confidence", 50))
                 for f in decision.get("new_facts", []):
                     if f and f not in state["facts"]:

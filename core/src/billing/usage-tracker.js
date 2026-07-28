@@ -256,8 +256,8 @@ export class UsageTracker {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "webIntelDay", "updatedAt")
          VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 1, 0, 0, $3::date, NOW())
-         ON CONFLICT ("orgId", "webIntelDay")
-         DO UPDATE SET "webIntelJobs" = "OrgUsage"."webIntelJobs" + 1, "updatedAt" = NOW()`,
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "webIntelJobs" = "OrgUsage"."webIntelJobs" + 1, "webIntelDay" = $3::date, "updatedAt" = NOW()`,
         orgId, this._currentMonth(), today
       );
       this._invalidateCache(orgId);

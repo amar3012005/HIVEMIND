@@ -10151,8 +10151,14 @@ exit \$RC
           // body.content, but chat sends body.message, so the most expensive
           // surface in the product charged nothing. A chat turn also runs recall
           // internally, hence the search meter alongside the tokens.
-          meters.push({ type: 'tokens', amount: charTokens(body?.message, 250), charge: true, feature: 'chat' });
-          meters.push({ type: 'searches', amount: 1, charge: true, feature: 'chat' });
+          // CHECK only, never charge. Chat already records its ACTUAL token spend
+          // at completion (see the recordUsage calls at the end of this handler)
+          // and its searches via routes/recall.js. Charging on admission here as
+          // well double-billed the org: measured on a live call, the counter moved
+          // by the real spend PLUS my estimate. Pre-flight gating and recording
+          // are different jobs — gate at the door, bill on the true amount.
+          meters.push({ type: 'tokens', amount: charTokens(body?.message, 250) });
+          meters.push({ type: 'searches', amount: 1 });
         } else if (pathname.includes('/search') || pathname.includes('/recall')) {
           meters.push({ type: 'searches', amount: 1 });
         } else if (body?.content) {

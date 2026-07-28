@@ -3218,6 +3218,22 @@ async def _orchestrate_single_agent(
         }
         _PLAN_BY_TURN[req.turn_id]["verification"] = verdict
         await _emit({"t": "verify", **verdict})
+    elif _room_kind == "seo" and result.get("seo_evidence_governed"):
+        artifact_id = str(result.get("seo_artifact_id") or "")
+        verdict = {
+            "met": True,
+            "artifact_ok": bool(artifact_id),
+            "assignments_ok": bool(contributions),
+            "grounded_ok": bool(artifact_id),
+            "gaps": [],
+            "note": "SEO evidence accepted by deterministic domain governance.",
+            "produced_artifacts": [artifact_id] if artifact_id else [],
+            "pending_writes": [],
+            "intended_output": intended_output,
+            "done_criterion": done_txt,
+        }
+        _PLAN_BY_TURN[req.turn_id]["verification"] = verdict
+        await _emit({"t": "verify", **verdict})
     else:
         try:
             await _verify_and_emit(req, lead, final_text=final_text,

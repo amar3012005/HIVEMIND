@@ -3573,6 +3573,10 @@ class Director:
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)
             "room_kind": self.room_kind,
+            "seo_evidence_governed": bool(self.room_kind == "seo" and self._seo_audit_evidence),
+            "seo_artifact_id": (
+                ((self._seo_audit_evidence or {}).get("capability") or {}).get("artifact_id")
+            ),
             "campaign_bundle": campaign_bundle,
             "campaign_bundle_errors": campaign_bundle_errors,
         }

@@ -1288,6 +1288,7 @@ class Director:
         self.sim_agents = max(10, min(100, int(sim_agents or _SIM_PERSONAS)))
         self._sim_report: Optional[str] = None       # folded into the synthesis when present
         self._sim_payload: Optional[Dict[str, Any]] = None  # emitted to the FE as sim_report
+        self._seo_audit_evidence: Optional[Dict[str, Any]] = None
         # Self-evolving employees (Loop 1, additional + opt-in). evo_playbooks = each participant's
         # GLOBAL learned playbook (lessons across ALL rooms, keyed by slug) injected before it speaks.
         # The WRITE (reflection) happens in the api layer post-verification. Dormant unless the
@@ -1924,6 +1925,7 @@ class Director:
         audit = ((result.get("results") or [{}])[0]) if isinstance(result.get("results"), list) else {}
         if not isinstance(audit, dict) or audit.get("schema") != "seo-audit-v1":
             return json.dumps({"error": "SEO audit returned no structured evidence", "is_error": True})
+        self._seo_audit_evidence = audit
         # Put compact deterministic evidence first so the bounded synthesis board
         # cannot lose it behind recall chatter. Full evidence remains in the web job.
         board_audit = {key: audit.get(key) for key in (
@@ -3132,6 +3134,33 @@ class Director:
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
 
+    async def _synthesize_seo_recommendation(self, transcript_json: str) -> str:
+        """Resolve the visible debate without asking the model to restate audit data."""
+        audit = self._seo_audit_evidence or {}
+        maturity = audit.get("maturity") or {}
+        findings = audit.get("findings") or []
+        compact = {
+            "stage": maturity.get("stage"),
+            "label": maturity.get("label"),
+            "blockers": maturity.get("blockers") or [],
+            "top_findings": [
+                {key: row.get(key) for key in ("id", "severity", "title", "template", "instances")}
+                for row in findings[:6] if isinstance(row, dict)
+            ],
+        }
+        prompt = (
+            "Write exactly two concise sentences that resolve the SEO agents' recommendation. "
+            "Use no numbers, dates, IDs, rankings, traffic claims, search-demand claims, job titles, or new facts. "
+            "Sentence one states the immediate operating priority from the evidence. Sentence two explains why "
+            "the next decision waits for measured evidence. Plain text only."
+        )
+        msg = await self._groq(
+            [{"role": "system", "content": prompt},
+             {"role": "user", "content": f"EVIDENCE: {json.dumps(compact, ensure_ascii=False)}\nDEBATE: {transcript_json[:3500]}"}],
+            force_text=True, model=self.synth_model, bucket="synth", max_tokens=180, temp=0.2,
+        )
+        return ((msg or {}).get("content") or "").strip()
+
     # ── Population-Sim (ADDITIONAL, opt-in) ───────────────────────────
     async def _groq_fb(self, messages: List[Dict[str, Any]], models: List[str], **kw: Any) -> Optional[Dict[str, Any]]:
         """Try each model until one returns usable content — the sim's rate-limit fallback
@@ -3472,7 +3501,20 @@ class Director:
                 final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
                     f"- {error}" for error in campaign_bundle_errors)
         else:
-            final_text = await self._synthesize(forced_debate, transcript_json)
+            if self.room_kind == "seo" and self.response_depth == "operating" and self._seo_audit_evidence:
+                from .domains.seo.reporting import render_operating_report
+                recommendation = await self._synthesize_seo_recommendation(transcript_json)
+                final_text = render_operating_report(self._seo_audit_evidence, recommendation)
+                await self.emit({
+                    "t": "seo_report_governance",
+                    "status": "accepted",
+                    "mode": "evidence_compiled",
+                    "artifact_id": ((self._seo_audit_evidence.get("capability") or {}).get("artifact_id")),
+                    "finding_count": len(self._seo_audit_evidence.get("findings") or []),
+                    "message": "Measured sections were compiled from the deterministic SEO artifact.",
+                })
+            else:
+                final_text = await self._synthesize(forced_debate, transcript_json)
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.
             final_text = ("(The room could not produce a grounded answer this turn — "

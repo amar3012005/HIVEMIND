@@ -1910,13 +1910,22 @@ class Director:
             return json.dumps({"error": "SEO audit returned no structured evidence", "is_error": True})
         # Put compact deterministic evidence first so the bounded synthesis board
         # cannot lose it behind recall chatter. Full evidence remains in the web job.
+        # Put page-level measured facts before aggregate procedures. Direct and
+        # focused turns intentionally use a smaller synthesis board; canonical,
+        # status, title, headings, and findings must survive that truncation.
         board_audit = {key: audit.get(key) for key in (
-            "schema", "capability", "seed_url", "scanned_at", "score", "coverage", "severity",
+            "schema", "seed_url", "scanned_at", "score", "coverage", "severity",
+        )}
+        capability = audit.get("capability") or {}
+        board_audit["capability"] = {key: capability.get(key) for key in (
+            "schema", "id", "version", "artifact_id", "worker_class",
+        )}
+        board_audit["pages"] = (audit.get("pages") or [])[:8]
+        board_audit["findings"] = (audit.get("findings") or [])[:6]
+        board_audit.update({key: audit.get(key) for key in (
             "evidence_quality", "maturity", "optimization_procedure", "categories", "templates",
             "architecture", "site_files", "crawl_errors", "limitations",
-        )}
-        board_audit["findings"] = (audit.get("findings") or [])[:6]
-        board_audit["pages"] = (audit.get("pages") or [])[:8]
+        )})
         search_console = audit.get("search_console") or {}
         board_audit["search_console"] = {
             key: search_console.get(key) for key in (
@@ -2555,6 +2564,17 @@ class Director:
                 f"{self.user_message or ''} {self.room_goal or ''}"):
             plan["needs_debate"] = True
             log.info("[hyper-engine] debate FORCED by judgment backstop (model gate said lookup)")
+        if depth == "direct":
+            # Direct is a product contract, not a suggestion to the model. One
+            # bounded question never convenes a committee or fans out a broad
+            # evidence plan. The planner still chooses the one relevant source.
+            plan["recall_queries"] = plan["recall_queries"][:1]
+            plan["connector_calls"] = plan["connector_calls"][:1]
+            plan["method_skills"] = plan["method_skills"][:1]
+            plan["places_query"] = None
+            plan["needs_debate"] = False
+            if plan.get("seo_audit_url"):
+                plan["web_query"] = None
         log.info("[hyper-engine] plan recalls=%d connectors=%d web=%s debate=%s",
                  len(plan["recall_queries"]), len(plan["connector_calls"]),
                  bool(plan["web_query"]), plan["needs_debate"])

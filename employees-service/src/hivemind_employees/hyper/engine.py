@@ -2378,6 +2378,14 @@ class Director:
         brief_geo = self.campaign_brief.get("geography") or nested_brief.get("geography") or []
         return bool(explicit_source and (explicit_geo or brief_geo))
 
+    def _allows_seo_external_web(self) -> bool:
+        """SEO site audits stay first-party unless the active task asks for an external lane."""
+        return bool(re.search(
+            r"\b(?:serp|search results?|competitors?|competitive|backlinks?|referring domains?|"
+            r"external research|public web|market landscape|benchmark(?:ing)?|keyword volume)\b",
+            self.user_message or "", re.I,
+        ))
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
@@ -2575,6 +2583,12 @@ class Director:
                 and not re.search(r"\b(?:memory|history|historical|previous|prior|earlier|last\s+(?:audit|run))\b",
                                   self.user_message or "", re.I)):
             plan["recall_queries"] = []
+        # A live crawl request is not an implicit competitor/market-research
+        # request. External search enters an SEO turn only when the active user
+        # message names that evidence lane; this prevents broad operating audits
+        # from quietly spending on irrelevant agency/competitor searches.
+        if self.room_kind == "seo" and not self._allows_seo_external_web():
+            plan["web_query"] = None
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():

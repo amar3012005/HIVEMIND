@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverCompanyPages, fallbackDomainHires, selectCompanyResearchPages } from '../../src/onboarding/company-discovery.js';
-import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile } from '../../src/onboarding/company-research.js';
+import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from '../../src/onboarding/company-discovery.js';
+import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, verifiedSocialProfiles } from '../../src/onboarding/company-research.js';
 
 test('onboarding collects real same-site links without language-specific classification', () => {
   const html = `
@@ -119,4 +119,84 @@ test('company location requires first-party evidence or an explicit user claim',
   }, { websiteUrl: 'https://example.com', fallbackName: 'EXAMPLE' });
   assert.equal(verified.location, 'Munich, Germany');
   assert.equal(verified.location_source, 'first_party');
+});
+
+test('social profiles require a first-party link and can be corroborated by search', () => {
+  const profiles = verifiedSocialProfiles([{
+    url: 'https://example.com/',
+    links: [
+      'https://www.linkedin.com/company/example-co/?trk=site',
+      'https://x.com/exampleco',
+      'https://x.com/intent/post?text=share',
+      'https://www.instagram.com/explore/tags/example',
+      'https://attacker.example/exampleco',
+    ],
+  }], [
+    { url: 'https://linkedin.com/company/example-co' },
+    { url: 'https://instagram.com/unlinked-account' },
+  ]);
+  assert.deepEqual(profiles, [
+    {
+      platform: 'linkedin',
+      url: 'https://linkedin.com/company/example-co',
+      source_url: 'https://example.com/',
+      verified_by: ['first_party', 'search'],
+    },
+    {
+      platform: 'x',
+      url: 'https://x.com/exampleco',
+      source_url: 'https://example.com/',
+      verified_by: ['first_party'],
+    },
+  ]);
+});
+
+test('direct-fetch fallback preserves first-party and social links', () => {
+  const links = discoverHttpLinks(`
+    <a href="/leistungen">Services</a>
+    <a href="https://www.linkedin.com/company/example-co/?trk=website">LinkedIn</a>
+    <a href="mailto:hello@example.com">Email</a>
+  `, 'https://example.com/');
+  assert.deepEqual(links, [
+    'https://example.com/leistungen',
+    'https://www.linkedin.com/company/example-co/?trk=website',
+  ]);
+});
+
+test('bounded Firecrawl crawl accepts complete data before the status label catches up', async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+    if (init.method === 'POST') {
+      return new Response(JSON.stringify({ success: true, id: 'crawl-1' }), { status: 200 });
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      status: 'scraping',
+      total: 1,
+      completed: 1,
+      creditsUsed: 1,
+      data: [{
+        markdown: 'Example builds useful software.',
+        links: ['https://linkedin.com/company/example'],
+        metadata: { sourceURL: 'https://example.com/', title: 'Example' },
+      }],
+    }), { status: 200 });
+  };
+  try {
+    const result = await researchCompanyWebsite('https://example.com/', {
+      apiKey: 'test-key',
+      maxPages: 5,
+      pollDelays: [0],
+    });
+    assert.equal(result.provider, 'firecrawl');
+    assert.equal(result.pages.length, 1);
+    assert.equal(result.credits_used, 1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].body.limit, 5);
+    assert.equal(calls[0].body.maxConcurrency, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

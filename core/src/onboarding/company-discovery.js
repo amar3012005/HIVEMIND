@@ -143,6 +143,25 @@ export function discoverCompanyPages(homepageHtml, homepageUrl, { maxPages = 40 
     .slice(0, Math.max(0, maxPages));
 }
 
+export function discoverHttpLinks(pageHtml, pageUrl, { maxLinks = 300 } = {}) {
+  let base;
+  try { base = new URL(pageUrl); } catch { return []; }
+  const links = new Set();
+  const anchorPattern = /<a\b[^>]*>/gi;
+  for (const match of String(pageHtml || '').matchAll(anchorPattern)) {
+    const href = anchorAttributes(match[0]).href;
+    if (!href || /^(?:#|data:|javascript:|mailto:|tel:)/i.test(href)) continue;
+    try {
+      const url = new URL(href, base);
+      if (!/^https?:$/.test(url.protocol)) continue;
+      url.hash = '';
+      links.add(url.href);
+    } catch { /* invalid links are ignored */ }
+    if (links.size >= Math.max(1, maxLinks)) break;
+  }
+  return [...links];
+}
+
 const DOMAIN_ROSTERS = [
   {
     pattern: /brand|branding|creative|design agency|marketing agency|werbeagentur|markenagentur|studio/,

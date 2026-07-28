@@ -1,6 +1,15 @@
-import { normalizeCompanyPageCandidates, selectCompanyResearchPages } from './company-discovery.js';
-
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
+const SOCIAL_PLATFORMS = [
+  ['linkedin', /(^|\.)linkedin\.com$/i, /^\/(?:company|showcase)\/[^/]+/i],
+  ['x', /(^|\.)(?:x|twitter)\.com$/i, /^\/(?!home|share|intent|search|i\/)[^/]+\/?$/i],
+  ['instagram', /(^|\.)instagram\.com$/i, /^\/(?!accounts|explore|p\/|reel\/)[^/]+\/?$/i],
+  ['facebook', /(^|\.)facebook\.com$/i, /^\/(?!sharer|share|plugins|dialog)[^/]+/i],
+  ['youtube', /(^|\.)youtube\.com$/i, /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i],
+  ['tiktok', /(^|\.)tiktok\.com$/i, /^\/@[^/]+\/?$/i],
+  ['threads', /(^|\.)threads\.net$/i, /^\/@[^/]+\/?$/i],
+  ['bluesky', /(^|\.)bsky\.app$/i, /^\/profile\/[^/]+/i],
+  ['github', /(^|\.)github\.com$/i, /^\/(?!features|topics|marketplace|login|signup)[^/]+\/?$/i],
+];
 
 function compactText(value, max = 7000) {
   return String(value || '').replace(/\u0000/g, '').trim().slice(0, max);
@@ -87,6 +96,55 @@ async function firecrawlRequest(path, body, { apiKey, timeoutMs = 65000 } = {}) 
   return payload;
 }
 
+async function firecrawlGet(path, { apiKey, timeoutMs = 65000 } = {}) {
+  if (!apiKey) throw new Error('Firecrawl API key not configured');
+  const response = await fetch(`${FIRECRAWL_BASE_URL}${path}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    const error = new Error(payload?.error || `Firecrawl ${path} returned ${response.status}`);
+    error.status = response.status;
+    const retryAfter = Number(response.headers.get('retry-after'));
+    error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
+    throw error;
+  }
+  return payload;
+}
+
+function normalizedSocialProfile(rawUrl) {
+  let url;
+  try { url = new URL(rawUrl); } catch { return null; }
+  if (url.protocol !== 'https:') return null;
+  url.hostname = url.hostname.replace(/^www\./i, '');
+  url.hash = '';
+  url.search = '';
+  url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
+  const match = SOCIAL_PLATFORMS.find(([, hostPattern, pathPattern]) => hostPattern.test(url.hostname) && pathPattern.test(url.pathname));
+  if (!match) return null;
+  return { platform: match[0], url: url.href };
+}
+
+export function verifiedSocialProfiles(pages, searchResults = []) {
+  const firstParty = new Map();
+  for (const page of Array.isArray(pages) ? pages : []) {
+    for (const rawUrl of Array.isArray(page?.links) ? page.links : []) {
+      const profile = normalizedSocialProfile(rawUrl);
+      if (profile && !firstParty.has(profile.url)) {
+        firstParty.set(profile.url, { ...profile, source_url: page.url, verified_by: ['first_party'] });
+      }
+    }
+  }
+  const searched = new Set((Array.isArray(searchResults) ? searchResults : [])
+    .map((item) => normalizedSocialProfile(item?.url))
+    .filter(Boolean)
+    .map((item) => item.url));
+  return [...firstParty.values()].map((profile) => searched.has(profile.url)
+    ? { ...profile, verified_by: ['first_party', 'search'] }
+    : profile);
+}
+
 const COUNTRY_CODES = new Map(Object.entries({
   austria: 'AT', belgium: 'BE', bulgaria: 'BG', croatia: 'HR', cyprus: 'CY', czechia: 'CZ',
   denmark: 'DK', estonia: 'EE', finland: 'FI', france: 'FR', germany: 'DE', greece: 'GR',
@@ -130,62 +188,80 @@ export async function searchCompanyMarket(query, {
 
 export async function researchCompanyWebsite(websiteUrl, {
   apiKey = process.env.FIRECRAWL_API_KEY,
-  maxPages = 6,
+  maxPages = 8,
   onProgress = () => {},
-  selectPages = null,
+  pollDelays = [12000, 24000, 30000],
 } = {}) {
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
-    onProgress('Mapping your website with Firecrawl');
-    const mapped = await firecrawlRequest('/map', {
+    const limit = Math.min(10, Math.max(5, Number(maxPages) || 8));
+    onProgress(`Crawling up to ${limit} first-party pages with Firecrawl`);
+    const started = await firecrawlRequest('/crawl', {
       url: websiteUrl,
+      limit,
+      maxDiscoveryDepth: 2,
+      crawlEntireDomain: true,
       sitemap: 'include',
-      includeSubdomains: false,
+      allowSubdomains: false,
+      allowExternalLinks: false,
       ignoreQueryParameters: true,
-      limit: 80,
-      timeout: 45000,
+      maxConcurrency: 1,
+      scrapeOptions: {
+        formats: ['markdown', 'links'],
+        onlyMainContent: true,
+        removeBase64Images: true,
+        blockAds: true,
+        maxAge: 86400000,
+      },
     }, { apiKey, timeoutMs: 50000 });
-    const links = Array.isArray(mapped?.links) ? mapped.links : [];
-    const candidates = normalizeCompanyPageCandidates(links, websiteUrl);
-    let semanticSelection = [];
-    if (typeof selectPages === 'function') {
-      try { semanticSelection = await selectPages(candidates, { maxPages }); } catch { semanticSelection = []; }
-    }
-    const selected = selectCompanyResearchPages(links, websiteUrl, { maxPages, semanticSelection });
-    onProgress(`Firecrawl found ${links.length} pages; reading ${selected.length} high-signal pages`);
-    const pages = [];
-    // Keep provider concurrency modest: onboarding is interactive and Firecrawl
-    // plans enforce per-team concurrent scrape limits.
-    for (let i = 0; i < selected.length; i += 2) {
-      const batch = selected.slice(i, i + 2);
-      const results = await Promise.all(batch.map(async (page) => {
-        try {
-          const scraped = await firecrawlRequest('/scrape', {
-            url: page.url,
-            formats: ['markdown'],
-            onlyMainContent: true,
-            removeBase64Images: true,
-            blockAds: true,
-            maxAge: 86400000,
-            timeout: 45000,
-          }, { apiKey, timeoutMs: 55000 });
-          const data = scraped?.data || {};
-          return {
-            ...page,
-            url: data?.metadata?.sourceURL || data?.metadata?.url || page.url,
-            title: data?.metadata?.title || page.label || '',
-            description: data?.metadata?.description || '',
-            content: compactText(data?.markdown || data?.content, 9000),
-            provider: 'firecrawl',
-          };
-        } catch (error) {
-          return { ...page, content: '', provider: 'firecrawl', error: error.message };
+    const jobId = started?.id;
+    if (!jobId) throw new Error('Firecrawl crawl did not return a job id');
+    let status = null;
+    const boundedPollDelays = (Array.isArray(pollDelays) && pollDelays.length ? pollDelays : [12000, 24000, 30000])
+      .slice(0, 3)
+      .map((value) => Math.max(0, Number(value) || 0));
+    for (const delayMs of boundedPollDelays) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      try {
+        status = await firecrawlGet(`/crawl/${encodeURIComponent(jobId)}`, { apiKey, timeoutMs: 15000 });
+      } catch (error) {
+        if (error?.status === 429) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(error.retryAfterMs || 0, 30000)));
+          continue;
         }
-      }));
-      pages.push(...results.filter((page) => page.content && isFirstPartyUrl(page.url, websiteUrl)));
+        throw error;
+      }
+      const dataComplete = Array.isArray(status?.data)
+        && status.data.length > 0
+        && Number(status?.total) > 0
+        && Number(status?.completed) >= Number(status.total);
+      if (status?.status === 'completed' || dataComplete) break;
+      if (status?.status === 'failed' || status?.status === 'cancelled') throw new Error(status?.error || `Firecrawl crawl ${status.status}`);
     }
+    const dataComplete = Array.isArray(status?.data)
+      && status.data.length > 0
+      && Number(status?.total) > 0
+      && Number(status?.completed) >= Number(status.total);
+    if (status?.status !== 'completed' && !dataComplete) throw new Error('Firecrawl crawl timed out');
+    const pages = (Array.isArray(status?.data) ? status.data : []).map((data) => ({
+      url: data?.metadata?.sourceURL || data?.metadata?.url || '',
+      title: cleanString(data?.metadata?.title, 300),
+      description: cleanString(data?.metadata?.description, 500),
+      content: compactText(data?.markdown || data?.content, 9000),
+      links: Array.isArray(data?.links) ? data.links.slice(0, 300) : [],
+      purpose: 'company',
+      provider: 'firecrawl',
+    })).filter((page) => page.content && isFirstPartyUrl(page.url, websiteUrl)).slice(0, limit);
     if (!pages.length) throw new Error('Firecrawl returned no usable first-party pages');
-    return { provider: 'firecrawl', pages, mapped: links.length, error: null };
+    onProgress(`Read ${pages.length} first-party pages in one bounded crawl`);
+    return {
+      provider: 'firecrawl',
+      pages,
+      mapped: Number(status?.total || pages.length),
+      social_profiles: verifiedSocialProfiles(pages),
+      credits_used: Number(status?.creditsUsed || pages.length),
+      error: null,
+    };
   } catch (error) {
     return { provider: 'fallback', pages: [], mapped: 0, error: error.message };
   }

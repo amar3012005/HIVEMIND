@@ -34,7 +34,7 @@ import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './b
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
-import { countQuotaHyperRooms, ensureDomainRooms } from './employees/domain-rooms.js';
+import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -46,8 +46,8 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
-import { discoverCompanyPages, fallbackDomainHires } from './onboarding/company-discovery.js';
-import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket } from './onboarding/company-research.js';
+import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires } from './onboarding/company-discovery.js';
+import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -828,6 +828,20 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         if (!task) { await persist(); continue; }
         // Room: reuse the task's room or provision one (same shape as tasks/open).
         let roomId = task.room_id;
+        if (!roomId && task.room_tag) {
+          const domainRows = await prisma.$queryRawUnsafe(
+            `SELECT id
+               FROM "hivemind"."hyper_rooms"
+              WHERE org_id = $1::uuid
+                AND room_tag = $2
+                AND archived_at IS NULL
+                AND agent_connectors->>'_domain_home' = 'true'
+              ORDER BY created_at ASC LIMIT 1`,
+            hq.org_id,
+            String(task.room_tag),
+          ).catch(() => []);
+          roomId = domainRows?.[0]?.id || null;
+        }
         if (!roomId) {
           const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
           const taskRoom = await createHyperRoomWithinPlan({
@@ -862,6 +876,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
           room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
           user_message: kickoff, participant_ids: roomRow?.participantIds || [],
           project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
+          task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
           callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
         task.status = 'active'; task.room_id = roomId;
@@ -7840,10 +7855,11 @@ Write the persona now.`;
             const t = setTimeout(() => ac.abort(), 8000);
             try {
               const r = await fetch(pageUrl, { signal: ac.signal, headers: { 'User-Agent': 'HIVEMIND-Onboarding/1.0' } });
-              if (!r.ok) return { url: pageUrl, text: '', html: '' };
+              if (!r.ok) return { url: pageUrl, text: '', html: '', links: [] };
               const html = await r.text();
-              return { url: r.url || pageUrl, text: stripHtml(html), html };
-            } catch { return { url: pageUrl, text: '', html: '' }; } finally { clearTimeout(t); }
+              const resolvedUrl = r.url || pageUrl;
+              return { url: resolvedUrl, text: stripHtml(html), html, links: discoverHttpLinks(html, resolvedUrl) };
+            } catch { return { url: pageUrl, text: '', html: '', links: [] }; } finally { clearTimeout(t); }
           };
           const selectResearchPages = async (candidates, { maxPages = 6 } = {}) => {
             if (!Array.isArray(candidates) || !candidates.length) return [];
@@ -7858,7 +7874,7 @@ Write the persona now.`;
           };
           const [homepage, firecrawlResearch] = await Promise.all([
             fetchPage(homepageUrl),
-            researchCompanyWebsite(homepageUrl, { onProgress: say, selectPages: selectResearchPages }),
+            researchCompanyWebsite(homepageUrl, { maxPages: 8, onProgress: say }),
           ]);
           let pages = firecrawlResearch.pages;
           if (firecrawlResearch.provider !== 'firecrawl') {
@@ -7878,6 +7894,7 @@ Write the persona now.`;
             pages = [homepage, ...linkedPages].map((page) => ({
               url: page.url,
               content: page.text,
+              links: page.links || [],
               purpose: page.purpose || 'company',
               provider: 'direct',
             }));
@@ -7922,6 +7939,9 @@ Write the persona now.`;
             websiteUrl: homepageUrl,
             claimedLocation: claimedCompanyLocation,
           });
+          profile.social_profiles = Array.isArray(firecrawlResearch.social_profiles)
+            ? firecrawlResearch.social_profiles
+            : [];
           // Clamp: the LLM sometimes copies the site <title> verbatim
           // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
           // the segment before any "|"/"–" separator, cap length hard.
@@ -7930,21 +7950,34 @@ Write the persona now.`;
 
           say('Researching your market from the verified company profile');
           const locationContext = profile.location || profile.location_country || '';
-          const companyQuery = `"${companyName}" ${host} ${locationContext} company`;
-          const marketSubject = String(profile.industry || profile.what_it_does || companyName).slice(0, 140);
-          const marketQuery = `${marketSubject} ${locationContext} competitors market ${new Date().getFullYear()}`;
-          say(`Searching web for verified company coverage: ${companyName}...`);
-          say(`Searching web for local market evidence: ${locationContext || 'target market'}...`);
-          let [companyCoverage, marketCoverage] = await Promise.all([
-            searchCompanyMarket(companyQuery, { limit: 5, includeDomains: [host], location: locationContext, country: profile.location_country }),
-            searchCompanyMarket(marketQuery, { limit: 6, location: locationContext, country: profile.location_country }),
-          ]);
-          if (!companyCoverage.length) companyCoverage = await webSearch(companyQuery, { limit: 5 });
-          if (!marketCoverage.length) marketCoverage = await webSearch(marketQuery, { limit: 6 });
-          research.push(
-            ...companyCoverage.filter((item) => isFirstPartyUrl(item.url, homepageUrl)),
-            ...marketCoverage.map((item) => ({ ...item, evidence_scope: 'external-market' })),
-          );
+          const evidenceQuery = `${companyName} ${host}`;
+          say(`Running one company and social-presence search for ${companyName}...`);
+          let coverage = await searchCompanyMarket(evidenceQuery, {
+            limit: 10,
+            location: locationContext,
+            country: profile.location_country,
+          });
+          if (!coverage.length) coverage = await webSearch(evidenceQuery, { limit: 10 });
+          profile.social_profiles = verifiedSocialProfiles(pages, coverage);
+          const officialSocialUrls = new Set(profile.social_profiles.map((social) => social.url));
+          coverage = coverage.filter((item) => {
+            if (isFirstPartyUrl(item.url, homepageUrl)) return true;
+            let normalizedUrl = '';
+            try {
+              const parsed = new URL(item.url);
+              parsed.hostname = parsed.hostname.replace(/^www\./i, '');
+              parsed.hash = '';
+              parsed.search = '';
+              parsed.pathname = parsed.pathname.replace(/\/$/, '');
+              normalizedUrl = parsed.href;
+            } catch { /* malformed search result */ }
+            if (officialSocialUrls.has(normalizedUrl)) return true;
+            return `${item.title || ''} ${item.snippet || ''}`.toLowerCase().includes(host.toLowerCase());
+          });
+          research.push(...coverage.map((item) => ({
+            ...item,
+            evidence_scope: isFirstPartyUrl(item.url, homepageUrl) ? 'first-party-search' : 'external-market',
+          })));
 
           say('Writing your mission');
           let mission = '';
@@ -8133,6 +8166,8 @@ Write the persona now.`;
               content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.${profile.location ? ` Company location: ${profile.location}.` : ''}` },
             ...(profile.location ? [{ title: `${companyName} — Company location`, memoryType: 'fact', authorityLevel: profile.location_source === 'first_party' ? 'verified' : 'claimed',
               content: `COMPANY LOCATION (${profile.location_source === 'first_party' ? 'first-party verified' : 'user provided'}) — ${companyName}: ${profile.location}. Evidence: ${profile.location_evidence_url || siteUrl}. Use this location to ground local market, customer, competitor, regulatory, hiring, and outreach research; do not treat it as the user's home address.` }] : []),
+            ...((profile.social_profiles || []).length ? [{ title: `${companyName} — Official social presence`, memoryType: 'fact', authorityLevel: 'verified',
+              content: `OFFICIAL SOCIAL PROFILES for ${companyName}, linked from its first-party website: ${(profile.social_profiles || []).map((social) => `${social.platform}: ${social.url}`).join('; ')}.` }] : []),
             { title: `${companyName} — Mission`, memoryType: 'summary',
               content: `MISSION of ${companyName}: ${mission}` },
             { title: `${companyName} — Positioning`, memoryType: 'decision',
@@ -8162,6 +8197,7 @@ Write the persona now.`;
               { key: 'company:positioning', value: profile.positioning || null },
               { key: 'company:icp', value: profile.icp || null },
               { key: 'company:website', value: siteUrl || null },
+              { key: 'company:social_profiles', value: (profile.social_profiles || []).map((social) => `${social.platform}: ${social.url}`).join('\n') || null },
               { key: 'company:location', value: profile.location || null },
               { key: 'location', value: profile.location ? `Company HQ: ${profile.location}` : null },
               { key: 'company:location_city', value: profile.location_city || null },
@@ -8181,42 +8217,60 @@ Write the persona now.`;
 
           say('Planning your first tasks');
           let tasks = [];
+          const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
           try {
             const tj = JSON.parse(await llm(
-              'Design a first research backlog for this company. Output ONLY JSON: {"tasks":[{"title":"","detail":"","tag":"RESEARCH","research_question":"","deliverable":"","source_plan":[""],"done_when":""}]}. Produce exactly 5 useful, non-overlapping tasks in dependency order. Task 1 verifies any first-party evidence gaps. Tasks 2-3 investigate the company location and target market using authoritative local sources, customer evidence, registries, trade bodies, analyst material, and current competitor websites. Task 4 turns verified evidence into a positioning or product decision. Task 5 prepares one evidence-backed go-to-market experiment; do not write generic content assets before the evidence work. Every task must name the decision it unlocks, a concrete deliverable, source types, and an observable completion criterion. At least three tasks must be RESEARCH. Never invent competitor names or market statistics. tag must be RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY.',
-              `Verified company profile: ${JSON.stringify(profile)}\nMission: ${mission}\nCompany location: ${profile.location || '(not verified; make location verification task 1)'}\nCurrent external market sources: ${JSON.stringify(research.slice(0, 8))}${userGoal ? `\nUser goal: ${userGoal}` : ''}`,
+              'Create one concise, immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 8 words. Details must be company-specific, at most 35 words, and state the evidence or decision produced. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
+              `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}\nCURRENT SOURCES: ${JSON.stringify(research.slice(0, 6))}${userGoal ? `\nUSER PRIORITY: ${userGoal}` : ''}`,
               { json: true, maxTokens: 1200 },
             ));
-            tasks = (Array.isArray(tj.tasks) ? tj.tasks : [])
-              .filter((x) => x && typeof x.title === 'string' && x.title.trim())
-              .slice(0, 5)
-              .map((x, i) => ({
+            const proposed = new Map((Array.isArray(tj.tasks) ? tj.tasks : [])
+              .filter((task) => task && starterRooms.some((roomDefinition) => roomDefinition.key === task.room_tag))
+              .map((task) => [task.room_tag, task]));
+            tasks = starterRooms.map((roomDefinition, i) => {
+              const x = proposed.get(roomDefinition.key) || {};
+              return {
                 id: `t${i + 1}`,
-                title: x.title.trim().slice(0, 120),
-                detail: (typeof x.detail === 'string' ? x.detail.trim() : '').slice(0, 500),
-                tag: i < 3 ? 'RESEARCH' : (['RESEARCH', 'FEATURE', 'MARKETING', 'OUTREACH', 'STRATEGY'].includes(x.tag) ? x.tag : 'RESEARCH'),
-                research_question: String(x.research_question || '').trim().slice(0, 300),
-                deliverable: String(x.deliverable || '').trim().slice(0, 300),
-                source_plan: (Array.isArray(x.source_plan) ? x.source_plan : []).map((source) => String(source).trim()).filter(Boolean).slice(0, 6),
-                done_when: String(x.done_when || '').trim().slice(0, 300),
+                room_tag: roomDefinition.key,
+                room_name: roomDefinition.name,
+                title: String(x.title || '').trim().slice(0, 80),
+                detail: String(x.detail || '').trim().slice(0, 260),
+                tag: roomDefinition.key === 'research' ? 'RESEARCH'
+                  : roomDefinition.key === 'product' || roomDefinition.key === 'design' ? 'FEATURE'
+                    : roomDefinition.key === 'legal_finance' || roomDefinition.key === 'fundraising' ? 'STRATEGY'
+                      : 'MARKETING',
                 status: 'todo',
                 room_id: null,
-              }));
-            const completeResearchContract = tasks.length === 5
-              && new Set(tasks.map((task) => task.title.toLowerCase())).size === 5
-              && tasks.every((task) => task.detail && task.research_question && task.deliverable && task.source_plan.length && task.done_when)
-              && tasks.filter((task) => task.tag === 'RESEARCH').length >= 3;
-            if (!completeResearchContract) tasks = [];
+              };
+            });
+            if (tasks.some((task) => !task.title || !task.detail)) tasks = [];
           } catch { /* tasks optional */ }
-          if (tasks.length < 5) {
+          if (tasks.length !== starterRooms.length) {
             const localMarket = profile.location || profile.location_country || 'the company operating market';
-            tasks = [
-              { title: 'Close company evidence gaps', detail: `Verify ${companyName}'s unresolved first-party facts and document each answer with a source URL.`, tag: 'RESEARCH', research_question: 'Which company facts remain unsupported?', deliverable: 'Verified company evidence register', source_plan: ['Company website', 'Official company registry'], done_when: 'Every profile fact is sourced or explicitly marked unknown.' },
-              { title: 'Map the local buyer landscape', detail: `Research buyer segments, active demand signals, and procurement constraints in ${localMarket}; rank segments by evidence and fit.`, tag: 'RESEARCH', research_question: `Where is demand strongest in ${localMarket}?`, deliverable: 'Ranked local buyer landscape', source_plan: ['Industry bodies', 'Public procurement data', 'Customer evidence'], done_when: 'Three segments are ranked with cited evidence and a recommended first segment.' },
-              { title: 'Verify the competitive set', detail: `Identify real alternatives serving the same buyer and problem in ${localMarket}; compare capabilities, proof, pricing signals, and positioning.`, tag: 'RESEARCH', research_question: 'Which alternatives do target buyers actually compare?', deliverable: 'Sourced competitor comparison', source_plan: ['Competitor websites', 'Customer reviews', 'Analyst and registry sources'], done_when: 'Each included competitor has direct evidence and a documented comparison basis.' },
-              { title: 'Choose a defensible position', detail: 'Turn verified buyer and competitor evidence into one positioning recommendation, preserving unsupported claims as open questions.', tag: 'STRATEGY', research_question: 'Which position is differentiated and supportable?', deliverable: 'Positioning decision brief', source_plan: ['Completed buyer research', 'Completed competitor research'], done_when: 'One position is selected with evidence, trade-offs, and prohibited claims.' },
-              { title: 'Design the first market test', detail: `Create a measurable, low-risk experiment for the highest-priority segment in ${localMarket}, including message, channel, audience, and success criteria.`, tag: 'MARKETING', research_question: 'What is the fastest credible demand test?', deliverable: 'Launch-ready experiment brief', source_plan: ['Positioning decision', 'Channel benchmarks'], done_when: 'The experiment has an owner, audience, channel, timing, metric, and stop/go threshold.' },
-            ].map((task, i) => ({ id: `t${i + 1}`, ...task, status: 'todo', room_id: null }));
+            const fallbackTasks = {
+              seo: ['Establish the search baseline', `Audit discoverability, technical blockers, and demand around ${companyName}; return a ranked SEO baseline with evidence.`],
+              marketing: ['Choose the first growth experiment', `Select one measurable audience and channel experiment for ${localMarket}, grounded in verified offer and buyer evidence.`],
+              campaign: ['Design the first campaign', `Turn the strongest verified position into one approval-ready campaign brief with audience, channel, sequence, and measurement.`],
+              branding: ['Sharpen the company narrative', `Compare ${companyName}'s current message with buyer needs and alternatives; recommend one defensible narrative and prohibited claims.`],
+              fundraising: ['Assess fundraising readiness', `Evaluate investor fit, evidence gaps, milestones, and capital story; return a candid readiness decision, not a generic pitch.`],
+              research: ['Close the highest-risk evidence gaps', `Verify unresolved company, buyer, competitor, and location facts using first-party and authoritative sources.`],
+              product: ['Prioritize the customer problem', `Translate verified buyer pain into one product priority with expected outcome, assumptions, and validation evidence.`],
+              design: ['Review the critical user journey', `Identify the highest-value journey and produce a focused usability and conversion improvement brief grounded in current evidence.`],
+              legal_finance: ['Map immediate obligations and economics', `Identify material legal, privacy, financial, and unit-economic questions for ${localMarket}; rank what requires expert review.`],
+            };
+            tasks = starterRooms.map((roomDefinition, i) => ({
+              id: `t${i + 1}`,
+              room_tag: roomDefinition.key,
+              room_name: roomDefinition.name,
+              title: fallbackTasks[roomDefinition.key][0],
+              detail: fallbackTasks[roomDefinition.key][1],
+              tag: roomDefinition.key === 'research' ? 'RESEARCH'
+                : roomDefinition.key === 'product' || roomDefinition.key === 'design' ? 'FEATURE'
+                  : roomDefinition.key === 'legal_finance' || roomDefinition.key === 'fundraising' ? 'STRATEGY'
+                    : 'MARKETING',
+              status: 'todo',
+              room_id: null,
+            }));
           }
           say('Saving your tasks');
 
@@ -8394,6 +8448,60 @@ Write the persona now.`;
       }
     }
 
+    // PATCH /v1/hyper/company/location — explicit HQ confirmation collected
+    // when the user enters the workspace. This is organization context, not a
+    // personal/home address, and is mirrored to the org-scoped profile store.
+    if (pathname === '/v1/hyper/company/location' && req.method === 'PATCH') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const location = typeof body.location === 'string' ? body.location.trim().slice(0, 240) : '';
+      if (location.length < 2) return jsonResponse(res, { error: 'headquarters location is required' }, 400);
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, "agent_connectors"->'_company' AS company
+             FROM "hivemind"."hyper_rooms"
+            WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
+            ORDER BY created_at DESC LIMIT 1`,
+          current.session.orgId,
+        );
+        const row = rows?.[0];
+        if (!row?.company) return jsonResponse(res, { error: 'not onboarded' }, 404);
+        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+        company.profile = { ...(company.profile || {}), location, location_source: 'user_claim', location_evidence_url: 'user-provided' };
+        company.company_location = location;
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+          JSON.stringify({ _company: company }), row.id,
+        );
+        try {
+          const { getSharedProfileStore } = await import('./memory/profile-store.js');
+          const profileStore = getSharedProfileStore(prisma);
+          for (const fact of [
+            { key: 'company:location', value: location },
+            { key: 'location', value: `Company HQ: ${location}` },
+          ]) {
+            await profileStore.upsertFact({
+              userId: current.session.userId,
+              orgId: current.session.orgId,
+              category: 'static',
+              key: fact.key,
+              value: fact.value,
+              confidence: 1,
+              sourceMemoryId: null,
+            });
+          }
+        } catch (error) {
+          console.warn('[hyper-company] HQ profile fact update failed:', error.message);
+        }
+        const activeJob = _hyperOnboardJobs.get(current.session.orgId);
+        if (activeJob?.result) activeJob.result = company;
+        return jsonResponse(res, { ok: true, company, location });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // GET /v1/hyper/outcomes — closed-loop value counters for the dashboard:
     // what actually LEFT the platform (emails sent, calls placed) and what came
     // back (replies, bookings), from the outbound_actions ledger. 7d + 30d.
@@ -8558,35 +8666,57 @@ Write the persona now.`;
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
           'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
         ].filter(Boolean).join('\n');
+        if (!task.room_id && task.room_tag) {
+          const domainRows = await prisma.$queryRawUnsafe(
+            `SELECT id, name
+               FROM "hivemind"."hyper_rooms"
+              WHERE org_id = $1::uuid
+                AND room_tag = $2
+                AND archived_at IS NULL
+                AND agent_connectors->>'_domain_home' = 'true'
+              ORDER BY created_at ASC LIMIT 1`,
+            current.session.orgId,
+            String(task.room_tag),
+          ).catch(() => []);
+          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
+        }
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
             select: { id: true, name: true },
           }).catch(() => null);
           if (existing) {
-            // A task room can exist with ZERO turns (created before the kickoff
-            // feature, or the kick was lost) — it sat idle in chat forever. Ship
-            // the kickoff again whenever the room has no turns; the FE's stable
-            // idempotency key makes a double-post harmless.
-            const turnCount = await prisma.hyperTurn.count({ where: { roomId: existing.id } }).catch(() => 1);
-            if (turnCount === 0) {
-              try {
-                const kickTurn = await prisma.hyperTurn.create({
-                  data: { roomId: existing.id, seq: 1, userMessage: kickoff, status: 'live',
-                          idempotencyKey: `task-kickoff-${existing.id}`, lines: [] },
-                });
-                const rr = await prisma.hyperRoom.findUnique({
-                  where: { id: existing.id }, select: { participantIds: true, goal: true, projectId: true },
-                }).catch(() => null);
-                dispatchHyperRoomTurn({
-                  room_id: existing.id, turn_id: kickTurn.id,
-                  user_id: current.session.userId, org_id: current.session.orgId,
-                  user_message: kickoff, participant_ids: rr?.participantIds || [],
-                  project_id: rr?.projectId || null, room_goal: rr?.goal || '',
-                  callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-                }).catch((e) => console.warn('[hyper-tasks] re-open kickoff dispatch failed:', e.message));
-              } catch (e) { console.warn('[hyper-tasks] re-open kickoff failed:', e.message || e); }
+            let created = false;
+            const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
+            const kickTurn = await prisma.$transaction(async (tx) => {
+              const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+              if (prior) return prior;
+              const last = await tx.hyperTurn.findFirst({
+                where: { roomId: existing.id }, orderBy: { seq: 'desc' }, select: { seq: true },
+              });
+              created = true;
+              return tx.hyperTurn.create({
+                data: { roomId: existing.id, seq: (last?.seq ?? 0) + 1, userMessage: kickoff, status: 'live', idempotencyKey, lines: [] },
+              });
+            });
+            if (created) {
+              const rr = await prisma.hyperRoom.findUnique({
+                where: { id: existing.id }, select: { participantIds: true, goal: true, projectId: true },
+              }).catch(() => null);
+              dispatchHyperRoomTurn({
+                room_id: existing.id, turn_id: kickTurn.id,
+                user_id: current.session.userId, org_id: current.session.orgId,
+                user_message: kickoff, participant_ids: rr?.participantIds || [],
+                project_id: rr?.projectId || null, room_goal: rr?.goal || '',
+                task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
+                callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+              }).catch((e) => console.warn('[hyper-tasks] domain kickoff dispatch failed:', e.message));
             }
+            task.status = 'active';
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+              JSON.stringify({ _company: company }), row.id,
+            ).catch(() => {});
             return jsonResponse(res, { room: existing, task });
           }
         }

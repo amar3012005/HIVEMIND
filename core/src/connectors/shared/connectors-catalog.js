@@ -118,6 +118,15 @@ const CONNECTOR_CATALOG = [
     authType: 'oauth2',
     status: 'beta',
   },
+  {
+    id: 'google-search-console',
+    name: 'Google Search Console',
+    description: 'First-party queries, pages, clicks, impressions, CTR, and position for SEO Intelligence.',
+    category: 'data',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'stable',
+  },
 
   // ── INGESTION / LIVE — Microsoft 365 ──────────────────────────────────
   {

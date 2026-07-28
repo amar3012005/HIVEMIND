@@ -40,6 +40,7 @@ model User {
   memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
   digitalEmployees     DigitalEmployee[]     @relation("UserCreatedEmployees")
   hyperRooms           HyperRoom[]           @relation("UserHyperRooms")
+  seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("UserSeoSearchConsoleProperties")
 
   @@map("users")
 }
@@ -120,6 +121,8 @@ model Organization {
   pageIndexNodes               PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig                    OrgSsoConfig?      @relation("OrgSsoConfig")
   hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
+  seoSearchConsoleProperties   SeoSearchConsoleProperty[] @relation("OrgSeoSearchConsoleProperties")
+  seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
 
   @@map("organizations")
 }
@@ -308,6 +311,7 @@ model PlatformIntegration {
   teamId                 String?   @map("team_id") @db.Uuid
   user                   User      @relation("UserPlatformIntegrations", fields: [userId], references: [id], onDelete: Cascade)
   team                   Team?     @relation("TeamPlatformIntegrations", fields: [teamId], references: [id], onDelete: SetNull)
+  seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("IntegrationSeoSearchConsoleProperties")
 
   @@unique([userId, platformType])
   @@index([userId])
@@ -362,6 +366,49 @@ model NangoConnection {
   @@index([orgId])
   @@index([status])
   @@map("nango_connections")
+}
+
+/// One Search Console property explicitly selected for an organization.
+/// OAuth credentials remain user-owned in PlatformIntegration; this binding
+/// prevents a user's connection from silently crossing organization context.
+model SeoSearchConsoleProperty {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String   @unique(map: "seo_gsc_properties_org_key") @map("org_id") @db.Uuid
+  connectedByUserId String   @map("connected_by_user_id") @db.Uuid
+  integrationId     String   @map("integration_id") @db.Uuid
+  siteUrl           String   @map("site_url") @db.Text
+  permissionLevel   String   @map("permission_level") @db.VarChar(40)
+  selectedAt        DateTime @default(now()) @map("selected_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  org               Organization @relation("OrgSeoSearchConsoleProperties", fields: [orgId], references: [id], onDelete: Cascade)
+  connectedByUser   User @relation("UserSeoSearchConsoleProperties", fields: [connectedByUserId], references: [id], onDelete: Cascade)
+  integration       PlatformIntegration @relation("IntegrationSeoSearchConsoleProperties", fields: [integrationId], references: [id], onDelete: Cascade)
+  snapshots         SeoSearchConsoleSnapshot[] @relation("PropertySeoSearchConsoleSnapshots")
+
+  @@index([orgId, connectedByUserId], map: "seo_gsc_properties_tenant_user_idx")
+  @@index([integrationId], map: "seo_gsc_properties_integration_idx")
+  @@map("seo_search_console_properties")
+}
+
+/// Durable first-party performance evidence. Snapshots are immutable inputs
+/// for later trend and change-detection stages.
+model SeoSearchConsoleSnapshot {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  propertyId    String   @map("property_id") @db.Uuid
+  siteUrl       String   @map("site_url") @db.Text
+  startDate     DateTime @map("start_date") @db.Date
+  endDate       DateTime @map("end_date") @db.Date
+  dataState     String   @default("final") @map("data_state") @db.VarChar(20)
+  evidence      Json     @db.JsonB
+  fetchedAt     DateTime @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  org           Organization @relation("OrgSeoSearchConsoleSnapshots", fields: [orgId], references: [id], onDelete: Cascade)
+  property      SeoSearchConsoleProperty @relation("PropertySeoSearchConsoleSnapshots", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, propertyId, startDate, endDate], map: "seo_gsc_snapshots_period_key")
+  @@index([orgId, fetchedAt(sort: Desc)], map: "seo_gsc_snapshots_org_time_idx")
+  @@index([propertyId, fetchedAt(sort: Desc)], map: "seo_gsc_snapshots_property_time_idx")
+  @@map("seo_search_console_snapshots")
 }
 
 /// Pending writes from agent — held for explicit user approval before

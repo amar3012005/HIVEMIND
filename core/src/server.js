@@ -41,6 +41,7 @@ import { processDueCampaignActions } from './campaigns/worker.js';
 import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
 import { SEO_SITE_INTELLIGENCE, runSeoSiteIntelligence } from './capabilities/seo-site-intelligence.js';
+import { SeoSearchConsoleService } from './capabilities/seo-search-console.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -8037,6 +8038,7 @@ exit \$RC
             'https://www.googleapis.com/auth/tasks.readonly':         'google-tasks',
             'https://www.googleapis.com/auth/tasks':                  'google-tasks',
             'https://www.googleapis.com/auth/forms.body.readonly':    'google-forms',
+            'https://www.googleapis.com/auth/webmasters.readonly':    'google-search-console',
           };
           // SHORT short-form (state) → canonical (hyphen, matching SCOPE_TO_SERVICE)
           const SHORT_TO_CANON = {
@@ -8050,6 +8052,7 @@ exit \$RC
             chat: 'google-chat',
             tasks: 'google-tasks',
             forms: 'google-forms',
+            'search-console': 'google-search-console',
           };
 
           const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
@@ -8060,6 +8063,9 @@ exit \$RC
           let filtered = requestedSet.size > 0
             ? grantedServices.filter(s => requestedSet.has(s))
             : grantedServices;
+          if (filtered.length === 0 && requestedSet.size > 0) {
+            throw new Error('Google did not grant any of the requested service scopes');
+          }
           if (filtered.length === 0) filtered = ['gmail'];
 
           for (const service of filtered) {
@@ -8095,7 +8101,9 @@ exit \$RC
             }
           }
 
-          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
+          const connectedService = filtered.length === 1 && filtered[0] === 'google-search-console'
+            ? 'google-search-console' : 'gmail';
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=${encodeURIComponent(connectedService)}&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
           res.end();
           return;
         } catch (err) {
@@ -12650,13 +12658,14 @@ exit \$RC
 
         case '/api/connectors/gmail/connect':
           if (req.method === 'GET') {
-            const { buildAuthUrl, AVAILABLE_SERVICES } = await import('./connectors/providers/gmail/oauth.js');
+            const { buildAuthUrl, AVAILABLE_SERVICES, DEFAULT_SERVICES } = await import('./connectors/providers/gmail/oauth.js');
             const gmailRedirectUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
             const targetScope = url.searchParams.get('target_scope') === 'organization' ? 'organization' : 'personal';
 
             // Services opt-in: ?services=gmail,drive,calendar,docs
-            // Default to all available (full Workspace) for new connections.
-            const requestedServices = (url.searchParams.get('services') || AVAILABLE_SERVICES.join(','))
+            // Default to Workspace services only. Search Console is a separate,
+            // explicit consent because it exposes company search performance.
+            const requestedServices = (url.searchParams.get('services') || DEFAULT_SERVICES.join(','))
               .split(',')
               .map(s => s.trim().toLowerCase())
               .filter(s => AVAILABLE_SERVICES.includes(s));
@@ -13151,7 +13160,7 @@ exit \$RC
           // Lets FE render per-service tiles with connected/disconnect status.
           if (req.method === 'GET') {
             try {
-              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms', 'google-search-console'];
               const rows = await prisma.platformIntegration.findMany({
                 where: { userId, platformType: { in: services } },
                 select: {
@@ -13204,7 +13213,7 @@ exit \$RC
                 return jsonResponse(res, { error: 'provider required (or "all")' }, 400);
               }
 
-              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms', 'google-search-console'];
               const toRevoke = targetProvider === 'all' ? services : [targetProvider];
 
               const result = await prisma.platformIntegration.updateMany({
@@ -16161,6 +16170,55 @@ exit \$RC
           }
           break;
 
+        case '/api/seo/search-console/status':
+          if (req.method === 'GET') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              return jsonResponse(res, await service.status({ orgId, userId }));
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_status_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/properties':
+          if (req.method === 'GET') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              return jsonResponse(res, await service.listProperties({ userId }));
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_properties_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/property':
+          if (req.method === 'POST') {
+            try {
+              if (!body.site_url) return jsonResponse(res, { error: 'site_url_required' }, 400);
+              const service = new SeoSearchConsoleService({ prisma });
+              const property = await service.selectProperty({ orgId, userId, siteUrl: String(body.site_url) });
+              return jsonResponse(res, { selected: true, property: {
+                site_url: property.siteUrl, permission_level: property.permissionLevel, selected_at: property.selectedAt,
+              } });
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_property_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/collect':
+          if (req.method === 'POST') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              const evidence = await service.collect({ orgId, userId });
+              return jsonResponse(res, { evidence });
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_collection_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
         case '/api/web/seo-audit/jobs':
           if (req.method === 'POST') {
             try {
@@ -16201,7 +16259,8 @@ exit \$RC
                 try {
                   await webJobStore.update(job.id, { status: 'running' });
                   const execution = await runSeoSiteIntelligence({
-                    seedUrl, depth, pageLimit, browserRuntime,
+                    seedUrl, depth, pageLimit, browserRuntime, userId, orgId,
+                    searchConsoleService: new SeoSearchConsoleService({ prisma }),
                     onStage: async (stage) => webJobStore.update(job.id, {
                       capability: `${SEO_SITE_INTELLIGENCE.id}@${SEO_SITE_INTELLIGENCE.version}`,
                       capability_stage: stage,
@@ -16386,7 +16445,7 @@ exit \$RC
                   const result = newJob.type === 'search'
                     ? await browserRuntime.search({ query: p.query, domains: p.domains || [], limit: p.limit || 10 })
                     : newJob.type === 'seo_audit'
-                      ? await runSeoSiteIntelligence({ seedUrl: p.url || p.urls?.[0], depth: p.depth || 2, pageLimit: p.pageLimit || 25, browserRuntime })
+                      ? await runSeoSiteIntelligence({ seedUrl: p.url || p.urls?.[0], depth: p.depth || 2, pageLimit: p.pageLimit || 25, browserRuntime, userId, orgId, searchConsoleService: new SeoSearchConsoleService({ prisma }) })
                     : await browserRuntime.crawl({ urls: p.urls, depth: p.depth || 1, pageLimit: p.pageLimit || 50, include: p.include, exclude: p.exclude });
                   const items = newJob.type === 'search'
                     ? result.results

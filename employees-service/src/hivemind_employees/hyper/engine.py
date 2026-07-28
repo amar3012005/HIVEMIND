@@ -1898,6 +1898,18 @@ class Director:
         )}
         board_audit["findings"] = (audit.get("findings") or [])[:6]
         board_audit["pages"] = (audit.get("pages") or [])[:8]
+        search_console = audit.get("search_console") or {}
+        board_audit["search_console"] = {
+            key: search_console.get(key) for key in (
+                "schema", "capability", "status", "connected", "site_url", "permission_level",
+                "fetched_at", "data_state", "periods", "totals", "limitations",
+            )
+        }
+        board_audit["search_console"]["opportunities"] = (search_console.get("opportunities") or [])[:20]
+        board_audit["search_console"]["queries"] = (search_console.get("queries") or [])[:20]
+        board_audit["search_console"]["pages"] = (search_console.get("pages") or [])[:20]
+        board_audit["search_console"]["query_pages"] = (search_console.get("query_pages") or [])[:20]
+        board_audit["search_console"]["daily"] = (search_console.get("daily") or [])[-35:]
         self.blackboard.insert(0, "SEO_AUDIT_EVIDENCE:\n" + json.dumps(board_audit, ensure_ascii=False))
         self.gather_count += 1
         await self.emit({
@@ -1910,8 +1922,10 @@ class Director:
             "capability_version": (audit.get("capability") or {}).get("version"),
             "critical": (audit.get("severity") or {}).get("critical", 0),
             "high": (audit.get("severity") or {}).get("high", 0),
+            "search_console_status": (audit.get("search_console") or {}).get("status", "not_connected"),
+            "search_opportunities": len((audit.get("search_console") or {}).get("opportunities") or []),
         })
-        return json.dumps(audit, ensure_ascii=False)
+        return json.dumps(board_audit, ensure_ascii=False)
 
     # ── debate (the room) ─────────────────────────────────────────────
     async def _consult(self, emp: Dict[str, Any], prompt: str, round_no: int) -> Dict[str, Any]:

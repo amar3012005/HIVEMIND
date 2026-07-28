@@ -112,7 +112,6 @@ export class ConnectorStore {
       teamId: teamId || null,
       platformUserId: accountRef,
       accessTokenEncrypted: encryptToken(accessToken),
-      refreshTokenEncrypted: encryptToken(refreshToken),
       tokenExpiresAt: tokenExpiresAt ? new Date(tokenExpiresAt) : null,
       oauthScopes: scopes || [],
       oauthGrantedAt: new Date(),
@@ -138,6 +137,11 @@ export class ConnectorStore {
         where: { id: existing.id },
         data: {
           ...data,
+          // Google may omit refresh_token during incremental consent. Keep the
+          // durable credential from the original grant unless a new one arrives.
+          refreshTokenEncrypted: refreshToken
+            ? encryptToken(refreshToken)
+            : existing.refreshTokenEncrypted,
           connectorMetadata: {
             ...readConnectorMetadata(existing),
             ...data.connectorMetadata,
@@ -150,6 +154,7 @@ export class ConnectorStore {
       data: {
         userId,
         platformType: provider,
+        refreshTokenEncrypted: encryptToken(refreshToken),
         ...data,
       },
     });
@@ -459,13 +464,16 @@ export class ConnectorStore {
       // Refresh the token
       try {
         const refreshToken = decryptToken(record.refreshTokenEncrypted);
-        if (refreshToken && provider === 'gmail') {
+        const isGoogleProvider = provider === 'gmail'
+          || provider.startsWith('google-')
+          || provider.startsWith('google_');
+        if (refreshToken && isGoogleProvider) {
           const resp = await fetch('https://oauth2.googleapis.com/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
-              client_id: process.env.GOOGLE_CLIENT_ID,
-              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              client_id: process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET,
               refresh_token: refreshToken,
               grant_type: 'refresh_token',
             }),

@@ -32,7 +32,7 @@ function artifactId(manifest, seedUrl, scannedAt) {
     .slice(0, 24);
 }
 
-export async function runSeoSiteIntelligence({ seedUrl, depth = 2, pageLimit = 25, browserRuntime, fetchImpl, onStage } = {}) {
+export async function runSeoSiteIntelligence({ seedUrl, depth = 2, pageLimit = 25, browserRuntime, fetchImpl, searchConsoleService, userId, orgId, onStage } = {}) {
   const manifest = capabilityRegistry.resolve('seo.site-intelligence');
   if (!manifest || !browserRuntime) throw new Error('SEO capability runtime is unavailable');
   const scannedAt = new Date().toISOString();
@@ -61,6 +61,22 @@ export async function runSeoSiteIntelligence({ seedUrl, depth = 2, pageLimit = 2
     runtime: crawl.runtime_used,
   });
 
+  let searchConsole = null;
+  if (searchConsoleService && orgId) {
+    await emit('search_performance', 'running');
+    try {
+      searchConsole = await searchConsoleService.collect({ orgId, userId });
+      await emit('search_performance', searchConsole.status === 'connected' ? 'succeeded' : 'skipped', { connection_status: searchConsole.status });
+    } catch (error) {
+      searchConsole = {
+        schema: 'seo-search-console-evidence-v1',
+        capability: { id: 'seo.search-console', version: '1.0.0' },
+        status: error.code || 'unavailable', connected: false,
+      };
+      await emit('search_performance', 'failed', { connection_status: searchConsole.status });
+    }
+  }
+
   await emit('evidence_compilation', 'running');
   const capability = {
     schema: 'capability-artifact-v1',
@@ -76,7 +92,7 @@ export async function runSeoSiteIntelligence({ seedUrl, depth = 2, pageLimit = 2
     errors: crawl.errors,
     runtimeUsed: crawl.runtime_used,
     scannedAt,
-    siteFiles,
+    siteFiles, searchConsole,
     capability,
   });
   await emit('evidence_compilation', 'succeeded', {
@@ -93,4 +109,3 @@ export async function runSeoSiteIntelligence({ seedUrl, depth = 2, pageLimit = 2
     duration_ms: crawl.duration_ms,
   };
 }
-

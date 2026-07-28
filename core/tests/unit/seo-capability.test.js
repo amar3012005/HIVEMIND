@@ -44,3 +44,23 @@ test('SEO site intelligence emits durable stages and a versioned evidence artifa
     'evidence_compilation:running', 'evidence_compilation:succeeded',
   ]);
 });
+
+test('SEO site intelligence attaches first-party evidence without mixing it into crawl facts', async () => {
+  const browserRuntime = { seoAudit: async () => ({
+    pages: [{ url: 'https://example.com/', title: 'Example', description: 'Description', canonical: 'https://example.com/', h1: ['Example'], wordCount: 300, links: [] }],
+    errors: [], runtime_used: 'playwright-service', fallback_applied: false, duration_ms: 10,
+  }) };
+  const searchConsoleService = { collect: async ({ orgId, userId }) => ({
+    schema: 'seo-search-console-evidence-v1', capability: { id: 'seo.search-console', version: '1.0.0' },
+    status: 'connected', connected: true, site_url: 'sc-domain:example.com', totals: { current: { clicks: 12 } },
+    tenant_check: `${orgId}:${userId}`,
+  }) };
+  const result = await runSeoSiteIntelligence({
+    seedUrl: 'https://example.com/', browserRuntime, searchConsoleService, orgId: 'org-1', userId: 'user-1',
+    fetchImpl: async (url) => ({ url, status: 404, ok: false, text: async () => '' }),
+  });
+  assert.equal(result.audit.runtime, 'playwright-service');
+  assert.equal(result.audit.search_console.status, 'connected');
+  assert.equal(result.audit.search_console.tenant_check, 'org-1:user-1');
+  assert.ok(result.audit.capability.stages.some((stage) => stage.stage === 'search_performance' && stage.status === 'succeeded'));
+});

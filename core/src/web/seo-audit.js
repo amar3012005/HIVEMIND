@@ -121,7 +121,7 @@ function aggregateFindings(findings) {
   return [...grouped.values()].sort((a, b) => WEIGHTS[b.severity] - WEIGHTS[a.severity] || b.instances - a.instances);
 }
 
-export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null, capability = null } = {}) {
+export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed = null, scannedAt = new Date().toISOString(), siteFiles = null, capability = null, searchConsole = null } = {}) {
   const auditedPages = asArray(pages).filter((page) => text(page?.url)).map(auditPage);
   const discoveredUrls = new Set([
     canonicalUrl(seedUrl),
@@ -187,10 +187,15 @@ export function compileSeoAudit({ seedUrl, pages = [], errors = [], runtimeUsed 
     templates: Object.values(templates).sort((a, b) => b.issues - a.issues),
     crawl_errors: normalizedErrors,
     site_files: siteFiles,
+    search_console: searchConsole || {
+      schema: 'seo-search-console-evidence-v1',
+      capability: { id: 'seo.search-console', version: '1.0.0' },
+      status: 'not_connected', connected: false,
+    },
     limitations: [
-      'Public crawl evidence does not prove Google index status or search demand.',
+      ...(searchConsole?.status === 'connected' ? [] : ['Public crawl evidence does not prove Google index status or search demand.']),
       'Core Web Vitals require field or Lighthouse measurements and are not inferred from HTML.',
-      'Connect Search Console to compare declared and Google-selected canonicals.',
+      ...(searchConsole?.status === 'connected' ? [] : ['Connect Search Console to add first-party query, page, click, impression, CTR, and position evidence.']),
     ],
   };
 }

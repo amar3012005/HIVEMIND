@@ -96,6 +96,15 @@ export const CONNECTOR_CATALOG = [
     status: 'beta',
     description: 'Spaces, messages — live query.',
   },
+  {
+    id: 'google-search-console',
+    name: 'Google Search Console',
+    category: 'data',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'stable',
+    description: 'First-party queries, pages, clicks, impressions, CTR, and position for SEO Intelligence.',
+  },
 
   // ── INGESTION / LIVE — Microsoft 365 ──────────────────────────────────
   {

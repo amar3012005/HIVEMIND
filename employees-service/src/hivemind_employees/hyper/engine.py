@@ -1288,6 +1288,9 @@ class Director:
         # resolve the recipient for a "send to <name>" task when the org/recall lookup
         # is empty (the director already searched to:<addr>, so it knows it).
         self.gathered_emails: set = set()
+        # The planner sets this per turn. It changes how much work the Room does,
+        # while keeping one Director and one set of SEO capabilities.
+        self.response_depth = "operating"
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -1295,6 +1298,7 @@ class Director:
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
         bucket: str = "director", schema: Optional[Dict[str, Any]] = None,
         uncapped: bool = False, json_object: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """One Groq chat call. Retries a 400 (malformed tool-call generation) once
         at a lower temperature per Groq's guidance. Returns the message dict or
@@ -1310,6 +1314,8 @@ class Director:
         # what actually stops it.
         msgs = _flatten_for_text(messages) if force_text else messages
         body: Dict[str, Any] = {"model": model or self.director_model, "messages": msgs, "temperature": temp}
+        if max_tokens is not None:
+            body["max_tokens"] = max(1, int(max_tokens))
         if tools and not force_text:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -1933,6 +1939,7 @@ class Director:
             "discovered": (audit.get("coverage") or {}).get("pages_discovered", 0),
             "capability": (audit.get("capability") or {}).get("id"),
             "capability_version": (audit.get("capability") or {}).get("version"),
+            "artifact_id": (audit.get("capability") or {}).get("artifact_id"),
             "critical": (audit.get("severity") or {}).get("critical", 0),
             "high": (audit.get("severity") or {}).get("high", 0),
             "search_console_status": (audit.get("search_console") or {}).get("status", "not_connected"),
@@ -2343,6 +2350,7 @@ class Director:
                     },
                     "required": ["role", "task", "query"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
+                "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
                 "campaign_request": {"type": ["object", "null"], "properties": {
                     "goal": {"type": "string"},
                     "name": {"type": ["string", "null"]},
@@ -2353,7 +2361,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "response_depth", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2365,6 +2373,11 @@ class Director:
             "deliverable ('hallo', 'who are you?', 'thanks!', 'what can you do?') — the room just REPLIES "
             "as people; every other field must then be empty/null/false. 'task' = real work is requested. "
             "The ROOM GOAL does NOT make a greeting a task — judge the MESSAGE, not the goal.\n"
+            "- response_depth: size the work to the USER MESSAGE, never to the standing Room goal. "
+            "direct = one factual or tightly scoped question that needs a concise answer; focused = one bounded "
+            "diagnosis, comparison, page/template analysis, or recommendation; operating = an explicit broad "
+            "audit, strategy, roadmap, optimization program, or multi-stage operating plan. Chat uses direct. "
+            "Do not run an operating pipeline merely because this is a specialist Room.\n"
             "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
             "RUN, START, or SET UP an operational campaign, return its complete brief here. This delegates to a "
             "dedicated Campaign Room, so every gather field must be empty/null and needs_debate=false. Map X to "
@@ -2372,9 +2385,11 @@ class Director:
             "a channel; Core will select only channels that are connected and executable. Defaults: 14 days, "
             "FOCUSED, APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when this is "
             "already a Campaign Room. Starting a campaign NEVER means publishing it.\n"
-            "- seo_audit_url: ONLY in an SEO Room, provide the public company website URL when the task asks to "
-            "audit, improve, diagnose, or plan SEO for that website. This invokes the deterministic crawler and "
-            "rule engine before discussion. Use null outside SEO Rooms or when no website is known.\n"
+            "- seo_audit_url: ONLY in an SEO Room when live page evidence is needed. For a direct question about "
+            "a page's current tag, redirect, heading, rendered content, or status, provide its URL; the runtime "
+            "will inspect one page. For focused analysis it inspects a small sample. For an operating audit or "
+            "optimization plan it performs the broader crawl. Use null for conceptual questions, outside SEO "
+            "Rooms, or when no website is known.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2454,6 +2469,10 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
+        depth = str(plan.get("response_depth") or "focused").strip().lower()
+        if depth not in {"direct", "focused", "operating"}:
+            depth = "focused"
+        plan["response_depth"] = depth
         rq = [q for q in (plan.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:3]
         if self.room_kind == "campaign":
             rq = [q for q in rq if self._campaign_recall_query_is_grounded(q)]
@@ -2474,11 +2493,16 @@ class Director:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
         audit_url = plan.get("seo_audit_url") if self.room_kind == "seo" else None
-        if self.room_kind == "seo" and not (isinstance(audit_url, str) and audit_url.strip()):
+        # A URL in the message is not itself permission to crawl a whole site.
+        # The planner must name the live-evidence gap. The deterministic fallback
+        # exists only for explicit broad operating runs when the model omitted a URL.
+        if (self.room_kind == "seo" and depth == "operating"
+                and not (isinstance(audit_url, str) and audit_url.strip())):
             candidate = f"{self.user_message or ''}\n{self.company_brief or ''}"
             match = re.search(r"https?://[^\s<>\]\[\)\(\"']+", candidate, re.I)
             audit_url = match.group(0).rstrip(".,;") if match else None
         plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
+        plan["seo_audit_page_limit"] = {"direct": 1, "focused": 8, "operating": 25}[depth]
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         if (not (isinstance(pq, str) and pq.strip())) and _places_on and self._allows_places_discovery():
@@ -2638,7 +2662,10 @@ class Director:
             tasks.append(self._gather_one("web_search", {"query": plan["web_query"]},
                                           owner=self._gather_owner(_i, "web_search"))); _i += 1
         if plan.get("seo_audit_url"):
-            tasks.append(self._gather_one("seo_audit", {"url": plan["seo_audit_url"], "page_limit": 25},
+            tasks.append(self._gather_one("seo_audit", {
+                "url": plan["seo_audit_url"],
+                "page_limit": int(plan.get("seo_audit_page_limit") or 25),
+            },
                                           owner=self._gather_owner(_i, "web_search"))); _i += 1
         if plan.get("places_query"):
             tasks.append(self._gather_one("places_search", {"query": plan["places_query"]},
@@ -2851,7 +2878,9 @@ class Director:
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
         if self.room_kind == "campaign":
             raise RuntimeError("Campaign Rooms may complete only through campaign__govern_delivery")
-        board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
+        depth = self.response_depth if self.response_depth in {"direct", "focused", "operating"} else "focused"
+        board_limit = {"direct": 3000, "focused": 4500, "operating": 6000}[depth]
+        board = "\n".join(self.blackboard)[:board_limit] or "(no grounded facts were gathered)"
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")
         # Additional: a population simulation's report (if it ran) is folded in so the final
@@ -2907,7 +2936,7 @@ class Director:
             " prospect/target/partner list in the report MUST be built from THOSE rows (real names, phones,"
             " emails, websites) — never invent institutions or write placeholder contacts when real ones exist."
         )
-        if _io in ("doc", "notion", "answer", "report", ""):
+        if depth != "direct" and _io in ("doc", "notion", "answer", "report", ""):
             _fmt += _RICH
         elif _io == "email" and _is_prospecting:
             _fmt += ("\n\nUnder '--- SUPPORTING MATERIAL ---' you MAY use the rich elements below "
@@ -2937,6 +2966,18 @@ class Director:
                 "still fabricated — omit it or write [confirm with sales] / [confirm with legal] instead. "
                 "Contact details: use ONLY the company's real sender identity from context."
                 + self._room_instr_block + _fmt + self._lang_directive())
+        if depth == "direct":
+            sysp += (
+                "\nDIRECT ANSWER MODE: answer only the user's bounded question in at most 6 short paragraphs or "
+                "bullets. Lead with the answer, cite the measured evidence used, distinguish current observation "
+                "from general guidance, and give only the verification steps needed. Do not write an executive "
+                "summary, roadmap, maturity report, broad audit, or unrelated recommendations."
+            )
+        elif depth == "focused":
+            sysp += (
+                "\nFOCUSED ANALYSIS MODE: solve only the named diagnosis or decision. Use only headings that "
+                "directly help that task; do not expand into a complete operating audit or roadmap."
+            )
         # Evidence contract: the report must show its grounding. Skills applied +
         # per-lane evidence counts feed a citation requirement — each major section
         # names the lane (recall/web/connector/debate) that grounded it.
@@ -2961,8 +3002,9 @@ class Director:
         # email/sheet keeps its own format contract). Existing discipline
         # (citations, UNVERIFIED, Gaps to confirm, owner+metric) still applies
         # inside each section.
-        _skeleton = ((self.domain_pack.report_contract if self.domain_pack else None)
-                     or self._REPORT_SKELETON.get(self.room_kind)) if _io in ("answer", "doc", "notion") else None
+        _skeleton = (((self.domain_pack.report_contract if self.domain_pack else None)
+                      or self._REPORT_SKELETON.get(self.room_kind))
+                     if depth == "operating" and _io in ("answer", "doc", "notion") else None)
         if _skeleton:
             sysp += (
                 f"\n\nREPORT CONTRACT ({self.room_kind.upper()} room — this is a "
@@ -2981,7 +3023,8 @@ class Director:
         user = (f"{_org_block}{self._journal_block}TASK: {self.user_message}\n\nGATHERED CONTEXT (the room's shared board):\n{board}{debate_ctx}{sim_ctx}\n\n"
                 "Write the final, publish-ready deliverable now.")
         msg = await self._groq([{"role": "system", "content": sysp}, {"role": "user", "content": user}],
-                               force_text=True, model=self.synth_model, bucket="synth")
+                               force_text=True, model=self.synth_model, bucket="synth",
+                               max_tokens={"direct": 900, "focused": 2200}.get(depth))
         self.director_iters.append(self._last_tok)
         return (msg or {}).get("content") or ""
 
@@ -3173,6 +3216,14 @@ class Director:
         # decides what to recall / which connectors to read / web + debate. Replaces the
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
         plan = await self._plan_gather()
+        self.response_depth = str(plan.get("response_depth") or "focused")
+        await self.emit({
+            "t": "work_scope",
+            "room_kind": self.room_kind,
+            "depth": self.response_depth,
+            "audit_page_limit": plan.get("seo_audit_page_limit") if plan.get("seo_audit_url") else 0,
+            "debate": bool(plan.get("needs_debate")),
+        })
         # EVENT-DRIVEN TURN ROUTER — the planner (an LLM, not a regex) classified the
         # MESSAGE. 'chat' = conversational: the room replies as people — no gather, no
         # web/Maps spend, no debate, no report. 'hallo' used to burn a 27k-token full

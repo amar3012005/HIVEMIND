@@ -8,4 +8,4 @@
 ## Measurement Contract — KPI, current sourced baseline or `not connected`, source, cadence, attribution limit, and rescan verification
 ## Risks & Unknowns — ranking uncertainty, incomplete crawl coverage, missing Search Console/analytics/CWV evidence, assumptions, and required access
 
-After the narrative, include exactly one fenced `seo_audit` block containing valid JSON copied from `SEO_AUDIT_EVIDENCE`. Preserve its `schema`, `capability`, `seed_url`, `scanned_at`, `score`, `evidence_quality`, `maturity`, `optimization_procedure`, `coverage`, `severity`, `categories`, `findings`, `pages`, `templates`, `architecture`, `site_files`, `search_console`, `crawl_errors`, and `limitations`. Never invent or modify measured values. If no deterministic audit ran, omit the block and state why under SEO Health.
+Reference the deterministic audit artifact ID under SEO Health. Never copy the audit JSON into the report. If no deterministic audit ran, state why under SEO Health.

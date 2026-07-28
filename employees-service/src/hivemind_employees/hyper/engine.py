@@ -3149,15 +3149,15 @@ class Director:
             ],
         }
         prompt = (
-            "Write exactly two concise sentences that resolve the SEO agents' recommendation. "
+            "Write one concise sentence that resolves the SEO agents' recommendation. "
             "Use no numbers, dates, IDs, rankings, traffic claims, search-demand claims, job titles, or new facts. "
-            "Sentence one states the immediate operating priority from the evidence. Sentence two explains why "
-            "the next decision waits for measured evidence. Plain text only."
+            "State the immediate operating priority and why the next decision waits for measured evidence. "
+            "Return only the sentence, with no label or quotation marks."
         )
         msg = await self._groq(
             [{"role": "system", "content": prompt},
              {"role": "user", "content": f"EVIDENCE: {json.dumps(compact, ensure_ascii=False)}\nDEBATE: {transcript_json[:3500]}"}],
-            force_text=True, model=self.synth_model, bucket="synth", max_tokens=180, temp=0.2,
+            force_text=True, model=self.synth_model, bucket="synth", max_tokens=120, temp=0.2,
         )
         return ((msg or {}).get("content") or "").strip()
 

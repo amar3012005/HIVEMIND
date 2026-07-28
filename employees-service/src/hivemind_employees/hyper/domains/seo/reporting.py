@@ -76,8 +76,14 @@ def render_operating_report(audit: Dict[str, Any], recommendation: str = "") -> 
     templates = [row for row in audit.get("templates") or [] if isinstance(row, dict)]
     procedure = [row for row in audit.get("optimization_procedure") or [] if isinstance(row, dict)]
 
-    summary = recommendation.strip()
-    if not summary:
+    summary = " ".join(recommendation.split()).strip()
+    unsafe_summary = (
+        not summary
+        or len(summary) > 500
+        or '"' in summary
+        or summary.lower().startswith(("sentence", "summary", "recommendation"))
+    )
+    if unsafe_summary:
         summary = (
             f"The site is at the {_text(maturity.get('label'))} stage. Work the measured findings in "
             "severity order, verify each release with the same rendered audit, and connect Search Console "

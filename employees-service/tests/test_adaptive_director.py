@@ -37,6 +37,7 @@ def test_light_intensity_is_a_bounded_director_contract(monkeypatch):
         "connector_calls": [],
         "web_query": "law firm campaign benchmarks",
         "seo_audit_url": None,
+        "seo_audit_scope": "none",
         "places_query": None,
         "needs_debate": True,
         "method_skills": [],
@@ -71,6 +72,7 @@ def test_seo_remediation_refreshes_measured_evidence_without_forcing_deep(monkey
         "connector_calls": [],
         "web_query": None,
         "seo_audit_url": None,
+        "seo_audit_scope": "site",
         "places_query": None,
         "needs_debate": False,
         "method_skills": [],
@@ -92,7 +94,7 @@ def test_seo_remediation_refreshes_measured_evidence_without_forcing_deep(monkey
     assert plan["response_depth"] == "focused"
     assert plan["seo_audit_url"] == "https://bb-markenagentur.de/"
     assert plan["seo_audit_page_limit"] == 25
-    assert plan["recall_queries"] == []
+    assert plan["recall_queries"] == ["previous SEO work"]
     assert plan["needs_debate"] is False
 
 
@@ -111,3 +113,23 @@ def test_light_collaboration_is_visible_without_persona_calls():
     assert len(contributions) == 3
     assert all(event.get("activity_only") is True for event in contributions)
 
+
+def test_deep_intensity_guarantees_visible_debate(monkeypatch):
+    director, _events = _director(message="Launch a 14-day multichannel campaign in France")
+    payload = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "places_query": None,
+        "needs_debate": False, "method_skills": [], "campaign_method_assignments": [],
+        "turn_mode": "task", "collaboration_intensity": "deep",
+        "response_depth": "operating", "evidence_mode": "standard",
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["collaboration_intensity"] == "deep"
+    assert plan["needs_debate"] is True

@@ -27,6 +27,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -1150,8 +1151,9 @@ class Director:
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
-        # Room METHOD skills: kind resolved from goal/message keywords unless the
-        # caller passed one; catalog goes to the planner, bodies load on demand.
+        # The persisted room kind is authoritative. Legacy callers without one use
+        # the compatibility resolver; active turn intent is still decided by the
+        # structured Director below rather than lexical routing.
         self.room_kind = (str(room_kind or "").strip().lower()
                           or resolve_room_kind("", room_goal or "", user_message or ""))
         self.domain_pack = get_domain_pack(self.room_kind)
@@ -2284,25 +2286,16 @@ class Director:
             log.warning("[hyper-engine] places query composer failed: %s", exc)
             return []
 
-    def _allows_seo_external_web(self) -> bool:
-        """SEO site audits stay first-party unless the active task asks for an external lane."""
-        return bool(re.search(
-            r"\b(?:serp|search results?|competitors?|competitive|backlinks?|referring domains?|"
-            r"external research|public web|market landscape|benchmark(?:ing)?|keyword volume)\b",
-            self.user_message or "", re.I,
-        ))
-
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
         tool-calling — reliable on gpt-oss + a single round-trip (replaces the old 15-call
         sequential agentic loop). connection_search (flag) trims the surfaced tool list."""
         conn_all = list(self._connector_routes.keys())
-        # Campaign intent and tool choice must work in every language. Expose the
-        # complete bounded connector catalog and let the structured Director choose;
-        # lexical token overlap silently hid tools for non-English requests.
-        conn = conn_all if self.room_kind == "campaign" else self._relevant_connector_names(
-            conn_all, f"{self.user_message or ''} {self.room_goal or ''}")
+        # Tool choice must work in every language. Expose the complete bounded
+        # connector catalog and let the structured Director choose up to four;
+        # lexical overlap silently hid valid tools for non-English requests.
+        conn = conn_all
         if _CONNECTION_SEARCH and len(conn) < len(conn_all):
             log.info("[hyper-engine] connection_search: surfaced %d/%d connector tools", len(conn), len(conn_all))
         conn_line = (f"Connector READ tools available (use these EXACT names): {conn}."
@@ -2319,6 +2312,7 @@ class Director:
                     "required": ["name", "args_json"], "additionalProperties": False}},
                 "web_query": {"type": ["string", "null"]},
                 "seo_audit_url": {"type": ["string", "null"]},
+                "seo_audit_scope": {"type": "string", "enum": ["none", "page", "sample", "site"]},
                 "places_query": {"type": ["string", "null"]},
                 "needs_debate": {"type": "boolean"},
                 "method_skills": {"type": "array", "items": {"type": "string"}},
@@ -2344,7 +2338,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "campaign_request"],
+            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -2361,7 +2355,11 @@ class Director:
             "or tentative/exploratory request; standard = bounded planning, diagnosis, research, or a decision "
             "that benefits from a few specialist views; deep = explicit launch, broad audit, multi-channel plan, "
             "scheduling, analytics, major strategy, or an operating program. A specialist Room does not make a "
-            "simple message deep. Chat is light.\n"
+            "simple message deep. Evidence breadth is independent from collaboration intensity: a concise request "
+            "may need a broad crawl or connector read while still producing a Standard answer with no debate. "
+            "Chat is light. Canonical examples: 'Can we run a campaign for law firms?' is light; 'Resolve 4 "
+            "critical and 0 high finding(s)' is standard, uses the current/fresh SEO artifact, and needs no debate; "
+            "'Launch a 14-day multichannel campaign in France' is deep.\n"
             "- response_depth: the matching deliverable size. light maps to direct, standard maps to focused, "
             "and deep maps to operating. Use that mapping exactly.\n"
             "- evidence_mode: prospecting only when this turn must discover or verify real organisations, "
@@ -2377,8 +2375,14 @@ class Director:
             "- seo_audit_url: ONLY in an SEO Room when live page evidence is needed. For a direct question about "
             "a page's current tag, redirect, heading, rendered content, or status, provide its URL; the runtime "
             "will inspect one page. For focused analysis it inspects a small sample. For an operating audit or "
-            "optimization plan it performs the broader crawl. Use null for conceptual questions, outside SEO "
-            "Rooms, or when no website is known.\n"
+            "optimization plan it performs the broader crawl. Use a URL VERBATIM from TASK or COMPANY CONTEXT; "
+            "never invent or append a path such as /seo-audit. Use null for conceptual questions, outside SEO "
+            "Rooms, or when no website is known. A command referring to current finding counts, blockers, fixes, "
+            "remediation, or a rescan requires the current/fresh audit URL even when collaboration_intensity is "
+            "standard; do not guess issue types from severity counts.\n"
+            "- seo_audit_scope: none when seo_audit_url is null; page for one exact-page answer; sample for a "
+            "bounded page/template diagnosis; site for a broad audit OR a remediation/rescan command referring "
+            "to site-wide finding counts. Audit scope controls evidence breadth, not collaboration intensity.\n"
             "- recall_queries: 1-3 SHORT focused company-brain searches, one per distinct entity/topic in the "
             "task (fewer, sharper beats many).\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
@@ -2399,7 +2403,9 @@ class Director:
             "- needs_debate: false for light work. For standard work, true only when independent specialist "
             "judgment or a material trade-off improves the answer; mechanical remediation of an already measured "
             "issue does not need debate. For deep work, true when strategy, sequencing, budget, channel, risk, or "
-            "priority choices must be challenged. Debate is never a ritual.\n"
+            "priority choices must be challenged. A new multi-channel launch, major strategy, or operating plan "
+            "therefore uses debate; only execution of an already approved, complete contract may skip it. Debate "
+            "is never a ritual.\n"
             "- campaign_method_assignments: ONLY in a Campaign Room, assign up to four bounded jobs to "
             "Strategist, Builder, Skeptic, or Final Synthesizer. Each query describes the advertising method "
             "needed, such as 'organic X copy framework', 'campaign measurement', 'source verification', or "
@@ -2493,39 +2499,37 @@ class Director:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
         audit_url = plan.get("seo_audit_url") if self.room_kind == "seo" else None
-        # Commands referring to current SEO findings require the measured artifact
-        # even when they are concise. Without it, the room previously invented
-        # robots rules, templates, URL counts and traffic lifts. This backstop only
-        # supplies the onboarded URL; it does not broaden the requested deliverable.
-        seo_remediation = bool(re.search(
-            r"\b(?:resolve|fix|repair|remediate|verify|rescan)\b[^.\n]{0,80}"
-            r"\b(?:seo|critical|high|finding|findings|issue|issues|error|errors|blocker|blockers)\b",
-            self.user_message or "", re.I,
-        ))
-        if (self.room_kind == "seo" and (depth == "operating" or seo_remediation)
+        audit_scope = str(plan.get("seo_audit_scope") or "none").strip().lower()
+        if audit_scope not in {"none", "page", "sample", "site"}:
+            audit_scope = "none"
+        context_urls = re.findall(
+            r"https?://[^\s<>\]\[\)\(\"']+",
+            f"{self.user_message or ''}\n{self.company_brief or ''}", re.I,
+        )
+        context_urls = [value.rstrip(".,;") for value in context_urls]
+        if isinstance(audit_url, str) and audit_url.strip() and context_urls:
+            requested = audit_url.strip().rstrip(".,;")
+            if requested not in context_urls:
+                # The Director selected the SEO capability but invented a path.
+                # Resolve it to supplied context instead of crawling guessed URLs.
+                audit_url = context_urls[0]
+            if audit_scope == "site":
+                parsed = urlsplit(str(audit_url))
+                audit_url = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else audit_url
+        # The Director selects the audit lane semantically in the user's language.
+        # Runtime only supplies the canonical onboarded URL for an operating audit.
+        if (self.room_kind == "seo" and audit_scope == "site"
                 and not (isinstance(audit_url, str) and audit_url.strip())):
             candidate = f"{self.user_message or ''}\n{self.company_brief or ''}"
             match = re.search(r"https?://[^\s<>\]\[\)\(\"']+", candidate, re.I)
             audit_url = match.group(0).rstrip(".,;") if match else None
         plan["seo_audit_url"] = audit_url if isinstance(audit_url, str) and audit_url.startswith(("http://", "https://")) else None
-        plan["seo_audit_page_limit"] = 25 if seo_remediation else {
-            "direct": 1, "focused": 8, "operating": 25,
-        }[depth]
-        # The onboarding company brief already carries canonical product/audience
-        # context. An SEO scan supplies current site truth. Pulling arbitrary room
-        # memory on every audit imported stale prospect and outreach records into
-        # the SEO debate. Historical recall remains available when the user asks
-        # for prior work, memory, history, or earlier findings explicitly.
-        if (self.room_kind == "seo" and plan["seo_audit_url"] and self.company_brief
-                and not re.search(r"\b(?:memory|history|historical|previous|prior|earlier|last\s+(?:audit|run))\b",
-                                  self.user_message or "", re.I)):
-            plan["recall_queries"] = []
-        # A live crawl request is not an implicit competitor/market-research
-        # request. External search enters an SEO turn only when the active user
-        # message names that evidence lane; this prevents broad operating audits
-        # from quietly spending on irrelevant agency/competitor searches.
-        if self.room_kind == "seo" and not self._allows_seo_external_web():
-            plan["web_query"] = None
+        plan["seo_audit_scope"] = audit_scope if plan["seo_audit_url"] else "none"
+        plan["seo_audit_page_limit"] = {"none": 0, "page": 1, "sample": 8, "site": 25}[
+            plan["seo_audit_scope"]
+        ]
+        # Recall and external research remain exactly what the structured Director
+        # selected; runtime does not reinterpret multilingual intent with keywords.
         pq = plan.get("places_query")
         _places_on = bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY"))
         # The structured Director is the sole semantic gate. Runtime code only
@@ -2562,6 +2566,8 @@ class Director:
                 ]
         plan["campaign_method_assignments"] = assignments
         plan["needs_debate"] = bool(plan.get("needs_debate"))
+        if intensity == "deep":
+            plan["needs_debate"] = True
         if intensity == "light":
             # Direct is a product contract, not a suggestion to the model. One
             # bounded question never convenes a committee or fans out a broad
@@ -2917,9 +2923,7 @@ class Director:
         # The deliverable FORMAT is driven by the intended output — so an "email" turn writes a
         # ready-to-send email (Subject + body), NOT a generic strategy report the producer can't send.
         _io = self.intended_output
-        _is_prospecting = bool(re.search(
-            r"\b(?:prospects?|leads?|potential clients?|new clients?|outreach|reach out|find clients?)\b",
-            (self.user_message or "").lower()))
+        _is_prospecting = self.evidence_mode == "prospecting"
         if _io == "email":
             # Auto-load the polished-email skill (the director rarely calls load_skill itself) +
             # email-medium rules: an email is read in an inbox — minimal markdown (bold + simple
@@ -3432,8 +3436,8 @@ class Director:
         #   a) org names surfaced by web/debate get looked up on Maps for REAL contacts;
         #   b) a sharpened company-oriented Places query runs when discovery was weak.
         try:
-            # Event-driven gate: the planner (LLM) asking for a places_query IS the
-            # discovery signal — works in any language; the regex is only a fallback.
+            # Event-driven gate: the planner asking for a places_query is the sole
+            # discovery signal and works in any language.
             _wants_contacts = bool(plan.get("places_query"))
             _prospect_rows = [l for l in self.blackboard if "PROSPECT:" in str(l)]
             if _wants_contacts and len(_prospect_rows) < 3:

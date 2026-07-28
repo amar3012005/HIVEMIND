@@ -19,7 +19,7 @@
  * bounded projection of the org's own highest-signal memories.
  */
 
-const CACHE = new Map(); // orgId → { brief, at }
+const CACHE = new Map(); // `${orgId}:${userId}` → { brief, at }
 const TTL_MS = 5 * 60 * 1000;
 const MAX_CHARS = 500;
 
@@ -28,12 +28,15 @@ function tidy(line) {
 }
 
 /**
+ * @param {string} [opts.userId] the operator TARA is calling on behalf of. Their own
+ *        personal-scoped memories are included; nobody else's ever are.
  * @returns {Promise<string>} compact brief, or '' when nothing is known. Never throws —
  *          a missing brief must degrade the opener, never fail the dial.
  */
-export async function buildOrgBrief(prisma, orgId, { maxChars = MAX_CHARS } = {}) {
+export async function buildOrgBrief(prisma, orgId, { userId = null, maxChars = MAX_CHARS } = {}) {
   if (!prisma || !orgId) return '';
-  const hit = CACHE.get(orgId);
+  const cacheKey = `${orgId}:${userId || '-'}`;
+  const hit = CACHE.get(cacheKey);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.brief;
 
   let brief = '';
@@ -41,13 +44,20 @@ export async function buildOrgBrief(prisma, orgId, { maxChars = MAX_CHARS } = {}
     const org = await prisma.organization.findUnique({
       where: { id: orgId }, select: { name: true },
     });
-    // Org-visible memories only. `personal` rows are one operator's private notes
-    // and must never be read out on a call to a third party.
+    // Org-visible memories, PLUS the calling operator's own personal-scoped rows.
+    // Another user's `personal` memories are their private notes and must never be
+    // read out on a call to a third party — hence the userId equality, not a blanket
+    // scope. The personal lane matters because in a single-user workspace `personal`
+    // is simply the default save scope, not a privacy intent, so excluding it left
+    // those orgs with a name and nothing else.
+    const visibleScope = userId
+      ? [{ scope: { in: ['organization', 'team', 'project'] } }, { scope: 'personal', userId }]
+      : [{ scope: { in: ['organization', 'team', 'project'] } }];
     const rows = await prisma.memory.findMany({
       where: {
         orgId,
-        scope: { in: ['organization', 'team', 'project'] },
-        OR: [{ memoryType: 'fact' }, { memoryType: 'decision' }],
+        OR: visibleScope,
+        memoryType: { in: ['fact', 'decision'] },
       },
       orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
       take: 12,
@@ -73,6 +83,6 @@ export async function buildOrgBrief(prisma, orgId, { maxChars = MAX_CHARS } = {}
     brief = '';
   }
 
-  CACHE.set(orgId, { brief, at: Date.now() });
+  CACHE.set(cacheKey, { brief, at: Date.now() });
   return brief;
 }

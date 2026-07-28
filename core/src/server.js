@@ -20916,7 +20916,7 @@ exit \$RC
             // separate from profile_context, which is the operator's own profile.
             try {
               const { buildOrgBrief } = await import('./tara/org-brief.js');
-              taraConfig.org_brief = await buildOrgBrief(prisma, orgId);
+              taraConfig.org_brief = await buildOrgBrief(prisma, orgId, { userId });
             } catch { /* brief is optional — never fail the config fetch */ }
             return jsonResponse(res, { config: taraConfig });
           }

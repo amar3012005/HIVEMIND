@@ -204,7 +204,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         // Compact org brief in EVERY new browser session's snapshot, so the very
         // first instruction already says who this workspace is. profile_context is
         // the operator's personal profile — it is not a description of the org.
-        org_brief: boundedString(await buildOrgBrief(prisma, orgId), 600) || '',
+        org_brief: boundedString(await buildOrgBrief(prisma, orgId, { userId }), 600) || '',
         opening_instruction: boundedString(buildOpeningInstruction({
           mode,
           goal: boundedString(body.goal, 300) || '',

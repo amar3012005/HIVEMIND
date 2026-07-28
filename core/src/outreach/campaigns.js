@@ -381,7 +381,7 @@ export function createOutreachModule(deps) {
     const orgBrief = await (async () => {
       try {
         const { buildOrgBrief } = await import('../tara/org-brief.js');
-        return await buildOrgBrief(prisma, campaign.orgId);
+        return await buildOrgBrief(prisma, campaign.orgId, { userId: campaign.userId });
       } catch { return ''; }
     })();
     const r = await fetch(`${provider.baseUrl}/calls/outbound`, {

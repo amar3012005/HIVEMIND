@@ -10767,7 +10767,7 @@ Write the persona now.`;
     const orgBrief = await (async () => {
       try {
         const { buildOrgBrief } = await import('./tara/org-brief.js');
-        return await buildOrgBrief(prisma, orgId);
+        return await buildOrgBrief(prisma, orgId, { userId });
       } catch { return ''; }
     })();
     try {

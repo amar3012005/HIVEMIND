@@ -180,7 +180,7 @@ test('compacted company context carries operating facts into every room', () => 
     },
   });
   assert.match(context, /BUSINESS MODEL: SaaS/);
-  assert.match(context, /OFFICIAL SOCIALS: linkedin:/);
+  assert.match(context, /SOCIAL PROFILES: linkedin:/);
   assert.match(context, /CONTACT EMAILS: hello@example.com/);
   assert.match(context, /EVIDENCE GAPS: Pricing not published/);
 });
@@ -240,7 +240,7 @@ test('Firecrawl homepage preview survives a crawl-start failure', async () => {
   global.fetch = async (url, init = {}) => {
     const body = init.body ? JSON.parse(init.body) : {};
     if (String(url).endsWith('/scrape')) {
-      assert.equal(body.formats.some((format) => format?.type === 'screenshot'), true);
+      assert.deepEqual(body.formats, ['markdown', 'links']);
       return new Response(JSON.stringify({
         success: true,
         data: {
@@ -257,7 +257,7 @@ test('Firecrawl homepage preview survives a crawl-start failure', async () => {
     const result = await researchCompanyWebsite('https://example.com/', { apiKey: 'test-key', maxPages: 5 });
     assert.equal(result.provider, 'firecrawl');
     assert.equal(result.pages.length, 1);
-    assert.equal(result.screenshot, 'https://cdn.example.com/homepage.png');
+    assert.equal(result.screenshot, null);
     assert.deepEqual(result.contacts, { emails: ['hello@example.com'], phones: ['+49 511 12345678'] });
   } finally {
     global.fetch = originalFetch;

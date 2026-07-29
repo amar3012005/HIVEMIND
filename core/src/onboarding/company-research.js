@@ -83,7 +83,7 @@ export function buildCompanyOperatingContext({ company, website, profile = {}, m
     mission && `MISSION: ${cleanString(mission, 800)}`,
     profile.location && `HQ: ${cleanString(profile.location, 240)} (${profile.location_source || 'unknown source'})`,
     Array.isArray(profile.social_profiles) && profile.social_profiles.length
-      && `OFFICIAL SOCIALS: ${profile.social_profiles.slice(0, 10).map((item) => `${cleanString(item?.platform, 40)}: ${cleanString(item?.url, 500)}`).filter((item) => item !== ': ').join('; ')}`,
+      && `SOCIAL PROFILES: ${profile.social_profiles.slice(0, 10).map((item) => `${cleanString(item?.platform, 40)}: ${cleanString(item?.url, 500)}`).filter((item) => item !== ': ').join('; ')}`,
     cleanList(contacts.emails, { maxItems: 5, maxChars: 200 }).length && `CONTACT EMAILS: ${contacts.emails.slice(0, 5).join('; ')}`,
     cleanList(contacts.phones, { maxItems: 5, maxChars: 100 }).length && `CONTACT PHONES: ${contacts.phones.slice(0, 5).join('; ')}`,
     profile.tone && `VOICE: ${cleanString(profile.tone, 300)}`,
@@ -181,7 +181,7 @@ function normalizedSocialProfile(rawUrl) {
   return { platform: match[0], url: url.href };
 }
 
-export function verifiedSocialProfiles(pages, searchResults = []) {
+export function verifiedSocialProfiles(pages, searchResults = [], { includeSearchCandidates = false, companyName = '', websiteUrl = '' } = {}) {
   const firstParty = new Map();
   for (const page of Array.isArray(pages) ? pages : []) {
     for (const rawUrl of Array.isArray(page?.links) ? page.links : []) {
@@ -195,9 +195,25 @@ export function verifiedSocialProfiles(pages, searchResults = []) {
     .map((item) => normalizedSocialProfile(item?.url))
     .filter(Boolean)
     .map((item) => item.url));
-  return [...firstParty.values()].map((profile) => searched.has(profile.url)
+  const profiles = [...firstParty.values()].map((profile) => searched.has(profile.url)
     ? { ...profile, verified_by: ['first_party', 'search'] }
     : profile);
+  if (!includeSearchCandidates) return profiles;
+
+  const identityTokens = new Set([
+    normalizedHost(websiteUrl).split('.')[0],
+    String(companyName || '').toLowerCase().replace(/[^a-z0-9]/g, ''),
+  ].filter((token) => token && token.length >= 4));
+  const knownUrls = new Set(profiles.map((profile) => profile.url));
+  for (const result of Array.isArray(searchResults) ? searchResults : []) {
+    const profile = normalizedSocialProfile(result?.url);
+    if (!profile || knownUrls.has(profile.url)) continue;
+    const evidence = `${result?.title || ''} ${result?.snippet || ''}`.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (![...identityTokens].some((token) => evidence.includes(token))) continue;
+    profiles.push({ ...profile, source_url: result.url, verified_by: ['search_candidate'] });
+    knownUrls.add(profile.url);
+  }
+  return profiles;
 }
 
 export function extractCompanyContacts(pages) {
@@ -266,19 +282,38 @@ export async function searchCompanyMarket(query, {
   }
 }
 
+export async function captureWebsiteScreenshot(websiteUrl, {
+  apiKey = process.env.FIRECRAWL_API_KEY,
+} = {}) {
+  if (!apiKey) return null;
+  try {
+    const payload = await firecrawlRequest('/scrape', {
+      url: websiteUrl,
+      formats: [{ type: 'screenshot', fullPage: false, quality: 70, viewport: { width: 1280, height: 720 } }],
+      waitFor: 0,
+      timeout: 25000,
+      maxAge: 86400000,
+    }, { apiKey, timeoutMs: 30000 });
+    return cleanString((payload?.data || payload)?.screenshot, 2000000) || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function researchCompanyWebsite(websiteUrl, {
   apiKey = process.env.FIRECRAWL_API_KEY,
   maxPages = 5,
+  includeCrawl = true,
   onProgress = () => {},
   pollDelays = Array(10).fill(2000),
 } = {}) {
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
     const limit = Math.min(6, Math.max(3, Number(maxPages) || 5));
-    onProgress(`Crawling up to ${limit} first-party pages with Firecrawl`);
+    onProgress(includeCrawl ? `Crawling up to ${limit} first-party pages with Firecrawl` : 'Reading the official homepage with Firecrawl');
     const homepagePromise = firecrawlRequest('/scrape', {
       url: websiteUrl,
-      formats: ['markdown', 'links', { type: 'screenshot', fullPage: false, quality: 70, viewport: { width: 1280, height: 720 } }],
+      formats: ['markdown', 'links'],
       onlyMainContent: false,
       removeBase64Images: true,
       blockAds: true,
@@ -286,7 +321,7 @@ export async function researchCompanyWebsite(websiteUrl, {
       timeout: 25000,
       maxAge: 86400000,
     }, { apiKey, timeoutMs: 30000 }).catch(() => null);
-    const started = await firecrawlRequest('/crawl', {
+    const started = includeCrawl ? await firecrawlRequest('/crawl', {
       url: websiteUrl,
       limit,
       maxDiscoveryDepth: 1,
@@ -303,7 +338,7 @@ export async function researchCompanyWebsite(websiteUrl, {
         blockAds: true,
         maxAge: 86400000,
       },
-    }, { apiKey, timeoutMs: 10000 }).catch(() => null);
+    }, { apiKey, timeoutMs: 10000 }).catch(() => null) : null;
     const jobId = started?.id;
     if (!jobId) {
       const homepagePayload = await homepagePromise;
@@ -322,7 +357,7 @@ export async function researchCompanyWebsite(websiteUrl, {
         provider: 'firecrawl', pages: [homepage], mapped: 1,
         social_profiles: verifiedSocialProfiles([homepage]),
         contacts: extractCompanyContacts([homepage]),
-        screenshot: cleanString(homepageData?.screenshot, 2000000) || null,
+        screenshot: null,
         credits_used: 1, error: null,
       };
     }
@@ -381,7 +416,7 @@ export async function researchCompanyWebsite(websiteUrl, {
       mapped: Number(status?.total || pages.length),
       social_profiles: verifiedSocialProfiles(pages),
       contacts: extractCompanyContacts(pages),
-      screenshot: cleanString(homepageData?.screenshot, 2000000) || null,
+      screenshot: null,
       credits_used: Number(status?.creditsUsed || pages.length),
       error: null,
     };

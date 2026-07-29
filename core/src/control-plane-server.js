@@ -47,7 +47,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires } from './onboarding/company-discovery.js';
-import { buildCompanyOperatingContext, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -7791,10 +7791,13 @@ Write the persona now.`;
           };
           const [homepage, firecrawlResearch, initialCoverage] = await Promise.all([
             fetchPage(homepageUrl),
-            researchCompanyWebsite(homepageUrl, { maxPages: 5, onProgress: say }),
+            researchCompanyWebsite(homepageUrl, { maxPages: 5, includeCrawl: false, onProgress: say }),
             searchCompanyMarket(`"${host}" company official LinkedIn Instagram Facebook X YouTube contact competitors`, { limit: 10 }),
           ]);
           markTiming('source_collection');
+          // Avoid a Firecrawl concurrent-scrape race: collect the fast evidence
+          // first, then let the slower visual renderer run independently.
+          const screenshotCapturePromise = captureWebsiteScreenshot(homepageUrl);
           const directHomepage = {
             url: homepage.url || homepageUrl,
             content: homepage.text,
@@ -7827,7 +7830,7 @@ Write the persona now.`;
           const siteText = firstPartyResearchDigest(pages, { maxChars: 18000 });
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
           let screenshot = null;
-          let websiteVisualSource = null;
+          let websiteVisualSource = 'pending';
 
           // Identity is synthesized from first-party pages only. The parallel
           // external search is used later for corroboration and never supplies
@@ -7881,7 +7884,11 @@ Write the persona now.`;
             JSON.stringify(profile), { maxTokens: 200 },
           ).catch(() => `Build ${companyName} into the category leader.`);
           let [coverage, mission] = await Promise.all([coveragePromise, missionPromise]);
-          profile.social_profiles = verifiedSocialProfiles(pages, coverage);
+          profile.social_profiles = verifiedSocialProfiles(pages, coverage, {
+            includeSearchCandidates: true,
+            companyName,
+            websiteUrl: homepageUrl,
+          });
           const officialSocialUrls = new Set(profile.social_profiles.map((social) => social.url));
           const identityTerms = [host, host.split('.')[0], companyName]
             .map((value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
@@ -7930,24 +7937,11 @@ Write the persona now.`;
           await clearPriorOnboarding();
           markTiming('replace_company_cleanup');
 
-          // Persist the new visual only after replacement cleanup. The cleanup
-          // deliberately removes the prior company's image, so capturing before
-          // it leaves a valid URL pointing at a file that has just been deleted.
+          // The screenshot is intentionally independent from profile creation.
+          // Firecrawl can take ~25s to render a visual, while homepage text and
+          // links arrive in under a second. Capture begins immediately and is
+          // persisted after replacement cleanup without holding up onboarding.
           say(`Capturing homepage: https://${host}/...`);
-          screenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlResearch.screenshot, orgId });
-          websiteVisualSource = screenshot ? 'firecrawl-screenshot' : null;
-          if (!screenshot) {
-            screenshot = await storeOfficialWebsiteVisual({
-              html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId,
-            });
-            if (screenshot) {
-              websiteVisualSource = 'official-site-image';
-              say('Using your website’s official preview image');
-            } else {
-              say('Website preview unavailable — using a branded company card');
-            }
-          }
-          markTiming('website_visual_persistence');
           await prisma.organization.update({
             where: { id: orgId },
             data: { name: companyName },
@@ -8121,8 +8115,8 @@ Write the persona now.`;
               content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.${profile.location ? ` Company location: ${profile.location}.` : ''}` },
             ...(profile.location ? [{ title: `${companyName} — Company location`, memoryType: 'fact', authorityLevel: profile.location_source === 'first_party' ? 'verified' : 'claimed',
               content: `COMPANY LOCATION (${profile.location_source === 'first_party' ? 'first-party verified' : 'user provided'}) — ${companyName}: ${profile.location}. Evidence: ${profile.location_evidence_url || siteUrl}. Use this location to ground local market, customer, competitor, regulatory, hiring, and outreach research; do not treat it as the user's home address.` }] : []),
-            ...((profile.social_profiles || []).length ? [{ title: `${companyName} — Official social presence`, memoryType: 'fact', authorityLevel: 'verified',
-              content: `OFFICIAL SOCIAL PROFILES for ${companyName}, linked from its first-party website: ${(profile.social_profiles || []).map((social) => `${social.platform}: ${social.url}`).join('; ')}.` }] : []),
+            ...((profile.social_profiles || []).length ? [{ title: `${companyName} — Social presence`, memoryType: 'fact', authorityLevel: 'verified',
+              content: `SOCIAL PROFILES for ${companyName}: ${(profile.social_profiles || []).map((social) => `${social.platform}: ${social.url} [${(social.verified_by || []).join('+')}]`).join('; ')}.` }] : []),
             ...((profile.contact_details?.emails || []).length || (profile.contact_details?.phones || []).length ? [{ title: `${companyName} — Official contact points`, memoryType: 'fact', authorityLevel: 'verified',
               content: `OFFICIAL CONTACTS for ${companyName}, found on first-party pages. Emails: ${(profile.contact_details?.emails || []).join(', ') || '(none)'}. Phones: ${(profile.contact_details?.phones || []).join(', ') || '(none)'}.` }] : []),
             { title: `${companyName} — Mission`, memoryType: 'summary',
@@ -8266,6 +8260,7 @@ Write the persona now.`;
             website: siteUrl,
             screenshot: screenshot || null,
             website_visual_source: websiteVisualSource,
+            screenshot_pending: true,
             research_provider: firecrawlResearch.provider,
             company_location: profile.location || null,
             profile, mission, company_context: companyContext, tasks,
@@ -8308,11 +8303,32 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          void (async () => {
+            const capturedScreenshot = await screenshotCapturePromise;
+            let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
+            let finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
+            if (!finalScreenshot) {
+              finalScreenshot = await storeOfficialWebsiteVisual({ html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId });
+              finalSource = finalScreenshot ? 'official-site-image' : null;
+            }
+            resultPayload.screenshot = finalScreenshot;
+            resultPayload.website_visual_source = finalSource;
+            resultPayload.screenshot_pending = false;
+            job.result = resultPayload;
+            if (finalScreenshot) say('Website preview ready');
+            else say('Website preview unavailable — using a branded company card');
+            try {
+              await prisma.$executeRawUnsafe(
+                'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+                JSON.stringify({ _company: resultPayload }), room.id,
+              );
+            } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); }
+          })();
           console.info('[hyper-onboarding] timing', JSON.stringify({
             org_id: orgId,
             company: companyName,
             provider: firecrawlResearch.provider,
-            screenshot: websiteVisualSource || 'none',
+            screenshot: 'pending',
             social_profiles: profile.social_profiles.length,
             timings_ms: resultPayload.onboarding_timings_ms,
           }));

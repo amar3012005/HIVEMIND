@@ -8498,6 +8498,51 @@ Write the persona now.`;
       }
     }
 
+    // PATCH /v1/hyper/company/contacts — user-corrected organization contact
+    // details. Stored on the HQ company state and mirrored into org profile
+    // facts so every room receives the corrected operating context.
+    if (pathname === '/v1/hyper/company/contacts' && req.method === 'PATCH') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const emails = Array.from(new Set((Array.isArray(body.emails) ? body.emails : [])
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)))).slice(0, 5);
+      const phones = Array.from(new Set((Array.isArray(body.phones) ? body.phones : [])
+        .map((value) => String(value || '').trim().slice(0, 80))
+        .filter((value) => value.replace(/\D/g, '').length >= 8))).slice(0, 5);
+      const socialProfiles = (Array.isArray(body.social_profiles) ? body.social_profiles : []).map((item) => {
+        const platform = String(item?.platform || '').trim().toLowerCase().slice(0, 40);
+        const url = String(item?.url || '').trim().slice(0, 800);
+        try { return platform && new URL(url).protocol === 'https:' ? { platform, url, verified_by: ['user_confirmed'] } : null; } catch { return null; }
+      }).filter(Boolean).slice(0, 10);
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms"
+           WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
+           ORDER BY created_at DESC LIMIT 1`, current.session.orgId,
+        );
+        const row = rows?.[0];
+        if (!row?.company) return jsonResponse(res, { error: 'not onboarded' }, 404);
+        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+        company.profile = { ...(company.profile || {}), social_profiles: socialProfiles, contact_details: { emails, phones } };
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+          JSON.stringify({ _company: company }), row.id,
+        );
+        try {
+          const { getSharedProfileStore } = await import('./memory/profile-store.js');
+          const profileStore = getSharedProfileStore(prisma);
+          await Promise.all([
+            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:contact_emails', value: emails.join('\n'), confidence: 1, sourceMemoryId: null }),
+            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:contact_phones', value: phones.join('\n'), confidence: 1, sourceMemoryId: null }),
+            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:social_profiles', value: socialProfiles.map((item) => `${item.platform}: ${item.url}`).join('\n'), confidence: 1, sourceMemoryId: null }),
+          ]);
+        } catch (error) { console.warn('[hyper-company] contact profile fact update failed:', error.message); }
+        return jsonResponse(res, { ok: true, company });
+      } catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+    }
+
     // GET /v1/hyper/outcomes — closed-loop value counters for the dashboard:
     // what actually LEFT the platform (emails sent, calls placed) and what came
     // back (replies, bookings), from the outbound_actions ledger. 7d + 30d.

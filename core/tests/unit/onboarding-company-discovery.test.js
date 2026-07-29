@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from '../../src/onboarding/company-discovery.js';
-import { firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, verifiedSocialProfiles } from '../../src/onboarding/company-research.js';
+import { buildCompanyOperatingContext, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, verifiedSocialProfiles } from '../../src/onboarding/company-research.js';
 
 test('onboarding collects real same-site links without language-specific classification', () => {
   const html = `
@@ -149,6 +149,40 @@ test('social profiles require a first-party link and can be corroborated by sear
       verified_by: ['first_party'],
     },
   ]);
+});
+
+test('direct homepage links complete Firecrawl evidence without duplicating the page', () => {
+  const pages = mergeCompanyResearchPages([{
+    url: 'https://example.com/',
+    content: 'Example builds software.',
+    links: ['https://linkedin.com/company/example'],
+    provider: 'firecrawl',
+  }], [{
+    url: 'https://www.example.com/',
+    content: 'Direct fallback.',
+    links: ['https://instagram.com/example', 'mailto:hello@example.com'],
+    provider: 'direct',
+  }], 'https://example.com/');
+  assert.equal(pages.length, 1);
+  assert.deepEqual(verifiedSocialProfiles(pages).map((item) => item.platform), ['linkedin', 'instagram']);
+});
+
+test('compacted company context carries operating facts into every room', () => {
+  const context = buildCompanyOperatingContext({
+    company: 'Example', website: 'https://example.com', mission: 'Make work simpler.',
+    profile: {
+      what_it_does: 'Builds workflow software.', industry: 'Software', business_model: 'SaaS',
+      capabilities: ['Automation', 'Analytics'], icp: 'Operations teams', positioning: 'Evidence-led automation',
+      location: 'Berlin, Germany', location_source: 'first_party',
+      social_profiles: [{ platform: 'linkedin', url: 'https://linkedin.com/company/example' }],
+      contact_details: { emails: ['hello@example.com'], phones: [] },
+      evidence_gaps: ['Pricing not published'],
+    },
+  });
+  assert.match(context, /BUSINESS MODEL: SaaS/);
+  assert.match(context, /OFFICIAL SOCIALS: linkedin:/);
+  assert.match(context, /CONTACT EMAILS: hello@example.com/);
+  assert.match(context, /EVIDENCE GAPS: Pricing not published/);
 });
 
 test('direct-fetch fallback preserves first-party and social links', () => {

@@ -47,7 +47,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires } from './onboarding/company-discovery.js';
-import { extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { buildCompanyOperatingContext, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -7655,9 +7655,15 @@ Write the persona now.`;
       const userGoal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 500) : '';
       const claimedCompanyLocation = typeof body.company_location === 'string' ? body.company_location.trim().slice(0, 240) : '';
 
-      const job = { lines: [], done: false, error: null, startedAt: Date.now(), result: null };
+      const job = { lines: [], done: false, error: null, startedAt: Date.now(), result: null, timings: {} };
       _hyperOnboardJobs.set(orgId, job);
       const say = (text) => { job.lines.push({ ts: Date.now(), text }); };
+      let lastTimingAt = job.startedAt;
+      const markTiming = (stage) => {
+        const now = Date.now();
+        job.timings[stage] = now - lastTimingAt;
+        lastTimingAt = now;
+      };
 
       // The shared fetch router rewrites this legacy-compatible request onto the
       // canonical Cerebras gpt-oss-120b route, with the configured provider failover.
@@ -7786,9 +7792,17 @@ Write the persona now.`;
           const [homepage, firecrawlResearch, initialCoverage] = await Promise.all([
             fetchPage(homepageUrl),
             researchCompanyWebsite(homepageUrl, { maxPages: 5, onProgress: say }),
-            searchCompanyMarket(`${host} company official social contact competitors`, { limit: 10 }),
+            searchCompanyMarket(`"${host}" company official LinkedIn Instagram Facebook X YouTube contact competitors`, { limit: 10 }),
           ]);
-          let pages = firecrawlResearch.pages;
+          markTiming('source_collection');
+          const directHomepage = {
+            url: homepage.url || homepageUrl,
+            content: homepage.text,
+            links: homepage.links || [],
+            purpose: 'company',
+            provider: 'direct',
+          };
+          let pages = mergeCompanyResearchPages(firecrawlResearch.pages, [directHomepage], homepageUrl, { limit: 6 });
           if (firecrawlResearch.provider !== 'firecrawl') {
             if (firecrawlResearch.error && firecrawlResearch.error !== 'not_configured') {
               say('Firecrawl was unavailable; using direct first-party website reading');
@@ -7812,21 +7826,8 @@ Write the persona now.`;
           }
           const siteText = firstPartyResearchDigest(pages, { maxChars: 18000 });
           if (!siteText.trim()) say('Website unreachable — continuing from the domain name alone');
-
-          say(`Capturing homepage: https://${host}/...`);
-          let screenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlResearch.screenshot, orgId });
-          let websiteVisualSource = screenshot ? 'firecrawl-screenshot' : null;
-          if (!screenshot) {
-            screenshot = await storeOfficialWebsiteVisual({
-              html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId,
-            });
-            if (screenshot) {
-              websiteVisualSource = 'official-site-image';
-              say('Using your website’s official preview image');
-            } else {
-              say('Website preview unavailable — using a branded company card');
-            }
-          }
+          let screenshot = null;
+          let websiteVisualSource = null;
 
           // Identity is synthesized from first-party pages only. The parallel
           // external search is used later for corroboration and never supplies
@@ -7854,6 +7855,7 @@ Write the persona now.`;
             ? firecrawlResearch.social_profiles
             : [];
           profile.contact_details = firecrawlResearch.contacts || extractCompanyContacts(pages);
+          markTiming('profile_synthesis');
           // Clamp: the LLM sometimes copies the site <title> verbatim
           // ("B&B. | Sinn für Marken | Markenagentur aus Hannover") — keep only
           // the segment before any "|"/"–" separator, cap length hard.
@@ -7881,6 +7883,9 @@ Write the persona now.`;
           let [coverage, mission] = await Promise.all([coveragePromise, missionPromise]);
           profile.social_profiles = verifiedSocialProfiles(pages, coverage);
           const officialSocialUrls = new Set(profile.social_profiles.map((social) => social.url));
+          const identityTerms = [host, host.split('.')[0], companyName]
+            .map((value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+            .filter((value) => value.length >= 5);
           coverage = coverage.filter((item) => {
             if (isFirstPartyUrl(item.url, homepageUrl)) return true;
             let normalizedUrl = '';
@@ -7893,12 +7898,22 @@ Write the persona now.`;
               normalizedUrl = parsed.href;
             } catch { /* malformed search result */ }
             if (officialSocialUrls.has(normalizedUrl)) return true;
-            return `${item.title || ''} ${item.snippet || ''}`.toLowerCase().includes(host.toLowerCase());
+            const evidenceText = `${item.title || ''} ${item.snippet || ''} ${item.url || ''}`
+              .toLowerCase().replace(/[^a-z0-9]/g, '');
+            return identityTerms.some((term) => evidenceText.includes(term));
           });
           research.push(...coverage.map((item) => ({
             ...item,
             evidence_scope: isFirstPartyUrl(item.url, homepageUrl) ? 'first-party-search' : 'external-market',
           })));
+          markTiming('mission_and_market');
+
+          const companyContext = buildCompanyOperatingContext({
+            company: companyName,
+            website: siteUrl,
+            profile,
+            mission,
+          }, { maxChars: 1600 });
 
           const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
           const starterTaskGenerationPromise = llm(
@@ -7913,6 +7928,26 @@ Write the persona now.`;
           // active roster, hires 3 new specialists, and the HQ room seats only
           // this company's agents (no cross-company leak). Recoverable (archived).
           await clearPriorOnboarding();
+          markTiming('replace_company_cleanup');
+
+          // Persist the new visual only after replacement cleanup. The cleanup
+          // deliberately removes the prior company's image, so capturing before
+          // it leaves a valid URL pointing at a file that has just been deleted.
+          say(`Capturing homepage: https://${host}/...`);
+          screenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlResearch.screenshot, orgId });
+          websiteVisualSource = screenshot ? 'firecrawl-screenshot' : null;
+          if (!screenshot) {
+            screenshot = await storeOfficialWebsiteVisual({
+              html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId,
+            });
+            if (screenshot) {
+              websiteVisualSource = 'official-site-image';
+              say('Using your website’s official preview image');
+            } else {
+              say('Website preview unavailable — using a branded company card');
+            }
+          }
+          markTiming('website_visual_persistence');
           await prisma.organization.update({
             where: { id: orgId },
             data: { name: companyName },
@@ -8062,6 +8097,7 @@ Write the persona now.`;
             team.push(...hires.filter(Boolean));
             _notifyEmployeesReload();
           }
+          markTiming('team_assembly');
 
           // ── File the company knowledge as a HIGH-SALIENCE, entity-rich
           // sectioned cluster so it always tops recall and grounds every agent.
@@ -8087,6 +8123,8 @@ Write the persona now.`;
               content: `COMPANY LOCATION (${profile.location_source === 'first_party' ? 'first-party verified' : 'user provided'}) — ${companyName}: ${profile.location}. Evidence: ${profile.location_evidence_url || siteUrl}. Use this location to ground local market, customer, competitor, regulatory, hiring, and outreach research; do not treat it as the user's home address.` }] : []),
             ...((profile.social_profiles || []).length ? [{ title: `${companyName} — Official social presence`, memoryType: 'fact', authorityLevel: 'verified',
               content: `OFFICIAL SOCIAL PROFILES for ${companyName}, linked from its first-party website: ${(profile.social_profiles || []).map((social) => `${social.platform}: ${social.url}`).join('; ')}.` }] : []),
+            ...((profile.contact_details?.emails || []).length || (profile.contact_details?.phones || []).length ? [{ title: `${companyName} — Official contact points`, memoryType: 'fact', authorityLevel: 'verified',
+              content: `OFFICIAL CONTACTS for ${companyName}, found on first-party pages. Emails: ${(profile.contact_details?.emails || []).join(', ') || '(none)'}. Phones: ${(profile.contact_details?.phones || []).join(', ') || '(none)'}.` }] : []),
             { title: `${companyName} — Mission`, memoryType: 'summary',
               content: `MISSION of ${companyName}: ${mission}` },
             { title: `${companyName} — Positioning`, memoryType: 'decision',
@@ -8095,6 +8133,8 @@ Write the persona now.`;
               content: `ICP / TARGET SEGMENTS for ${companyName}: ${profile.icp || '(n/a)'}.${profile.offer ? ` Offer: ${profile.offer}.` : ''}` },
             { title: `${companyName} — Competitors & market`, memoryType: 'fact',
               content: `COMPETITORS of ${companyName}: ${(profile.competitors || []).join(', ') || '(none identified)'}.\nMARKET RESEARCH:\n${research.map((r) => `• ${r.title}: ${r.snippet}`).join('\n')}`.slice(0, 6000) },
+            { title: `${companyName} — Operating context`, memoryType: 'summary', authorityLevel: 'verified',
+              content: companyContext },
           ];
           await Promise.all(sections.map((section) => saveMemory({ ...section, tags: canonTags })));
 
@@ -8111,10 +8151,23 @@ Write the persona now.`;
             const companyFacts = [
               { key: 'company', value: companyName },
               { key: 'company:mission', value: mission },
+              { key: 'company:tagline', value: profile.tagline || null },
+              { key: 'company:what_it_does', value: profile.what_it_does || null },
+              { key: 'company:industry', value: profile.industry || null },
+              { key: 'company:business_model', value: profile.business_model || null },
+              { key: 'company:capabilities', value: (profile.capabilities || []).join('\n') || null },
+              { key: 'company:offer', value: profile.offer || null },
               { key: 'company:positioning', value: profile.positioning || null },
               { key: 'company:icp', value: profile.icp || null },
+              { key: 'company:tone', value: profile.tone || null },
+              { key: 'company:opportunities', value: (profile.opportunities || []).join('\n') || null },
+              { key: 'company:risks', value: (profile.risks || []).join('\n') || null },
+              { key: 'company:evidence_gaps', value: (profile.evidence_gaps || []).join('\n') || null },
               { key: 'company:website', value: siteUrl || null },
               { key: 'company:social_profiles', value: (profile.social_profiles || []).map((social) => `${social.platform}: ${social.url}`).join('\n') || null },
+              { key: 'company:contact_emails', value: (profile.contact_details?.emails || []).join('\n') || null },
+              { key: 'company:contact_phones', value: (profile.contact_details?.phones || []).join('\n') || null },
+              { key: 'company:operating_context', value: companyContext || null },
               { key: 'company:location', value: profile.location || null },
               { key: 'location', value: profile.location ? `Company HQ: ${profile.location}` : null },
               { key: 'company:location_city', value: profile.location_city || null },
@@ -8123,12 +8176,13 @@ Write the persona now.`;
             ].filter((f) => f.value && String(f.value).trim());
             await Promise.all(companyFacts.map((fact) => _ps.upsertFact({
                 userId, orgId, category: 'static',
-                key: fact.key, value: String(fact.value).slice(0, 500),
+                key: fact.key, value: String(fact.value).slice(0, fact.key === 'company:operating_context' ? 2400 : 900),
                 confidence: 0.95, sourceMemoryId: null,
               }).catch(() => {})));
           } catch (err) {
             console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
           }
+          markTiming('memory_and_profile');
 
           say('Planning your first tasks');
           let tasks = [];
@@ -8201,7 +8255,7 @@ Write the persona now.`;
           // "You are the team running <name>" — NOT "Operate <name>", which a
           // model can misread as a proper noun ("Operate B&B" evaluated as a
           // third-party partner company in a live run).
-          const roomGoal = `You are the team running ${companyName} — this is YOUR company.${profile.location ? ` Verified company location: ${profile.location}. Ground local research in this location unless the user names another market.` : ' Company location is not yet verified; preserve it as an explicit research gap.'} Mission: ${mission}\nFirst tasks:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2400);
+          const roomGoal = `You are the team running ${companyName} — this is YOUR company.\n${companyContext}\nFIRST TASKS:\n${tasks.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join('\n')}`.slice(0, 2400);
           try {
             await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', roomGoal, room.id);
           } catch (e) { console.warn('[hyper-onboarding] room goal failed:', e.message); }
@@ -8214,7 +8268,7 @@ Write the persona now.`;
             website_visual_source: websiteVisualSource,
             research_provider: firecrawlResearch.provider,
             company_location: profile.location || null,
-            profile, mission, tasks,
+            profile, mission, company_context: companyContext, tasks,
             research: research.slice(0, 10),
             documents: [
               `${companyName} — Company profile`,
@@ -8226,6 +8280,7 @@ Write the persona now.`;
             room_name: room.name,
             onboarded_at: new Date().toISOString(),
             onboarding_duration_ms: Date.now() - job.startedAt,
+            onboarding_timings_ms: job.timings,
           };
           try {
             resultPayload.domain_rooms = await ensureDomainRooms({
@@ -8239,6 +8294,9 @@ Write the persona now.`;
             console.warn('[hyper-onboarding] domain rooms failed:', e.message);
             resultPayload.domain_rooms = [];
           }
+          markTiming('workspace_provisioning');
+          resultPayload.onboarding_duration_ms = Date.now() - job.startedAt;
+          resultPayload.onboarding_timings_ms = { ...job.timings, total: resultPayload.onboarding_duration_ms };
           // Persist the company state on the HQ room (agent_connectors is a
           // legacy jsonb — we namespace under _company). Central for ALL org
           // types (rooms never live on the self-host agent), zero-migration,
@@ -8250,6 +8308,14 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          console.info('[hyper-onboarding] timing', JSON.stringify({
+            org_id: orgId,
+            company: companyName,
+            provider: firecrawlResearch.provider,
+            screenshot: websiteVisualSource || 'none',
+            social_profiles: profile.social_profiles.length,
+            timings_ms: resultPayload.onboarding_timings_ms,
+          }));
           say(`Completed · onboarding in ${Math.max(1, Math.round((Date.now() - job.startedAt) / 1000))}s`);
           job.result = resultPayload;
           job.done = true;

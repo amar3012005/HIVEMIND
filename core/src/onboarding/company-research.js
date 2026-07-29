@@ -40,6 +40,61 @@ export function firstPartyResearchDigest(pages, { maxChars = 18000 } = {}) {
   return chunks.join('\n\n---\n\n');
 }
 
+export function mergeCompanyResearchPages(primaryPages, fallbackPages, websiteUrl, { limit = 6 } = {}) {
+  const merged = new Map();
+  for (const page of [...(Array.isArray(primaryPages) ? primaryPages : []), ...(Array.isArray(fallbackPages) ? fallbackPages : [])]) {
+    if (!page?.url || !isFirstPartyUrl(page.url, websiteUrl)) continue;
+    let normalizedUrl;
+    try {
+      const parsed = new URL(page.url);
+      parsed.hostname = parsed.hostname.replace(/^www\./i, '');
+      parsed.hash = '';
+      normalizedUrl = parsed.href.replace(/\/$/, '') || parsed.href;
+    } catch { continue; }
+    const previous = merged.get(normalizedUrl);
+    if (!previous) {
+      merged.set(normalizedUrl, { ...page, links: [...new Set(Array.isArray(page.links) ? page.links : [])] });
+      continue;
+    }
+    merged.set(normalizedUrl, {
+      ...previous,
+      title: previous.title || page.title || '',
+      description: previous.description || page.description || '',
+      content: previous.content || page.content || '',
+      links: [...new Set([...(previous.links || []), ...(Array.isArray(page.links) ? page.links : [])])].slice(0, 400),
+    });
+  }
+  return [...merged.values()].slice(0, Math.max(1, Number(limit) || 6));
+}
+
+export function buildCompanyOperatingContext({ company, website, profile = {}, mission = '' } = {}, { maxChars = 2400 } = {}) {
+  const contacts = profile.contact_details || {};
+  const lines = [
+    `COMPANY: ${cleanString(company || profile.name, 140)}`,
+    `WEBSITE: ${cleanString(website, 500)}`,
+    profile.tagline && `TAGLINE: ${cleanString(profile.tagline, 300)}`,
+    profile.what_it_does && `DOES: ${cleanString(profile.what_it_does, 700)}`,
+    profile.industry && `INDUSTRY: ${cleanString(profile.industry, 300)}`,
+    profile.business_model && `BUSINESS MODEL: ${cleanString(profile.business_model, 400)}`,
+    cleanList(profile.capabilities).length && `CAPABILITIES: ${cleanList(profile.capabilities).join('; ')}`,
+    profile.offer && `OFFER: ${cleanString(profile.offer, 500)}`,
+    profile.icp && `ICP: ${cleanString(profile.icp, 700)}`,
+    profile.positioning && `POSITIONING: ${cleanString(profile.positioning, 700)}`,
+    mission && `MISSION: ${cleanString(mission, 800)}`,
+    profile.location && `HQ: ${cleanString(profile.location, 240)} (${profile.location_source || 'unknown source'})`,
+    Array.isArray(profile.social_profiles) && profile.social_profiles.length
+      && `OFFICIAL SOCIALS: ${profile.social_profiles.slice(0, 10).map((item) => `${cleanString(item?.platform, 40)}: ${cleanString(item?.url, 500)}`).filter((item) => item !== ': ').join('; ')}`,
+    cleanList(contacts.emails, { maxItems: 5, maxChars: 200 }).length && `CONTACT EMAILS: ${contacts.emails.slice(0, 5).join('; ')}`,
+    cleanList(contacts.phones, { maxItems: 5, maxChars: 100 }).length && `CONTACT PHONES: ${contacts.phones.slice(0, 5).join('; ')}`,
+    profile.tone && `VOICE: ${cleanString(profile.tone, 300)}`,
+    cleanList(profile.opportunities).length && `OPPORTUNITIES: ${cleanList(profile.opportunities).join('; ')}`,
+    cleanList(profile.risks).length && `RISKS: ${cleanList(profile.risks).join('; ')}`,
+    cleanList(profile.evidence_gaps, { maxItems: 10, maxChars: 300 }).length
+      && `EVIDENCE GAPS: ${cleanList(profile.evidence_gaps, { maxItems: 10, maxChars: 300 }).join('; ')}`,
+  ].filter(Boolean);
+  return lines.join('\n').slice(0, Math.max(500, Number(maxChars) || 2400));
+}
+
 function cleanString(value, max = 1000) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
@@ -131,8 +186,8 @@ export function verifiedSocialProfiles(pages, searchResults = []) {
   for (const page of Array.isArray(pages) ? pages : []) {
     for (const rawUrl of Array.isArray(page?.links) ? page.links : []) {
       const profile = normalizedSocialProfile(rawUrl);
-      if (profile && !firstParty.has(profile.url)) {
-        firstParty.set(profile.url, { ...profile, source_url: page.url, verified_by: ['first_party'] });
+      if (profile && !firstParty.has(profile.platform)) {
+        firstParty.set(profile.platform, { ...profile, source_url: page.url, verified_by: ['first_party'] });
       }
     }
   }

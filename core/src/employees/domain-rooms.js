@@ -48,8 +48,9 @@ export async function ensureDomainRooms({ prisma, orgId, userId, participantIds 
         rooms.push({ id: existingId, room_tag: definition.key, created: false });
         continue;
       }
+      const operatingContext = String(company?.company_context || '').trim();
       const companyContext = companyName
-        ? ` You are operating ${companyName}${mission ? `, whose mission is: ${mission}` : ''}.`
+        ? ` You are operating ${companyName}${mission ? `, whose mission is: ${mission}` : ''}.${operatingContext ? `\nCOMPANY OPERATING CONTEXT:\n${operatingContext}` : ''}`
         : '';
       const room = await tx.hyperRoom.create({
         data: {

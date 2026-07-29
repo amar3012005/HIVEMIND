@@ -1,6 +1,19 @@
 import crypto from 'node:crypto';
 import { decideKbUploadPath } from '../knowledge/upload-mode.js';
 
+/**
+ * Billable KB pages for one upload. The plan limit is defined per PAGE
+ * ("each page is one document"), so segmentCount must never stand in for it:
+ * segments are retrieval chunks and there are routinely 10-30 per file, which
+ * silently billed a 2-page note as if it were twenty. When the parser cannot
+ * report a page count (plain text, markdown, anything unpaginated) the truthful
+ * floor is 1 — under-counting is the correct direction to err for a customer.
+ */
+function kbPagesFor(result) {
+  return Math.max(1, Number(result?.pages) || 1);
+}
+
+
 export async function handleKnowledgeUploadRoute(ctx = {}) {
   const {
     req,
@@ -275,7 +288,7 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
               metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, candidateCount: result.candidateCount, promotedCount: result.promotedCount },
             });
             if (planEnforcer && orgId) {
-              planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
+              planEnforcer.recordUsage(orgId, 'kbPages', kbPagesFor(result));
               planEnforcer.recordUsage(orgId, 'uploads', 1);
             }
             console.log(`[knowledge:async] ✓ ${filePart.filename} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tBg}`);
@@ -297,7 +310,7 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
         });
         console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);
         if (planEnforcer && orgId) {
-          const realPages = result.pages || result.segmentCount || 1;
+          const realPages = kbPagesFor(result);
           planEnforcer.recordUsage(orgId, 'kbPages', realPages);
           planEnforcer.recordUsage(orgId, 'uploads', 1);
         }

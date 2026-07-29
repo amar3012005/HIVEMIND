@@ -1777,7 +1777,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         ingestTracker,
         recordUsage: (orgId, result) => {
           if (planEnforcer && orgId) {
-            planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
+            planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(result.pages) || 1));
             planEnforcer.recordUsage(orgId, 'uploads', 1);
           }
         },
@@ -15933,7 +15933,7 @@ exit \$RC
                     },
                   });
                   if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'kbPages', r.pages || r.segmentCount || 1);
+                    planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(r.pages) || 1));
                     planEnforcer.recordUsage(orgId, 'uploads', 1);
                   }
                   results[idx] = {

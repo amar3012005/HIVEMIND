@@ -9,6 +9,7 @@ import re
 from typing import Optional
 from urllib.parse import urlencode
 
+import asyncio
 import httpx
 from pydantic import BaseModel
 
@@ -98,13 +99,47 @@ async def _dial_twilio(req: DialRequest) -> dict:
     return {"call_leg_id": leg, "session_id": req.session_id, "status": "dialing"}
 
 
+# Zernio's gateway flakes intermittently under a campaign burst: a run of 9 dials
+# saw 5 connect normally and 4 die on "502 Bad Gateway" from
+# https://zernio.com/api/v1/voice/calls, while the API answered healthily seconds
+# later. With no retry, one blip permanently loses a prospect from the campaign.
+_RETRY_STATUS = {502, 503, 504}
+_RETRY_BACKOFF = (0.6, 1.8)  # two retries; sequential dialling, so this cannot stampede
+
+
 async def _zernio(method: str, path: str, extra_headers: Optional[dict] = None, **kwargs) -> dict:
     headers = {"Authorization": f"Bearer {config.ZERNIO_API_KEY}",
                "Content-Type": "application/json", **(extra_headers or {})}
-    async with httpx.AsyncClient(timeout=20) as c:
-        r = await getattr(c, method)(f"{config.ZERNIO_API_BASE}{path}", headers=headers, **kwargs)
-        r.raise_for_status()
-        return r.json() if r.content else {}
+    # Retrying a POST /voice/calls is only safe because the caller sends an
+    # Idempotency-Key, so Zernio collapses a duplicate into the original call. If
+    # a POST ever arrives WITHOUT one, do not retry it — a second dial would ring
+    # a real person twice, which is far worse than a failed row in the campaign.
+    idempotent = method.lower() != "post" or "Idempotency-Key" in headers
+    attempts = 1 + (len(_RETRY_BACKOFF) if idempotent else 0)
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await getattr(c, method)(f"{config.ZERNIO_API_BASE}{path}",
+                                             headers=headers, **kwargs)
+                if r.status_code in _RETRY_STATUS and attempt < attempts - 1:
+                    log.warning("zernio %s %s -> %s, retrying in %.1fs (attempt %d/%d)",
+                                method.upper(), path, r.status_code,
+                                _RETRY_BACKOFF[attempt], attempt + 1, attempts)
+                    await asyncio.sleep(_RETRY_BACKOFF[attempt])
+                    continue
+                r.raise_for_status()
+                return r.json() if r.content else {}
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            last_exc = e
+            if attempt >= attempts - 1:
+                raise
+            log.warning("zernio %s %s transport error (%s), retrying in %.1fs",
+                        method.upper(), path, e, _RETRY_BACKOFF[attempt])
+            await asyncio.sleep(_RETRY_BACKOFF[attempt])
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"zernio {method} {path} exhausted retries")
 
 
 async def _dial_zernio(req: DialRequest) -> dict:

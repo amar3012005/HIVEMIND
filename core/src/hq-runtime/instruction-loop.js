@@ -8,6 +8,16 @@ const providerAliases = {
   x: ['x', 'twitter'],
 };
 
+const PLATFORM_MANAGED_CAPABILITIES = {
+  'google-maps': () => Boolean(process.env.GOOGLE_MAPS_API_KEY || process.env.HYPER_PLACES_KEY),
+};
+
+export function getPlatformManagedCapabilities() {
+  return new Set(Object.entries(PLATFORM_MANAGED_CAPABILITIES)
+    .filter(([, available]) => available())
+    .map(([capability]) => capability));
+}
+
 function cleanLocation(value) {
   return String(value || '').trim().replace(/[.,;!?]+$/, '').slice(0, 160);
 }
@@ -60,13 +70,15 @@ export async function getConnectedCapabilities({ prisma, runtime }) {
     ...platform.map((row) => row.platformType),
     ...(Array.isArray(zernio?.connectedAccounts) ? zernio.connectedAccounts.map((row) => row.platform || row.provider) : []),
   ].filter(Boolean).map((value) => String(value).toLowerCase()));
-  const connected = new Set(raw);
+  const platformManaged = getPlatformManagedCapabilities();
+  const connected = new Set([...raw, ...platformManaged]);
   for (const [canonical, aliases] of Object.entries(providerAliases)) if (aliases.some((alias) => raw.has(alias))) connected.add(canonical);
   return connected;
 }
 
 export async function reconcileTodoCapabilities({ prisma, runtime }) {
   const connected = await getConnectedCapabilities({ prisma, runtime });
+  const platformManaged = getPlatformManagedCapabilities();
   const todos = await prisma.hqTodo.findMany({
     where: { runtimeId: runtime.id, orgId: runtime.orgId, status: { in: ['READY', 'WAITING_FOR_CONNECTOR'] } },
     orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 30,
@@ -90,11 +102,12 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
         prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'READY', blockedReason: null } }),
         prisma.hqCapabilityRequest.updateMany({ where: { runtimeId: runtime.id, todoId: todo.id, status: 'REQUIRED' }, data: { status: 'RESOLVED', resolvedAt: new Date() } }),
       ]);
-      resolved.push({ todo_id: todo.id, capabilities: required });
+      resolved.push({ todo_id: todo.id, capabilities: required, platform_managed: required.filter((capability) => platformManaged.has(String(capability).toLowerCase())) });
     }
   }
   return {
     connected: [...connected],
+    platform_managed: [...platformManaged],
     todos: await prisma.hqTodo.findMany({ where: { runtimeId: runtime.id, orgId: runtime.orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
     requests: await prisma.hqCapabilityRequest.findMany({ where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'REQUIRED' }, orderBy: { createdAt: 'asc' }, take: 20 }),
     resolved,

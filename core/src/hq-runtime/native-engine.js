@@ -50,6 +50,10 @@ export class NativeHqEngine {
     });
 
     const appliedInstructions = await ingestPendingInstructions({ prisma, runtime, company: context.company });
+    if (!appliedInstructions.length) await event(prisma, runtime, cycle, {
+      eventType: 'instruction_checked', title: 'I checked for new operating instructions',
+      summary: 'No unapplied instruction changed the operating queue. I will use the current priorities rather than replaying old work.',
+    });
     for (const applied of appliedInstructions) {
       await event(prisma, runtime, cycle, {
         eventType: 'instruction_received', title: 'I have accepted a new operating instruction',
@@ -63,8 +67,8 @@ export class NativeHqEngine {
     }
     const capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
     for (const resolved of capabilityState.resolved) await event(prisma, runtime, cycle, {
-      eventType: 'capability_resolved', title: 'The missing capability is connected',
-      summary: `I verified ${resolved.capabilities.join(', ')} against this organization. The blocked todo is ready again, so I am continuing from it instead of rebuilding the plan.`,
+      eventType: 'capability_resolved', title: 'A required capability is available',
+      summary: `${resolved.platform_managed?.length ? `${resolved.platform_managed.join(', ')} is provided by Singulance.` : `I verified ${resolved.capabilities.join(', ')} against this organization.`} The blocked todo is ready again, so I am continuing from it instead of rebuilding the plan.`,
       details: resolved,
     });
     for (const request of capabilityState.requests) {
@@ -75,6 +79,13 @@ export class NativeHqEngine {
       });
     }
     const readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
+    await event(prisma, runtime, cycle, {
+      eventType: 'queue_checked', title: 'I re-ranked the operating queue',
+      summary: readyTodo
+        ? `The next executable priority is ${readyTodo.title}. Waiting items remain retained but will not stall safe work behind them.`
+        : 'There is no executable todo ahead of the active stage. I will wait only for the evidence or capability that can change the next decision.',
+      details: { next_todo_id: readyTodo?.id || null, platform_managed_capabilities: capabilityState.platform_managed || [] },
+    });
 
     const baselineMissing = !context.evidence.baseline;
     const baselineStale = !baselineMissing && (!context.evidence.company_identity.matches || !context.evidence.company_identity.current_onboarding);
@@ -226,6 +237,14 @@ export class NativeHqEngine {
       if (trigger.type === 'user_wake' && action.action === 'monitor' && !appliedInstructions.length) {
         await event(prisma, runtime, cycle, { eventType: 'observation', title: 'No material change detected', summary: 'The company state, operating instruction, work ownership, and measurement evidence are unchanged. Repeating the same work would create activity, not progress.' });
       }
+    }
+
+    if (trigger.type === 'work_result' && capabilityState.todos.some((todo) => todo.status === 'READY')) {
+      await scheduleHqWake({
+        prisma, runtimeId: runtime.id, orgId: runtime.orgId,
+        idempotencyKey: `queue-advance:${cycle.id}`, triggerType: 'queue_advance', dueAt: new Date(),
+        payload: { completed_cycle_id: cycle.id },
+      });
     }
 
     const dueAt = context.growth.active_stage?.checkpoint_at

@@ -1,5 +1,6 @@
 import { getGrowthOperatingState } from '../growth/operating-loop.js';
 import { getLatestGrowthPlan } from '../growth/planner.js';
+import { getConnectedCapabilities, getPlatformManagedCapabilities } from './instruction-loop.js';
 
 function identity(value = {}) {
   const company = value && typeof value === 'object' ? value : {};
@@ -21,7 +22,7 @@ function baselineIdentity(payload = {}) {
 }
 
 export async function buildHqContext({ prisma, runtime, trigger }) {
-  const [growth, planArtifact, pendingWork, pendingApprovals, companyRows] = await Promise.all([
+  const [growth, planArtifact, pendingWork, pendingApprovals, companyRows, connectedCapabilities] = await Promise.all([
     getGrowthOperatingState({ prisma, orgId: runtime.orgId }),
     getLatestGrowthPlan({ prisma, orgId: runtime.orgId }),
     prisma.hyperWorkOrder.findMany({
@@ -39,6 +40,7 @@ export async function buildHqContext({ prisma, runtime, trigger }) {
         WHERE org_id=$1::uuid AND archived_at IS NULL AND agent_connectors ? '_company'
         ORDER BY (room_tag='general') DESC, updated_at DESC LIMIT 1`, runtime.orgId,
     ).catch(() => []),
+    getConnectedCapabilities({ prisma, runtime }),
   ]);
   const company = companyRows[0]?.company || {};
   const canonicalIdentity = identity(company);
@@ -60,6 +62,10 @@ export async function buildHqContext({ prisma, runtime, trigger }) {
       active_stage_id: runtime.activeStageId, next_wake_at: runtime.nextWakeAt,
     },
     trigger,
+    capabilities: {
+      connected: [...connectedCapabilities],
+      platform_managed: [...getPlatformManagedCapabilities()],
+    },
     company,
     growth: {
       active_goal: growth.goals.find((goal) => goal.status === 'ACTIVE') || null,

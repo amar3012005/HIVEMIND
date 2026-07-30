@@ -47,7 +47,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
-import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
@@ -956,8 +956,11 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day)`);
 }
 
+let hqScheduler = null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
-  startHqScheduler({ prisma }).catch((error) => console.warn('[hq-runtime] scheduler unavailable:', error.message));
+  startHqScheduler({ prisma })
+    .then((scheduler) => { hqScheduler = scheduler; })
+    .catch((error) => console.warn('[hq-runtime] scheduler unavailable:', error.message));
 }
 
 // Chromium is heavy; cap concurrent captures so parallel onboardings can't
@@ -2077,10 +2080,9 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         // Dependent tables — none of these touch each other, so run them
         // concurrently. Cuts batch wall time from sum to max.
         await Promise.all([
-          prisma.auditLog.updateMany({
-            where: { resourceId: { in: batch } },
-            data: { resourceId: null },
-          }),
+          // Audit records are append-only by database policy. They are not a
+          // foreign-key dependency, so preserve them as the immutable record
+          // of the erased resource rather than trying to rewrite resource_id.
           prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
           prisma.codeMemoryMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
           prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: batch } } }),
@@ -2119,11 +2121,10 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await prisma.userOrganization.deleteMany({ where: { userId } });
     emit(85, 'Deleted org memberships');
 
-    await prisma.auditLog.updateMany({
-      where: { userId },
-      data: { userId: null },
-    });
-    emit(88, 'Anonymized audit logs');
+    // `audit_logs` is append-only (the DB rejects UPDATE and DELETE). There is
+    // no FK from it to users, so deleting the user below is valid while the
+    // immutable audit trail remains available for compliance retention.
+    emit(88, 'Preserved immutable audit logs');
 
     // Delete or detach createdBy FK rows that block user delete.
     // createdBy is NOT NULL on DigitalEmployee + Team + Project +
@@ -2531,6 +2532,7 @@ const server = http.createServer(async (req, res) => {
 
   const handleHqRuntimeRoute = createHqRuntimeRouteHandler({
     prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse,
+    wakeScheduler: () => hqScheduler?.wake?.(),
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;
 
@@ -8429,6 +8431,11 @@ Write the persona now.`;
             let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
             let finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
             if (!finalScreenshot) {
+              const playwrightScreenshot = await captureWebsiteScreenshotWithPlaywright(homepage.url || homepageUrl);
+              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: playwrightScreenshot, orgId });
+              finalSource = finalScreenshot ? 'playwright-screenshot' : null;
+            }
+            if (!finalScreenshot) {
               finalScreenshot = await storeOfficialWebsiteVisual({ html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId });
               finalSource = finalScreenshot ? 'official-site-image' : null;
             }
@@ -9122,19 +9129,6 @@ Write the persona now.`;
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
       });
-      if (room) {
-        try {
-          const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
-            roomId,
-          );
-          room.projectId = gr?.[0]?.project_id || null;
-          room.goal = gr?.[0]?.goal || '';
-          room.roomTag = gr?.[0]?.room_tag || 'general';
-        } catch {
-          room.goal = '';
-        }
-      }
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       // project_id/goal are read via raw SQL — deployed Prisma clients can lag
       // additive columns, so prisma.hyperRoom.findFirst() may omit them.
@@ -9152,10 +9146,17 @@ Write the persona now.`;
         // Backward-compatible FE field while clients move to room_journal.
         room.evo_journal = room.room_journal;
       } catch { /* leave undefined */ }
-      const linkedCampaign = await prisma.campaign.findFirst({
-        where: { roomId, orgId: current.session.orgId },
-        select: { id: true },
-      }).catch(() => null);
+      const [linkedCampaign, newestTurns] = await Promise.all([
+        prisma.campaign.findFirst({
+          where: { roomId, orgId: current.session.orgId },
+          select: { id: true },
+        }).catch(() => null),
+        prisma.hyperTurn.findMany({
+          where: { roomId },
+          orderBy: { seq: 'desc' },
+          take: 20,
+        }),
+      ]);
       room.campaign_id = linkedCampaign?.id || null;
       // Prewarm the sidecar on room OPEN (fire-and-forget): warms the company brief
       // + the cold MCP connector inspects (~20-30s, the dominant first-turn latency)
@@ -9178,11 +9179,7 @@ Write the persona now.`;
           }),
         }).catch(() => { /* best-effort — never blocks room open */ });
       } catch { /* best-effort */ }
-      const turns = await prisma.hyperTurn.findMany({
-        where: { roomId },
-        orderBy: { seq: 'asc' },
-        take: 50,
-      });
+      const turns = newestTurns.reverse();
       const employees = (room.participantIds || []).length
         ? await prisma.digitalEmployee.findMany({
             where: { id: { in: room.participantIds } },

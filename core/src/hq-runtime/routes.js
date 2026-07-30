@@ -5,6 +5,7 @@ import {
   scheduleHqWake,
   transitionHqRuntime,
 } from './repository.js';
+import { reconcileTodoCapabilities } from './instruction-loop.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
@@ -73,7 +74,64 @@ async function requestWake({ prisma, runtime, triggerType, payload = {}, key }) 
   });
 }
 
-export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse }) {
+async function reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler }) {
+  const result = await reconcileTodoCapabilities({ prisma, runtime });
+  if (!result.resolved.length) return result;
+  for (const resolved of result.resolved) {
+    await appendHqEvent({
+      prisma, runtimeId: runtime.id, orgId: runtime.orgId,
+      eventType: 'capability_resolved', title: 'A required capability is available',
+      summary: `${resolved.platform_managed?.length ? `${resolved.platform_managed.join(', ')} is provided by Singulance.` : `I verified ${resolved.capabilities.join(', ')} against this organization.`} The blocked todo is ready again and has returned to the operating queue.`,
+      details: resolved,
+    });
+  }
+  await requestWake({
+    prisma, runtime, triggerType: 'connector_changed', payload: { resolved: result.resolved },
+    key: `capability-reconciled:${runtime.id}:${result.resolved.map((item) => item.todo_id).join(':')}`,
+  });
+  Promise.resolve(wakeScheduler?.()).catch(() => {});
+  return result;
+}
+
+function queueStatus(value) {
+  const status = String(value || '').toUpperCase();
+  if (['COMPLETED', 'COMPLETE'].includes(status)) return 'COMPLETED';
+  if (status === 'WAITING_FOR_CONNECTOR') return 'WAITING_FOR_CONNECTOR';
+  if (status === 'BLOCKED') return 'BLOCKED';
+  if (['RUNNING', 'ACTIVE', 'QUEUED'].includes(status)) return 'RUNNING';
+  return 'READY';
+}
+
+function runtimeQueue({ todos, stages, delegations }) {
+  const stageById = new Map(stages.map((stage) => [stage.id, stage]));
+  const todoRows = todos.map((todo) => ({
+    id: `todo:${todo.id}`, source: 'todo', source_id: todo.id, title: todo.title,
+    objective: todo.objective, status: queueStatus(todo.status), priority: todo.priority,
+    position: todo.position, blocked_reason: todo.blockedReason || null, updated_at: todo.updatedAt,
+  }));
+  const stageRows = stages.map((stage) => {
+    const stageDelegations = delegations.filter((delegation) => delegation.growthStageId === stage.id);
+    const waitingForEvidence = String(stage.status).toUpperCase() === 'ACTIVE'
+      && stage.checkpointAt && new Date(stage.checkpointAt).getTime() > Date.now()
+      && stageDelegations.every((delegation) => ['COMPLETED', 'CANCELLED'].includes(String(delegation.status).toUpperCase()));
+    return {
+      id: `stage:${stage.id}`, source: 'growth_stage', source_id: stage.id, title: stage.name,
+      objective: stage.objective, status: waitingForEvidence ? 'WAITING_FOR_EVIDENCE' : queueStatus(stage.status),
+      priority: String(stage.status).toUpperCase() === 'ACTIVE' ? 10 : 80, position: 0,
+      blocked_reason: waitingForEvidence ? `Review at ${new Date(stage.checkpointAt).toISOString()}` : null, updated_at: stage.updatedAt,
+    };
+  });
+  const delegationRows = delegations.map((delegation) => ({
+    id: `delegation:${delegation.id}`, source: 'growth_delegation', source_id: delegation.id,
+    title: delegation.objective, objective: delegation.deliverable || delegation.objective,
+    status: queueStatus(delegation.status), priority: stageById.get(delegation.growthStageId)?.status === 'ACTIVE' ? 15 : 90,
+    position: 0, blocked_reason: null, updated_at: delegation.updatedAt,
+  }));
+  return [...todoRows, ...stageRows, ...delegationRows]
+    .sort((left, right) => left.priority - right.priority || left.position - right.position || new Date(left.updated_at) - new Date(right.updated_at));
+}
+
+export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null }) {
   return async function handleHqRuntimeRoute(req, res, url) {
     const pathname = url.pathname;
     if (!pathname.startsWith('/v1/hq/')) return false;
@@ -243,14 +301,17 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
       if (pathname === '/v1/hq/work' && req.method === 'GET') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
-        const [workOrders, schedules, todos, capabilityRequests, instructions] = await Promise.all([
+        await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
+        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations] = await Promise.all([
           prisma.hyperWorkOrder.findMany({ where: { orgId, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
           prisma.hqSchedule.findMany({ where: { orgId, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
           prisma.hqTodo.findMany({ where: { orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
           prisma.hqCapabilityRequest.findMany({ where: { orgId, status: 'REQUIRED' }, orderBy: { createdAt: 'asc' }, take: 20 }),
           prisma.hqInstruction.findMany({ where: { orgId }, orderBy: { createdAt: 'desc' }, take: 20 }),
+          prisma.growthStage.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 }),
+          prisma.growthDelegation.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 30 }),
         ]);
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions });
+        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }) });
       }
 
       if (pathname === '/v1/hq/instructions' && req.method === 'POST') {
@@ -261,14 +322,17 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!instructionBody) return jsonResponse(res, { error: 'hq_instruction_required' }, 400);
         const instruction = await prisma.hqInstruction.create({ data: { runtimeId: runtime.id, orgId, userId, body: instructionBody } });
         const schedule = await requestWake({ prisma, runtime, triggerType: 'instruction_updated', payload: { instruction_id: instruction.id }, key: `instruction:${instruction.id}` });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
         return jsonResponse(res, { instruction, schedule }, 201);
       }
 
       if (pathname === '/v1/hq/capabilities/recheck' && req.method === 'POST') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
-        const schedule = await requestWake({ prisma, runtime, triggerType: 'connector_changed', key: `connector_changed:${Date.now()}` });
-        return jsonResponse(res, { schedule }, 202);
+        const result = await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
+        const schedule = result.resolved.length ? null : await requestWake({ prisma, runtime, triggerType: 'connector_changed', key: `connector_changed:${Date.now()}` });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { schedule, resolved: result.resolved, platform_managed: result.platform_managed }, 202);
       }
 
       if (pathname === '/v1/hq/resources' && req.method === 'GET') {

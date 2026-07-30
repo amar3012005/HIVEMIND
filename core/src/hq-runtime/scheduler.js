@@ -74,9 +74,10 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
       while (await dispatchNextHqWorkOrder({ prisma, logger })) { /* drain bounded specialist work serially */ }
     } finally { running = false; }
   };
-  const timer = setInterval(() => tick().catch((error) => logger.error('[hq-runtime] scheduler tick failed:', error.message)), intervalMs);
+  const wake = () => tick().catch((error) => logger.error('[hq-runtime] scheduler wake failed:', error.message));
+  const timer = setInterval(wake, intervalMs);
   timer.unref?.();
-  tick().catch((error) => logger.error('[hq-runtime] scheduler initial tick failed:', error.message));
+  wake();
   logger.log(`[hq-runtime] scheduler active as ${leaseOwner}`);
-  return { enabled: true, leaseOwner, stop: () => clearInterval(timer) };
+  return { enabled: true, leaseOwner, wake, stop: () => clearInterval(timer) };
 }

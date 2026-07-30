@@ -1,0 +1,8 @@
+{
+  "slug": "hq",
+  "version": 1,
+  "display_name": "Company HQ",
+  "description": "Company-level growth operating decisions grounded in retained evidence and delegated to the appropriate specialist room.",
+  "lead_shape": "panel",
+  "default_skill": ""
+}

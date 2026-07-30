@@ -1266,6 +1266,262 @@ model SourceArtifact {
   @@map("source_artifacts")
 }
 
+/// GrowthGoal — organization-level outcome governed by Company HQ.
+model GrowthGoal {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  ownerUserId   String   @map("owner_user_id") @db.Uuid
+  title         String   @db.VarChar(255)
+  objective     String
+  status        String   @default("ACTIVE") @db.VarChar(24)
+  autonomyMode  String   @default("MANUAL_REVIEW") @map("autonomy_mode") @db.VarChar(24)
+  policy        Json     @default("{}")
+  sourceRefs    Json     @default("[]") @map("source_refs")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([ownerUserId, createdAt(sort: Desc)])
+  @@map("growth_goals")
+}
+
+/// GrowthStage — one bounded experiment or operating phase below a GrowthGoal.
+model GrowthStage {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  growthGoalId     String    @map("growth_goal_id") @db.Uuid
+  name             String    @db.VarChar(255)
+  objective        String
+  constraint       String    @map("growth_constraint") @db.VarChar(40)
+  status           String    @default("PLANNED") @db.VarChar(24)
+  startsAt         DateTime? @map("starts_at") @db.Timestamptz(6)
+  checkpointAt     DateTime? @map("checkpoint_at") @db.Timestamptz(6)
+  endsAt           DateTime? @map("ends_at") @db.Timestamptz(6)
+  channelPolicy    Json      @default("{}") @map("channel_policy")
+  measurement      Json      @default("{}")
+  sourceRefs       Json      @default("[]") @map("source_refs")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, checkpointAt])
+  @@index([growthGoalId, createdAt(sort: Desc)])
+  @@map("growth_stages")
+}
+
+/// GrowthHypothesis — a falsifiable, evidence-backed claim belonging to a stage.
+model GrowthHypothesis {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String   @map("org_id") @db.Uuid
+  growthStageId   String   @map("growth_stage_id") @db.Uuid
+  statement       String
+  confidence      String   @default("MEDIUM") @db.VarChar(12)
+  evidenceRefs    Json     @default("[]") @map("evidence_refs")
+  expectedSignal  String?  @map("expected_signal")
+  falsification   String?  @map("falsification")
+  status          String   @default("OPEN") @db.VarChar(20)
+  observedOutcome Json     @default("{}") @map("observed_outcome")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@map("growth_hypotheses")
+}
+
+/// GrowthDelegation — an HQ handoff contract for a bounded specialist-room result.
+model GrowthDelegation {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  growthStageId  String    @map("growth_stage_id") @db.Uuid
+  roomId         String?   @map("room_id") @db.Uuid
+  roomTag        String    @map("room_tag") @db.VarChar(40)
+  objective      String
+  inputs         Json      @default("{}")
+  deliverable    String?   @db.VarChar(500)
+  successMetric  String?   @map("success_metric") @db.VarChar(500)
+  status         String    @default("PENDING") @db.VarChar(24)
+  result         Json      @default("{}")
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@index([roomId])
+  @@map("growth_delegations")
+}
+
+/// GrowthJournal — compact, append-only evidence and decision history for HQ.
+model GrowthJournal {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  growthGoalId   String?  @map("growth_goal_id") @db.Uuid
+  growthStageId  String?  @map("growth_stage_id") @db.Uuid
+  actorUserId    String?  @map("actor_user_id") @db.Uuid
+  eventType      String   @map("event_type") @db.VarChar(60)
+  summary        String
+  evidenceRefs   Json     @default("[]") @map("evidence_refs")
+  decision       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@map("growth_journal")
+}
+
+/// HqRuntime — one persistent company operator per organization.
+model HqRuntime {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String    @unique @map("org_id") @db.Uuid
+  ownerUserId     String    @map("owner_user_id") @db.Uuid
+  objective       String
+  state           String    @default("INACTIVE") @db.VarChar(24)
+  authorityPolicy Json      @default("{}") @map("authority_policy") @db.JsonB
+  activeGoalId    String?   @map("active_goal_id") @db.Uuid
+  activeStageId   String?   @map("active_stage_id") @db.Uuid
+  currentCycleId  String?   @map("current_cycle_id") @db.Uuid
+  nextWakeAt      DateTime? @map("next_wake_at") @db.Timestamptz(6)
+  pauseReason     String?   @map("pause_reason")
+  blockedReason   String?   @map("blocked_reason")
+  eventSequence   BigInt    @default(0) @map("event_sequence")
+  version         Int       @default(1)
+  activatedAt     DateTime? @map("activated_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([state, nextWakeAt])
+  @@map("hq_runtimes")
+}
+
+/// HqCycle — one leased, resumable wake execution.
+model HqCycle {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String    @map("runtime_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
+  triggerType    String    @map("trigger_type") @db.VarChar(60)
+  triggerPayload Json      @default("{}") @map("trigger_payload") @db.JsonB
+  inputRefs      Json      @default("[]") @map("input_refs") @db.JsonB
+  status         String    @default("QUEUED") @db.VarChar(24)
+  decision       Json      @default("{}") @db.JsonB
+  usage          Json      @default("{}") @db.JsonB
+  error          String?
+  leaseOwner     String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  startedAt      DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, idempotencyKey])
+  @@index([runtimeId, createdAt(sort: Desc)])
+  @@index([status, leaseExpiresAt])
+  @@map("hq_cycles")
+}
+
+/// HqRuntimeEvent — append-only user-visible operational evidence.
+model HqRuntimeEvent {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String   @map("runtime_id") @db.Uuid
+  cycleId        String?  @map("cycle_id") @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  sequence       BigInt
+  eventType      String   @map("event_type") @db.VarChar(60)
+  title          String   @db.VarChar(240)
+  summary        String
+  details        Json     @default("{}") @db.JsonB
+  skillRef       String?  @map("skill_ref") @db.VarChar(160)
+  toolRef        String?  @map("tool_ref") @db.VarChar(160)
+  workOrderId    String?  @map("work_order_id") @db.Uuid
+  evidenceRefs   Json     @default("[]") @map("evidence_refs") @db.JsonB
+  visibility     String   @default("USER") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([runtimeId, sequence])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([cycleId, sequence])
+  @@map("hq_runtime_events")
+}
+
+/// HqSchedule — a durable wake request leased by the HQ scheduler.
+model HqSchedule {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String    @map("runtime_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
+  triggerType    String    @map("trigger_type") @db.VarChar(60)
+  payload        Json      @default("{}") @db.JsonB
+  dueAt          DateTime  @map("due_at") @db.Timestamptz(6)
+  status         String    @default("PENDING") @db.VarChar(24)
+  leaseOwner     String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  attempts       Int       @default(0)
+  lastError      String?   @map("last_error")
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, idempotencyKey])
+  @@index([status, dueAt])
+  @@index([runtimeId, createdAt(sort: Desc)])
+  @@map("hq_schedules")
+}
+
+model HqInstruction {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId   String    @map("runtime_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  body        String
+  status      String    @default("PENDING") @db.VarChar(24)
+  interpreted Json      @default("{}") @db.JsonB
+  appliedAt   DateTime? @map("applied_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([runtimeId, status, createdAt])
+  @@map("hq_instructions")
+}
+
+model HqTodo {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId            String    @map("runtime_id") @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  instructionId        String?   @map("instruction_id") @db.Uuid
+  title                String    @db.VarChar(240)
+  objective            String
+  kind                 String    @db.VarChar(60)
+  status               String    @default("READY") @db.VarChar(32)
+  priority             Int       @default(100)
+  position             Int       @default(0)
+  requiredCapabilities Json      @default("[]") @map("required_capabilities") @db.JsonB
+  context              Json      @default("{}") @db.JsonB
+  result               Json      @default("{}") @db.JsonB
+  blockedReason        String?   @map("blocked_reason")
+  startedAt            DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([runtimeId, status, priority, position])
+  @@map("hq_todos")
+}
+
+model HqCapabilityRequest {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId   String    @map("runtime_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  todoId      String?   @map("todo_id") @db.Uuid
+  capability  String    @db.VarChar(100)
+  provider    String    @db.VarChar(100)
+  status      String    @default("REQUIRED") @db.VarChar(24)
+  reason      String
+  connectPath String?   @map("connect_path")
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([orgId, status, createdAt])
+  @@map("hq_capability_requests")
+}
+
 /// Knowledge documents — parsed/normalized from source artifacts
 /// Represents threads, files, web pages, conversations
 model KnowledgeDocument {
@@ -2296,6 +2552,65 @@ model HyperRoom {
   @@index([archivedAt])
   @@index([projectId])
   @@map("hyper_rooms")
+}
+
+/// HyperWorkOrder — a durable, bounded unit of agent work created by a Room
+/// Director for a specific turn. This is intentionally separate from TeamTask:
+/// TeamTask belongs to the older AgentScope team runtime, while WorkOrders are
+/// the shared execution substrate beneath every HyperRoom domain pack.
+model HyperWorkOrder {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String   @map("org_id") @db.Uuid
+  roomId              String   @map("room_id") @db.Uuid
+  turnId              String?  @map("turn_id") @db.Uuid
+  hqCycleId           String?  @map("hq_cycle_id") @db.Uuid
+  growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
+  orderKey            String   @map("order_key") @db.VarChar(80)
+  kind                String   @db.VarChar(40)
+  status              String   @default("queued") @db.VarChar(20)
+  title               String   @db.VarChar(180)
+  objective           String   @db.Text
+  ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
+  ownerSlug           String?  @map("owner_slug") @db.VarChar(120)
+  ownerLane           String?  @map("owner_lane") @db.VarChar(40)
+  selectedSkills      Json     @default("[]") @map("selected_skills") @db.JsonB
+  requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
+  acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
+  inputSnapshot       Json     @default("{}") @map("input_snapshot") @db.JsonB
+  artifactRefs        Json     @default("[]") @map("artifact_refs") @db.JsonB
+  evidenceRefs        Json     @default("[]") @map("evidence_refs") @db.JsonB
+  attempt             Int      @default(0)
+  error               String?  @db.Text
+  startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([turnId, orderKey])
+  @@unique([hqCycleId, orderKey])
+  @@index([orgId, roomId, status])
+  @@index([turnId])
+  @@index([hqCycleId, status])
+  @@map("hyper_work_orders")
+}
+
+/// HyperWorkResult — append-only worker attempt output. The final Room
+/// synthesis consumes compact results rather than raw tool transcripts.
+model HyperWorkResult {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId String   @map("work_order_id") @db.Uuid
+  attempt     Int      @default(1)
+  status      String   @default("completed") @db.VarChar(20)
+  summary     String   @db.Text
+  output      Json     @default("{}") @db.JsonB
+  evidence    Json     @default("[]") @db.JsonB
+  artifacts   Json     @default("[]") @db.JsonB
+  usage       Json     @default("{}") @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([workOrderId, attempt])
+  @@index([workOrderId])
+  @@map("hyper_work_results")
 }
 
 /// AgentTrust — per-org meritocracy ledger. score in [0,1], starts 0.5.

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "scope": "hq_only",
+  "skills": [
+    {"id":"baseline-establishment","description":"Establish a source-backed company position from the website, connected channels, analytics, leads, campaigns, and market signals.","model_policy":{"mode":"deterministic_tools","model":null}},
+    {"id":"company-state-diagnosis","description":"Establish current company state from retained evidence and live signals."},
+    {"id":"evidence-sufficiency","description":"Decide whether evidence supports action or requires targeted observation."},
+    {"id":"growth-constraint-diagnosis","description":"Identify the highest-leverage evidenced business constraint.","model_policy":{"mode":"synthesis","model":"gpt-oss-120b","reasoning_effort":"low"}},
+    {"id":"growth-stage-planning","description":"Create one bounded stage with metrics, thresholds, and stop conditions."},
+    {"id":"work-order-delegation","description":"Delegate a measurable result contract to one appropriate specialist Room."},
+    {"id":"stage-review","description":"Compare stage evidence with its decision rule and choose the next transition."},
+    {"id":"performance-diagnostics","description":"Explain measured movement without inventing attribution or causality."},
+    {"id":"memory-promotion","description":"Promote verified outcomes and decisions into compact company memory."},
+    {"id":"blocker-resolution","description":"Resolve access, evidence, policy, or execution blockers safely."},
+    {"id":"primary-outreach","description":"Build a location-grounded client acquisition motion from company evidence, qualified local prospects, and connected outreach tools without inventing contacts or sending unapproved messages.","model_policy":{"mode":"agent_tools","model":"gpt-oss-120b","reasoning_effort":"low"}}
+  ]
+}

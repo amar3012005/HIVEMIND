@@ -48,6 +48,12 @@ import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js'
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
+import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
+import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
+import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
+import { activateHqAfterOnboarding, resetHqForCompanyReplacement } from './hq-runtime/repository.js';
+import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -663,6 +669,8 @@ async function clearHyperCompanyContext({ orgId, userId }) {
     });
   }, { timeout: 15000, maxWait: 8000 });
 
+  await resetHqForCompanyReplacement({ prisma, orgId });
+
   try {
     const { getSharedProfileStore } = await import('./memory/profile-store.js');
     getSharedProfileStore(prisma)?.invalidateOrg(orgId);
@@ -821,11 +829,18 @@ const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200
 if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   const runNightlyCycle = async () => {
     const today = new Date().toISOString().slice(0, 10);
+    const hqRuntimeAvailable = await prisma.$queryRawUnsafe(
+      `SELECT to_regclass('hivemind.hq_runtimes') IS NOT NULL AS available`,
+    ).then((rows) => Boolean(rows?.[0]?.available)).catch(() => false);
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT DISTINCT ON (org_id) id, org_id, user_id, "agent_connectors"->'_company' AS company
-         FROM "hivemind"."hyper_rooms"
-        WHERE "agent_connectors" ? '_company' AND archived_at IS NULL
-        ORDER BY org_id, created_at DESC`,
+      `SELECT DISTINCT ON (r.org_id) r.id, r.org_id, r.user_id, r."agent_connectors"->'_company' AS company
+         FROM "hivemind"."hyper_rooms" r
+        WHERE r."agent_connectors" ? '_company' AND r.archived_at IS NULL
+          ${hqRuntimeAvailable ? `AND NOT EXISTS (
+            SELECT 1 FROM hivemind.hq_runtimes runtime
+            WHERE runtime.org_id=r.org_id AND runtime.state<>'INACTIVE'
+          )` : ''}
+        ORDER BY r.org_id, r.created_at DESC`,
     ).catch(() => []);
     for (const hq of rows || []) {
       try {
@@ -941,6 +956,10 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day)`);
 }
 
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  startHqScheduler({ prisma }).catch((error) => console.warn('[hq-runtime] scheduler unavailable:', error.message));
+}
+
 // Chromium is heavy; cap concurrent captures so parallel onboardings can't
 // thrash the single hm-playwright browser. A tiny FIFO semaphore.
 const HYPER_SIDECAR_BASE_URL = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
@@ -973,6 +992,10 @@ function dispatchHyperRoomTurn(body) {
     headers: { 'Content-Type': 'application/json' },
     body: payload,
   });
+}
+
+function requestsGrowthStage(message) {
+  return /\b(growth (operating )?plan|growth stage|next growth|baseline.*plan|plan.*baseline|current (position|status).*growth)\b/i.test(String(message || ''));
 }
 
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
@@ -2505,6 +2528,11 @@ const server = http.createServer(async (req, res) => {
 
   // Attach SSO context early (subdomain-based org routing; no-op on non-subdomain hosts)
   if (prisma) await attachSsoContext(req, prisma);
+
+  const handleHqRuntimeRoute = createHqRuntimeRouteHandler({
+    prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse,
+  });
+  if (await handleHqRuntimeRoute(req, res, url)) return;
 
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
@@ -7606,6 +7634,85 @@ Write the persona now.`;
     // first tasks and provisions an HQ room. The FE polls /status and renders
     // the log lines as a live terminal. One job per org at a time; jobs are
     // in-memory (a refresh mid-run re-attaches via /status).
+    // POST /v1/hyper/growth-baseline is deliberately a short independent
+    // workflow: it refreshes sourced company-position evidence before a Room
+    // decides whether a growth campaign is warranted.
+    if (pathname === '/v1/hyper/growth-baselines' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      const limit = Number(url.searchParams.get('limit') || 12);
+      return jsonResponse(res, { baselines: await listGrowthBaselines({ prisma, orgId: current.session.orgId, limit }) });
+    }
+    if (pathname === '/v1/hyper/growth-baseline' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      const body = await parseBody(req).catch(() => ({}));
+      try {
+        const baseline = await runGrowthBaseline({
+          prisma,
+          orgId: current.session.orgId,
+          userId: current.session.userId,
+          websiteUrl: body?.website_url,
+          socialUrls: body?.social_urls,
+          platforms: body?.platforms,
+          metrics: body?.metrics,
+          days: body?.days,
+          mode: body?.mode === 'full_all' ? 'full_all' : 'refresh',
+          includeWebsite: body?.include_website !== false,
+        });
+        return jsonResponse(res, { baseline });
+      } catch (error) {
+        return jsonResponse(res, { error: error.code || 'growth_baseline_failed', message: error.message }, error.status || 500);
+      }
+    }
+    if (pathname === '/v1/hyper/growth-operating-state' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      try { return jsonResponse(res, await getGrowthOperatingState({ prisma, orgId: current.session.orgId })); }
+      catch (error) { return jsonResponse(res, { error: 'growth_operating_state_unavailable', message: error.message }, 503); }
+    }
+    if (pathname === '/v1/hyper/growth-plans' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      try { return jsonResponse(res, { plans: await listGrowthPlans({ prisma, orgId: current.session.orgId, limit: url.searchParams.get('limit') }) }); }
+      catch (error) { return jsonResponse(res, { error: 'growth_plan_history_unavailable', message: error.message }, 503); }
+    }
+    if (pathname === '/v1/hyper/growth-plan' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      const body = await parseBody(req).catch(() => ({}));
+      const mode = body?.mode === 'initial_full' ? 'initial_full' : 'operate';
+      try {
+        const result = await runGrowthPlan({
+          prisma, orgId: current.session.orgId, userId: current.session.userId, mode,
+          aspects: Array.isArray(body?.aspects) ? body.aspects : [], objective: body?.objective,
+          autonomyMode: body?.autonomy_mode,
+        });
+        return jsonResponse(res, result, 201);
+      } catch (error) {
+        return jsonResponse(res, { error: 'growth_plan_failed', message: error.message }, 503);
+      }
+    }
+    if (pathname === '/v1/hyper/growth-goals' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      const body = await parseBody(req).catch(() => ({}));
+      const title = String(body.title || '').trim().slice(0, 255);
+      const objective = String(body.objective || '').trim().slice(0, 5000);
+      if (!title || !objective) return jsonResponse(res, { error: 'title_and_objective_required' }, 400);
+      const mode = ['MANUAL_REVIEW', 'ASSISTED', 'AUTO'].includes(body.autonomy_mode) ? body.autonomy_mode : 'MANUAL_REVIEW';
+      try {
+        const goal = await createGrowthGoal({ prisma, orgId: current.session.orgId, userId: current.session.userId, title, objective, autonomyMode: mode, policy: body.policy || {}, sourceRefs: Array.isArray(body.source_refs) ? body.source_refs : [] });
+        return jsonResponse(res, { goal }, 201);
+      } catch (error) { return jsonResponse(res, { error: 'growth_goal_create_failed', message: error.message }, 503); }
+    }
+
     if (pathname === '/v1/hyper/onboarding/status' && req.method === 'GET') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -8303,6 +8410,20 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          try {
+            const objective = [
+              `Operate ${companyName} toward measurable company growth.`,
+              mission ? `Mission: ${mission}` : '',
+              profile?.goal ? `Company goal: ${profile.goal}` : '',
+            ].filter(Boolean).join(' ').slice(0, 5000);
+            await activateHqAfterOnboarding({
+              prisma, orgId, userId, objective, onboardedAt: resultPayload.onboarded_at,
+            });
+            say('HQ is awake and establishing the current position');
+          } catch (error) {
+            console.warn('[hyper-onboarding] HQ activation failed:', error.message);
+            say('HQ activation is queued for retry');
+          }
           void (async () => {
             const capturedScreenshot = await screenshotCapturePromise;
             let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
@@ -9759,7 +9880,8 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+            task_tag: room.agentConnectors?._domain_home === true && String(room.roomTag || room.room_tag || 'general') === 'general'
+              ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
             flyby_decision: decision,
             flyby_spec: flybySpec,
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -9821,11 +9943,15 @@ Write the persona now.`;
 
         if (createdNew) planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
 
+        const isIndependentGrowthRun = room.agentConnectors?._domain_home === true
+          && String(room.roomTag || room.room_tag || 'general') === 'general'
+          && requestsGrowthStage(userMessage);
+
         // Emit a bootstrap router event immediately so the UI can render the
         // lead/reactor line before the sidecar finishes the heavier recall and
         // simulation prep. The sidecar will emit the authoritative router event
         // later; the frontend treats this as the same conversation state.
-        try {
+        if (!isIndependentGrowthRun) try {
           const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
           const participantRows = room.participantIds?.length
             ? await prisma.digitalEmployee.findMany({
@@ -9875,8 +10001,31 @@ Write the persona now.`;
         // Kick the sidecar only after the 202 response has been flushed. This
         // lets the frontend open SSE/poll immediately instead of waiting behind
         // any sidecar connection/setup latency.
-        const dispatchSidecar = () => {
+        const dispatchSidecar = async () => {
           try {
+          const isHq = room.agentConnectors?._domain_home === true && String(room.roomTag || room.room_tag || 'general') === 'general';
+          if (isHq && requestsGrowthStage(userMessage)) {
+            const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
+            try {
+              const prior = await getLatestGrowthPlan({ prisma, orgId: current.session.orgId });
+              const mode = prior ? 'operate' : 'initial_full';
+              await appendTurnEvent(prisma, turn.id, { t: 'growth_plan_runner', status: 'running', mode, title: mode === 'initial_full' ? 'Building the first Growth Operating Plan' : 'Updating the Growth Operating Plan' });
+              const result = await runGrowthPlan({
+                prisma, orgId: current.session.orgId, userId: current.session.userId, mode,
+                objective: userMessage, turnId: turn.id,
+                onProgress: ({ stage, detail }) => appendTurnEvent(prisma, turn.id, { t: 'growth_plan_progress', status: 'complete', stage, detail }),
+              });
+              await appendTurnEvent(prisma, turn.id, { t: 'growth_plan_complete', status: 'complete', artifact_id: result.artifact_id, mode: result.mode, aspects: result.aspects, plan: result.plan, committed: result.committed });
+              await appendTurnEvent(prisma, turn.id, { t: 'final_report', status: 'complete', kind: 'growth_operating_plan', text: result.plan.report_markdown, artifact_id: result.artifact_id });
+              await sealTurn(prisma, turn.id, { status: 'complete', costTokens: Number(result.usage?.total_tokens || 0) });
+            } catch (error) {
+              console.warn('[growth-plan-runner] failed:', error.message);
+              await appendTurnEvent(prisma, turn.id, { t: 'growth_plan_failed', status: 'failed', error: error.message });
+              await sealTurn(prisma, turn.id, { status: 'failed', event: { t: 'seal', status: 'failed', error: error.message, cost_tokens: 0 } });
+            }
+            return;
+          }
+          let executionContext = '';
           dispatchHyperRoomTurn({
             room_id: roomId,
             turn_id: turn.id,
@@ -9886,7 +10035,8 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+            task_tag: isHq ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+            ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
@@ -9894,7 +10044,7 @@ Write the persona now.`;
             console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
           }
         };
-        setImmediate(dispatchSidecar);
+        setImmediate(() => dispatchSidecar().catch(err => console.warn('[hyper-rooms] async sidecar dispatch failed:', err.message)));
 
         return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
       } catch (err) {
@@ -9959,6 +10109,33 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
+        if (body.event.t === 'growth_plan_contract') {
+          try {
+            const sourceTurn = await prisma.hyperTurn.findUnique({
+              where: { id: body.turn_id }, select: { roomId: true },
+            });
+            const sourceRoom = sourceTurn && await prisma.hyperRoom.findUnique({
+              where: { id: sourceTurn.roomId }, select: { orgId: true, userId: true, agentConnectors: true },
+            });
+            const isHq = Boolean(sourceRoom?.agentConnectors?._domain_home);
+            if (!sourceRoom || !isHq) throw new Error('Growth plans may be committed only by Company HQ');
+            const committed = await commitGrowthPlan({
+              prisma, orgId: sourceRoom.orgId, userId: sourceRoom.userId,
+              turnId: body.turn_id, contract: body.event.contract,
+            });
+            await appendTurnEvent(prisma, body.turn_id, {
+              t: 'growth_plan_committed', status: 'accepted',
+              goal_id: committed.goal.id, growth_stage_id: committed.stage.id,
+              delegation_id: committed.delegation.id, work_order_id: committed.work_order?.id,
+              room_id: committed.room.id, room_tag: committed.delegation.room_tag,
+            });
+          } catch (growthError) {
+            console.warn('[growth-stage] contract rejected:', growthError.message);
+            await appendTurnEvent(prisma, body.turn_id, {
+              t: 'growth_plan_rejected', status: 'rejected', error: growthError.message,
+            });
+          }
+        }
         const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
         await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
         if (body.event.t === 'seal') {

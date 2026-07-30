@@ -33,6 +33,7 @@ ARG CACHE_BUST=1
 COPY core/src ./src
 COPY core/scripts ./scripts
 COPY core/config ./config
+COPY employees-service/src/HQ-runtime ./hq-runtime
 COPY core/tests ./tests
 
 # Generate Prisma client
@@ -92,6 +93,7 @@ USER nodejs
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
+COPY --from=builder --chown=nodejs:nodejs /app/hq-runtime ./hq-runtime
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma

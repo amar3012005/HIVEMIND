@@ -599,6 +599,240 @@ async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep
     """Append one journal entry atomically and retain only the newest entries."""
     if not isinstance(entry, dict):
         return False
+
+
+async def create_hyper_work_order(
+    *,
+    org_id: str,
+    room_id: str,
+    turn_id: str,
+    order_key: str,
+    kind: str,
+    title: str,
+    objective: str,
+    owner: Dict[str, Any],
+    selected_skills: list,
+    required_evidence: list,
+    acceptance_criteria: list,
+    input_snapshot: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Create one tenant-scoped work order, idempotently per turn/order key.
+
+    The migration is intentionally deployed separately. Until then this is a
+    non-fatal no-op, allowing the shared runtime code to roll out safely before
+    persistence is enabled.
+    """
+    if not all((org_id, room_id, turn_id, order_key, title, objective)):
+        return None
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO hivemind.hyper_work_orders (
+                  org_id, room_id, turn_id, order_key, kind, title, objective,
+                  owner_employee_id, owner_slug, owner_lane, selected_skills,
+                  required_evidence, acceptance_criteria, input_snapshot
+                ) VALUES (
+                  $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7,
+                  NULLIF($8, '')::uuid, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb
+                )
+                ON CONFLICT (turn_id, order_key) DO UPDATE
+                  SET updated_at = now()
+                RETURNING id, status, attempt
+                """,
+                org_id, room_id, turn_id, order_key[:80], kind[:40], title[:180], objective,
+                str(owner.get("id") or ""), str(owner.get("slug") or "")[:120],
+                str(owner.get("_lane") or owner.get("lane") or "")[:40],
+                json.dumps(selected_skills or [], ensure_ascii=False),
+                json.dumps(required_evidence or [], ensure_ascii=False),
+                json.dumps(acceptance_criteria or [], ensure_ascii=False),
+                json.dumps(input_snapshot or {}, ensure_ascii=False),
+            )
+        return {"id": str(row["id"]), "status": row["status"], "attempt": int(row["attempt"] or 0)} if row else None
+    except Exception as exc:  # migration may not have landed yet; never sink a Room turn
+        log.info("create_hyper_work_order unavailable (non-fatal): %s", exc)
+        return None
+
+
+async def start_hyper_work_order(work_order_id: str, org_id: str) -> bool:
+    """Claim a queued work order for its first attempt within its tenant."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE hivemind.hyper_work_orders
+                SET status = 'running', attempt = attempt + 1, started_at = now(), updated_at = now(), error = NULL
+                WHERE id = $1::uuid AND org_id = $2::uuid AND status IN ('queued', 'blocked')
+                """,
+                work_order_id, org_id,
+            )
+        return result.endswith("1")
+    except Exception as exc:
+        log.info("start_hyper_work_order unavailable (non-fatal): %s", exc)
+        return False
+
+
+async def get_hq_work_order(work_order_id: str, org_id: str) -> Optional[Dict[str, Any]]:
+    """Load one HQ-owned work order and its assigned Company Room safely."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT wo.*, r.participant_ids, r.room_tag, r.goal AS room_goal,
+                       COALESCE(r.agent_connectors->'_company', canonical.company) AS room_company,
+                       rt.owner_user_id
+                FROM hivemind.hyper_work_orders wo
+                JOIN hivemind.hyper_rooms r
+                  ON r.id = wo.room_id AND r.org_id = wo.org_id
+                JOIN hivemind.hq_runtimes rt
+                  ON rt.org_id = wo.org_id
+                LEFT JOIN LATERAL (
+                  SELECT cr.agent_connectors->'_company' AS company
+                    FROM hivemind.hyper_rooms cr
+                   WHERE cr.org_id = wo.org_id
+                     AND cr.archived_at IS NULL
+                     AND cr.agent_connectors ? '_company'
+                   ORDER BY (cr.room_tag = 'general') DESC, cr.updated_at DESC
+                   LIMIT 1
+                ) canonical ON true
+                WHERE wo.id = $1::uuid
+                  AND wo.org_id = $2::uuid
+                  AND wo.hq_cycle_id IS NOT NULL
+                  AND r.archived_at IS NULL
+                """,
+                work_order_id, org_id,
+            )
+        if not row:
+            return None
+        item = dict(row)
+        for key in ("id", "org_id", "room_id", "turn_id", "hq_cycle_id",
+                    "growth_delegation_id", "owner_employee_id", "owner_user_id"):
+            if item.get(key) is not None:
+                item[key] = str(item[key])
+        item["participant_ids"] = [str(value) for value in (item.get("participant_ids") or [])]
+        if isinstance(item.get("room_company"), str):
+            try:
+                item["room_company"] = json.loads(item["room_company"])
+            except Exception:
+                item["room_company"] = {}
+        return item
+    except Exception as exc:
+        log.info("get_hq_work_order unavailable: %s", exc)
+        return None
+
+
+async def resolve_hq_evidence(org_id: str, evidence_ids: list[str]) -> list[Dict[str, Any]]:
+    """Resolve immutable artifact references into bounded worker evidence."""
+    if not evidence_ids:
+        return []
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, source_platform, source_id, source_url, payload, metadata, created_at
+                  FROM hivemind.source_artifacts
+                 WHERE org_id = $1::uuid AND id = ANY($2::uuid[])
+                 ORDER BY created_at DESC
+                """,
+                org_id, evidence_ids[:12],
+            )
+        result = []
+        for row in rows:
+            payload = row["payload"]
+            metadata = row["metadata"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    metadata = {}
+            payload = payload if isinstance(payload, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            # A full baseline can be large. Preserve the decision-bearing fields
+            # while excluding raw post transcripts and provider response noise.
+            if row["source_platform"] == "growth_baseline":
+                social = payload.get("social_presence") if isinstance(payload.get("social_presence"), dict) else {}
+                payload = {
+                    "kind": payload.get("kind"), "as_of": payload.get("as_of"),
+                    "status": payload.get("status"), "company": payload.get("company"),
+                    "website": payload.get("website"), "market_signals": payload.get("market_signals"),
+                    "data_gaps": payload.get("data_gaps"),
+                    "social_presence": {
+                        "totals": social.get("totals"), "accounts": social.get("accounts"),
+                        "platform_reports": social.get("platform_reports"),
+                    },
+                }
+            result.append({
+                "id": str(row["id"]), "source_platform": row["source_platform"],
+                "source_id": row["source_id"], "source_url": row["source_url"],
+                "created_at": row["created_at"].isoformat(), "metadata": metadata,
+                "payload": payload,
+            })
+        return result
+    except Exception as exc:
+        log.info("resolve_hq_evidence unavailable: %s", exc)
+        return []
+
+
+async def complete_hyper_work_order(
+    *,
+    work_order_id: str,
+    org_id: str,
+    status: str,
+    summary: str,
+    output: Dict[str, Any],
+    evidence: list,
+    artifacts: list,
+    usage: Dict[str, Any],
+    error: Optional[str] = None,
+) -> bool:
+    """Store one immutable worker result then close the matching tenant work order."""
+    if status not in {"completed", "blocked", "failed"}:
+        status = "failed"
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT attempt FROM hivemind.hyper_work_orders WHERE id = $1::uuid AND org_id = $2::uuid FOR UPDATE",
+                    work_order_id, org_id,
+                )
+                if not row:
+                    return False
+                attempt = max(1, int(row["attempt"] or 1))
+                await conn.execute(
+                    """
+                    INSERT INTO hivemind.hyper_work_results
+                      (work_order_id, attempt, status, summary, output, evidence, artifacts, usage)
+                    VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb)
+                    ON CONFLICT (work_order_id, attempt) DO NOTHING
+                    """,
+                    work_order_id, attempt, status, summary,
+                    json.dumps(output or {}, ensure_ascii=False), json.dumps(evidence or [], ensure_ascii=False),
+                    json.dumps(artifacts or [], ensure_ascii=False), json.dumps(usage or {}, ensure_ascii=False),
+                )
+                await conn.execute(
+                    """
+                    UPDATE hivemind.hyper_work_orders
+                    SET status = $1, completed_at = now(), updated_at = now(), error = $2,
+                        evidence_refs = $3::jsonb, artifact_refs = $4::jsonb
+                    WHERE id = $5::uuid AND org_id = $6::uuid
+                    """,
+                    status, error, json.dumps(evidence or [], ensure_ascii=False),
+                    json.dumps(artifacts or [], ensure_ascii=False), work_order_id, org_id,
+                )
+        return True
+    except Exception as exc:
+        log.info("complete_hyper_work_order unavailable (non-fatal): %s", exc)
+        return False
     try:
         pool = await init_pool()
         async with pool.acquire() as conn:

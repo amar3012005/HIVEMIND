@@ -69,6 +69,7 @@ _load()
 
 # task_tag -> room_kind (sidecar task tags: RESEARCH|FEATURE|MARKETING|OUTREACH|STRATEGY|…)
 _TAG_TO_KIND = {
+    "HQ": "hq",
     "CAMPAIGN": "campaign",
     "ROOM_SEO": "seo",
     "ROOM_MARKETING": "marketing",

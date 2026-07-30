@@ -19,6 +19,8 @@ import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
 import { registerSlackTools } from './connector-toolkits/slack-tools.js';
 import { getHivemindToolCatalog, registerHivemindTools } from './connector-toolkits/hivemind-tools.js';
 import { getCampaignToolCatalog, registerCampaignTools } from './connector-toolkits/campaign-tools.js';
+import { getGrowthBaselineToolCatalog, registerGrowthBaselineTools } from './connector-toolkits/growth-baseline-tools.js';
+import { getGrowthPlanToolCatalog, registerGrowthPlanTools } from './connector-toolkits/growth-plan-tools.js';
 import { campaignsV2Enabled } from '../campaigns/state.js';
 
 // MCP-backed groups (run via persistent client pool).
@@ -70,7 +72,7 @@ export async function getCapabilityCatalogForUser({ prisma, userId, orgId }) {
     name, description: CONNECTOR_CAPABILITIES[name].description,
     tools: CONNECTOR_CAPABILITIES[name].tools.map((tool) => ({ name: tool, description: `Server-owned ${name} capability`, readOnly: !CONNECTOR_WRITE_TOOLS.has(tool) })),
   }) : null).filter(Boolean);
-  const nativeCatalog = campaignsV2Enabled(orgId) ? [getCampaignToolCatalog()] : [];
+  const nativeCatalog = [...(campaignsV2Enabled(orgId) ? [getCampaignToolCatalog()] : []), getGrowthBaselineToolCatalog(), getGrowthPlanToolCatalog()];
   const catalog = [...getHivemindToolCatalog(), ...nativeCatalog, ...connectorCatalog];
   capabilityCache.set(key, { expiresAt: Date.now() + 30_000, catalog });
   return catalog;
@@ -98,6 +100,8 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   // connectors. Groups remain inactive until selected for this turn.
   registerHivemindTools(tk, { selectedGroups });
   if (campaignsV2Enabled(orgId)) registerCampaignTools(tk, { prisma, userId, orgId, selectedGroups });
+  registerGrowthBaselineTools(tk, { prisma, orgId, userId, selectedGroups });
+  registerGrowthPlanTools(tk, { prisma, orgId, userId, selectedGroups });
 
   // 1. Register HIVEMIND-internal tools into 'basic' group (always active).
   for (const t of hivemindTools) {

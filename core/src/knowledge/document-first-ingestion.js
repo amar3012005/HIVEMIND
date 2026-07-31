@@ -1688,6 +1688,49 @@ Every item must include a non-empty content field and one or more valid support_
     const _msParse = Date.now() - _tParse;
     emit('parsed', 35, { parse_ms: _msParse, pages: parseResult.pages, word_count: parseResult.wordCount });
 
+    // Step 2b: RETAIN the parsed text on the artifact.
+    //
+    // Step 1 says "Store raw source artifact", but it only ever wrote
+    // {filename, uploadedAt} plus a COMPUTED `storageLocation` string — no bytes
+    // and no text were persisted anywhere, so the source was destroyed the moment
+    // this function returned. Consequence: every extractor improvement applied to
+    // NEW uploads only; the existing corpus stayed frozen at whatever quality the
+    // extractor had on ingest day, with no way to re-derive it (measured: 44 docs
+    // at ~2.7 canonical claims each, un-reprocessable). Retaining the parsed text
+    // is what makes `processing_version` mean something — a later backfill can
+    // re-extract from here instead of asking the user to re-upload.
+    //
+    // Residency: remote (self-host) orgs deliberately keep raw content on their
+    // own agent, so they are skipped here exactly as Step 1 skips them.
+    if (!orgIsRemote(orgId) && sourceArtifact?.id) {
+      const _parsedText = String(parseResult.text || parseResult.markdown || '');
+      // Bounded so one pathological upload cannot bloat the row. Default 4MB of
+      // text (~600k words) covers every document seen so far; the flag records
+      // truncation so a backfill never silently re-extracts a partial source.
+      const _retainCap = Math.max(0, Number(process.env.KB_RETAIN_TEXT_MAX_CHARS ?? 4_000_000));
+      if (_parsedText && _retainCap > 0) {
+        try {
+          await this.db.sourceArtifact.update({
+            where: { id: sourceArtifact.id },
+            data: {
+              payload: {
+                ...(sourceArtifact.payload && typeof sourceArtifact.payload === 'object' ? sourceArtifact.payload : {}),
+                content: _parsedText.slice(0, _retainCap),
+                content_chars: _parsedText.length,
+                content_truncated: _parsedText.length > _retainCap,
+                parse_engine: parseResult.engine || null,
+                retained_at: new Date().toISOString(),
+              },
+            },
+          });
+        } catch (retainError) {
+          // Never fail an ingest because retention failed — the memories are the
+          // primary product. Surface it so a silent regression is visible.
+          this.logger?.warn?.(`[kb-retain] could not retain source text for ${sourceArtifact.id}: ${retainError.message}`);
+        }
+      }
+    }
+
     // Step 3: Create knowledge document
     // sourceId scoped per checksum + UPLOAD SCOPE, so identical bytes in a
     // different scope (personal / project / team / org-wide) become a

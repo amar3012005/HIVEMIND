@@ -872,7 +872,8 @@ Output the JSON object and nothing else.`;
     // status + sole-IP + three products + replacement cost = >4 distinct claims;
     // capping at 4 dropped them before the curator ever saw them). minImportance
     // (0.65) + the curator keep the extra candidates from becoming noise.
-    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1, compact ? 3 : 8));
+    const factCap = Math.max(1, Math.min(Number(maxFacts) || 1,
+      compact ? 3 : Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10)));
     const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
@@ -2964,7 +2965,30 @@ Every item must include a non-empty content field and one or more valid support_
         // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
         // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
         const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
-        const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 4);
+        // 8/1k throttled SHORT dense sections: a 711-char window with 7 distinct facts
+        // was allowed only 6, and the model returns conservatively under whatever
+        // ceiling it is given (told 6 -> returned 3; told 10 -> returned all 7).
+        // UWMAX remains the real bound; this rate only stops tiny fragments from
+        // claiming a full budget.
+        const UFPK = Number(process.env.KB_FACTS_PER_1K_CHARS || 12);
+        // Per-window ceiling. This was a hardcoded 4, which made it THE binding
+        // constraint on density for every document: min(4, ...) meant no window
+        // ever yielded more than 4 facts no matter how much it said, so a rich
+        // 1500-char window capped at ~2.7 facts/1k chars.
+        //
+        // Measured against cognee on an identical 97-word German fixture: cognee
+        // extracted 17 entities / 51 edges, this pipeline extracted 2 claims, and
+        // the two recall misses were facts that had never been extracted at all —
+        // the revenue figure, the kW rating, the supplier weightings, the board's
+        // pricing decision. Retrieval was not at fault; there was nothing to find.
+        //
+        // Density is safe to raise here because the rails are downstream and
+        // already enforced: DOC_CAP (30), the dynamic 70%-of-candidates cap,
+        // _curateDocumentClaims dedup, minImportance, and cross-window
+        // consolidation. Ingest is async (HTTP 202) so a slower, richer extraction
+        // costs the user no perceived latency — unlike query-time synthesis, which
+        // is what makes cognee's search 6.6-28s against our 0.26-0.70s.
+        const UWMAX = Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10);
         let uWindows = targets;
         try {
           const { chunkText } = await import('./document-chunker.js');
@@ -2973,7 +2997,7 @@ Every item must include a non-empty content field and one or more valid support_
           if (uc.length) uWindows = uc.map((content, i) => ({
             segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
             content, heading: null, page: null,
-            maxFacts: Math.max(1, Math.min(4, Math.round((content.length / 1000) * UFPK))),
+            maxFacts: Math.max(1, Math.min(UWMAX, Math.round((content.length / 1000) * UFPK))),
             scope: metadata.scope, visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],

@@ -12989,7 +12989,14 @@ exit \$RC
               let ingested = 0;
               let failed = 0;
               let treesIngested = 0;
-              for (const threadId of threadIds) {
+              // Gmail threads are independent source documents. Process a small
+              // bounded batch in parallel so one slow thread cannot serially
+              // hold the connector request or starve the rest of the selection.
+              const concurrency = Math.max(1, Math.min(4, Number(process.env.GMAIL_SELECTED_INGEST_CONCURRENCY || 2)));
+              let nextThread = 0;
+              const processThread = async () => {
+                while (nextThread < threadIds.length) {
+                  const threadId = threadIds[nextThread++];
                 try {
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
@@ -13051,15 +13058,17 @@ exit \$RC
                   });
                   failed += 1;
                 }
-              }
+                }
+              };
+              await Promise.all(Array.from({ length: Math.min(concurrency, threadIds.length) }, processThread));
               auditLog({
                 organizationId: orgId, userId,
                 actorType: 'user', actorUserId: userId,
                 eventType: 'connector.gmail.ingest_selected', eventCategory: 'connector',
                 action: 'ingest', resourceType: 'gmail_thread', resourceId: 'batch',
-                metadata: { thread_count: threadIds.length, ingested, failed, thread_mode: threadMode },
+                metadata: { thread_count: threadIds.length, ingested, failed, thread_mode: threadMode, concurrency },
               });
-              return jsonResponse(res, { ok: true, ingested, failed, trees_ingested: treesIngested, requested: threadIds.length });
+              return jsonResponse(res, { ok: true, ingested, failed, trees_ingested: treesIngested, requested: threadIds.length, concurrency });
             } catch (err) {
               console.error('[gmail-ingest-selected] error:', err);
               return jsonResponse(res, { error: err.message }, 500);

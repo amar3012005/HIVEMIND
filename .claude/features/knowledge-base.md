@@ -1,7 +1,8 @@
 # Knowledge Base
 
 **Group:** Your Brain · **Route:** `/hivemind/app/knowledge`
-**Status:** PARTIALLY HARDENED — 3 defects fixed and verified live, 1 open constraint
+**Status:** HARDENED ON INPUT, BLOCKED ON PARSE — 9 defects fixed and verified live;
+PDF figures + table structure still lost to two environment blockers
 
 ## Frontend
 - `pages/KnowledgeBase.jsx`
@@ -133,6 +134,56 @@ claims semantically near-identical.
 
 **Next step:** instrument that loop to log which claims return no memory and why,
 or run the canary against a `hybrid` org with no prior Solvis content.
+
+## What remains, in priority order
+Measured against a real 54-page German strategy deck (4.2 MB) and supermemory's
+extraction of the same file.
+
+**1. Curation discards 59% of candidates — the live bottleneck.**
+`22 candidates → 9 curated memories` while the dynamic cap allowed 16, so
+`_curateDocumentClaims` is merging/dropping 13 on its own judgement. Segmentation
+(`3dbb927ae`) raised candidates 3→22 and memory count did NOT move, which is what
+localises the loss here. Start by logging what the curator drops and why.
+
+**2. ImageMagick + poppler absent from the core container (BLOCKS #3).**
+`command -v convert` and `pdftoppm` both empty. Page rendering is step one of
+image description, so `picture_descriptions` (defaulted on in `b59ce73d6`) is
+INERT — every figure, chart and diagram in every PDF is dropped. For this deck
+that is the EV-adoption curve, the heating-market collapse, the product timeline
+and the Handwerkspartner split. Fix: add both to `Dockerfile.production`, rebuild.
+Needs owner approval (image change).
+
+**3. Docling degrades to `fast-pdf` on multi-page PDFs.**
+This deck logged `tier=fast-pdf pages=54`; a 39.6 MB deck logged
+`Docling async polling timeout after 120000ms` then fell back to an extractor that
+emitted ONLY page markers (`-- 1 of 19 --`). fast-pdf flattens table cells, so no
+prompt change can recover a table while this path is taken. Raise the Docling
+timeout, and delete the page-marker fallback — it manufactures contentless
+documents (the new zero-memory gate now catches them, but it should not happen).
+
+**4. Table row-sets must become ONE claim.**
+The 7-row inverter matrix produced four partial rows (three dropped) before
+`3dbb927ae`, and none after. Supermemory renders the same table as a single
+complete claim naming all seven brands — that is the target shape. The summary
+prompt already asks for full enumerations; the CLAIM extractor does not.
+
+**5. A duplicate reached storage.**
+Pages 2 and 3 of the deck are byte-identical and both were stored. Semantic dedup
+(`skipped_redundant`, similarity > 0.65 + LLM NOOP) correctly suppressed canary
+repeats but missed this. Suspect intra-document candidates bypass the check.
+
+**6. ~46% of tenants cannot be verified at all.**
+6 orgs `amr_embedded` + 1 `byod_amr` vs 6 `hybrid`. The canary names the mode
+instead of failing blind, but asserting against the mneme store is unbuilt.
+
+**7. Untested guardrails.** Idempotency on the partial-failure path (a crash
+mid-pipeline leaves a document + segment with no memories — observed while
+probing); observability (a thin extraction is still invisible without SQL).
+
+**8. Legacy corpus.** The ~65 documents ingested before `295594e54` have no
+retained source text and cannot be re-extracted — they need re-upload to benefit
+from any of the above. New uploads retain (verified: 25,576 chars on this deck),
+but there is no re-extract endpoint to replay improvements over retained text.
 
 ## Strategy note
 Ingest is async (202), so capture cost is invisible to the user; query latency is

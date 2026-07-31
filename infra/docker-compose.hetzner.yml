@@ -46,7 +46,7 @@ x-common-env: &common-env
 services:
   core:
     build: { context: .., dockerfile: Dockerfile.production }
-    image: hivemind/core-api:${VERSION:-latest}
+    image: hivemind/core-api:prod-20260731-kb-render
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped
@@ -78,9 +78,9 @@ services:
 
   control-plane:
     build: { context: .., dockerfile: Dockerfile.control-plane }
-    image: hivemind/control-plane:${VERSION:-latest}
+    image: hivemind/control-plane:prod-20260731-gmail-lead-watcher-v2
     container_name: hm-control
-    env_file: [../.env]
+    env_file: [../.env, ../.env.firecrawl]
     restart: unless-stopped
     mem_limit: 768m
     memswap_limit: 1152m
@@ -99,7 +99,7 @@ services:
 
   employees:
     build: { context: ../employees-service }
-    image: hivemind/employees:${VERSION:-latest}
+    image: hivemind/employees:prod-20260731-hq-runtime-compound-v3
     container_name: hm-employees
     env_file: [../.env]
     restart: unless-stopped
@@ -111,11 +111,15 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
       GROQ_API_KEY: ${GROQ_API_KEY}
+      HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-openai/gpt-oss-120b}
+      CLAUDE_ADS_RESOURCE_ROOT: /opt/hivemind-resources/claude-ads
       # Employees sidecar MUST listen on 8060 — control-plane calls http://hm-employees:8060
       # (control-plane-server.js _hyperSidecar default). The global .env sets PORT=3000 (for core), so
       # override it here or the sidecar binds 3000 and every room turn "no responses". config.py
       # already defaults port=8060; this just neutralizes the inherited global PORT=3000.
       PORT: "8060"
+    volumes:
+      - ../resources/claude-ads:/opt/hivemind-resources/claude-ads:ro
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }
@@ -236,6 +240,22 @@ services:
       # /opt/tara-deepgram/.env; set TELEPHONY_PROVIDER=telnyx|twilio to switch
       # back without a code change. Not a secret, so it lives in git.
       TELEPHONY_PROVIDER: ${TELEPHONY_PROVIDER:-zernio}
+      # Strategist model pin. /opt/tara-deepgram/.env still holds the old
+      # gemini-2.5-flash-lite; this git-tracked value overrides it so the whole
+      # deepgram path runs Cerebras gpt-oss-120b. Not a secret, so it lives here
+      # rather than in an untracked env file nobody can review.
+      TARA_DG_ROUTER_MODEL: ${TARA_DG_ROUTER_MODEL:-openai/gpt-oss-120b}
+      TARA_DG_ROUTER_PROVIDER: ${TARA_DG_ROUTER_PROVIDER:-Cerebras}
+      TARA_DG_ROUTER_REASONING: ${TARA_DG_ROUTER_REASONING:-low}
+      # AMD is OFF. Controlled A/B on one number with a stable baseline:
+      # without AMD 38s/35s/35s/37s and the media bridge opened every time;
+      # with AMD 6s and the bridge NEVER opened. Zernio's "defer the bridge
+      # until human/machine is decided" drops these calls outright. Re-enable
+      # only with a fresh A/B against a known-good baseline number.
+      ZERNIO_AMD: ${ZERNIO_AMD:-false}
+      # Live-listen: core SIGNS a session-scoped token, this service VERIFIES it,
+      # so the browser never holds the privileged dial key. Value from ../.env.
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
     ports:
       - "127.0.0.1:${TARA_DEEPGRAM_PORT:-8091}:8091"
     volumes:
@@ -265,6 +285,18 @@ services:
       - ${TARA_GROK_ENV_FILE:-/opt/tara-grok/.env}
     environment:
       HIVEMIND_CORE_EVENTS_URL: http://core:3000/internal/v1/tara/calls
+      # AMD OFF here too. Proven on tara-deepgram by controlled A/B (with AMD the
+      # media bridge NEVER opens); leaving it on for grok reproduced the same
+      # 21s hangup-with-no-bridge. Both adapters must match.
+      ZERNIO_AMD: ${ZERNIO_AMD:-false}
+      # Live-listen: verify Core-minted session-scoped tokens (same key core signs
+      # with) so the dashboard can hear Grok PSTN calls without the dial key.
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
+      # Dial gate — same shared secret + `x-tara-key` contract as tara-deepgram.
+      # NOTE: the destination allowlist deliberately is NOT set here. Compose
+      # `environment` OVERRIDES env_file, so listing it would blank the value from
+      # /opt/tara-grok/.env and fail-closed every dial.
+      TARA_DG_API_KEY: ${TARA_DG_API_KEY:-}
     ports:
       - "127.0.0.1:${TARA_GROK_PORT:-8092}:8092"
     depends_on:
@@ -301,12 +333,20 @@ services:
   #    `compose up -d` keeps it running (no --profile gate). ──
   playwright:
     build: { context: ../services/hm-playwright }
-    image: hivemind/hm-playwright:${VERSION:-latest}
+    image: hivemind/hm-playwright:prod-20260728-seo-renderer-6dea0af63
     container_name: hm-playwright
     restart: unless-stopped
     mem_limit: 1536m
     memswap_limit: 2304m
     cpus: 0.75
+    environment:
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8932/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── NOT in this repo: stt-eu (speech-to-text :8002) + csi (CSI-Engine, separate build). Push their
   #    images + add a service block here if you need voice STT / CSI. Core + tara + hermes run without them.

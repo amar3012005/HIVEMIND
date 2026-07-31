@@ -84,7 +84,8 @@
 - **Migration:** verified additive PostgreSQL indexes `memories_org_created_at_idx` and `memories_org_valid_window_idx`; both use `CREATE INDEX IF NOT EXISTS` and were present before promotion.
 - **Backup:** `/root/backups/hivemind-prod-20260716-351b7220.dump`, SHA-256 `e783df2f01815b37154a2e78c3fff51832d4b45f6d8b9056f6287e2e38a612bf`.
 - **Acceptance:** core healthy with PostgreSQL, Qdrant, and Docling reachable; public Core health returned `ok:true`; `next.singulancelabs.com/hivemind` and `/hivemind/login` returned `200`; no fresh fatal, panic, uncaught, unhandled, OOM, or migration errors were found in the core deployment window.
-- **Not exercised:** an authenticated tenant-specific recall/chat request; no customer-side effects were triggered.
+- **Authenticated FOREST acceptance:** a five-minute disposable control session was minted and deleted after the check. Bootstrap returned `200`; exact-source `/api/recall` in `explain` mode returned `200` with three evidence sections, all from `HIVEMIND Brochure.html.pdf`; `/api/chat` returned `200` with an answer and one citation from that same requested document. No customer data was written.
+- **BYOD read-only acceptance:** the enrolled self-hosted `pg-qdrant` agent returned healthy PostgreSQL/Qdrant status and authenticated `/v1/kb-docs` returned `200`. Its health protocol does not expose an agent build revision and it has no remote-upgrade endpoint; a customer-side agent upgrade remains required before claiming deployed-code parity.
 - **Aliases:** core and frontend `stable` and `latest` match the images above.
 - **Rollback:** `hivemind/core-api:rollback-20260715T215652Z-pre-prod-20260716-351b7220` and `hivemind/fe:rollback-20260715T215652Z-pre-prod-20260716-351b7220`.
 

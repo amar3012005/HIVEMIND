@@ -123,15 +123,34 @@ export async function handleRecallRoute(ctx = {}) {
   }
 
   try {
+    // Accept `query` as an alias for `query_context`/`context`.
+    //
+    // The route previously read ONLY query_context/context. A caller sending the
+    // obvious `{"query": "..."}` got a 200 with an EMPTY query: no query means no
+    // embedding, which means searchMemories logs "No vector available for search"
+    // and returns [], which collapses the vector lane, which makes search_method
+    // fall back to 'persisted-keyword' and the response come back with zero
+    // memories. That is byte-for-byte what a broken recall engine looks like, and
+    // nothing in the response says the query was never read. Aliasing removes the
+    // trap outright and cannot break an existing caller — it only adds a fallback
+    // where the value was previously undefined.
+    const rawRecallQuery = body.query_context || body.context || body.query || '';
+    if (!String(rawRecallQuery).trim()) {
+      // Do not fail — some callers legitimately recall with no query — but make
+      // the degradation VISIBLE instead of silently returning an empty result set.
+      console.warn('[recall] empty query (expected query_context | context | query) — '
+        + 'the vector lane cannot run; results will be keyword-only');
+    }
+
     let recallWeights = body.weights;
     if (cognitiveOperator && !recallWeights) {
-      const intent = detectQueryIntent(body.query_context || body.context || '');
+      const intent = detectQueryIntent(rawRecallQuery);
       recallWeights = computeDynamicWeights(intent);
     }
 
-    const temporalExpansion = expandTemporalQuery(body.query_context || body.context || '');
-    const rewritten = rewriteQuery(body.query_context || body.context || '');
-    const effectiveRecallQuery = rewritten.expanded || body.query_context || body.context;
+    const temporalExpansion = expandTemporalQuery(rawRecallQuery);
+    const rewritten = rewriteQuery(rawRecallQuery);
+    const effectiveRecallQuery = rewritten.expanded || rawRecallQuery;
     const recallProject = body.project || effectiveContainerTag || null;
 
     let recallAccessCtx = await buildAccessContext(userId, orgId);
@@ -167,7 +186,7 @@ export async function handleRecallRoute(ctx = {}) {
       }
     }
 
-    const query = body.query_context || body.context || '';
+    const query = rawRecallQuery;
     let recallRuntime = injectedRecallRuntime;
     if (!recallRuntime) {
       const [{ RecallRouter, resolveRecallPlan, loadTypedGraphEvidence }, { buildRecallPacket }] = await Promise.all([
@@ -294,7 +313,7 @@ export async function handleRecallRoute(ctx = {}) {
 
     const result = await recallPersistedMemories(persistentMemoryStore, {
       query_context: effectiveRecallQuery,
-      raw_query: body.query_context || body.context || '',
+      raw_query: rawRecallQuery,
       user_id: userId,
       org_id: orgId,
       project: recallProject,
@@ -351,7 +370,7 @@ export async function handleRecallRoute(ctx = {}) {
     }
 
     if (cognitiveOperator && result.memories) {
-      const intent = detectQueryIntent(body.query_context || body.context || '');
+      const intent = detectQueryIntent(rawRecallQuery);
       for (const m of result.memories) {
         const boost = ctx.getMemoryTypeBoost(intent, m.memory_type || 'fact');
         if (boost !== 1.0) {
@@ -472,7 +491,7 @@ export async function handleRecallRoute(ctx = {}) {
         const { recallEnhance } = await import('../memory/recall-router.js');
         const enhanced = await recallEnhance({
           memories: memoryHits,
-          query: body.query_context || body.context || '',
+          query: rawRecallQuery,
           ctx: { userId, orgId },
           evidenceService: evidenceRetrieval,
           prisma,

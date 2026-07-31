@@ -3,8 +3,22 @@
 
 FROM node:20-slim AS base
 
+# imagemagick + poppler-utils are REQUIRED for PDF figure extraction, not optional.
+# The KB ingest renders each page to an image before asking a vision model to
+# describe it; without a renderer that step fails closed with
+#   [docling-adapter] groq-vision failed: Render failed: spawnSync convert ENOENT
+# and every figure, chart and diagram in every PDF is silently dropped. Verified
+# absent on the live box (`command -v convert` and `pdftoppm` both empty), which
+# made the picture_descriptions default shipped in b59ce73d6 completely inert.
+# ghostscript backs ImageMagick's PDF delegate; poppler-utils supplies pdftoppm.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget && \
+    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget \
+      imagemagick ghostscript poppler-utils && \
+    # Debian ships a policy that denies ImageMagick read/write on PDF (CVE-2016-3714
+    # era hardening). Rendering a PDF page is exactly what we need, and the input is
+    # a tenant upload we already type-gate and size-gate, so re-enable PDF only.
+    sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' \
+      /etc/ImageMagick-6/policy.xml 2>/dev/null || true && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

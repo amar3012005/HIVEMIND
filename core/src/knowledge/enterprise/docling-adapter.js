@@ -63,7 +63,25 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // code/formula/chart enrichment, picture classification.
   // Activated when user toggles Smart Extract OR for PDF/DOCX/XLSX which
   // benefit from layout-aware parsing.
-  const smart = opts.smart === true;
+  // The comment above has always described layout-aware parsing as automatic for
+  // PDF/DOCX/XLSX — but the code only ever read opts.smart, and the KB upload path
+  // never passes it. So the documented behaviour never once ran in production.
+  //
+  // Everything that makes a rich document worth ingesting lives inside the
+  // `if (smart)` block below: OCR, table structure, chart extraction, picture
+  // classification and picture DESCRIPTIONS. With smart false, a 54-page deck
+  // parsed in 813ms via fast-pdf, its 7-row inverter matrix arrived as loose text,
+  // and every figure was discarded — which also made the picture_descriptions
+  // default from b59ce73d6 unreachable, since it is consumed in here.
+  //
+  // Ingest is async (202), so the extra parse time is invisible; the quality is
+  // permanent. Layout-bearing formats now opt IN by default; opts.smart === false
+  // still forces the fast path.
+  const LAYOUT_FORMATS = new Set(['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt']);
+  const smart = opts.smart === true
+    || (opts.smart !== false
+        && LAYOUT_FORMATS.has(ext)
+        && String(process.env.DOCLING_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
   // Each of these toggles downloads / runs a separate model. Tables+OCR are
   // fast and warm; the rest can balloon latency 5-10x. Opt-in individually.
   const wantPictureDesc = opts.picture_descriptions === true;
@@ -102,9 +120,19 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // at DOCLING_SERVE_MAX_SYNC_WAIT seconds internally).
   const fileSize = fs.statSync(filePath).size;
   const useAsync = smart || fileSize > 4 * 1024 * 1024; // >4 MB
-  // Hard ceiling: 180s smart, 120s non-smart. Beyond that the caller falls
-  // back to fast-pdf Tier 1 instead of waiting.
-  const overallTimeout = smart ? 180_000 : 120_000;
+  // Ceiling before the caller gives up and falls back to fast-pdf Tier 1.
+  // Was 180s smart / 120s non-smart, hardcoded. A real 54-page deck blew the
+  // non-smart ceiling ("Docling async polling timeout after 120000ms") and fell
+  // back to fast-pdf, which flattens table cells — so its 7-row inverter matrix
+  // reached the extractor as loose text and was never captured as a table.
+  //
+  // Ingest is ASYNCHRONOUS (upload returns 202), so parse duration is invisible
+  // to the user while parse QUALITY decides everything downstream — a document is
+  // extracted once and recalled forever. Spend the time here, not at query time.
+  const overallTimeout = Number(
+    smart ? (process.env.DOCLING_SMART_TIMEOUT_MS || 600_000)
+          : (process.env.DOCLING_TIMEOUT_MS || 420_000),
+  );
 
   try {
     if (useAsync) {

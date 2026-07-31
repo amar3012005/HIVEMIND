@@ -1489,16 +1489,53 @@ Every item must include a non-empty content field and one or more valid support_
     let docParentId = null;
     try {
       const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
-      const keyTopics = (memories || [])
+      // A `summary` memory must SAY something. This previously emitted a manifest:
+      //   Document: canary-1785528669.txt
+      //   Durable memories: 3
+      //   Key topics: Altoform GmbH Employee Count and Location; ...
+      // — a filename, an internal counter, and a list of topic TITLES, carrying
+      // zero facts. It is typed memory_type:'summary' and indexed for recall, so
+      // 57 such rows were competing with real memories while being unable to
+      // answer anything. A reader who retrieves only this learns nothing.
+      //
+      // Build the summary from the child facts' CONTENT instead, so the document
+      // parent is a self-contained account of what the document establishes.
+      const childFacts = (memories || [])
         .filter((memory) => memory?.id && !memory.isParent)
-        .map((memory) => String(memory.title || '').trim())
-        .filter(Boolean)
-        .slice(0, 6);
-      const docSummary = [
-        `Document: ${docTitle}`,
-        `Durable memories: ${childIds.length}`,
-        ...(keyTopics.length ? [`Key topics: ${keyTopics.join('; ')}`] : []),
-      ].join('\n');
+        .map((memory) => String(memory.content || memory.title || '').replace(/\s+/g, ' ').trim())
+        .filter((text) => text.length >= 20);
+      const _summaryCap = Number(process.env.KB_DOC_SUMMARY_MAX_CHARS || 1200);
+      let docSummary = '';
+      if (childFacts.length) {
+        // Deterministic first — this alone is strictly better than the manifest
+        // and cannot fail. The LLM pass below only refines it.
+        docSummary = childFacts.join(' ').slice(0, _summaryCap);
+        try {
+          const refined = await chatCompletionWithFallback({
+            models: [process.env.KB_DOC_SUMMARY_MODEL || process.env.KB_UNIFIED_MODEL
+              || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b'],
+            temperature: 0.2, max_tokens: 420, feature: 'kb-doc-summary',
+            messages: [
+              { role: 'system', content: 'Write ONE self-contained paragraph stating what this document establishes. '
+                + 'Use only the supplied facts. Name the subjects explicitly — never "the document", "this file", '
+                + 'a filename, or a count of memories. Preserve figures, units, dates and proper nouns verbatim. '
+                + 'Where the facts enumerate a set (supported brands, covered regions, required steps), keep the '
+                + 'FULL enumeration in one sentence rather than naming one example. No preamble, no markdown.' },
+              { role: 'user', content: childFacts.slice(0, 30).join('\n') },
+            ],
+          });
+          // chatCompletion returns a raw STRING when json_mode is off (litellm-client
+          // `return content`) — reading .text/.content off it yields undefined and
+          // would silently fall back to the deterministic join forever.
+          const text = String(typeof refined === 'string' ? refined : (refined?.content || ''))
+            .replace(/\s+/g, ' ').trim();
+          if (text.length >= 40) docSummary = text.slice(0, _summaryCap);
+        } catch (summaryError) {
+          this.logger?.warn?.(`[kb-doc-summary] refine failed, using deterministic join: ${summaryError.message}`);
+        }
+      } else {
+        docSummary = `${docTitle} was ingested but produced no durable facts.`;
+      }
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const parentRes = await this.memoryGraphEngine.ingestMemory({
         user_id: userId, org_id: orgId,

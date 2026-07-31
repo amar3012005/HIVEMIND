@@ -212,15 +212,27 @@ def _resolve_openai_compatible_target(
     has_tools: bool = True,
 ) -> tuple[str, str, str]:
     """Route a model to the right OpenAI-compatible endpoint, MODEL-AWARE:
+      • an EXPLICIT `openrouter` provider → OpenRouter, always (caller opt-in wins);
       • an OpenRouter-native vendor slug (deepseek/…, anthropic/…) or anthropic
         provider → OpenRouter (when a key is present);
-      • gpt-oss-* / llama-* → GROQ DIRECT (even if an OpenRouter key is set).
+      • otherwise gpt-oss-* / llama-* → GROQ DIRECT.
     The Groq llama→gpt-oss-20b swap (llama emits <function=> Llama-tag format → 400
     under strict tool validation) fires ONLY for TOOL-USING agents — tool-less
-    agents (debate reactors, planner, verifier) keep llama / llama-3.1-8b-instant."""
+    agents (debate reactors, planner, verifier) keep llama / llama-3.1-8b-instant.
+
+    An explicit provider request MUST outrank the model-name heuristic. It did not,
+    and the failure was silent and total: `_verify_turn` sets llm_provider="openrouter"
+    for the grounding judge, but gpt-oss force-routed to Groq anyway — so once the Groq
+    account went delinquent EVERY room turn came back met=False/grounded_ok=False
+    ("quality verification was unavailable") and the goalkeeper re-planned to its round
+    cap on every turn: governance permanently closed, plus the token cost of the rework."""
     ml = (model or "").lower()
     openrouter_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY")
-    is_openrouter_model = any(ml.startswith(v) for v in _OPENROUTER_VENDORS) or provider == "anthropic"
+    is_openrouter_model = (
+        provider == "openrouter"
+        or any(ml.startswith(v) for v in _OPENROUTER_VENDORS)
+        or provider == "anthropic"
+    )
     if openrouter_key and is_openrouter_model:
         routed_model = model
         if provider == "anthropic" and "/" not in model:

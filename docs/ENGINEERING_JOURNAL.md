@@ -19,6 +19,15 @@ or uncommitted changes as completed work.
 5. If a release fails or is rolled back, append the failure and rollback
    reference. Never edit, delete, or rewrite older entries.
 
+## Canonical Merge Gate
+
+Before asking for review, run `git fetch origin` and rebase the feature branch
+onto `origin/hivemind-main`. If `hivemind-main` moves before merge, repeat the
+rebase and request review again. After merge, resolve the SHA from
+`origin/hivemind-main`; that post-merge SHA is the only permitted production
+build input. A feature-branch SHA, old release tag, or local checkout can
+never be deployed.
+
 ## Entry Template
 
 ```md

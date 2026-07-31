@@ -23,6 +23,7 @@ If another document conflicts with this file, this file wins.
 - Commit and push the frontend first. Then update and commit the parent repo's frontend gitlink.
 - The parent release commit is the complete release declaration. A frontend commit not referenced by its gitlink is not releasable.
 - Never deploy an uncommitted tree, a local-only commit, or a submodule with `+`, `-`, or `dirty` status.
+- Before requesting review, rebase the feature branch onto the current `origin/hivemind-main`; if canonical moves before merge, rebase again and obtain a new review. Deploy only the SHA returned by `origin/hivemind-main` after merge, never the pre-merge branch SHA.
 - Before editing, record `git branch --show-current`, `git status --short`, parent `HEAD`, frontend `HEAD`, and active production release.
 - Parallel sessions must declare the files and services they own. If two sessions touch the same file or service, one must stop.
 
@@ -124,4 +125,3 @@ Only after acceptance:
 ## Agent completion report
 
 Every deployment report must state: release ID, parent SHA, frontend SHA, running image digests, migrations, tests, authenticated checks, public checks, error-log result, rollback reference, and any intentionally untested external side effect.
-

@@ -332,6 +332,22 @@ export class KbIngestQueue {
         work,
         new Promise((_, rej) => setTimeout(() => rej(new Error(`kb-ingest timeout ${JOB_TIMEOUT_MS}ms`)), JOB_TIMEOUT_MS)),
       ]);
+      // An ingest that produced NO document is a failure, not a success. This
+      // block ran unconditionally on resolve, so an empty upload logged
+      //   [kb-queue] ✓ empty.txt org=1380251c doc=undefined segs=undefined promoted=undefined
+      // and the job went to status 'indexed', progress 100. The caller already
+      // holds its 202 {success:true}, so NOTHING anywhere said the upload produced
+      // nothing — the user waits for memories that will never arrive.
+      if (!result?.documentId) {
+        const reason = 'ingest produced no document (empty or unreadable content)';
+        try {
+          this.tracker?.updateJob(trackerJobId, { status: 'failed', progress: 100, error: reason });
+        } catch { /* noop */ }
+        this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
+        this._counters.failed = (this._counters.failed || 0) + 1;
+        this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} — ${reason}`);
+        return { documentId: null, segmentCount: 0, promotedCount: 0, error: reason };
+      }
       try {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
         this.tracker?.updateJob(trackerJobId, {

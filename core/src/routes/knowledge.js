@@ -161,6 +161,35 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
       }, 415);
     }
 
+    // SIZE GATE. The type gate above was the only validation, so a 0-byte file
+    // returned 202 {success:true} and a job that logged "✓ indexed" with
+    // doc=undefined, and a 1-byte file created a real document with 1 segment and
+    // ZERO memories — junk that pollutes recall. Reject at the door with a reason
+    // the user can act on rather than accepting work that cannot succeed.
+    // Media files are exempt from the floor: a short audio clip is legitimately
+    // small once encoded, and transcription — not text length — decides its value.
+    const _bytes = filePart.data?.length || 0;
+    const _isMedia = ['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp', 'mp3', 'wav', 'm4a', 'flac', 'ogg'].includes(ext);
+    const _minBytes = _isMedia ? 1 : Number(process.env.KB_MIN_UPLOAD_BYTES || 32);
+    const _maxBytes = Number(process.env.KB_MAX_UPLOAD_BYTES || 52_428_800); // 50 MB
+    if (_bytes < _minBytes) {
+      return jsonResponse(res, {
+        error: _bytes === 0
+          ? 'The uploaded file is empty — nothing to ingest.'
+          : `The uploaded file is ${_bytes} bytes, below the ${_minBytes}-byte minimum. It cannot produce a durable memory.`,
+        code: 'FILE_TOO_SMALL', bytes: _bytes,
+      }, 400);
+    }
+    if (_bytes > _maxBytes) {
+      // Measured: an 11.2 MB text file produced 1,600,001 words and 7,334
+      // segments and still yielded ZERO memories — it consumed the pipeline and
+      // returned nothing. Bound it explicitly instead of failing slowly.
+      return jsonResponse(res, {
+        error: `The uploaded file is ${(_bytes / 1_048_576).toFixed(1)} MB, above the ${(_maxBytes / 1_048_576).toFixed(0)} MB limit. Split it and upload the parts.`,
+        code: 'FILE_TOO_LARGE', bytes: _bytes,
+      }, 413);
+    }
+
     const smartFlag = (parts.find((p) => p.name === 'smart')?.value || '').toLowerCase() === 'true';
     const pictureDescFlag = (parts.find((p) => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
     const enterpriseFlag = (parts.find((p) => p.name === 'enterprise')?.value || 'auto').toLowerCase();

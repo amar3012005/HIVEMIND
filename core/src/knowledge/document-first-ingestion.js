@@ -1693,7 +1693,14 @@ Every item must include a non-empty content field and one or more valid support_
     emit('parsing', 10);
     const parseResult = await this._parseDocument(fileBuffer, contentType, filename, {
       smart: metadata?.smart === true,
-      picture_descriptions: metadata?.picture_descriptions === true,
+      // Image descriptions default ON. This was opt-in via metadata, and the KB
+      // upload path never passes it — so every figure, chart and diagram in every
+      // PDF was silently discarded. For a slide deck or a report that is most of
+      // the document: a market-adoption chart or a compatibility table carries
+      // facts that exist nowhere in the prose. The caller can still force it off.
+      picture_descriptions: metadata?.picture_descriptions !== undefined
+        ? metadata.picture_descriptions === true
+        : String(process.env.KB_PICTURE_DESCRIPTIONS ?? 'true').toLowerCase() !== 'false',
     });
     const documentClassification = metadata.document_type
       ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
@@ -1718,7 +1725,12 @@ Every item must include a non-empty content field and one or more valid support_
     // Residency: remote (self-host) orgs deliberately keep raw content on their
     // own agent, so they are skipped here exactly as Step 1 skips them.
     if (!orgIsRemote(orgId) && sourceArtifact?.id) {
-      const _parsedText = String(parseResult.text || parseResult.markdown || '');
+      // Prefer MARKDOWN over flat text. Docling returns both; `text` has already
+      // lost the headings, tables and list structure that tell a reader — and the
+      // extractor — where one distinct claim ends and the next begins. Retaining
+      // the flattened form meant a future re-extraction could never recover that
+      // structure, which is the whole point of retaining the source at all.
+      const _parsedText = String(parseResult.markdown || parseResult.text || '');
       // Bounded so one pathological upload cannot bloat the row. Default 4MB of
       // text (~600k words) covers every document seen so far; the flag records
       // truncation so a backfill never silently re-extracts a partial source.

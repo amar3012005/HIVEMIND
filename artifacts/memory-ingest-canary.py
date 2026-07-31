@@ -42,18 +42,27 @@ KEEP = "--keep" in sys.argv
 # Deliberately multilingual with hard specifics (figures, units, dates, names).
 # Language-independence is a product requirement, and exact values are what a
 # lossy extractor silently drops first.
-FIXTURE = """Solvis Gemeinwohlbilanz — Auszug 2026.
+# Values are randomised per run. The document marker alone is NOT enough: the
+# CLAIMS are what dedup against prior runs, so a byte-identical fixture makes the
+# density metric measure deduplication instead of extraction. Observed: 7 facts
+# extracted and 7 curated, but only 3 persisted, purely because earlier canary
+# runs had already stored the other 4.
+def build_fixture(run_id, n):
+    return f"""Solvis Gemeinwohlbilanz — Auszug 2026 (Pruefsatz {run_id}).
 
-Die Solvis GmbH beschaeftigt 180 Mitarbeitende am Standort Braunschweig.
-Geschaeftsfuehrer ist Helmut Jaeger, im Amt seit 2019.
-Das Unternehmen erreichte im Jahr 2023 einen Umsatz von 45 Millionen Euro.
-Der SolvisBruno erreicht eine Brennstoffwaermeleistung von 3,1 bis 10,7 kW.
-Fuer Lieferanten gelten 20 Prozent Menschenwuerde, 10 Prozent Solidaritaet,
-30 Prozent oekologische Nachhaltigkeit und 10 Prozent Transparenz.
+Die Solvis GmbH beschaeftigt {180 + n} Mitarbeitende am Standort Braunschweig.
+Geschaeftsfuehrer ist Helmut Jaeger, im Amt seit {2010 + (n % 15)}.
+Das Unternehmen erreichte im Jahr 2023 einen Umsatz von {40 + n} Millionen Euro.
+Der SolvisBruno erreicht eine Brennstoffwaermeleistung von {3 + n % 5},1 bis {10 + n % 7},7 kW.
+Fuer Lieferanten gelten {15 + n % 10} Prozent Menschenwuerde, 10 Prozent Solidaritaet,
+{25 + n % 10} Prozent oekologische Nachhaltigkeit und 10 Prozent Transparenz.
 Die Zertifizierung wurde im Maerz 2024 durch eine externe Peer-Evaluation bestaetigt.
-Der Vorstand beschloss am 12. Maerz 2026, die Enterprise-Stufe von 2.400 Euro
-auf 3.100 Euro pro Jahr anzuheben, wirksam zum 1. Mai.
+Der Vorstand beschloss am 12. Maerz 2026, die Enterprise-Stufe von {2400 + n} Euro
+auf {3100 + n} Euro pro Jahr anzuheben, wirksam zum 1. Mai.
 """
+
+# 7 distinct facts are stated above; anything below that is real capture loss.
+FIXTURE_FACT_COUNT = 7
 
 RECALL_QUERY = "Welche Gewichtung gilt fuer oekologische Nachhaltigkeit bei Lieferanten?"
 
@@ -106,13 +115,23 @@ def main():
     filename = f"canary-{int(time.time())}-{run_id}.txt"
     # Ingestion dedups on sha256(content), so a byte-identical fixture 409s on the
     # second run. Stamp the body so each run is a genuinely new document.
-    body_text = FIXTURE + f"\nPrueflauf-Kennung: {run_id}.\n"
+    body_text = build_fixture(run_id, int(time.time()) % 97)
     results = []
 
     def check(name, ok, detail=""):
         results.append((ok, name, detail))
         print(f"  {'PASS' if ok else 'FAIL'}  {name}{'  — ' + detail if detail else ''}")
 
+    # Storage-mode gate. This engine has TWO per-org backends: `hybrid` orgs write
+    # to Postgres, `amr_embedded` orgs write to the .amr/mneme store on the
+    # hivemind-data volume. Asserting Postgres invariants for an amr org reports a
+    # confident FAIL for a document that ingested perfectly — observed on boozit
+    # (40da0836), where the ingest log read "✓ doc=689f15da segs=1 promoted=2"
+    # while every Postgres table was legitimately empty.
+    mode_rows = sql("select o.memory_storage_mode from hivemind.organizations o "
+                    "join hivemind.api_keys k on k.org_id = o.id "
+                    "where k.revoked_at is null order by k.created_at desc limit 50")
+    modes = {r[0] for r in mode_rows if r and r[0]}
     print(f"\nMemory ingest canary → {CORE}\nfixture: {filename}\n")
     t0 = time.time()
     try:
@@ -135,10 +154,17 @@ def main():
         if rows:
             break
         time.sleep(3)
-    check("document created", bool(rows),
-          f"appeared after {time.time() - t0:.0f}s" if rows else "no knowledge_documents row within timeout")
     if not rows:
+        # Distinguish "never ingested" from "ingested into the other backend".
+        amr = sql("select o.name, o.memory_storage_mode from hivemind.organizations o "
+                  "where o.memory_storage_mode is not null and o.memory_storage_mode <> 'hybrid'")
+        hint = (" — this org may be amr_embedded; Postgres assertions do not apply. "
+                "Orgs on .amr: " + ", ".join(f"{r[0]}={r[1]}" for r in amr[:4])) if amr else ""
+        check("document created", False, "no knowledge_documents row within timeout" + hint)
+        print("\n  If the org is amr_embedded this canary cannot verify it — assert against "
+              "the mneme store instead, or run against a `hybrid` org.")
         return 1
+    check("document created", True, f"appeared after {time.time() - t0:.0f}s")
     doc_id, words = rows[0][0], rows[0][1]
 
     # Segments and anchors land after the document row. Wait for the pipeline to
@@ -176,9 +202,13 @@ def main():
     # non-deterministic, so a >=3 gate flaps and a flapping gate gets ignored.
     # The density number is printed every run so a real regression is still visible.
     density = anchored / max(1, int(words or 0) / 1000) if words else 0
+    # The fixture states FIXTURE_FACT_COUNT distinct facts; report capture as a
+    # fraction of what is actually there, not an abstract per-1k rate. Gate on
+    # starvation only — extraction is genuinely non-deterministic (5 and 7 observed
+    # from byte-identical input), so a fixed threshold flaps.
     check("claim extraction not starved", anchored >= 1,
-          f"{anchored} claims for {words} words (~{density:.1f} per 1k words) "
-          f"[observed spread on this fixture: 1-3 — track, do not tune to it]")
+          f"{anchored}/{FIXTURE_FACT_COUNT} stated facts captured "
+          f"({100*anchored/FIXTURE_FACT_COUNT:.0f}%), ~{density:.1f} per 1k words")
 
     try:
         rec = recall(RECALL_QUERY)

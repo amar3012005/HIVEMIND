@@ -78,6 +78,19 @@ HM_API_KEY=$K python3 artifacts/memory-ingest-canary.py --keep  # inspect artifa
    facts regardless of content (~2.7/1k chars). Now `KB_UNIFIED_WINDOW_MAX_FACTS`
    (10) with the rate at 12/1k. Revenue fact now captured where it was dropped.
 
+## Storage backends — half the tenants are NOT in Postgres
+`organizations.memory_storage_mode`: **6 orgs `amr_embedded`, 6 `hybrid`, 1 `byod_amr`.**
+`hybrid` writes to Postgres; `amr_embedded` writes to the `.amr`/mneme store on the
+`hivemind-data` volume (`/app/data/mneme/<orgId>/`).
+
+Any verification that asserts Postgres invariants reports a confident FAIL for a
+document that ingested perfectly. Observed on boozit (`40da0836`, pro,
+`amr_embedded`): the ingest log read `✓ doc=689f15da segs=1 promoted=2` while every
+Postgres table was legitimately empty. The canary now detects this and says so
+instead of failing blind — but **it still cannot verify an amr org**. Asserting
+against the mneme store is unbuilt and is the single biggest coverage gap in this
+audit: ~46% of tenants are unverified.
+
 ## Open constraint — extraction yield
 Benchmarked against **cognee 1.4.0**, identical 97-word German fixture, same LLM
 (gpt-oss-120b):
@@ -98,13 +111,28 @@ Eliminated as causes, with evidence:
 - `minImportance` — identical 7-fact output at 0.65 and 0.30
 - `_curateDocumentClaims` — fed 7 distinct candidates it returned **7**
 
-**Remaining:** `_extractUnified` called directly on that text returns **7 facts**;
-the same text through the full pipeline persists **3**. Every downstream cap is
-now cleared, so the difference must be in the window text the pipeline builds vs
-the raw block used in the direct test.
+**Measurement was contaminated — now fixed.** The canary reused a byte-identical
+fixture every run, so its CLAIMS deduped against prior runs even though the
+document was unique. Traced live: 7 extracted → 7 curated → only 3 persisted,
+purely because earlier runs had stored the other 4. The canary now randomises the
+stated values per run and reports capture as a fraction of `FIXTURE_FACT_COUNT`.
 
-**Next step:** log the exact `window.content` the pipeline passes to
-`_extractUnified` for the canary fixture and diff it against the fixture.
+**True capture rate: 3/7 (43%), stable across three consecutive runs.**
+
+Also measured: **extraction is non-deterministic** — the identical call on the
+identical segment returned 5 and 7 facts on different runs. Do not tune to a
+single observation.
+
+**Remaining:** the pipeline segment is 708 of 711 chars (the whole document), the
+window allows 8 facts, `_extractUnified` on that exact segment returns 5-7, and
+curation preserves all of them (7 in → 7 out) — yet 3 persist. The drop is in the
+per-claim persist loop, where `_ingestUnifiedWindow` returning nothing is silently
+skipped (`if (!memory) continue;`). Semantic near-duplicate suppression against
+prior memories is the leading suspect, since randomising numbers still leaves the
+claims semantically near-identical.
+
+**Next step:** instrument that loop to log which claims return no memory and why,
+or run the canary against a `hybrid` org with no prior Solvis content.
 
 ## Strategy note
 Ingest is async (202), so capture cost is invisible to the user; query latency is

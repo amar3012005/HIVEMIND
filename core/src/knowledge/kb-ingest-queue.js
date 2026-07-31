@@ -338,15 +338,25 @@ export class KbIngestQueue {
       // and the job went to status 'indexed', progress 100. The caller already
       // holds its 202 {success:true}, so NOTHING anywhere said the upload produced
       // nothing — the user waits for memories that will never arrive.
-      if (!result?.documentId) {
-        const reason = 'ingest produced no document (empty or unreadable content)';
+      // Zero promoted memories is ALSO a failure, not just a missing document.
+      // Measured: a 39.6 MB PDF whose parse chain fully collapsed —
+      //   groq-vision failed: spawnSync convert ENOENT   (ImageMagick absent)
+      //   Docling async polling timeout after 120000ms
+      //   falling back to fast-pdf
+      // — produced a document whose entire retained content was page markers
+      // ("-- 1 of 19 --") and ZERO memories, and still logged ✓ promoted=0.
+      // A document the user can never recall from is a failed ingest.
+      if (!result?.documentId || Number(result?.promotedCount || 0) === 0) {
+        const reason = !result?.documentId
+          ? 'ingest produced no document (empty or unreadable content)'
+          : 'ingest produced no memories — the document could not be parsed into recallable content';
         try {
           this.tracker?.updateJob(trackerJobId, { status: 'failed', progress: 100, error: reason });
         } catch { /* noop */ }
         this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
         this._counters.failed = (this._counters.failed || 0) + 1;
-        this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} — ${reason}`);
-        return { documentId: null, segmentCount: 0, promotedCount: 0, error: reason };
+        this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} doc=${result?.documentId || 'none'} — ${reason}`);
+        return { documentId: result?.documentId || null, segmentCount: result?.segmentCount || 0, promotedCount: 0, error: reason };
       }
       try {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};

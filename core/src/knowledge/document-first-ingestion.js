@@ -910,24 +910,38 @@ Promote only decisions, commitments, requirements, metrics, named parties, dates
     let best = [];
     const contentLength = String(window?.content || '').trim().length;
     const maxFacts = Math.max(1, Number(options.maxFacts) || 8);
-    const expected = contentLength >= 700 ? Math.min(3, maxFacts) : 1;
+    // "Good enough" must scale with the budget. A flat 3 meant EVERY section over
+    // 700 chars was satisfied at three facts — a 5000-char window allowed 10 facts
+    // returned 3 and never retried. Measured on the ingest canary: extraction
+    // reported `3 candidates` on every run while the same call on the same segment
+    // returned 5-7 when sampled directly, and only 3/7 of the fixture's stated
+    // facts reached the user. Scale to ~60% of budget, floor 3.
+    const expected = contentLength >= 700
+      ? Math.min(maxFacts, Math.max(3, Math.round(maxFacts * Number(process.env.KB_UNIFIED_EXPECTED_RATIO || 0.6))))
+      : 1;
+    // A SPARSE result and a MALFORMED result need opposite retries, and conflating
+    // them made sparse extraction unrecoverable: the retry shrank the budget to 2
+    // and set compact, so a thin first pass could only ever be followed by a
+    // thinner second one. Shrink only after a real failure; re-sample at full
+    // budget when the completion was fine but under-delivered.
+    let sparseOnly = true;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        // A malformed first completion should not repeat the same wide output.
-        // Retry with a smaller schema/output budget so the document remains
-        // source-first and promotion stays bounded under provider pressure.
+        const degraded = attempt > 1 && !sparseOnly;
         const claims = await this._extractUnified(window, {
           ...options,
-          maxFacts: attempt === 1 ? maxFacts : Math.min(maxFacts, 2),
-          compact: attempt > 1,
+          maxFacts: degraded ? Math.min(maxFacts, 2) : maxFacts,
+          compact: degraded,
         });
         if (claims.length > best.length) best = claims;
         if (claims.length >= expected || attempt === attempts) return best;
-        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); retrying (${attempt}/${attempts})`);
+        sparseOnly = true;
+        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); re-sampling at full budget (${attempt}/${attempts})`);
       } catch (error) {
         lastError = error;
+        sparseOnly = false;
         if (attempt === attempts) throw error;
-        this.logger.warn?.(`[kb-unified] extraction failed; retrying (${attempt}/${attempts}): ${error.message}`);
+        this.logger.warn?.(`[kb-unified] extraction failed; retrying degraded (${attempt}/${attempts}): ${error.message}`);
       }
     }
     if (lastError) throw lastError;

@@ -2636,8 +2636,23 @@ Every item must include a non-empty content field and one or more valid support_
         let chunks = [];
         try {
           const { chunkText } = await import('./document-chunker.js');
-          const TARGET = Number(process.env.KB_SEGMENT_CHARS || 1500); // ~512 BGE-M3 tokens
-          chunks = (chunkText(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: 0 }) || [])
+          // 1500 sized the segment to the EMBEDDING WINDOW (~512 BGE-M3 tokens),
+          // not to a unit of meaning — and fitting the window is a ceiling, not a
+          // target. Measured on a real 54-page deck: the parser handed us 53
+          // chunks and this collapsed them into 20 at ~1273 chars each. Two costs,
+          // both observed on that document:
+          //   retrieval  — one vector averaging several topics is far less precise
+          //                than one vector per topic (supermemory chunks the same
+          //                file into 86, ~one claim each, incl. one per table ROW);
+          //   extraction — a 7-row compatibility matrix landing inside a single
+          //                segment reaches the extractor as a wall of pipe-
+          //                delimited text, and came back as four partial rows with
+          //                three rows dropped entirely.
+          const TARGET = Number(process.env.KB_SEGMENT_CHARS || 700);
+          // overlapSize was 0, so a claim straddling a boundary was cut in half and
+          // NEITHER side held it whole. Carry roughly a sentence across the seam.
+          const OVERLAP = Number(process.env.KB_SEGMENT_OVERLAP_CHARS || 120);
+          chunks = (chunkText(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: OVERLAP }) || [])
             .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 20);
         } catch (e) { console.warn(`[segments] semantic chunk failed: ${e.message}`); }
         if (chunks.length) {

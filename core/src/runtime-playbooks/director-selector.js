@@ -50,6 +50,7 @@ function bindContext(playbook, selected, context) {
   for (const field of fields) {
     let value = supplied[field.path];
     if (value === undefined) value = getPath(context, field.path);
+    if (value === null) value = undefined;
     if (value === undefined && Object.prototype.hasOwnProperty.call(field, 'default_value')) value = field.default_value;
     if (value === undefined) {
       if (field.required) throw new Error(`runtime_playbook_binding_required:${field.path}`);

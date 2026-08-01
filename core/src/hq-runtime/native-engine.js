@@ -174,6 +174,9 @@ export class NativeHqEngine {
       });
     }
     const readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
+    const focusedOutcome = capabilityState.todos.find((todo) => (
+      todo.context?.execution_mode === 'single_outcome' && todo.status !== 'COMPLETED'
+    ));
     if (!firstAwakening || readyTodo) await event(prisma, runtime, cycle, {
       eventType: 'queue_checked', title: 'I re-ranked the operating queue',
       summary: readyTodo
@@ -562,7 +565,7 @@ export class NativeHqEngine {
           }
         }
       }
-    } else if (!context.evidence.latest_growth_plan) {
+    } else if (!context.evidence.latest_growth_plan && !focusedOutcome) {
       await move('DIAGNOSING');
       const selectedSkill = this.skills.load('growth-constraint-diagnosis');
       const [growthToolkit] = this.toolkits.select(['growth_plan']);

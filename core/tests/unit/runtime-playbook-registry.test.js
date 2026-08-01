@@ -445,6 +445,28 @@ test('Director binds only playbook-declared inputs without keyword parsing in th
   assert.equal(JSON.stringify(selected).includes('undeclared'), false);
 });
 
+test('Director applies a declared default when an open-ended binding is null', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: 'outreach.prospect-to-conversation', version: 2, reason: 'complete lifecycle fit',
+        bindings: {
+          'target.quantity': null,
+          'target.geography': 'Hannover, Germany',
+          'constraints.delivery_requested': true,
+        },
+      }) } }] }; },
+    }),
+  });
+  const selected = await selector.select({ objective: 'Pursue as many suitable organizations as possible.' });
+  assert.equal(selected.context_patch.target.quantity, 10);
+  assert.equal(selected.context_patch.target.geography, 'Hannover, Germany');
+});
+
 test('adapter registry exposes generic operations and injects immutable tenant execution context', async () => {
   const calls = [];
   const adapters = new RuntimeAdapterRegistry();

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -18,6 +18,12 @@ function defaultSidecarUrl() {
 
 function defaultCallbackUrl() {
   return `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`;
+}
+
+function turnIdempotencyKey(request) {
+  const identity = [request.run_id, request.stage_id, asObject(request.stage_attempts)[request.stage_id] || 1]
+    .map(String).join('\u0000');
+  return `runtime-stage:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 48)}`;
 }
 
 function normalizeArtifact(artifact, expectedKeys) {
@@ -113,7 +119,7 @@ export class RuntimeRoomDirector {
       turnId = turnId || await this.#createTurn(
         request.room_id,
         `Runtime stage | ${String(request.objective || '').trim()}`.slice(0, 8000),
-        `runtime-stage:${request.run_id}:${request.stage_id}:${asObject(request.stage_attempts)[request.stage_id] || 1}`,
+        turnIdempotencyKey(request),
       );
     }
     turnId = turnId || `runtime-turn-${randomUUID()}`;

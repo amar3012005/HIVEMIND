@@ -133,7 +133,7 @@ export async function interpretHqInstructionSemantic(body, company = {}) {
         temperature: 0,
         response_format: { type: 'json_object' }, max_completion_tokens: 1400,
         messages: [
-          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its domain lifecycle. Return JSON only with intent, title, objective, room_tag, skill, location, target:{quantity,sector,audience}, required_capabilities, acceptance_criteria, and exactly one work_units item preserving the complete requested outcome. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, and authority gates. room_tag must be one of general,outreach,seo,marketing,campaign,branding,research,product,fundraising,legal_finance. Preserve exact audience, geography, quantity, timing, and external-action restrictions. If quantity was not specified, use null; do not invent one.' },
+          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its domain lifecycle. Return JSON only with intent, title, objective, room_tag, skill, location, target:{quantity,sector,audience}, required_capabilities, acceptance_criteria, and exactly one work_units item preserving the complete requested outcome. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, and authority gates. room_tag must be one of general,outreach,seo,marketing,campaign,branding,research,product,fundraising,legal_finance. Preserve exact audience, geography, quantity, timing, and external-action restrictions. If geography was not explicitly stated, use the supplied retained company location and do not infer a broader market from the company profile. If quantity was not specified, use null; do not invent one. Set authority_mode to EXECUTE only when the requested terminal outcome necessarily requires an external action; otherwise use PREPARE.' },
           { role: 'user', content: JSON.stringify({ instruction: String(body || '').slice(0, 5000), company }) },
         ],
       }),
@@ -212,7 +212,8 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
           context: { location: unit.target?.location || interpreted.location, target: unit.target,
             skill: unit.skill, room_tag: unit.room_tag, acceptance_criteria: unit.acceptance_criteria,
             completion_requirements: unit.completion_requirements, authority_mode: unit.authority_mode,
-            workflow_index: index, workflow_size: units.length, depends_on_todo_id: dependency?.id || null },
+            execution_mode: executionMode, workflow_index: index, workflow_size: units.length,
+            depends_on_todo_id: dependency?.id || null },
         } });
         rows.push(row);
       }

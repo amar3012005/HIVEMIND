@@ -2268,6 +2268,34 @@ class Director:
     def _prospect_count(self) -> int:
         return sum(1 for row in self.blackboard if "PROSPECT:" in str(row))
 
+    async def _compose_outreach_email(
+        self, record: Dict[str, Any], sender_company: str,
+    ) -> Dict[str, Any]:
+        """Use the canonical per-prospect Outreach Intelligence composer."""
+        from ..api_outreach import GenerateRequest, _Prospect, generate
+
+        return await generate(GenerateRequest(
+            channel="email",
+            turn_id=self.turn_id,
+            sender_email=self.sender_email,
+            sender_company=sender_company,
+            company_context=self.company_brief[:6000],
+            user_id=self.user_id,
+            org_id=self.org_id,
+            prospect=_Prospect(
+                lead_id=str(record.get("memory_id") or "") or None,
+                company=str(record.get("company") or ""),
+                email=str(record.get("email") or "") or None,
+                phone=str(record.get("phone") or "") or None,
+                website=str(record.get("website") or "") or None,
+                address=str(record.get("address") or "") or None,
+                source_url=str(record.get("source_url") or record.get("website") or "") or None,
+                fit_reason=str(record.get("fit_reason") or "") or None,
+                outreach_angle=str(record.get("outreach_angle") or "") or None,
+                notes=str(record.get("note") or record.get("notes") or "") or None,
+            ),
+        ))
+
     @staticmethod
     def _tool_result_succeeded(output: str) -> bool:
         text = str(output or "").strip()
@@ -2288,6 +2316,10 @@ class Director:
             for artifact in (upstream.get("deliverables") or []) if isinstance(artifact, dict)
             and artifact.get("kind") == "prospect_records"
             for record in (artifact.get("records") or []) if isinstance(record, dict)
+        ]
+        requirements = [
+            requirement for requirement in (envelope.get("completion_requirements") or [])
+            if isinstance(requirement, dict)
         ]
         envelope_criteria = [str(x) for x in (envelope.get("acceptance_criteria") or []) if str(x).strip()][:8]
         selected_skills = [str(x) for x in (plan.get("method_skills") or []) if str(x).strip()][:4]
@@ -2498,31 +2530,58 @@ class Director:
                 "\nProduce the actual bounded work product. Cite only supplied evidence. State concrete gaps; "
                 "never describe future work as completed. Return useful detail, not process narration."
             )
+            generated_email_drafts: List[Dict[str, str]] = []
             if draft_work:
-                prompt += (
-                    "\nReturn strict JSON with email_drafts only. email_drafts must be an array of objects with "
-                    "prospect_company, to, subject, body, rationale. Produce one finished, personalized draft per "
-                    "verified contact supplied below. Never invent a recipient or sender identity, and do not send. "
-                    "End each body with the ask: no signature, placeholder, guaranteed outcome, or unsupported "
-                    "performance/compliance claim."
+                # Runtime uses the same per-prospect Outreach Intelligence composer
+                # as the human-facing Email Campaign action. HQ never authors copy:
+                # it supplies the lifecycle envelope, while this Room applies the
+                # cold-email and polished-email skills to each retained lead.
+                company_match = re.search(
+                    r"(?:^|\n)Company:\s*([^\n—–]+)", self.company_brief or "", re.I,
                 )
-            requirements = [row for row in (envelope.get("completion_requirements") or []) if isinstance(row, dict)]
-            draft_minimum = max(
-                [int(row.get("minimum") or 0) for row in requirements if row.get("type") == "email_drafts"] or [0]
-            )
-            verified_worker_records = sum(1 for row in worker_records if str(row.get("email") or "").strip())
-            draft_target = draft_minimum or verified_worker_records
-            # JSON overhead plus two concise paragraphs regularly exceeds 650
-            # tokens per draft. Truncated JSON invalidates the entire batch, so
-            # budget for complete structured records instead of paying for a
-            # failed generation and returning zero accepted artifacts.
-            worker_max_tokens = max(1800, min(12000, draft_target * 1000 + 600)) if draft_work else 1200
-            response = await self._groq([
-                {"role": "system", "content": _now_block() + f"You are {owner_name}, {lane}. {persona}"},
-                {"role": "user", "content": f"{prompt}\n\nVERIFIED RECORDS FOR THIS WORK PRODUCT:\n{json.dumps(worker_records, ensure_ascii=False)[:20000]}\n\nPRIOR SUBTASK OUTPUT:\n{prior}\n\nTOOL RESULTS:\n{json.dumps(tool_outputs, ensure_ascii=False)}\n\nEVIDENCE BOARD:\n{context}"},
-            ], model=self.persona_model, temp=0.25, bucket="worker", force_text=True,
-               json_object=draft_work, max_tokens=worker_max_tokens)
-            text = _strip_cot(str((response or {}).get("content") or "")).strip()
+                sender_company = (company_match.group(1).strip(" .,-") if company_match else "")
+                verified_records = [
+                    record for record in worker_records
+                    if str(record.get("company") or "").strip()
+                    and str(record.get("email") or "").strip()
+                ]
+                for record in verified_records:
+                    await self.emit({
+                        "t": "typing", "agent": owner.get("slug"),
+                        "note": f"Writing a personalized email for {str(record.get('company'))[:120]}…",
+                    })
+                    try:
+                        generated = await self._compose_outreach_email(record, sender_company)
+                    except Exception as exc:  # noqa: BLE001 — one failed prospect must not discard the batch
+                        log.warning("[hyper-engine] outreach email compose failed for %s: %s",
+                                    record.get("company"), exc)
+                        continue
+                    if generated.get("error") or not generated.get("subject") or not generated.get("body"):
+                        continue
+                    generated_email_drafts.append({
+                        "prospect_company": str(record.get("company") or "").strip(),
+                        "to": str(record.get("email") or "").strip().casefold(),
+                        "subject": str(generated.get("subject") or "").strip()[:500],
+                        "body": str(generated.get("body") or "").strip()[:6000],
+                        "rationale": str(record.get("outreach_angle") or record.get("fit_reason") or "").strip()[:1000],
+                        "source_url": str(record.get("source_url") or record.get("website") or "")[:1000],
+                    })
+                if generated_email_drafts:
+                    successful_tools["outreach_email_compose"] += len(generated_email_drafts)
+                    await self.emit({
+                        "t": "gather", "sources": ["your-leads", "company-memory"],
+                        "tool": "outreach_email_compose",
+                        "query": str(order.get("title") or "")[:160],
+                        "connector_hits": [], "memory_hits": len(generated_email_drafts),
+                    })
+                text = json.dumps({"email_drafts": generated_email_drafts}, ensure_ascii=False)
+            else:
+                response = await self._groq([
+                    {"role": "system", "content": _now_block() + f"You are {owner_name}, {lane}. {persona}"},
+                    {"role": "user", "content": f"{prompt}\n\nVERIFIED RECORDS FOR THIS WORK PRODUCT:\n{json.dumps(worker_records, ensure_ascii=False)[:20000]}\n\nPRIOR SUBTASK OUTPUT:\n{prior}\n\nTOOL RESULTS:\n{json.dumps(tool_outputs, ensure_ascii=False)}\n\nEVIDENCE BOARD:\n{context}"},
+                ], model=self.persona_model, temp=0.25, bucket="worker", force_text=True,
+                   max_tokens=1200)
+                text = _strip_cot(str((response or {}).get("content") or "")).strip()
             tool_attempts = sum(self._exec_counts.values()) - sum(before_counts.values())
             tool_delta = sum(successful_tools.values())
             self._work_order_successful_tools += tool_delta
@@ -2583,33 +2642,6 @@ class Director:
                     if accepted_draft:
                         email_drafts.append(accepted_draft)
 
-                # Finish only missing rows in one bounded batch. This is not report
-                # regeneration: every row remains bound to a verified source record.
-                drafted_companies = {row["prospect_company"].casefold() for row in email_drafts}
-                missing_sources = [record for record in draft_sources
-                                   if str(record.get("email") or "").strip()
-                                   and str(record.get("company") or "").strip().casefold() not in drafted_companies]
-                if missing_sources:
-                    followup = await self._groq([
-                        {"role": "system", "content": (
-                            _now_block() + "Complete only the missing grounded cold email drafts. Return JSON only "
-                            "with email_drafts:[{prospect_company,to,subject,body,rationale}]. Produce exactly one "
-                            "draft for each supplied verified record. Use every verified recipient verbatim. Do not "
-                            "add a sender name, signature, placeholder, unsupported claim, or claim that contact "
-                            "already occurred. End each body with the ask.")},
-                        {"role": "user", "content": json.dumps({
-                            "company_context": self.company_brief[:5000],
-                            "prospects": missing_sources,
-                            "assignment": order.get("objective") or envelope.get("objective"),
-                        }, ensure_ascii=False)},
-                    ], model=self.persona_model, temp=0.2, bucket="worker", force_text=True,
-                       json_object=True,
-                       max_tokens=max(1800, min(12000, len(missing_sources) * 1000 + 600)))
-                    parsed_followup = _first_json_object(str((followup or {}).get("content") or "")) or {}
-                    for draft in (parsed_followup.get("email_drafts") or []):
-                        accepted_draft = accept_draft(draft)
-                        if accepted_draft:
-                            email_drafts.append(accepted_draft)
                 if email_drafts:
                     grounded_artifacts.append({
                         "kind": "email_drafts", "source": "room_worker",

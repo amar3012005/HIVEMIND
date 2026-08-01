@@ -47,6 +47,7 @@ class GenerateRequest(BaseModel):
     sender_email: str = ""
     sender_name: str = ""
     sender_company: str = ""
+    company_context: str = ""
     prospect: _Prospect
     # Tenant identity — lets generation recall the org's prior outreach learnings.
     user_id: str = ""
@@ -174,7 +175,9 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
             "(e.g. 'warm professional', 'crisp formal', 'friendly energetic'). "
             "Never invent facts about the firm."
         )
-    user = (f"TEAM REPORT (grounding):\n{report or '(no report body — use the firm data only)'}\n\n"
+    company_context = str(req.company_context or "").strip()[:6000]
+    user = (f"COMPANY CONTEXT (grounding):\n{company_context or '(use the sealed Room report and verified sender identity)'}\n\n"
+            f"TEAM REPORT (grounding):\n{report or '(no report body — use the firm data only)'}\n\n"
             f"PROSPECT:\n{firm}{learnings_block}")
     content, usage = await run_mention_reply(
         [{"role": "system", "content": sys}, {"role": "user", "content": user}], temp=0.5,

@@ -260,17 +260,15 @@ def test_runtime_outreach_uses_same_run_records_for_one_batch_of_drafts(monkeypa
         director._exec_counts[name] += 1
         return json.dumps({"prospects": records, "persisted": 2})
 
-    async def model(*args, **_kwargs):
-        model_calls.append(args)
-        return {"content": json.dumps({"email_drafts": [{
-            "prospect_company": record["company"], "to": record["email"],
+    async def compose(record, _sender_company):
+        model_calls.append(record["company"])
+        return {
             "subject": f"A note for {record['company']}",
             "body": "A grounded and personalized message. Open to a short conversation?",
-            "rationale": record["outreach_angle"],
-        } for record in records]})}
+        }
 
     monkeypatch.setattr(director, "_exec", execute)
-    monkeypatch.setattr(director, "_groq", model)
+    monkeypatch.setattr(director, "_compose_outreach_email", compose)
     plan = {
         "recall_queries": [], "connector_calls": [], "web_query": None,
         "seo_audit_url": None, "places_query": "companies in Hannover",
@@ -289,7 +287,7 @@ def test_runtime_outreach_uses_same_run_records_for_one_batch_of_drafts(monkeypa
 
     results = asyncio.run(director._run_work_order_subtasks(plan))
 
-    assert len(model_calls) == 1
+    assert model_calls == ["Alpha GmbH", "Beta GmbH"]
     assert results[0]["status"] == "completed", results[0]
     artifacts = results[0]["output"]["artifacts"]
     assert [artifact["kind"] for artifact in artifacts] == ["prospect_records", "email_drafts"]
@@ -331,16 +329,14 @@ def test_runtime_outreach_persists_upstream_records_before_accepting_drafts(monk
             for index, row in enumerate(prospects, start=1)
         ]}
 
-    async def model(*_args, **_kwargs):
-        return {"content": json.dumps({"email_drafts": [{
-            "prospect_company": row["company"], "to": row["email"],
-            "subject": f"A note for {row['company']}",
+    async def compose(record, _sender_company):
+        return {
+            "subject": f"A note for {record['company']}",
             "body": "A grounded message. Open to a short conversation?",
-            "rationale": row["outreach_angle"],
-        } for row in records]})}
+        }
 
     monkeypatch.setattr("hivemind_employees.hyper.engine.save_prospects_bulk_emulated", persist)
-    monkeypatch.setattr(director, "_groq", model)
+    monkeypatch.setattr(director, "_compose_outreach_email", compose)
     plan = {
         "recall_queries": [], "connector_calls": [], "web_query": None,
         "seo_audit_url": None, "places_query": None,

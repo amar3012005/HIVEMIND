@@ -1,3 +1,5 @@
+import { PlaywrightServiceRuntime } from '../web/playwright-service-runtime.js';
+
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
 const SOCIAL_PLATFORMS = [
   ['linkedin', /(^|\.)linkedin\.com$/i, /^\/(?:company|showcase)\/[^/]+/i],
@@ -345,6 +347,18 @@ export async function captureWebsiteScreenshot(websiteUrl, {
     }, { apiKey, timeoutMs: 30000 });
     return cleanString((payload?.data || payload)?.screenshot, 2000000) || null;
   } catch {
+    return null;
+  }
+}
+
+export async function captureWebsiteScreenshotWithPlaywright(websiteUrl) {
+  if (!websiteUrl) return null;
+  try {
+    const runtime = new PlaywrightServiceRuntime({ timeoutMs: 30_000, settleMs: 700 });
+    const result = await runtime.crawl({ urls: [websiteUrl], depth: 0, pageLimit: 1, captureScreenshot: true });
+    return compactText(result.pages?.[0]?.screenshot, 7_000_000) || null;
+  } catch (error) {
+    console.warn('[hyper-onboarding] Playwright screenshot skipped:', error.message);
     return null;
   }
 }

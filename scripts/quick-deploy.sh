@@ -65,7 +65,10 @@ if [ "${1:-}" = "--rollback" ]; then
   shift; [ $# -gt 0 ] || { echo "usage: quick-deploy.sh --rollback <service...>"; exit 1; }
   for s in "$@"; do i=$(img_of "$s"); tag=$([ "$s" = fe ] && echo "latest-single" || echo latest); stag=$([ "$s" = fe ] && echo "stable-single" || echo stable)
     docker image inspect "hivemind/$i:$stag" >/dev/null 2>&1 || { echo "no :stable for $i — cannot roll back"; exit 1; }
-    docker tag "hivemind/$i:$stag" "hivemind/$i:$tag"; recreate_one "$s"; health_gate "${CONTAINER[$s]}"
+    docker tag "hivemind/$i:$stag" "hivemind/$i:$tag"
+    configured_image=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
+    [ -z "$configured_image" ] || [ "$configured_image" = "hivemind/$i:$tag" ] || docker tag "hivemind/$i:$stag" "$configured_image"
+    recreate_one "$s"; health_gate "${CONTAINER[$s]}"
     echo "rolled $s back to :$stag"; done
   exit 0
 fi
@@ -171,6 +174,11 @@ for s in "${SVCS[@]}"; do
   built_revision=$(docker image inspect "hivemind/$i:$tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
   [ "$built_revision" = "$NOW" ] || { echo "FATAL: $s image revision $built_revision != fetched $NOW"; exit 1; }
   echo "  image revision verified: ${built_revision:0:12}"
+  configured_image=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
+  if [ -n "$configured_image" ] && [ "$configured_image" != "hivemind/$i:$tag" ]; then
+    docker tag "hivemind/$i:$tag" "$configured_image"
+    echo "  compose reference updated: $configured_image"
+  fi
   recreate_one "$s"; health_gate "${CONTAINER[$s]}" || { echo "FATAL — roll back with: quick-deploy.sh --rollback $s"; exit 1; }
 done
 

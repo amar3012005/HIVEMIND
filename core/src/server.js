@@ -1749,7 +1749,16 @@ if (process.env.DOCLING_URL) {
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
         const [parseResult, chunkResult] = await Promise.all([
-          parseWithDocling(tempPath, filename, { smart: useSmart, picture_descriptions }),
+          // Pass the format profile through so the adapter can skip passes this
+          // format has nothing to gain from (slides need picture description, not
+          // a document-wide OCR + accurate-table sweep). Undefined for unknown
+          // formats, which the adapter treats as "run everything" — unchanged.
+          parseWithDocling(tempPath, filename, {
+            smart: useSmart,
+            picture_descriptions,
+            ocr: profile ? profile.ocr : undefined,
+            tables: profile ? profile.tables : undefined,
+          }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);

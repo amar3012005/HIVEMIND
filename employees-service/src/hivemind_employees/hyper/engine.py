@@ -2562,6 +2562,7 @@ class Director:
             text = str(output.get("text") or row.get("summary") or "").strip()
             if text:
                 evidence.append({"id": f"work:{index}", "content": text[:4000]})
+        stage_contract = {key: value for key, value in envelope.items() if key != "inputs"}
         response = await self._groq([
             {"role": "system", "content": (
                 _now_block() + "Return JSON only for runtime-stage-result.v1. Use exactly these fields: "
@@ -2576,10 +2577,10 @@ class Director:
                 "If the work is incomplete, return the supported artifacts and exact gaps; do not fabricate "
                 "fields merely to satisfy completion checks.")},
             {"role": "user", "content": json.dumps({
-                "stage": envelope,
-                "room_work": self.work_results,
+                "stage": stage_contract,
                 "evidence": evidence,
-            }, ensure_ascii=False)[:30000]},
+                "room_work": self.work_results,
+            }, ensure_ascii=False)},
         ], model=self.synth_model, temp=0.1, bucket="synth", force_text=True,
            json_object=True, uncapped=True, max_tokens=8000)
         parsed = _first_json_object(str((response or {}).get("content") or "")) or {}

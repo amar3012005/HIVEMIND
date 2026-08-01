@@ -142,4 +142,5 @@ def test_runtime_stage_exposes_prior_artifacts_as_citable_evidence(monkeypatch):
     evidence_ids = {row["id"] for row in captured["payload"]["evidence"]}
     assert "input:artifacts.request_record:1" in evidence_ids
     assert "input:artifacts.request_record:2" in evidence_ids
+    assert "inputs" not in captured["payload"]["stage"]
     assert len(result["artifacts"]) == 2

@@ -1,8 +1,9 @@
 # Knowledge Base
 
 **Group:** Your Brain · **Route:** `/hivemind/app/knowledge`
-**Status:** PARSE CHAIN COMPLETE — 16 defects fixed, deployed in a pinned image,
-canary 6/6. Tables now captured; figure descriptions + guardrails still open.
+**Status:** PRODUCTION-HARDENED (`[~]`, not `[x]`) — 30 defects fixed, all baked into
+`hivemind/core-api:prod-20260801-kb-v6`, canary 6/6, Gate 2 security review passed.
+Blocked on Gate 1 (never verified in a browser). Open items in `knowledge-base.left.md`.
 
 ## Frontend
 - `pages/KnowledgeBase.jsx`
@@ -173,6 +174,72 @@ attribute loss to prefilter / cap / model so this cannot hide again (9aaded04d).
 | segments | 20 | **63** |
 | memories | 8-9 | **14** |
 | inverter table | 4 partial rows, 3 brands lost | **consolidated multi-brand claims** |
+
+## Session 2026-08-01 — what changed, with measurements
+
+Every number below came from re-ingesting the SAME real 54-page German deck, or
+from a live 39-document upload by the owner.
+
+### The pipeline end to end
+| | before | after |
+|---|---|---|
+| parse tier | `fast-pdf`, 813ms, tables flattened | `docling` / `groq-vision` by content |
+| chars extracted | 25,576 | **62,867** (vision reads the figures) |
+| segments | 20 @ 1273 chars | **105** @ ~600 |
+| memories | 8 | **17-18** |
+| figure-bearing segments | 0 | **28** |
+| language (German doc) | all English | **all German** |
+| capture rate (canary) | 3/7 (43%) | **4/7 (57%)** |
+
+### Root causes, in the order each was hiding the next
+1. `smart` defaulted false → Tier-1 fast-pdf always won → **Docling never ran** for
+   any text-bearing PDF (`9683f0767`).
+2. Docling had `mem_limit: 2g` against a ~3 GiB workload → OOM, 9 restarts, tasks
+   vanished mid-convert → polls 404'd for the full timeout (`651c09415`).
+3. A 404 poll was treated as transient → burned 600s before falling back.
+4. The chunker's 180s client timeout aborted while the parse SUCCEEDED.
+5. The fallback keyed on `text` alone → discarded `chunks=81 parseError=none`.
+6. `KB_CURATED_MEMORY_CAP=8` in `.env` overrode the dynamic cap for **every**
+   document — a 54-page deck and a one-page note both stopped at 8 (`9aaded04d`).
+7. `KB_SEGMENT_CHARS=1500` sized segments to the EMBEDDING WINDOW, not to meaning;
+   `overlapSize: 0` split claims with neither half whole (`3dbb927ae`).
+8. `picture_descriptions` had the same false-default as `smart` → figures never
+   requested; then `isImageHeavy` only caught PDFs with NO text, so a 474
+   chars/page deck never reached vision → **new `isFigureRich` tier** (`95bcf6d2f`).
+
+### Multi-tenant correctness (owner-flagged, important)
+The extraction prompt carried ONE tenant's data as literal examples — company
+name, address, product model, brand colour, fonts — in a prompt that runs for
+**every** tenant. Most predated this session. All replaced with abstract shapes
+(`c698a6bf2`). `DOCLING_OCR_LANGS` also defaulted to `de,en`, degrading OCR for
+every French/Spanish/Italian/Dutch/Portuguese customer (`186bd842d`).
+
+**Language is now pinned in CODE, not prose** (`478133e67`): telling the model to
+"use the section's language" failed twice because the surrounding prompt is
+English and the model read it as the target. Function-word detection across 7
+languages, English as one row not the default, degrading to generic wording when
+uncertain.
+
+### Format profiles — one bucket was wrong
+`LAYOUT_EXTS` sent every format through the full enrichment stack. A `.pptx` spent
+479s and produced **zero** memories. Now `ocr`/`tables`/`pics` per format:
+| format | route | measured |
+|---|---|---|
+| PDF text-native | Docling + tables + pics | 105 segs |
+| PDF figure-rich (<900 chars/page, ≥4pp) | **vision, single pass** | 47s, 28 fig segs |
+| PDF image-heavy | vision | 3-10s |
+| DOCX | Docling, no OCR | **21 memories/1k words** — best yield |
+| XLSX | Docling tables, no OCR/pics | 11 memories, 12s |
+| PPTX | Docling text only | **603s → 27.6s**, 13 memories (`5dbd3105c`) |
+| PNG/JPG | image path only | one atomic memory, **no evidence** (`48bc9e6b2`) |
+
+### Invariant: images are NOT documents
+An image has no text to segment, so document-path evidence rows are chunks of a
+vision description pointing at themselves. The FE routed correctly but the API
+entry point did not — that is how image-upload memories became 27/38 anchored to
+evidence they should never have had. Now `IMAGE_NOT_A_DOCUMENT` (415) at the
+boundary; verified a PNG yields **0 documents, 0 segments**.
+**Not cleaned up:** the 27 historical evidence links still exist (destructive).
 
 ## What remains, in priority order
 Measured against a real 54-page German strategy deck (4.2 MB) and supermemory's

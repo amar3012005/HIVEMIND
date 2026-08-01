@@ -367,6 +367,49 @@ def test_runtime_outreach_persists_upstream_records_before_accepting_drafts(monk
     assert any(event.get("tool") == "leads_persist" for event in events)
 
 
+def test_runtime_formatter_cannot_invent_input_after_machine_checks_pass(monkeypatch):
+    director, _events = _director(message="Prepare the accepted artifacts", room_kind="outreach")
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-complete",
+        "objective": "Prepare artifacts only.", "acceptance_criteria": [],
+        "completion_requirements": [],
+    }
+    director.work_results = [{
+        "id": "subtask_1", "title": "Prepare accepted artifacts", "status": "completed",
+        "checks": [{
+            "criterion": "machine:deliverables", "type": "deliverables",
+            "observed": "count=1", "passed": True,
+        }],
+        "output": {"kind": "rows", "text": "Prepared.", "artifacts": [{
+            "kind": "prepared_records", "source": "room_worker",
+            "record_count": 1, "records": [{"id": "record-1"}],
+        }]},
+        "evidence_refs": ["source:record-1"], "gaps": [],
+    }]
+
+    async def formatter(*_args, **_kwargs):
+        return {"content": json.dumps({
+            "report_markdown": "Prepared.",
+            "deliverables": [],
+            "needs_input": [{"item": "Approval from a Room employee"}],
+            "blockers": [{"description": "Wait for approval"}],
+            "checkpoint": {
+                "stage": "prepared", "completed": True, "next": "await approval",
+                "disposition": "request_hq", "reason": "Approval needed",
+                "requires": "approval_from_owner",
+            },
+        })}
+
+    monkeypatch.setattr(director, "_groq", formatter)
+    result = asyncio.run(director._synthesize_work_order_result())
+
+    assert result["status"] == "completed"
+    assert result["needs_input"] == []
+    assert result["blockers"] == []
+    assert result["checkpoint"]["disposition"] == "complete"
+    assert result["checkpoint"]["completed"] == ["Prepare accepted artifacts"]
+
+
 def test_work_brief_is_short_natural_language_and_mentions_the_report():
     director, events = _director(message="Build a market-entry strategy")
     director.response_depth = "operating"

@@ -2766,6 +2766,26 @@ class Director:
                                                      "subtasks": subtask_view}, ensure_ascii=False)},
         ], model=self.synth_model, temp=0.15, bucket="synth", force_text=True, json_object=True, uncapped=True, max_tokens=1800)
         semantic = _first_json_object(str((response or {}).get("content") or "")) or {}
+        # Subtask checks are the execution authority. A formatter may describe
+        # unresolved work, but it must not invent a blocker or human-input gate
+        # after every machine requirement has passed. External authority remains
+        # represented separately by proposed_actions for HQ to govern.
+        subtasks_complete = bool(self.work_results) and all(
+            row.get("status") == "completed"
+            and all(check.get("passed") is True for check in (row.get("checks") or []))
+            for row in self.work_results if isinstance(row, dict)
+        )
+        if subtasks_complete:
+            semantic["needs_input"] = []
+            semantic["blockers"] = []
+            checkpoint = semantic.get("checkpoint") if isinstance(semantic.get("checkpoint"), dict) else {}
+            checkpoint["completed"] = [
+                str(row.get("title") or row.get("id") or "work order")[:120]
+                for row in self.work_results if isinstance(row, dict)
+            ]
+            checkpoint["disposition"] = "complete"
+            checkpoint["requires"] = []
+            semantic["checkpoint"] = checkpoint
         if grounded_artifacts:
             # Structured tool artifacts are authoritative. Models may explain them,
             # but may not recreate rows, add placeholders, or silently drop records.

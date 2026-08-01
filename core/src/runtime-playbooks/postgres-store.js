@@ -101,6 +101,15 @@ export class PostgresRuntimeStore {
     });
   }
 
+  async renewRun(runId, orgId, owner) {
+    const now = this.now();
+    const result = await this.prisma.runtimePlaybookRun.updateMany({
+      where: { id: runId, orgId, leaseOwner: owner },
+      data: { leaseExpiresAt: new Date(now.getTime() + this.leaseMs) },
+    });
+    return result.count === 1;
+  }
+
   async updateRun(runId, orgId, data) {
     const result = await this.prisma.runtimePlaybookRun.updateMany({
       where: { id: runId, orgId },

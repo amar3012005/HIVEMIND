@@ -193,9 +193,19 @@ export class GenericStageExecutor {
 
   async run(runId, { orgId, event = null } = {}) {
     if (!orgId) throw new Error('runtime_executor_org_required');
-    if (!await this.store.claimRun(runId, orgId, this.workerId)) {
+    // The executor instance is shared by scheduler, callbacks and API requests.
+    // A unique invocation owner prevents two calls in the same process from
+    // treating the shared worker ID as permission to execute the run twice.
+    const leaseOwner = `${this.workerId}:${randomUUID()}`;
+    if (!await this.store.claimRun(runId, orgId, leaseOwner)) {
       return { status: 'ALREADY_CLAIMED', runId };
     }
+    const heartbeat = typeof this.store.renewRun === 'function'
+      ? setInterval(() => {
+        this.store.renewRun(runId, orgId, leaseOwner).catch(() => {});
+      }, 20_000)
+      : null;
+    heartbeat?.unref?.();
     try {
       for (let stepCount = 0; stepCount < this.maxSteps; stepCount += 1) {
         let run = await this.store.loadRun(runId, orgId);
@@ -404,7 +414,8 @@ export class GenericStageExecutor {
       }
       throw new Error('runtime_executor_step_limit_exceeded');
     } finally {
-      await this.store.releaseRun(runId, orgId, this.workerId);
+      if (heartbeat) clearInterval(heartbeat);
+      await this.store.releaseRun(runId, orgId, leaseOwner);
     }
   }
 }

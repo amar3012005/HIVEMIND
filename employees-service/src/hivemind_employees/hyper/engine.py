@@ -1852,8 +1852,22 @@ class Director:
         except Exception as exc:  # noqa: BLE001
             log.warning("[hyper-engine] places_search failed: %s", exc)
             return json.dumps({"error": str(exc)[:200], "is_error": True})
+        requirements = [
+            row for row in ((self.work_order or {}).get("completion_requirements") or [])
+            if isinstance(row, dict)
+        ]
+        needs_verified_recipient = any(
+            str(row.get("type") or "") == "email_drafts" and int(row.get("minimum") or 0) > 0
+            for row in requirements
+        )
+        # A requested output count is not a candidate-search limit. When the
+        # active Room contract also requires personalized drafts, inspect a
+        # bounded candidate pool and prefer rows with a verified public contact.
+        # This preserves the requested output count without accepting the first
+        # uncontactable Places result and then abandoning the same Room phase.
+        candidate_limit = min(20, max(requested_count, 10 if needs_verified_recipient else requested_count))
         rows = []
-        for pl in places[:20]:
+        for pl in places[:candidate_limit]:
             rows.append({
                 "company": (pl.get("displayName") or {}).get("text", ""),
                 "place_id": pl.get("id", ""),
@@ -1866,12 +1880,15 @@ class Director:
                 "rating": pl.get("rating"),
                 "review_count": pl.get("userRatingCount"),
             })
-        rows = [x for x in rows if x["company"]][:requested_count]
+        rows = [x for x in rows if x["company"]]
         # Impressum/contact enrichment — for firms with a website, fetch the
         # legally-mandated Impressum/Kontakt page and attach a real email (named
         # person preferred). Concurrent + bounded; a failure just leaves email "".
         await self._enrich_impressum(rows)
         await self._qualify_prospect_rows(rows, query)
+        if needs_verified_recipient:
+            rows.sort(key=lambda row: (not bool(str(row.get("email") or "").strip()),))
+        rows = rows[:requested_count]
         # Onto the blackboard as sourced prospect facts (synth cites Google Places;
         # email cites the Impressum so the outreach send has a real recipient).
         for x in rows:
@@ -2375,7 +2392,14 @@ class Director:
             planned_calls.append({"name": "places_search", "args_json": json.dumps({"query": str(plan["places_query"])}, ensure_ascii=False)})
         outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else {}
         prospect_work = bool(outreach.get("discover") or outreach.get("persist") or plan.get("places_query"))
-        draft_work = bool(outreach.get("draft"))
+        # The immutable phase contract is authoritative even when the Director's
+        # semantic plan omitted an internal checkpoint. This does not prescribe
+        # a tool sequence: it tells the Outreach Room to keep operating until its
+        # declared deliverable exists.
+        draft_work = bool(outreach.get("draft")) or any(
+            str(row.get("type") or "") == "email_drafts" and int(row.get("minimum") or 0) > 0
+            for row in requirements
+        )
         action = {
             "tool_calls": planned_calls,
             "requires_tool": bool(planned_calls),
@@ -2769,9 +2793,11 @@ class Director:
                 persistence_ref = str(record.get("memory_id") or "").strip()
                 draft = drafts_by_company.get(company_key)
                 recipient = str((draft or {}).get("to") or record.get("email") or "").strip()
-                # This phase promises message-ready accepted leads. Keep broader
-                # discovery evidence in the Room result, not in the accepted chain.
-                if not company or not persistence_ref or not recipient or not draft:
+                # Lead persistence is independently useful evidence. Do not erase
+                # a completed lead artifact merely because contact enrichment or
+                # message composition is still incomplete; Core will retain it and
+                # evaluate the missing message predicate separately.
+                if not company or not persistence_ref:
                     continue
                 lead_id = artifact_id("lead_record", persistence_ref)
                 source_ref = str(record.get("source_url") or record.get("website") or "").strip()

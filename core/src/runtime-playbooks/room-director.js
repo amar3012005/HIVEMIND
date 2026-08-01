@@ -186,6 +186,7 @@ export class RuntimeRoomDirector {
     const duplicateIds = artifacts.map((artifact) => artifact.id)
       .filter((id, index, values) => values.indexOf(id) !== index);
     if (duplicateIds.length) throw new Error(`runtime_room_artifact_duplicate:${duplicateIds[0]}`);
-    return { artifacts, gaps: asArray(result.gaps).map(String).filter(Boolean), turn_id: turnId };
+    const gaps = asArray(result.gaps).map(String).filter(Boolean);
+    return { artifacts, gaps, warnings: gaps, turn_id: turnId };
   }
 }

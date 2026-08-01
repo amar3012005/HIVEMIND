@@ -44,8 +44,24 @@ canary 6/6. Tables now captured; figure descriptions + guardrails still open.
       results; now aliased and warned (`3263ff1ea`).
 - [x] **Re-processability** — parsed source text retained (`295594e54`), so an
       extractor improvement can be reapplied. Was previously impossible.
-- [ ] **AuthZ** — not yet tested with a wrong-org caller.
-- [ ] **Input validation** — behaviour on corrupt/huge/encrypted files untested.
+- [x] **AuthZ — GATE 2 PASSED (2026-08-01).** Authenticated as SINGULANCE
+      (`1380251c`), requested MANDI (`807ebb88`) resources BY ID:
+      `/api/knowledge/documents/<mandi-doc>` → **404**, `/api/memories/<mandi-mem>`
+      → **404**, `.../segments` → **404**. 404 not 403 is correct — 403 would
+      confirm the resource exists. Unauthenticated `/api/knowledge/documents` and
+      `/api/recall` → **401**.
+      **Recall lane (where leaks actually hide):** queried MANDI-only content
+      ("B&B Solvis Vorbereitung Kick-Off") with the SINGULANCE key → 5 hits, and
+      **every one of the 5 returned ids resolves to org `1380251c`** — the
+      caller's own. Semantic neighbours, zero cross-tenant rows. Verified by
+      feeding the returned ids back into a `group by org_id` query rather than
+      trusting the response body.
+- [x] **Input validation — GATE 2 PASSED.** 0 bytes → **400** "The uploaded file
+      is empty — nothing to ingest."; 1 byte and 27 bytes → **400** "below the
+      32-byte minimum"; 3 MB of random bytes and a fake-encrypted PDF → accepted
+      at upload (202, correct — parsing is async) then **failed closed**:
+      `✗ enc.pdf — ingest produced no memories — the document could not be parsed
+      into recallable content`. No success-shaped empty result.
 - [ ] **Idempotency** — dedups on `sha256(content)` (a re-upload 409s), but the
       partial-failure path is untested: a crash mid-pipeline leaves a document
       and segment with no memories (observed while probing).

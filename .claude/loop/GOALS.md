@@ -30,9 +30,10 @@ defects fixed + deployed + re-verified on the box, then commit → journal → `
 **Guardrails audited per feature:** tenant isolation · authZ (unauth + wrong-org) · input validation ·
 failure mode (never a success-shaped empty result) · idempotency · observability · reproducibility.
 
-**Per-goal pipeline:** recon (grep ground truth) → plan → surgical build → `node --check`/`py_compile`
-→ deploy (docker cp + restart, or build image) → **e2e verify on the box BEFORE push** → commit
-(author amarsai3012005) → journal → `[x]`. Workflow tool BANNED — agents only.
+**HOW each goal is worked: `.claude/loop/FEATURE-LOOP.md` — read it first, every time.**
+FE → backend-to-storage → enterprise failure modes → measure with curl → fix by MODIFYING
+existing code → verify e2e in the browser → record → next. No patches, no duplicate paths.
+Workflow tool BANNED — agents only.
 
 ---
 

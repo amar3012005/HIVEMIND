@@ -439,3 +439,12 @@ installed `litellm` version requests newer `httpx` and `openai` packages than
 the employee package pins. This was not introduced by Runtime, but it should be
 resolved deliberately in a dedicated dependency change rather than hidden in an
 unrelated feature deployment.
+
+## Playbook-only dispatch
+
+HQ instruction ingestion preserves one complete requested outcome. It does not
+split that outcome into domain stages or infer completion artifacts from words in
+the request. The Director selects a registered immutable playbook, and only that
+playbook may define stages, predicates, adapters, event waits, and authority gates.
+If no lifecycle fits, the todo remains visibly blocked while independent work can
+continue; Runtime never falls back to a one-shot Room report.

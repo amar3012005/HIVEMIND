@@ -7,7 +7,6 @@ import { narrateAwakening } from './awakening-narrator.js';
 const DAY = 86400000;
 
 const metric = (value) => Number(value || 0).toLocaleString('en-US');
-export const boundedDelegationField = (value) => String(value || '').slice(0, 500);
 
 export function summarizeBaselineResult(baseline = {}) {
   const social = baseline.social_presence && typeof baseline.social_presence === 'object' ? baseline.social_presence : {};
@@ -51,57 +50,8 @@ export function resolveWorkResultTodo({ order, result }) {
   };
 }
 
-export function fallbackRoomTag(todo, available) {
-  const exact = String(todo?.context?.room_tag || todo?.context?.specialist_room || '').trim().toLowerCase();
-  if (available.includes(exact)) return exact;
-  return available.includes('general') ? 'general' : null;
-}
-
 export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
-}
-
-export function compileCompletionRequirements(todo) {
-  const context = todo?.context && typeof todo.context === 'object' ? todo.context : {};
-  return Array.isArray(context.completion_requirements)
-    ? context.completion_requirements.filter((row) => row && typeof row === 'object' && row.type)
-    : [];
-}
-
-async function selectSpecialistRoomTag(todo, skillId, availableRooms) {
-  const catalog = availableRooms.map((room) => ({
-    tag: String(room?.roomTag || '').trim().toLowerCase(),
-    name: String(room?.name || '').trim(),
-    goal: String(room?.goal || '').trim(),
-  })).filter((room) => room.tag);
-  const candidates = [...new Set(catalog.map((room) => room.tag))];
-  const requiredOwner = String(todo?.context?.room_tag || todo?.context?.specialist_room || '').trim().toLowerCase();
-  if (requiredOwner) return requiredOwner;
-  if (!candidates.length) return null;
-  const fallback = fallbackRoomTag(todo, candidates);
-  const apiKey = process.env.GROQ_API_KEY || process.env.GROQ_KEY || '';
-  if (!apiKey) return fallback;
-  try {
-    const response = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
-      method: 'POST', signal: AbortSignal.timeout(12000),
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: process.env.HQ_DISPATCH_MODEL || 'openai/gpt-oss-120b', temperature: 0,
-        response_format: { type: 'json_object' }, max_tokens: 180,
-        messages: [
-          { role: 'system', content: 'Route one durable company work order to exactly one available specialist Room. Classify by meaning in any language, never by keyword occurrence. The bounded objective and work kind outrank broad standing instructions. Return JSON only: {"room_tag":"one exact available tag","reason":"short reason"}.' },
-          { role: 'user', content: JSON.stringify({ work_kind: todo?.kind, title: todo?.title, objective: todo?.objective, selected_skill: skillId, available_rooms: catalog }) },
-        ],
-      }),
-    });
-    if (!response.ok) return fallback;
-    const payload = await response.json();
-    const parsed = JSON.parse(String(payload?.choices?.[0]?.message?.content || '{}'));
-    const selected = String(parsed?.room_tag || '').trim().toLowerCase();
-    return candidates.includes(selected) ? selected : fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 export function verifySpecialistDelivery({ order, result, resultOutput }) {
@@ -499,45 +449,66 @@ export class NativeHqEngine {
           instruction_id: readyTodo.instructionId || null,
         },
       };
+      let selectionError = null;
       const selectedLifecycle = this.runtimePlaybooks ? await this.runtimePlaybooks.selectAssignment({
         objective: boundedObjective, context: lifecycleContext,
       }).catch((error) => {
+        selectionError = error;
         this.logger.warn('[hq-runtime] playbook selection unavailable:', error.message);
         return null;
       }) : null;
-      const declaredRoomTag = String(selectedLifecycle?.playbook?.metadata?.owner_room_tag || '').trim().toLowerCase();
-      const roomTag = selectedLifecycle?.matched
-        ? declaredRoomTag
-        : await selectSpecialistRoomTag(readyTodo, skillId, rooms);
-      const room = rooms.find((candidate) => candidate.roomTag === roomTag);
-      if (!room) {
-        await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'BLOCKED', blockedReason: `No ${roomTag} Company Room is available.` } });
-        await event(prisma, runtime, cycle, { eventType: 'blocked', title: 'The right specialist room is unavailable', summary: `I retained the todo, but no ${roomTag} Company Room exists to own it. I will advance to another independent priority instead of substituting the wrong Room.`, details: { todo_id: readyTodo.id, required_room_tag: roomTag } });
+      if (!selectedLifecycle?.matched) {
+        const reason = selectionError
+          ? `Playbook selection failed: ${String(selectionError.message || selectionError).slice(0, 1000)}`
+          : String(selectedLifecycle?.selection?.reason || 'No installed lifecycle fits this bounded assignment.').slice(0, 1000);
+        await prisma.hqTodo.update({
+          where: { id: readyTodo.id },
+          data: { status: 'BLOCKED', blockedReason: reason },
+        });
+        await event(prisma, runtime, cycle, {
+          eventType: 'blocked',
+          title: 'No checkpointed lifecycle is installed for this work',
+          summary: `${reason} I retained the todo and will advance another independent priority instead of bypassing artifact governance with a one-shot Room run.`,
+          details: {
+            todo_id: readyTodo.id,
+            selection_reason: selectedLifecycle?.selection?.reason || null,
+            selector_error: selectionError ? String(selectionError.message || selectionError).slice(0, 1000) : null,
+          },
+        });
         await scheduleHqWake({
           prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-          idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
+          idempotencyKey: `queue-after-missing-playbook:${readyTodo.id}`,
           triggerType: 'queue_advance', dueAt: new Date(),
-          payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
+          payload: { todo_id: readyTodo.id, reason: 'playbook_unavailable' },
         });
       } else {
-        const ownerId = room.permanentLeadId || room.participantIds?.[0] || null;
-        const owner = ownerId ? await prisma.digitalEmployee.findUnique({ where: { id: ownerId } }) : null;
-        const playbookAssignment = selectedLifecycle?.matched ? await this.runtimePlaybooks.createSelectedAssignment({
-          orgId: runtime.orgId,
-          roomId: room.id,
-          objective: boundedObjective,
-          idempotencyKey: `hq-todo:${runtime.epoch}:${readyTodo.id}`,
-          trigger: {
-            type: 'hq_todo',
-            runtime_id: runtime.id,
-            runtime_epoch: runtime.epoch,
-            cycle_id: cycle.id,
-            todo_id: readyTodo.id,
-          },
-          context: lifecycleContext,
-          selection: selectedLifecycle.selection,
-        }) : null;
-        if (playbookAssignment?.matched) {
+        const roomTag = String(selectedLifecycle.playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
+        const room = rooms.find((candidate) => candidate.roomTag === roomTag);
+        if (!room) {
+          await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'BLOCKED', blockedReason: `No ${roomTag} Company Room is available.` } });
+          await event(prisma, runtime, cycle, { eventType: 'blocked', title: 'The right specialist room is unavailable', summary: `I retained the todo, but no ${roomTag} Company Room exists to own it. I will advance to another independent priority instead of substituting the wrong Room.`, details: { todo_id: readyTodo.id, required_room_tag: roomTag } });
+          await scheduleHqWake({
+            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+            idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
+            triggerType: 'queue_advance', dueAt: new Date(),
+            payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
+          });
+        } else {
+          const playbookAssignment = await this.runtimePlaybooks.createSelectedAssignment({
+            orgId: runtime.orgId,
+            roomId: room.id,
+            objective: boundedObjective,
+            idempotencyKey: `hq-todo:${runtime.epoch}:${readyTodo.id}`,
+            trigger: {
+              type: 'hq_todo',
+              runtime_id: runtime.id,
+              runtime_epoch: runtime.epoch,
+              cycle_id: cycle.id,
+              todo_id: readyTodo.id,
+            },
+            context: lifecycleContext,
+            selection: selectedLifecycle.selection,
+          });
           await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'RUNNING', startedAt: new Date(), blockedReason: null } });
           await event(prisma, runtime, cycle, {
             eventType: 'work_order_created',
@@ -563,83 +534,6 @@ export class NativeHqEngine {
             });
             queueContinuationScheduled = true;
           }
-        } else {
-        const previousAttempts = await prisma.hyperWorkOrder.count({
-          where: { orgId: runtime.orgId, inputSnapshot: { path: ['todo_id'], equals: readyTodo.id } },
-        });
-        const acceptanceCriteria = Array.isArray(readyTodo.context?.acceptance_criteria) && readyTodo.context.acceptance_criteria.length
-          ? readyTodo.context.acceptance_criteria
-          : ['Return a bounded result with evidence, next action, and measurable outcome.'];
-        const { delegation, order } = await prisma.$transaction(async (tx) => {
-          const delegation = runtime.activeStageId ? await tx.growthDelegation.create({ data: {
-            orgId: runtime.orgId, growthStageId: runtime.activeStageId, roomId: room.id, roomTag,
-            objective: boundedObjective,
-            inputs: { todo_id: readyTodo.id, baseline_ref: context.evidence.baseline?.id, runtime_epoch: runtime.epoch },
-            deliverable: boundedDelegationField(readyTodo.context?.deliverable),
-            successMetric: boundedDelegationField(readyTodo.context?.success_measure || acceptanceCriteria.join('; ')),
-            status: 'RUNNING',
-          } }) : null;
-          const order = await tx.hyperWorkOrder.create({ data: {
-            orgId: runtime.orgId, roomId: room.id, hqCycleId: cycle.id, runtimeEpoch: runtime.epoch,
-            orderKey: `todo-${readyTodo.id}`,
-            growthDelegationId: delegation?.id || null,
-            kind: readyTodo.kind, title: readyTodo.title, objective: boundedObjective,
-            ownerEmployeeId: owner?.id || null, ownerSlug: owner?.slug || null, ownerLane: owner?.roleArchetype || null,
-            // HQ chooses ownership and completion. The Room Director chooses its
-            // own method skills and tools from the normal Room catalog.
-            selectedSkills: [], requiredEvidence: ['company_memory', 'connected_capabilities'],
-            acceptanceCriteria,
-            inputSnapshot: {
-              todo_id: readyTodo.id, location: readyTodo.context?.location, instruction_id: readyTodo.instructionId,
-              workflow_id: readyTodo.context?.workflow_id || null,
-              workflow_step_id: readyTodo.context?.workflow_step_id || null,
-              workflow_step_key: readyTodo.context?.workflow_step_key || null,
-              source_objective: readyTodo.objective,
-              target: readyTodo.context?.target || {},
-              completion_requirements: compileCompletionRequirements(readyTodo),
-              upstream_result: readyTodo.context?.upstream_result || null,
-              room_checkpoint: readyTodo.context?.room_checkpoint || null,
-              room_checkpoint_fingerprint: readyTodo.context?.room_checkpoint_fingerprint || null,
-              room_tag: roomTag,
-              authority: {
-                mode: readyTodo.context?.authority_mode === 'EXECUTE' ? 'EXECUTE' : 'PREPARE',
-                vision: 'semantic_only', hands: readyTodo.context?.authority_mode === 'EXECUTE' ? 'governed_external_writes' : 'internal_writes',
-                external_writes: readyTodo.context?.authority_mode === 'EXECUTE', spending: false, resumable: true,
-              },
-              runtime_epoch: runtime.epoch,
-            },
-            evidenceRefs: [context.evidence.baseline?.id].filter(Boolean),
-            attempt: previousAttempts,
-          } });
-          await tx.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'RUNNING', startedAt: new Date() } });
-          if (readyTodo.context?.workflow_step_id) await tx.hqWorkflowStep.updateMany({ where: {
-            id: readyTodo.context.workflow_step_id, workflowId: readyTodo.context.workflow_id || undefined,
-            orgId: runtime.orgId, status: { in: ['READY', 'PENDING'] },
-          }, data: { status: 'RUNNING', workOrderId: order.id, startedAt: new Date(), blockedReason: null } });
-          if (readyTodo.context?.workflow_id) await tx.hqWorkflow.updateMany({ where: {
-            id: readyTodo.context.workflow_id, orgId: runtime.orgId, status: { in: ['READY', 'WAITING'] },
-          }, data: { status: 'RUNNING', startedAt: new Date(), terminalReason: null } });
-          return { delegation, order };
-        });
-        const authorityMode = order.inputSnapshot?.authority?.mode || 'PREPARE';
-        await event(prisma, runtime, cycle, { eventType: 'work_order_created', title: `I delegated: ${readyTodo.title}`, summary: authorityMode === 'EXECUTE'
-          ? `The ${roomTag} specialist owns this bounded action in EXECUTE mode. Every external action must pass the existing connector authorization and approval policy, and completion requires durable provider receipts.`
-          : `The ${roomTag} specialist owns this bounded action in PREPARE mode. It may read evidence and persist internal deliverables, but it may not send, publish, spend, or change company policy. I will verify ${acceptanceCriteria.length} explicit completion ${acceptanceCriteria.length === 1 ? 'criterion' : 'criteria'} before advancing it.`, workOrderId: order.id, details: { todo_id: readyTodo.id, room_id: room.id, room_tag: roomTag, candidate_room_tags: rooms.map((candidate) => candidate.roomTag), routing: 'required_owner', authority: order.inputSnapshot?.authority, completion_requirements: order.inputSnapshot?.completion_requirements, acceptance_criteria: acceptanceCriteria } });
-        const nextReady = capabilityState.todos.find((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
-        if (nextReady) {
-          await scheduleHqWake({
-            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-            idempotencyKey: `queue-after-delegation:${order.id}`,
-            triggerType: 'queue_advance', dueAt: new Date(),
-            payload: { delegated_todo_id: readyTodo.id, next_todo_id: nextReady.id },
-          });
-          queueContinuationScheduled = true;
-          await event(prisma, runtime, cycle, {
-            eventType: 'schedule_created', title: 'I am continuing with independent work',
-            summary: `${readyTodo.title} remains tracked by its specialist. I am moving immediately to ${nextReady.title} instead of idling while the first result is in flight.`,
-            details: { delegated_todo_id: readyTodo.id, next_todo_id: nextReady.id }, workOrderId: order.id,
-          });
-        }
         }
       }
     } else if (!context.evidence.latest_growth_plan) {

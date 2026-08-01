@@ -105,6 +105,19 @@ else
 fi
 # de-dup
 SVCS=($(printf '%s\n' "${SVCS[@]}" | awk '!seen[$0]++'))
+if [ -n "${QUICK_DEPLOY_SKIP_SERVICES:-}" ]; then
+  declare -A SKIP_SERVICE=()
+  for skipped in ${QUICK_DEPLOY_SKIP_SERVICES//,/ }; do SKIP_SERVICE["$skipped"]=1; done
+  FILTERED_SVCS=()
+  for service in "${SVCS[@]}"; do
+    if [ "${SKIP_SERVICE[$service]:-0}" = 1 ]; then
+      echo "protected service skipped: $service"
+    else
+      FILTERED_SVCS+=("$service")
+    fi
+  done
+  SVCS=("${FILTERED_SVCS[@]}")
+fi
 [ ${#SVCS[@]} -gt 0 ] || { echo "no service dirs changed — nothing to rebuild"; exit 0; }
 echo "changed services: ${SVCS[*]}"
 

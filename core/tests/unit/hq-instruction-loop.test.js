@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { canonicalInstructionKind, getPlatformManagedCapabilities, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities } from '../../src/hq-runtime/instruction-loop.js';
+import { canonicalInstructionKind, getPlatformManagedCapabilities, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities, shouldDeferInstruction } from '../../src/hq-runtime/instruction-loop.js';
 
 test('instruction ingestion contains no keyword router or domain lifecycle decomposition', async () => {
   const source = await readFile(new URL('../../src/hq-runtime/instruction-loop.js', import.meta.url), 'utf8');
@@ -75,4 +75,15 @@ test('instruction normalization does not encode adapter requirements from a task
   }] }, fallback);
   assert.equal(unit.authority_mode, 'EXECUTE');
   assert.deepEqual(unit.required_capabilities, []);
+});
+
+test('single-outcome instructions remain executable before the first broad operating plan', () => {
+  assert.equal(shouldDeferInstruction({
+    deferTodos: true,
+    instruction: { interpreted: { execution_mode: 'single_outcome' } },
+  }), false);
+  assert.equal(shouldDeferInstruction({
+    deferTodos: true,
+    instruction: { interpreted: { execution_mode: 'operating_plan' } },
+  }), true);
 });

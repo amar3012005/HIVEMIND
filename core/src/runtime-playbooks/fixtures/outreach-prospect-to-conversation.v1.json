@@ -1,7 +1,7 @@
 {
   "playbook_id": "outreach.prospect-to-conversation",
   "version": 1,
-  "status": "ACTIVE",
+  "status": "RETIRED",
   "name": "Prospect to conversation",
   "description": "Discover and qualify organizations, persist accepted records, prepare distinct outreach, execute only under authority, and observe replies.",
   "metadata": { "owner_room_tag": "outreach" },

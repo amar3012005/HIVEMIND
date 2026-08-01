@@ -104,6 +104,7 @@ export const runtimePlaybookSchema = {
               mode: { enum: ['room', 'adapter'] },
               adapter_id: { type: 'string', minLength: 2, maxLength: 120 },
               operation: { enum: ['execute', 'monitor'] },
+              config: { type: 'object' },
             },
           },
           verifications: {

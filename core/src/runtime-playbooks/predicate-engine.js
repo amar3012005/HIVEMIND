@@ -41,8 +41,16 @@ const predicates = {
   has_min_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length >= check.value,
   has_max_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length <= check.value,
   has_exact_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length === check.value,
+  count_matches: ({ artifacts, check }) => (
+    selectArtifacts(artifacts, check.select).length === selectArtifacts(artifacts, check.target_select).length
+  ),
   has_field: ({ artifacts, check }) => compareSelected(artifacts, { ...check, mode: 'any' }, (value) => value !== undefined && value !== null),
   all_have_field: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => value !== undefined && value !== null),
+  all_have_nonempty_field: ({ artifacts, check }) => compareSelected(
+    artifacts,
+    check,
+    (value) => value != null && (typeof value !== 'string' || value.trim().length > 0),
+  ),
   none_have_field: ({ artifacts, check }) => {
     const selected = selectArtifacts(artifacts, check.select);
     return selected.length > 0 && selected.every((artifact) => getPath(artifact, check.path) == null);
@@ -100,8 +108,10 @@ const requiredArguments = {
   has_min_count: ['select', 'value'],
   has_max_count: ['select', 'value'],
   has_exact_count: ['select', 'value'],
+  count_matches: ['select', 'target_select'],
   has_field: ['select', 'path'],
   all_have_field: ['select', 'path'],
+  all_have_nonempty_field: ['select', 'path'],
   none_have_field: ['select', 'path'],
   field_equals: ['select', 'path', 'value'],
   field_not_equals: ['select', 'path', 'value'],

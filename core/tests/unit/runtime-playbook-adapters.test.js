@@ -75,6 +75,29 @@ test('Gmail adapter verifies drafts, sends once, records runtime correlation, an
   assert.equal(monitored.artifacts[0].data.subscription_ref, 'gmail-thread:thread-1');
 });
 
+test('Gmail adapter creates one provider draft per accepted message through generic execute', async () => {
+  const created = [];
+  const adapter = createGmailRuntimeAdapter({
+    prisma: { hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } } },
+    runTool: async (tool, args) => {
+      assert.equal(tool, 'gmail_create_draft');
+      created.push(args);
+      return { draftId: `draft-${created.length}`, messageId: `message-${created.length}`, threadId: `thread-${created.length}` };
+    },
+  });
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' },
+    inputs: { 'artifacts.message_record': [{
+      id: 'message-artifact-1', key: 'message_record', source_refs: ['source:1'],
+      data: { recipient: 'lead@example.test', subject: 'Grounded subject', body: 'Grounded body', lead_ref: 'lead-1', delivery_requested: true },
+    }] },
+  }, context());
+  assert.equal(created.length, 1);
+  assert.equal(result.artifacts[0].key, 'draft_record');
+  assert.equal(result.artifacts[0].data.message_ref, 'message-artifact-1');
+  assert.equal(result.artifacts[0].data.delivery_requested, true);
+});
+
 test('Gmail adapter marks provider write timeouts ambiguous so the executor cannot replay them', async () => {
   const adapter = createGmailRuntimeAdapter({
     prisma: {

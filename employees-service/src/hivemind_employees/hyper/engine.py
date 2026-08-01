@@ -3559,6 +3559,10 @@ class Director:
             else:
                 await self._emit_tool_start(fn, args)
             result = await self._exec(fn, args)
+            if self.runtime_stage and str(result or "").strip():
+                # A checkpointed stage must compile from the actual tool payload,
+                # not from the human-friendly activity bubble emitted above it.
+                self.blackboard.append(f"TOOL_RESULT[{fn}]:\n{str(result)[:12000]}")
             if fn == "seo_audit":
                 try:
                     audit_result = json.loads(result or "{}")

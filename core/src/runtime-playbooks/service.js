@@ -46,7 +46,7 @@ export class RuntimePlaybookService {
     this.onRunState = onRunState;
   }
 
-  static async create({ prisma, logger = console, director = null, adapters = null, completionFetch = undefined, onRunState = null } = {}) {
+  static async create({ prisma, logger = console, director = null, adapters = null, completionFetch = undefined, onRunState = null, onStageState = null } = {}) {
     if (!prisma) throw new Error('runtime_playbook_service_prisma_required');
     const registry = new RuntimePlaybookRegistry();
     await registry.load([createJsonPlaybookSource(await productionFixturePaths())]);
@@ -64,6 +64,7 @@ export class RuntimePlaybookService {
       director: director || new RuntimeRoomDirector({ prisma }),
       selector,
       adapters: adapterRegistry,
+      onStageState,
     });
     return new RuntimePlaybookService({ prisma, registry, selector, executor, logger, onRunState });
   }

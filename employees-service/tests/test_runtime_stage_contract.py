@@ -86,3 +86,20 @@ def test_runtime_stage_never_claims_artifacts_without_room_evidence(monkeypatch)
     result = asyncio.run(director._synthesize_runtime_stage_result())
     assert result["artifacts"] == []
     assert result["gaps"]
+
+
+def test_runtime_stage_retains_actual_tool_payload_for_artifact_compilation(monkeypatch):
+    director = _director({
+        "contract": "runtime-stage.v1",
+        "run_id": "run-3",
+        "stage_id": "discover",
+        "objective": "Collect source-backed records.",
+        "expected_artifacts": ["record"],
+    })
+
+    async def execute_tool(_name, _args):
+        return '{"records":[{"id":"durable-1","source":"provider-1"}]}'
+
+    monkeypatch.setattr(director, "_exec", execute_tool)
+    asyncio.run(director._gather_one("sample_tool", {"query": "bounded"}))
+    assert any("TOOL_RESULT[sample_tool]" in row and "durable-1" in row for row in director.blackboard)

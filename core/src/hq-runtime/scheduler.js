@@ -96,8 +96,40 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   const runtimePlaybooks = await createProductionRuntimePlaybookService({
     prisma,
     logger,
+    onStageState: async ({ phase, run, stage, artifacts, verdict }) => {
+      const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
+      if (!trigger.runtime_id || !trigger.runtime_epoch) return;
+      const keys = [...new Set((artifacts || []).map((artifact) => artifact.key).filter(Boolean))];
+      await appendHqEvent({
+        prisma,
+        runtimeId: trigger.runtime_id,
+        orgId: run.orgId,
+        runtimeEpoch: trigger.runtime_epoch,
+        cycleId: trigger.cycle_id || null,
+        eventType: phase === 'REJECTED' ? 'blocked' : phase === 'ACCEPTED' ? 'tool_result' : 'tool_started',
+        title: phase === 'STARTED' ? `Room checkpoint started: ${stage.id}`
+          : phase === 'ACCEPTED' ? `Room checkpoint accepted: ${stage.id}`
+          : `Room checkpoint needs evidence: ${stage.id}`,
+        summary: phase === 'STARTED'
+          ? stage.objective
+          : phase === 'ACCEPTED'
+            ? `The Room persisted ${(artifacts || []).length} accepted artifact(s)${keys.length ? ` across ${keys.join(', ')}` : ''}. Every declared predicate passed.`
+            : `The checkpoint retained its current evidence but did not advance. Unmet predicates: ${(verdict?.unmet || []).map((item) => item.id || item.predicate || item.reason).join(', ') || 'unknown'}.`,
+        details: {
+          runtime_playbook_run_id: run.id,
+          playbook_id: run.playbookId,
+          playbook_version: run.playbookVersion,
+          stage_id: stage.id,
+          phase,
+          artifact_refs: (artifacts || []).map((artifact) => artifact.id),
+          artifact_counts: Object.fromEntries(keys.map((key) => [key, (artifacts || []).filter((artifact) => artifact.key === key).length])),
+          verdict: verdict || null,
+        },
+        evidenceRefs: (artifacts || []).map((artifact) => artifact.id),
+      });
+    },
     onRunState: async ({ run }) => {
-      if (!['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION', 'WAITING_AUTHORITY'].includes(String(run.status))) return;
+      if (!['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION', 'WAITING_AUTHORITY', 'WAITING_EVENT'].includes(String(run.status))) return;
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
       await scheduleHqWake({

@@ -102,6 +102,7 @@ class TestRuntimeStore {
 
 const fixturePath = fileURLToPath(new URL('../../src/runtime-playbooks/fixtures/greenleaf-order-operations.v1.json', import.meta.url));
 const outreachFixturePath = fileURLToPath(new URL('../../src/runtime-playbooks/fixtures/outreach-prospect-to-conversation.v1.json', import.meta.url));
+const outreachV2FixturePath = fileURLToPath(new URL('../../src/runtime-playbooks/fixtures/outreach-prospect-to-conversation.v2.json', import.meta.url));
 
 async function loadFixture() {
   return JSON.parse(await readFile(fixturePath, 'utf8'));
@@ -252,7 +253,11 @@ test('generic executor checkpoints and resumes the GreenLeaf lifecycle end to en
       return { artifacts: outputs[stageId] || [] };
     },
   };
-  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'test-worker' });
+  const stageEvents = [];
+  const executor = new GenericStageExecutor({
+    registry, predicates: new PredicateEngine(), store, director, workerId: 'test-worker',
+    onStageState: async (entry) => stageEvents.push({ phase: entry.phase, stage: entry.stage.id, count: entry.artifacts.length }),
+  });
   const created = await executor.createRun({
     orgId: 'organization-1',
     playbookId: 'greenleaf.order-operations',
@@ -290,6 +295,12 @@ test('generic executor checkpoints and resumes the GreenLeaf lifecycle end to en
     'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'EVENT_REQUIRED',
     'EVENT_RECEIVED', 'BEFORE_EXECUTION', 'AUTHORITY_REQUIRED',
     'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'TERMINAL',
+  ]);
+  assert.deepEqual(stageEvents.filter((entry) => entry.phase === 'ACCEPTED'), [
+    { phase: 'ACCEPTED', stage: 'capture_request', count: 1 },
+    { phase: 'ACCEPTED', stage: 'confirm_terms', count: 1 },
+    { phase: 'ACCEPTED', stage: 'fulfill_request', count: 1 },
+    { phase: 'ACCEPTED', stage: 'notify_customer', count: 1 },
   ]);
 });
 
@@ -366,6 +377,28 @@ test('Director selection rejects invented identifiers rather than guessing a fal
   await assert.rejects(() => selector.select({ objective: 'ambiguous request' }), /runtime_playbook_selection_not_in_registry/);
 });
 
+test('Director retries one malformed selection response without local routing', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
+  let calls = 0;
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() {
+        calls += 1;
+        return { choices: [{ message: { content: calls === 1
+          ? '{"playbook_id":"outreach.prospect-to-conversation"'
+          : '{"playbook_id":"outreach.prospect-to-conversation","version":2,"reason":"complete fit","bindings":{"target.quantity":10,"constraints.delivery_requested":true}}' } }] };
+      },
+    }),
+  });
+  const selected = await selector.select({ objective: 'Acquire customers from a sourced local prospect list.' });
+  assert.equal(calls, 2);
+  assert.equal(selected.version, 2);
+  assert.deepEqual(selected.context_patch, { target: { quantity: 10 }, constraints: { delivery_requested: true } });
+});
+
 test('Director may decline every registered playbook instead of forcing a bad fit', async () => {
   const registry = new RuntimePlaybookRegistry();
   registry.register(await loadFixture());
@@ -387,13 +420,13 @@ test('Director may decline every registered playbook instead of forcing a bad fi
 
 test('Director binds only playbook-declared inputs without keyword parsing in the engine', async () => {
   const registry = new RuntimePlaybookRegistry();
-  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
   const selector = new DirectorPlaybookSelector({
     registry,
     completionFetch: async () => ({
       ok: true,
       async json() { return { choices: [{ message: { content: JSON.stringify({
-        playbook_id: 'outreach.prospect-to-conversation', version: 1, reason: 'complete lifecycle fit',
+        playbook_id: 'outreach.prospect-to-conversation', version: 2, reason: 'complete lifecycle fit',
         bindings: {
           'target.quantity': 10,
           'target.geography': 'Hannover, Germany',
@@ -466,7 +499,7 @@ test('service-level authority grant resumes the exact waiting run immediately', 
 });
 
 test('predicate engine exposes a bounded generic vocabulary and exact unmet checks', () => {
-  assert.equal(defaultPredicateNames.length, 20);
+  assert.equal(defaultPredicateNames.length, 22);
   const engine = new PredicateEngine();
   const verdict = engine.validateChecks([
     { id: 'minimum', predicate: 'has_min_count', select: 'records', value: 2 },
@@ -501,17 +534,18 @@ test('dynamic predicate thresholds resolve from run context without engine domai
 
 test('Outreach lifecycle loads as versioned data with no engine modification', async () => {
   const registry = new RuntimePlaybookRegistry();
-  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
-  const playbook = registry.get('outreach.prospect-to-conversation', 1);
-  assert.equal(playbook.stages.length, 7);
-  assert.deepEqual(playbook.terminal_states, ['prepared', 'conversation_started', 'no_viable_candidates']);
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
+  const playbook = registry.get('outreach.prospect-to-conversation', 2);
+  assert.equal(playbook.stages.length, 8);
+  assert.deepEqual(playbook.terminal_states, ['prepared', 'conversation_started']);
+  assert.equal(stage(playbook, 'prepare_drafts').execution.config.action, 'prepare_drafts');
   assert.equal(stage(playbook, 'deliver_outreach').authority_gate, 'external_write');
   assert.equal(stage(playbook, 'observe_responses').waits_for_event.type, 'response.received');
 });
 
 test('Outreach lifecycle advances through the Room contract and stops prepared without delivery', async () => {
   const registry = new RuntimePlaybookRegistry();
-  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
   const store = new TestRuntimeStore();
   const outputs = {
     discover_candidates: [
@@ -522,13 +556,13 @@ test('Outreach lifecycle advances through the Room contract and stops prepared w
       { id: 'qualified-1', key: 'qualified_record', data: { organization_key: 'one', fit_rationale: 'Fit one', outreach_angle: 'Angle one' }, source_refs: ['source:1'] },
       { id: 'qualified-2', key: 'qualified_record', data: { organization_key: 'two', fit_rationale: 'Fit two', outreach_angle: 'Angle two' }, source_refs: ['source:2'] },
     ],
-    persist_records: [
+    retain_records: [
       { id: 'lead-1', key: 'lead_record', data: { persistence_ref: 'leadbook:1', qualified_ref: 'qualified-1' }, source_refs: ['source:1'] },
       { id: 'lead-2', key: 'lead_record', data: { persistence_ref: 'leadbook:2', qualified_ref: 'qualified-2' }, source_refs: ['source:2'] },
     ],
-    prepare_outreach: [
-      { id: 'draft-1', key: 'draft_record', data: { draft_ref: 'drafts:1', recipient_ref: 'leadbook:1', lead_ref: 'lead-1', delivery_requested: false }, source_refs: ['source:1'] },
-      { id: 'draft-2', key: 'draft_record', data: { draft_ref: 'drafts:2', recipient_ref: 'leadbook:2', lead_ref: 'lead-2', delivery_requested: false }, source_refs: ['source:2'] },
+    compose_messages: [
+      { id: 'message-1', key: 'message_record', data: { recipient: 'one@example.test', subject: 'One', body: 'Body one', lead_ref: 'lead-1', delivery_requested: false }, source_refs: ['source:1'] },
+      { id: 'message-2', key: 'message_record', data: { recipient: 'two@example.test', subject: 'Two', body: 'Body two', lead_ref: 'lead-2', delivery_requested: false }, source_refs: ['source:2'] },
     ],
   };
   const calls = [];
@@ -539,7 +573,14 @@ test('Outreach lifecycle advances through the Room contract and stops prepared w
   });
   adapters.register({
     id: 'gmail',
-    async verify() { return { passed: true, evidence: [{ id: 'draft-verified' }], unmet: [] }; },
+    async execute(input) {
+      return { artifacts: input.inputs['artifacts.message_record'].map((message, index) => ({
+        id: `draft-${index + 1}`, key: 'draft_record',
+        data: { draft_ref: `drafts:${index + 1}`, recipient_ref: message.data.recipient,
+          message_ref: message.id, lead_ref: message.data.lead_ref, delivery_requested: false },
+        source_refs: message.source_refs,
+      })) };
+    },
   });
   const director = new RuntimeRoomDirector({ transport: async (payload) => {
     const envelope = JSON.parse(payload.execution_context);
@@ -552,27 +593,27 @@ test('Outreach lifecycle advances through the Room contract and stops prepared w
   const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, adapters, workerId: 'outreach-worker' });
   const created = await executor.createRun({
     orgId: 'organization-1', roomId: 'room-1', playbookId: 'outreach.prospect-to-conversation',
-    playbookVersion: 1, idempotencyKey: 'outreach-1',
-    context: { target: { quantity: 2 }, company: { name: 'Any Company' }, constraints: { delivery: false } },
+    playbookVersion: 2, idempotencyKey: 'outreach-1',
+    context: { target: { quantity: 2 }, company: { name: 'Any Company' }, constraints: { delivery_requested: false } },
   });
   const run = await executor.run(created.id, { orgId: created.orgId });
   assert.equal(run.status, 'COMPLETED');
   assert.equal(run.terminalState, 'prepared');
-  assert.deepEqual(run.completedStageIds, ['discover_candidates', 'qualify_candidates', 'persist_records', 'prepare_outreach']);
-  assert.deepEqual(calls.map((call) => call.stage_id), run.completedStageIds);
+  assert.deepEqual(run.completedStageIds, ['discover_candidates', 'qualify_candidates', 'retain_records', 'compose_messages', 'prepare_drafts']);
+  assert.deepEqual(calls.map((call) => call.stage_id), ['discover_candidates', 'qualify_candidates', 'retain_records', 'compose_messages']);
   assert.equal(calls.every((call) => call.contract === 'runtime-stage.v1'), true);
-  assert.equal(run.artifacts.length, 8);
+  assert.equal(run.artifacts.length, 10);
 });
 
 test('Outreach lifecycle delegates provider execution and event monitoring to adapters', async () => {
   const registry = new RuntimePlaybookRegistry();
-  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
   const store = new TestRuntimeStore();
   const roomOutputs = {
     discover_candidates: [{ id: 'candidate-1', key: 'candidate_record', data: { organization_key: 'one', viable: true }, source_refs: ['source:1'] }],
     qualify_candidates: [{ id: 'qualified-1', key: 'qualified_record', data: { organization_key: 'one', fit_rationale: 'Fit', outreach_angle: 'Angle' }, source_refs: ['source:1'] }],
-    persist_records: [{ id: 'lead-1', key: 'lead_record', data: { persistence_ref: 'record-1', qualified_ref: 'qualified-1' }, source_refs: ['source:1'] }],
-    prepare_outreach: [{ id: 'draft-1', key: 'draft_record', data: { draft_ref: 'provider-draft-1', recipient_ref: 'record-1', lead_ref: 'lead-1', delivery_requested: true }, source_refs: ['source:1'] }],
+    retain_records: [{ id: 'lead-1', key: 'lead_record', data: { persistence_ref: 'record-1', qualified_ref: 'qualified-1' }, source_refs: ['source:1'] }],
+    compose_messages: [{ id: 'message-1', key: 'message_record', data: { recipient: 'lead@example.test', subject: 'Hello', body: 'A grounded message.', lead_ref: 'lead-1', delivery_requested: true }, source_refs: ['source:1'] }],
     handle_response: [{ id: 'response-1', key: 'response_record', data: { classification: 'interested', timeline_ref: 'record-1', provider_event_ref: 'event-artifact-1' }, source_refs: ['provider:reply-1'] }],
   };
   const roomCalls = [];
@@ -588,7 +629,14 @@ test('Outreach lifecycle delegates provider execution and event monitoring to ad
   adapters.register({
     id: 'gmail',
     async verify() { adapterCalls.push('verify'); return { passed: true, evidence: [], unmet: [] }; },
-    async execute() {
+    async execute(input) {
+      if (input.config?.action === 'prepare_drafts') {
+        adapterCalls.push('prepare');
+        return { artifacts: [{
+          id: 'draft-1', key: 'draft_record', source_refs: ['source:1'],
+          data: { draft_ref: 'provider-draft-1', recipient_ref: 'lead@example.test', message_ref: 'message-1', lead_ref: 'lead-1', delivery_requested: true },
+        }] };
+      }
       adapterCalls.push('execute');
       return { artifacts: [{
         id: 'receipt-1', key: 'delivery_receipt', source_refs: ['provider:sent-1'],
@@ -606,7 +654,7 @@ test('Outreach lifecycle delegates provider execution and event monitoring to ad
   const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, adapters, workerId: 'outreach-adapter-worker' });
   const created = await executor.createRun({
     orgId: 'organization-1', roomId: 'room-1', playbookId: 'outreach.prospect-to-conversation',
-    playbookVersion: 1, idempotencyKey: 'outreach-adapter-1', context: { target: { quantity: 1 } },
+    playbookVersion: 2, idempotencyKey: 'outreach-adapter-1', context: { target: { quantity: 1 } },
   });
   let run = await executor.run(created.id, { orgId: created.orgId });
   assert.equal(run.status, 'WAITING_AUTHORITY');
@@ -616,7 +664,7 @@ test('Outreach lifecycle delegates provider execution and event monitoring to ad
   assert.equal(run.status, 'WAITING_EVENT');
   assert.equal(run.currentStageId, 'handle_response');
   assert.equal(run.waitingFor.correlation_value, 'thread-1');
-  assert.deepEqual(adapterCalls, ['verify', 'execute', 'monitor']);
+  assert.deepEqual(adapterCalls, ['prepare', 'execute', 'monitor']);
   assert.equal(roomCalls.includes('deliver_outreach'), false);
   assert.equal(roomCalls.includes('observe_responses'), false);
   run = await executor.run(run.id, {

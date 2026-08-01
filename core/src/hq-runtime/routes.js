@@ -205,6 +205,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             interpreted: {
               source: 'runtime_invitation',
               focuses: Array.isArray(body.focuses) ? body.focuses.map(String).slice(0, 12) : [],
+              execution_mode: body.execution_mode === 'single_outcome' ? 'single_outcome' : 'operating_plan',
             },
           },
         });

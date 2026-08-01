@@ -1,0 +1,141 @@
+{
+  "playbook_id": "outreach.prospect-to-conversation",
+  "version": 2,
+  "status": "ACTIVE",
+  "name": "Prospect to conversation",
+  "description": "Discover and qualify organizations, retain accepted lead records, prepare provider drafts, execute only under authority, and observe replies.",
+  "metadata": { "owner_room_tag": "outreach" },
+  "input_contract": { "fields": [
+    { "path": "target.quantity", "type": "integer", "description": "Bounded batch size. Open-ended requests use this playbook-defined batch.", "required": true, "default_value": 10 },
+    { "path": "target.geography", "type": "string", "description": "Requested or retained geographic scope." },
+    { "path": "target.segment", "type": "string", "description": "Requested or retained organization segment." },
+    { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether delivery is requested after authority is granted.", "required": true, "default_value": false }
+  ]},
+  "initial_stage_id": "discover_candidates",
+  "terminal_states": ["prepared", "conversation_started"],
+  "stages": [
+    {
+      "id": "discover_candidates",
+      "objective": "Discover a bounded batch of source-backed candidate organizations matching the supplied company, segment, geography, and quantity. Use the Room Director's relevant search and location tools. Retain exact provider evidence, contact routes, and any durable record identifier returned by those tools.",
+      "input_refs": ["trigger.payload", "context.company", "context.target", "context.constraints"],
+      "expected_artifacts": ["candidate_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "candidate_record", "value": 1 },
+        { "predicate": "is_source_backed", "select": "candidate_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "candidate_record", "path": "data.organization_key" },
+        { "predicate": "unique_by", "select": "candidate_record", "path": "data.organization_key" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "qualify_candidates" }],
+      "on_failure": "REPAIR", "max_attempts": 3
+    },
+    {
+      "id": "qualify_candidates",
+      "objective": "Qualify every candidate against retained company evidence. Preserve its verified contact route, durable record reference, a distinct fit rationale, a distinct outreach angle, and the evidence used.",
+      "input_refs": ["context.company", "context.target", "artifacts.candidate_record"],
+      "expected_artifacts": ["qualified_record"],
+      "completion_checks": [
+        { "predicate": "count_matches", "select": "qualified_record", "target_select": "candidate_record" },
+        { "predicate": "all_have_nonempty_field", "select": "qualified_record", "path": "data.fit_rationale" },
+        { "predicate": "all_have_nonempty_field", "select": "qualified_record", "path": "data.outreach_angle" },
+        { "predicate": "is_source_backed", "select": "qualified_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "unique_by", "select": "qualified_record", "path": "data.organization_key" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "retain_records" }],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "retain_records",
+      "objective": "Return one lead record for every accepted organization using only durable tenant record identifiers already produced by Room tools. Prose and unsaved lists are not records.",
+      "input_refs": ["artifacts.qualified_record"],
+      "expected_artifacts": ["lead_record"],
+      "completion_checks": [
+        { "predicate": "count_matches", "select": "lead_record", "target_select": "qualified_record" },
+        { "predicate": "all_have_nonempty_field", "select": "lead_record", "path": "data.persistence_ref" },
+        { "predicate": "all_reference_existing", "select": "lead_record", "path": "data.qualified_ref", "target_select": "qualified_record", "target_path": "id" }
+      ],
+      "verifications": [{ "adapter_id": "tenant-records", "operation": "verify", "select": "lead_record", "config": { "record_paths": ["data.persistence_ref"] } }],
+      "transitions": [{ "default": true, "to_stage": "compose_messages" }],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "compose_messages",
+      "objective": "Write one concise personalized message for each retained lead with a verified recipient. Ground it in company evidence, fit rationale, and distinct outreach angle. Return recipient, subject, body, lead reference, and whether delivery was requested. Do not create a provider draft or send in this Room stage.",
+      "input_refs": ["context.company", "context.constraints", "artifacts.qualified_record", "artifacts.lead_record"],
+      "expected_artifacts": ["message_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "message_record", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.recipient" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.subject" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.body" },
+        { "predicate": "all_have_field", "select": "message_record", "path": "data.delivery_requested" },
+        { "predicate": "all_reference_existing", "select": "message_record", "path": "data.lead_ref", "target_select": "lead_record", "target_path": "id" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "prepare_drafts" }],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_drafts",
+      "objective": "Create provider drafts from accepted message records and retain one durable draft receipt per message.",
+      "input_refs": ["artifacts.message_record"],
+      "expected_artifacts": ["draft_record"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "prepare_drafts" } },
+      "completion_checks": [
+        { "predicate": "count_matches", "select": "draft_record", "target_select": "message_record" },
+        { "predicate": "all_have_nonempty_field", "select": "draft_record", "path": "data.draft_ref" },
+        { "predicate": "all_have_nonempty_field", "select": "draft_record", "path": "data.recipient_ref" },
+        { "predicate": "all_have_field", "select": "draft_record", "path": "data.delivery_requested" },
+        { "predicate": "all_reference_existing", "select": "draft_record", "path": "data.message_ref", "target_select": "message_record", "target_path": "id" }
+      ],
+      "transitions": [
+        { "when": { "predicate": "field_equals", "select": "draft_record", "path": "data.delivery_requested", "value": false, "mode": "all" }, "to_terminal": "prepared" },
+        { "default": true, "to_stage": "deliver_outreach" }
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "deliver_outreach",
+      "objective": "Send only authority-approved provider drafts and persist one provider receipt per action.",
+      "input_refs": ["context.constraints", "artifacts.draft_record"],
+      "expected_artifacts": ["delivery_receipt"],
+      "authority_gate": "external_write", "authority_policy_key": "external_writes",
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "deliver" } },
+      "completion_checks": [
+        { "predicate": "count_matches", "select": "delivery_receipt", "target_select": "draft_record" },
+        { "predicate": "has_provider_receipt", "select": "delivery_receipt", "receipt_path": "data.provider_receipt_id" },
+        { "predicate": "status_in", "select": "delivery_receipt", "path": "data.status", "values": ["accepted", "delivered"] }
+      ],
+      "transitions": [{ "default": true, "to_stage": "observe_responses" }],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_responses",
+      "objective": "Create durable response observation subscriptions for every delivered thread.",
+      "input_refs": ["artifacts.lead_record", "artifacts.delivery_receipt"],
+      "expected_artifacts": ["observation_subscription"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "monitor" },
+      "completion_checks": [
+        { "predicate": "count_matches", "select": "observation_subscription", "target_select": "delivery_receipt" },
+        { "predicate": "has_provider_receipt", "select": "observation_subscription", "receipt_path": "data.subscription_ref" }
+      ],
+      "waits_for_event": { "type": "response.received", "correlation_path": "data.correlation_ref" },
+      "transitions": [{ "default": true, "to_stage": "handle_response" }],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "handle_response",
+      "objective": "Read and classify the correlated response, update the retained lead timeline, and return the next governed action without inventing intent.",
+      "input_refs": ["context.company", "artifacts.lead_record", "artifacts.delivery_receipt", "artifacts.observation_subscription", "event"],
+      "expected_artifacts": ["response_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "response_record", "value": 1 },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.classification" },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.timeline_ref" },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.provider_event_ref" },
+        { "predicate": "is_source_backed", "select": "response_record", "source_path": "source_refs", "value": 1 }
+      ],
+      "verifications": [{ "adapter_id": "tenant-records", "operation": "verify", "select": "response_record", "config": { "record_paths": ["data.timeline_ref"], "source_artifact_paths": ["data.provider_event_ref"] } }],
+      "transitions": [{ "default": true, "to_terminal": "conversation_started" }],
+      "on_failure": "REPAIR", "max_attempts": 2
+    }
+  ]
+}

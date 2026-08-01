@@ -17,6 +17,25 @@ function inputArtifacts(input, ref) {
   return asArray(input?.inputs?.[ref]);
 }
 
+function messageDraftArtifact(context, artifact, draft) {
+  const draftId = String(draft?.draftId || '').trim();
+  return {
+    id: artifactId('draft', context.runId, artifact.id, draftId),
+    key: 'draft_record',
+    status: 'READY',
+    data: {
+      draft_ref: draftId,
+      message_ref: artifact.id,
+      lead_ref: artifact?.data?.lead_ref || null,
+      recipient_ref: String(artifact?.data?.recipient || '').trim(),
+      delivery_requested: artifact?.data?.delivery_requested === true,
+      thread_id: draft?.threadId || null,
+    },
+    source_refs: [...new Set([...(artifact?.source_refs || []), `gmail-draft:${draftId}`])],
+    external_ref: draftId,
+  };
+}
+
 async function ownerFor(prisma, context) {
   const room = await prisma.hyperRoom.findFirst({
     where: { id: context.roomId, orgId: context.orgId, archivedAt: null },
@@ -92,6 +111,42 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
     id: 'gmail',
     name: 'Gmail',
     description: 'Verifies drafts, sends authority-approved drafts, and creates reply correlation subscriptions.',
+    async execute(input, context) {
+      if (input?.config?.action !== 'prepare_drafts') {
+        return deliverDrafts(input, context);
+      }
+      const messages = inputArtifacts(input, 'artifacts.message_record');
+      const actor = await ownerFor(prisma, context);
+      const produced = [];
+      for (const artifact of messages) {
+        const recipient = String(artifact?.data?.recipient || '').trim();
+        const subject = String(artifact?.data?.subject || '').trim();
+        const body = String(artifact?.data?.body || '').trim();
+        if (!recipient || !subject || !body) {
+          throw new Error(`runtime_gmail_message_incomplete:${artifact?.id || 'unknown'}`);
+        }
+        let draft;
+        try {
+          draft = await google('gmail_create_draft', {
+            to: recipient,
+            subject,
+            body,
+            markdown: true,
+          }, actor);
+        } catch (cause) {
+          const error = new Error(`runtime_gmail_draft_ambiguous:${artifact?.id || 'unknown'}:${cause?.message || cause}`);
+          error.ambiguous = true;
+          throw error;
+        }
+        if (!draft?.draftId) {
+          const error = new Error(`runtime_gmail_draft_receipt_incomplete:${artifact?.id || 'unknown'}`);
+          error.ambiguous = true;
+          throw error;
+        }
+        produced.push(messageDraftArtifact(context, artifact, draft));
+      }
+      return { artifacts: produced, gaps: [] };
+    },
     async verify(input, context) {
       const artifacts = asArray(input.artifacts);
       const actor = await ownerFor(prisma, context);
@@ -110,7 +165,29 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
         unmet: missing.map((reference) => ({ predicate: 'provider_draft_exists', reason: `draft_not_found:${reference || 'missing'}` })),
       };
     },
-    async execute(input, context) {
+    async monitor(input, context) {
+      const receipts = inputArtifacts(input, 'artifacts.delivery_receipt');
+      const artifacts = receipts.map((receipt) => {
+        const correlation = String(receipt?.data?.correlation_ref || receipt?.data?.thread_id || '').trim();
+        if (!correlation) throw new Error(`runtime_gmail_correlation_missing:${receipt?.id || 'unknown'}`);
+        return {
+          id: artifactId('subscription', context.runId, correlation),
+          key: 'observation_subscription',
+          status: 'READY',
+          data: {
+            subscription_ref: `gmail-thread:${correlation}`,
+            correlation_ref: correlation,
+            delivery_ref: receipt.id,
+          },
+          source_refs: receipt.source_refs || [],
+          external_ref: correlation,
+        };
+      });
+      return { artifacts, gaps: [] };
+    },
+  };
+
+  async function deliverDrafts(input, context) {
       const artifacts = inputArtifacts(input, 'artifacts.draft_record');
       const actor = await ownerFor(prisma, context);
       const produced = [];
@@ -149,26 +226,5 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
         produced.push(receiptArtifact(context, artifact, { ...providerDraft, draftId: ref }, receipt));
       }
       return { artifacts: produced, gaps: [] };
-    },
-    async monitor(input, context) {
-      const receipts = inputArtifacts(input, 'artifacts.delivery_receipt');
-      const artifacts = receipts.map((receipt) => {
-        const correlation = String(receipt?.data?.correlation_ref || receipt?.data?.thread_id || '').trim();
-        if (!correlation) throw new Error(`runtime_gmail_correlation_missing:${receipt?.id || 'unknown'}`);
-        return {
-          id: artifactId('subscription', context.runId, correlation),
-          key: 'observation_subscription',
-          status: 'READY',
-          data: {
-            subscription_ref: `gmail-thread:${correlation}`,
-            correlation_ref: correlation,
-            delivery_ref: receipt.id,
-          },
-          source_refs: receipt.source_refs || [],
-          external_ref: correlation,
-        };
-      });
-      return { artifacts, gaps: [] };
-    },
-  };
+  }
 }

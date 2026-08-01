@@ -114,8 +114,17 @@ function eventMatches(waitingFor, event) {
   return getPath(event, waitingFor.correlation_path) === waitingFor.correlation_value;
 }
 
+async function notifyStage(listener, payload) {
+  if (typeof listener !== 'function') return;
+  try {
+    await listener(payload);
+  } catch {
+    // User-facing progress is observability. It must not alter durable execution.
+  }
+}
+
 export class GenericStageExecutor {
-  constructor({ registry, predicates, store, director, selector = null, adapters = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
+  constructor({ registry, predicates, store, director, selector = null, adapters = null, onStageState = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
     if (!registry || !predicates || !store || !director?.execute) {
       throw new Error('runtime_executor_dependencies_required');
     }
@@ -125,6 +134,7 @@ export class GenericStageExecutor {
     this.director = director;
     this.selector = selector;
     this.adapters = adapters;
+    this.onStageState = onStageState;
     this.workerId = workerId;
     this.maxSteps = maxSteps;
   }
@@ -198,6 +208,7 @@ export class GenericStageExecutor {
           state: { completed_stage_ids: run.completedStageIds },
         });
         run = await this.store.loadRun(runId, orgId);
+        await notifyStage(this.onStageState, { phase: 'STARTED', run, stage, artifacts: [], verdict: null });
 
         if (stage.authority_gate && !run.authorityGates.includes(stage.authority_gate)) {
           await this.store.updateRun(runId, orgId, { status: 'WAITING_AUTHORITY' });
@@ -242,6 +253,7 @@ export class GenericStageExecutor {
               inputs: executionRequest.inputs,
               expected_artifacts: stage.expected_artifacts,
               checks: stage.completion_checks,
+              config: asObject(execution.config),
             }, { orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId })
             : await this.director.execute(executionRequest);
           if (execution.mode === 'adapter' && !this.adapters) {
@@ -306,6 +318,7 @@ export class GenericStageExecutor {
           verdict,
           artifactRefs: persisted.map((artifact) => artifact.id),
         });
+        await notifyStage(this.onStageState, { phase: verdict.passed ? 'ACCEPTED' : 'REJECTED', run, stage, artifacts: persisted, verdict });
 
         if (!verdict.passed) {
           const attempt = attempts[stage.id];

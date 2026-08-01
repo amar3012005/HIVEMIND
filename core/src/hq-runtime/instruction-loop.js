@@ -174,6 +174,10 @@ export function canonicalInstructionKind(interpreted = {}) {
   return String(interpreted.intent || 'operating_focus').trim().toLowerCase();
 }
 
+export function shouldDeferInstruction({ deferTodos = false, instruction = {} } = {}) {
+  return Boolean(deferTodos && instruction?.interpreted?.execution_mode !== 'single_outcome');
+}
+
 export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false }) {
   const pending = await prisma.hqInstruction.findMany({
     where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 20,
@@ -181,9 +185,11 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
   const created = [];
   for (const instruction of pending) {
     const interpreted = await interpretHqInstructionSemantic(instruction.body, company);
-    if (deferTodos) {
+    const executionMode = instruction.interpreted?.execution_mode === 'single_outcome'
+      ? 'single_outcome' : 'operating_plan';
+    if (shouldDeferInstruction({ deferTodos, instruction })) {
       await prisma.hqInstruction.update({ where: { id: instruction.id }, data: {
-        status: 'APPLIED', interpreted: { ...interpreted, incorporated_into_initial_plan: true }, appliedAt: new Date(),
+        status: 'APPLIED', interpreted: { ...interpreted, execution_mode: executionMode, incorporated_into_initial_plan: true }, appliedAt: new Date(),
       } });
       created.push({ instruction, interpreted, todo: null });
       continue;
@@ -213,6 +219,7 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
       await tx.hqInstruction.update({ where: { id: instruction.id }, data: {
         status: 'APPLIED', interpreted: {
           ...interpreted,
+          execution_mode: executionMode,
           work_units: units,
           workflow_todo_ids: rows.map((row) => row.id),
         }, appliedAt: new Date(),

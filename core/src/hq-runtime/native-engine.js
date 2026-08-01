@@ -291,6 +291,24 @@ export class NativeHqEngine {
             details: { run_id: run.id, gate: authority.gate, policy_key: authority.policyKey },
           });
         }
+      } else if (run.status === 'WAITING_EVENT') {
+        await prisma.hqTodo.update({ where: { id: todo.id }, data: {
+          status: 'RUNNING', blockedReason: null,
+          result: {
+            runtime_playbook_run_id: run.id,
+            playbook_id: run.playbookId,
+            playbook_version: run.playbookVersion,
+            status: run.status,
+            waiting_for: run.waitingFor || {},
+            artifact_refs: artifactRefs,
+          },
+        } });
+        await event(prisma, runtime, cycle, {
+          eventType: 'observation', title: `Response monitoring is active: ${todo.title}`,
+          summary: `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). Provider response correlation is active; a matching event will resume this same run immediately.`,
+          details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
+          evidenceRefs: artifactRefs,
+        });
       } else {
         const completed = run.status === 'COMPLETED';
         await prisma.hqTodo.update({
@@ -475,24 +493,32 @@ export class NativeHqEngine {
             selector_error: selectionError ? String(selectionError.message || selectionError).slice(0, 1000) : null,
           },
         });
-        await scheduleHqWake({
-          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-          idempotencyKey: `queue-after-missing-playbook:${readyTodo.id}`,
-          triggerType: 'queue_advance', dueAt: new Date(),
-          payload: { todo_id: readyTodo.id, reason: 'playbook_unavailable' },
-        });
+        const anotherReady = capabilityState.todos.some((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
+        if (anotherReady) {
+          await scheduleHqWake({
+            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+            idempotencyKey: `queue-after-missing-playbook:${readyTodo.id}`,
+            triggerType: 'queue_advance', dueAt: new Date(),
+            payload: { todo_id: readyTodo.id, reason: 'playbook_unavailable' },
+          });
+          queueContinuationScheduled = true;
+        }
       } else {
         const roomTag = String(selectedLifecycle.playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
         const room = rooms.find((candidate) => candidate.roomTag === roomTag);
         if (!room) {
           await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'BLOCKED', blockedReason: `No ${roomTag} Company Room is available.` } });
           await event(prisma, runtime, cycle, { eventType: 'blocked', title: 'The right specialist room is unavailable', summary: `I retained the todo, but no ${roomTag} Company Room exists to own it. I will advance to another independent priority instead of substituting the wrong Room.`, details: { todo_id: readyTodo.id, required_room_tag: roomTag } });
-          await scheduleHqWake({
-            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-            idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
-            triggerType: 'queue_advance', dueAt: new Date(),
-            payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
-          });
+          const anotherReady = capabilityState.todos.some((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
+          if (anotherReady) {
+            await scheduleHqWake({
+              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+              idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
+              triggerType: 'queue_advance', dueAt: new Date(),
+              payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
+            });
+            queueContinuationScheduled = true;
+          }
         } else {
           const playbookAssignment = await this.runtimePlaybooks.createSelectedAssignment({
             orgId: runtime.orgId,
@@ -598,17 +624,17 @@ export class NativeHqEngine {
       });
     }
 
-    const dueAt = context.growth.active_stage?.checkpoint_at
-      ? new Date(context.growth.active_stage.checkpoint_at)
-      : new Date(Date.now() + DAY);
-    await scheduleHqWake({
+    const stageCheckpoint = context.growth.active_stage?.checkpoint_at
+      ? new Date(context.growth.active_stage.checkpoint_at) : null;
+    const dueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
+    if (dueAt) await scheduleHqWake({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-      idempotencyKey: `checkpoint:${runtime.activeStageId || cycle.id}:${dueAt.toISOString()}`,
+      idempotencyKey: `checkpoint:${runtime.activeStageId}:${dueAt.toISOString()}`,
       triggerType: 'checkpoint', dueAt, payload: { stage_id: runtime.activeStageId },
     });
     const measurement = context.growth.active_stage?.measurement || {};
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
-    const waitingDays = Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY));
+    const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
     const [pendingLegacySpecialist, pendingPlaybookRun] = await Promise.all([
       prisma.hyperWorkOrder.findFirst({
@@ -616,23 +642,36 @@ export class NativeHqEngine {
         select: { title: true, status: true },
       }),
       prisma.runtimePlaybookRun?.findFirst ? prisma.runtimePlaybookRun.findFirst({
-        where: { orgId: runtime.orgId, status: 'ACTIVE' },
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
         orderBy: { updatedAt: 'asc' }, select: { id: true, currentStageId: true, status: true },
       }).catch(() => null) : Promise.resolve(null),
     ]);
     const pendingSpecialist = pendingLegacySpecialist || (pendingPlaybookRun ? {
       title: `stage ${pendingPlaybookRun.currentStageId}`, status: pendingPlaybookRun.status,
     } : null);
+    const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
+    const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
     const sleepReason = queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability
       ? `I am pausing because ${openCapability.provider} is not connected. That capability is required by the next todo; pretending otherwise would produce an unusable result. Connect it and I will wake immediately, verify the tenant binding, and continue the same todo.`
+      : waitingForResponse
+        ? 'I am watching the accepted provider correlations for matching responses. The configured monitor resumes this exact checkpoint when an event arrives; there is no arbitrary measurement delay.'
       : pendingSpecialist
-        ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately. The ${waitingDays}-day checkpoint is only the next measurement review; it is not a delay before I can continue.`
-      : `I am sleeping because assigned work is owned and no material evidence has changed. The next useful decision needs about ${waitingDays} day(s) of observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} to compare results with the active stage thresholds. I will wake earlier for a campaign result, connector change or failure, specialist result, new instruction, or material performance change.`;
-    await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next checkpoint', summary: `The next evidence review is ${dueAt.toISOString()}. Its timing comes from the active Growth Stage, not an arbitrary sleep interval.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
+        ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately.`
+      : blockedTodos.length
+        ? `${blockedTodos.length} retained todo(s) cannot advance because their exact lifecycle or owner is unavailable. No work is running, and I will not describe this as observation or completed activity.`
+      : dueAt
+        ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
+      : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
+    if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
     await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null });
-    await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled ? 'observation' : 'sleep', title: queueContinuationScheduled ? 'The queue is still moving' : openCapability ? 'I am waiting for access' : pendingSpecialist ? 'I am waiting for specialist work' : 'I am sleeping', summary: sleepReason, details: { due_at: dueAt.toISOString(), capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist } });
+    const waitingTitle = queueContinuationScheduled ? 'The queue is still moving'
+      : openCapability ? 'I am waiting for access'
+      : waitingForResponse ? 'I am monitoring for replies'
+      : pendingSpecialist ? 'I am waiting for specialist work'
+      : blockedTodos.length ? 'The operating queue needs intervention' : 'I am sleeping';
+    await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
     return { transition: 'WAIT', nextWakeAt: dueAt };
   }
 }

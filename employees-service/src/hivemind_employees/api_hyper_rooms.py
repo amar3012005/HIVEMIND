@@ -2008,7 +2008,11 @@ def _apply_outreach_contract(
     outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else None
     if not outreach:
         return verdict
-    requested = max(1, min(50, int(outreach.get("requested_count") or 1)))
+    raw_requested = outreach.get("requested_count")
+    requested = (
+        max(1, min(50, int(raw_requested)))
+        if raw_requested is not None else None
+    )
     metrics = plan.get("outreach_metrics") if isinstance(plan.get("outreach_metrics"), dict) else {}
     pending_count = sum(
         1 for item in pending
@@ -2024,11 +2028,14 @@ def _apply_outreach_contract(
         "deliver": 0,
         "monitor": 0,
     }
-    missing = [
-        f"outreach lifecycle {phase} incomplete: {observed[phase]}/{requested}"
-        for phase in ("discover", "persist", "draft", "deliver", "monitor")
-        if outreach.get(phase) is True and observed[phase] < requested
-    ]
+    missing = []
+    for phase in ("discover", "persist", "draft", "deliver", "monitor"):
+        if outreach.get(phase) is not True:
+            continue
+        if requested is not None and observed[phase] < requested:
+            missing.append(f"outreach lifecycle {phase} incomplete: {observed[phase]}/{requested}")
+        elif requested is None and observed[phase] < 1:
+            missing.append(f"outreach lifecycle {phase} produced no verified result")
     verdict["outreach_contract"] = outreach
     verdict["outreach_observed"] = observed
     if missing:

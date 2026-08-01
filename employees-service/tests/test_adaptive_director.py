@@ -176,6 +176,126 @@ def test_outreach_director_preserves_full_compound_lifecycle(monkeypatch):
     assert plan["post_output_actions"][0]["capability"] == "gmail.send_email"
 
 
+def test_runtime_outreach_keeps_room_selected_lifecycle_and_action(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    director, _events = _director(
+        message="Find relevant companies nearby and prepare personalized outreach",
+        room_kind="outreach",
+        enabled_connectors=["gmail"],
+    )
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-1",
+        "objective": "Build a source-backed local pipeline and prepare outreach.",
+    }
+    payload = {
+        "recall_queries": ["existing qualified leads"],
+        "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
+        "places_query": "regulated companies in Hannover", "needs_debate": True,
+        "method_skills": ["prospect-qualification", "cold-email-sequence"],
+        "campaign_method_assignments": [],
+        "work_orders": [{
+            "kind": "research", "owner_lane": "Researcher",
+            "title": "Build and prepare the local pipeline",
+            "objective": "Discover, persist, and prepare personalized outreach.",
+            "required_evidence": ["company context", "provider evidence"],
+            "acceptance_criteria": ["Return durable records and prepared actions"],
+        }],
+        "turn_mode": "task", "collaboration_intensity": "deep",
+        "response_depth": "operating", "evidence_mode": "prospecting",
+        "post_output_actions": [{
+            "capability": "gmail.create_draft", "explicit": True, "target_hint": None,
+        }],
+        "outreach_request": {
+            "requested_count": None, "geography": "Hannover", "sector": None,
+            "audience": "regulated companies", "offer": None, "discover": True,
+            "persist": True, "draft": True, "deliver": False, "monitor": False,
+        },
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["outreach_request"] == payload["outreach_request"]
+    assert plan["post_output_actions"][0]["capability"] == "gmail.create_draft"
+    assert plan["places_query"] == "regulated companies in Hannover"
+    assert plan["needs_debate"] is False
+    assert plan["collaboration_intensity"] == "standard"
+    assert len(plan["work_orders"]) == 1
+
+
+def test_runtime_outreach_uses_same_run_records_for_one_batch_of_drafts(monkeypatch):
+    director, _events = _director(
+        message="Find relevant local companies and prepare personalized drafts",
+        room_kind="outreach",
+    )
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-2",
+        "objective": "Build and prepare a local outreach batch.",
+        "completion_requirements": [
+            {"type": "records_persisted", "minimum": 2},
+            {"type": "email_drafts", "minimum": 2},
+        ],
+    }
+    director.post_output_actions = [{
+        "capability": "gmail.create_draft", "operation": "draft_email",
+        "connected": True,
+    }]
+    model_calls = []
+    records = [{
+        "company": "Alpha GmbH", "email": "hello@alpha.example",
+        "source_url": "https://alpha.example", "fit_reason": "Strong fit",
+        "outreach_angle": "Relevant workflow",
+    }, {
+        "company": "Beta GmbH", "email": "hello@beta.example",
+        "source_url": "https://beta.example", "fit_reason": "Strong fit",
+        "outreach_angle": "Different workflow",
+    }]
+
+    async def execute(name, _args):
+        director._exec_counts[name] += 1
+        return json.dumps({"prospects": records, "persisted": 2})
+
+    async def model(*args, **_kwargs):
+        model_calls.append(args)
+        return {"content": json.dumps({"email_drafts": [{
+            "prospect_company": record["company"], "to": record["email"],
+            "subject": f"A note for {record['company']}",
+            "body": "A grounded and personalized message. Open to a short conversation?",
+            "rationale": record["outreach_angle"],
+        } for record in records]})}
+
+    monkeypatch.setattr(director, "_exec", execute)
+    monkeypatch.setattr(director, "_groq", model)
+    plan = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "places_query": "companies in Hannover",
+        "method_skills": ["prospect-qualification", "cold-email-sequence"],
+        "post_output_actions": director.post_output_actions,
+        "outreach_request": {
+            "requested_count": 2, "discover": True, "persist": True,
+            "draft": True, "deliver": False, "monitor": False,
+        },
+        "work_orders": [{
+            "kind": "research", "owner_lane": "Researcher", "title": "Build batch",
+            "objective": "Discover, persist, and draft.", "required_evidence": [],
+            "acceptance_criteria": [],
+        }],
+    }
+
+    results = asyncio.run(director._run_work_order_subtasks(plan))
+
+    assert len(model_calls) == 1
+    assert results[0]["status"] == "completed"
+    artifacts = results[0]["output"]["artifacts"]
+    assert [artifact["kind"] for artifact in artifacts] == ["prospect_records", "email_drafts"]
+    assert artifacts[1]["record_count"] == 2
+
+
 def test_work_brief_is_short_natural_language_and_mentions_the_report():
     director, events = _director(message="Build a market-entry strategy")
     director.response_depth = "operating"

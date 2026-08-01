@@ -29,11 +29,16 @@ _MAX_REPORT_CHARS = 9000
 
 
 class _Prospect(BaseModel):
+    lead_id: Optional[str] = None
     company: str
     email: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None
     address: Optional[str] = None
+    source_url: Optional[str] = None
+    fit_reason: Optional[str] = None
+    outreach_angle: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -72,6 +77,35 @@ async def _report_for_turn(turn_id: str) -> str:
     return body[:_MAX_REPORT_CHARS]
 
 
+def _email_system_prompt(req: GenerateRequest) -> str:
+    from .hyper.skills import load_method_skill
+    from .hyper.engine import _SKILLS as _ENGINE_SKILLS
+
+    skill = (load_method_skill("cold-email-sequence") or "")[:900]
+    polish = str(_ENGINE_SKILLS.get("polished-email") or "")[:700]
+    sender = str(req.sender_company or req.sender_name or req.sender_email or "the sender company").strip()
+    prompt = (
+        "You are the Outreach Intelligence operator preparing one email to a specific prospect. "
+        "Apply these method skills exactly:\n" + skill + "\n" + polish + "\n"
+        "GROUNDING RULES: this is Touch 1 to this firm. Derive the why-now hook and value point from "
+        "the company context, Room result, retained fit rationale, outreach angle, and verified prospect "
+        "profile below. Use only supplied facts. The copy must be distinct to this prospect and must not "
+        "infer its customers, needs, or activity from a name, address, or domain. Use the sender brand exactly "
+        f"as supplied: {sender}. Do not insert a website, product name, claim, or metric that is absent from "
+        "the supplied context. Under 160 words. Never invent contacts or placeholders."
+    )
+    if req.sender_email:
+        prompt += (
+            f" SENDER IDENTITY: send as {req.sender_name or req.sender_email} from "
+            f"{req.sender_company or 'the sender company'} at {req.sender_email}. Sign with this exact verified "
+            "identity and do not invent a title or role."
+        )
+    return prompt + (
+        ' Respond with ONLY a JSON object: {"subject": "...", "body": "..."} '
+        "(body is plain markdown with no Subject line)."
+    )
+
+
 def _json_block(text: str) -> Optional[Dict[str, Any]]:
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not m:
@@ -89,8 +123,11 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
     report = await _report_for_turn(req.turn_id)
     p = req.prospect
     firm = (
+        f"Lead ID: {p.lead_id or '—'}\n"
         f"Company: {p.company}\nWebsite: {p.website or '—'}\n"
-        f"Address: {p.address or '—'}\nPhone: {p.phone or '—'}\nEmail: {p.email or '—'}"
+        f"Address: {p.address or '—'}\nPhone: {p.phone or '—'}\nEmail: {p.email or '—'}\n"
+        f"Source: {p.source_url or '—'}\nFit rationale: {p.fit_reason or '—'}\n"
+        f"Outreach angle: {p.outreach_angle or '—'}\nNotes: {p.notes or '—'}"
     )
     # Prior outreach learnings (distilled from past TARA calls at /calls/end) —
     # guaranteed tag lane; prefer this prospect's own learnings, then org-wide.
@@ -117,31 +154,7 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
         # polished-email form) and grounds the write on the RUN's report, THIS
         # firm's real data (website/city), and prior-call learnings — never a
         # generic template.
-        from .hyper.skills import load_method_skill
-        from .hyper.engine import _SKILLS as _ENGINE_SKILLS
-        _skill = (load_method_skill("cold-email-sequence") or "")[:900]
-        _polish = str(_ENGINE_SKILLS.get("polished-email") or "")[:700]
-        sys = (
-            "You are the outreach agent SENDING one email to a specific prospect — apply these "
-            "method skills exactly:\n" + _skill + "\n" + _polish + "\n"
-            "GROUNDING RULES: this is Touch 1 to THIS firm. Derive the why-now hook and value point "
-            "from the TEAM REPORT and the firm's own profile below (their business, city, website). "
-            "Reference only a verified prospect fact from the profile (name, website, address, or a "
-            "specific fact in the TEAM REPORT) so it could not have been sent to anyone else. Do not "
-            "infer their business, customers, or needs from a name, address, or domain. Include the "
-            "firm's REAL website URL from the profile when referencing them, and our site "
-            "https://singulancelabs.com as the sender's link. "
-            "Brand names exactly: SINGULANCE, HIVEMIND, TARA, HYPERAGENTS. Under 160 words. Never "
-            "invent facts, numbers, links, or placeholder contacts."
-            + (
-                f" SENDER IDENTITY: the email is sent by {req.sender_name or req.sender_email} "
-                f"from {req.sender_company or 'our company'} at {req.sender_email}. Sign with this "
-                "exact verified identity. Do not invent a title or role."
-                if req.sender_email else ""
-            )
-            + ' Respond with ONLY a JSON object: {"subject": "...", "body": "..."} '
-            "(body is the email text, plain markdown, no Subject: line inside it)."
-        )
+        sys = _email_system_prompt(req)
     else:
         sys = (
             "You prepare ONE outbound phone call by an AI voice agent (TARA) to a specific "

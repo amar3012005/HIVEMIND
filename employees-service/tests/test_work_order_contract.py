@@ -99,3 +99,42 @@ def test_completed_result_with_blockers_or_pending_deliverables_is_rejected():
     assert "completed result cannot contain blockers" in errors
     assert "completed result cannot require input" in errors
     assert "completed result cannot contain pending deliverables" in errors
+
+
+def test_completed_result_does_not_require_an_invented_machine_quota():
+    envelope = {
+        "work_order_id": "wo-no-quota",
+        "acceptance_criteria": ["Return evidence"],
+        "completion_requirements": [],
+    }
+    result = assemble_work_order_result(
+        {
+            "report_markdown": "Completed the bounded assignment.",
+            "actual_counts": {"qualified_records": 7},
+            "proposed_actions": [{
+                "capability": "provider.action", "operation": "prepare",
+                "authority_required": True, "status": "prepared",
+            }],
+        },
+        envelope=envelope, subtasks=[_subtask()], metrics={"tool_calls_total": 1},
+    )
+
+    assert result["status"] == "completed"
+    assert result["actual_counts"]["qualified_records"] == 7
+    assert result["proposed_actions"][0]["authority_required"] is True
+    assert work_order_result_errors(result) == []
+
+
+def test_room_cannot_remove_authority_boundary_from_proposed_action():
+    result = assemble_work_order_result(
+        {
+            "report_markdown": "Prepared an action.",
+            "proposed_actions": [{
+                "capability": "provider.action", "operation": "execute",
+                "authority_required": False,
+            }],
+        },
+        envelope=_envelope(), subtasks=[_subtask()], metrics={"tool_calls_total": 1},
+    )
+
+    assert any("authority boundary" in error for error in work_order_result_errors(result))

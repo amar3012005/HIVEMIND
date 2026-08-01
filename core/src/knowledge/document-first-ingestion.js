@@ -874,8 +874,41 @@ Output the JSON object and nothing else.`;
     // (0.65) + the curator keep the extra candidates from becoming noise.
     const factCap = Math.max(1, Math.min(Number(maxFacts) || 1,
       compact ? 3 : Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10)));
+    // DETERMINISTIC LANGUAGE PIN. Telling the model to "use the section's language"
+    // does not hold: the surrounding prompt is entirely English and the model reads
+    // that as the target. Measured twice — a German document produced 16 English /
+    // 2 German claims even WITH an explicit final override line, and a German
+    // spreadsheet produced 10 English / 0 German.
+    //
+    // So decide it in code and NAME the language in the instruction. Function words
+    // rather than characters, because diacritics are absent from plenty of real
+    // German text and common in French/Spanish/Portuguese. Fully tenant-neutral —
+    // a generic marker table, no customer terms — and it degrades to the generic
+    // wording when undecided rather than guessing and translating the corpus.
+    const _langProbe = String(content).slice(0, 4000).toLowerCase();
+    const _langHits = (words) => words.reduce((n, w) => {
+      const m = _langProbe.match(new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, 'gu'));
+      return n + (m ? m.length : 0);
+    }, 0);
+    const _LANG_MARKERS = [
+      ['German', ['der', 'die', 'das', 'und', 'nicht', 'mit', 'für', 'ist', 'ein', 'auch', 'werden']],
+      ['French', ['le', 'la', 'les', 'des', 'et', 'pour', 'dans', 'est', 'une', 'avec']],
+      ['Spanish', ['el', 'los', 'las', 'de', 'para', 'con', 'una', 'que', 'por']],
+      ['Italian', ['il', 'lo', 'gli', 'delle', 'per', 'con', 'una', 'che', 'sono']],
+      ['Dutch', ['het', 'een', 'niet', 'voor', 'met', 'zijn', 'wordt']],
+      ['Portuguese', ['os', 'as', 'do', 'da', 'para', 'com', 'uma', 'não']],
+      ['English', ['the', 'and', 'of', 'for', 'with', 'that', 'this', 'are']],
+    ];
+    let _bestLang = null; let _bestScore = 0;
+    for (const [name, markers] of _LANG_MARKERS) {
+      const score = _langHits(markers);
+      if (score > _bestScore) { _bestScore = score; _bestLang = name; }
+    }
+    const _langLine = (_bestLang && _bestScore >= 5)
+      ? `LANGUAGE: the SECTION is written in ${_bestLang}. Write every "t" and "f" in ${_bestLang}. Do NOT translate.`
+      : 'LANGUAGE: write "t" and "f" in the SAME language the SECTION is written in. Do NOT translate.';
     const sys = `Extract only high-value durable workspace memory from the SECTION.
-LANGUAGE: write "t" and "f" in the SAME language the SECTION is written in. Do NOT translate. A German section yields German claims, a French section French. The tenant must be able to quote their own memories back to their own stakeholders, and recall in the source language degrades when claims are silently translated. Only "memory_type" and JSON keys stay English.
+${_langLine} These instructions are in English for your benefit only — they are NOT a language sample. A tenant must be able to quote their own memories back to their own stakeholders, and same-language recall degrades when claims are silently translated. Only "memory_type" and the JSON keys stay English.
 Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 

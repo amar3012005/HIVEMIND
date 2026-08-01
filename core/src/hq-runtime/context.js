@@ -76,7 +76,16 @@ export async function buildHqContext({ prisma, runtime, trigger }) {
       next_action: growth.next_action,
     },
     evidence: {
-      baseline: growth.baseline ? { id: growth.baseline.id, created_at: growth.baseline.createdAt, scope: growth.baseline.payload?.scope, as_of: growth.baseline.payload?.as_of, data_gaps: growth.baseline.payload?.data_gaps || [] } : null,
+      baseline: growth.baseline ? {
+        id: growth.baseline.id,
+        created_at: growth.baseline.createdAt,
+        scope: growth.baseline.payload?.scope,
+        as_of: growth.baseline.payload?.as_of,
+        data_gaps: growth.baseline.payload?.data_gaps || [],
+        website_pages: Number(growth.baseline.payload?.website?.mapped_pages || growth.baseline.payload?.website?.pages?.length || 0),
+        social_accounts: Array.isArray(growth.baseline.payload?.social_presence?.accounts) ? growth.baseline.payload.social_presence.accounts.length : 0,
+        recent_posts: Array.isArray(growth.baseline.payload?.social_presence?.recent_posts) ? growth.baseline.payload.social_presence.recent_posts.length : 0,
+      } : null,
       latest_growth_plan: currentPlan ? { id: currentPlan.id, created_at: currentPlan.createdAt, mode: currentPlan.payload?.mode, constraint: currentPlan.payload?.plan?.constraint, stage: currentPlan.payload?.plan?.stage } : null,
       company_identity: {
         canonical: canonicalIdentity,

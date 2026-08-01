@@ -1,0 +1,74 @@
+{
+  "playbook_id": "greenleaf.order-operations",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "GreenLeaf Bakery order operations",
+  "description": "Accept an order, confirm its terms, wait for fulfillment evidence, and notify the customer.",
+  "initial_stage_id": "capture_request",
+  "terminal_states": ["notified", "cancelled"],
+  "stages": [
+    {
+      "id": "capture_request",
+      "objective": "Capture the requested items and a usable customer contact as a durable request record.",
+      "input_refs": ["trigger.payload"],
+      "expected_artifacts": ["request_record"],
+      "completion_checks": [
+        { "predicate": "has_exact_count", "select": "request_record", "value": 1 },
+        { "predicate": "all_have_field", "select": "request_record", "path": "data.request_id" },
+        { "predicate": "all_have_field", "select": "request_record", "path": "data.customer_contact" },
+        { "predicate": "all_have_min_items", "select": "request_record", "path": "data.items", "value": 1 }
+      ],
+      "transitions": [
+        { "when": { "predicate": "field_equals", "select": "request_record", "path": "data.cancelled", "value": true }, "to_terminal": "cancelled" },
+        { "default": true, "to_stage": "confirm_terms" }
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "confirm_terms",
+      "objective": "Confirm the request terms and preserve the confirmation as a separate artifact.",
+      "input_refs": ["artifacts.request_record"],
+      "expected_artifacts": ["confirmation_record"],
+      "authority_gate": "commit_terms",
+      "authority_policy_key": "policy_changes",
+      "completion_checks": [
+        { "predicate": "has_exact_count", "select": "confirmation_record", "value": 1 },
+        { "predicate": "all_have_field", "select": "confirmation_record", "path": "data.confirmed_at" },
+        { "predicate": "all_reference_existing", "select": "confirmation_record", "path": "data.request_ref", "target_select": "request_record", "target_path": "id" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "fulfill_request" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "fulfill_request",
+      "objective": "Produce fulfillment evidence for every confirmed item.",
+      "input_refs": ["artifacts.request_record", "artifacts.confirmation_record"],
+      "expected_artifacts": ["fulfillment_record"],
+      "completion_checks": [
+        { "predicate": "has_exact_count", "select": "fulfillment_record", "value": 1 },
+        { "predicate": "all_have_field", "select": "fulfillment_record", "path": "data.completed_at" },
+        { "predicate": "field_equals", "select": "fulfillment_record", "path": "data.state", "value": "fulfilled" }
+      ],
+      "waits_for_event": { "type": "fulfillment.completed", "correlation_path": "data.request_ref" },
+      "transitions": [{ "default": true, "to_stage": "notify_customer" }],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "notify_customer",
+      "objective": "Notify the customer and retain provider acknowledgement of the external action.",
+      "input_refs": ["artifacts.request_record", "artifacts.fulfillment_record"],
+      "expected_artifacts": ["notification_receipt"],
+      "authority_gate": "external_write",
+      "authority_policy_key": "external_writes",
+      "completion_checks": [
+        { "predicate": "has_exact_count", "select": "notification_receipt", "value": 1 },
+        { "predicate": "has_provider_receipt", "select": "notification_receipt", "receipt_path": "data.provider_receipt_id" },
+        { "predicate": "status_in", "select": "notification_receipt", "path": "data.status", "values": ["accepted", "delivered"] }
+      ],
+      "transitions": [{ "default": true, "to_terminal": "notified" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    }
+  ]
+}

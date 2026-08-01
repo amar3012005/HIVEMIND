@@ -1,0 +1,142 @@
+{
+  "playbook_id": "outreach.prospect-to-conversation",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "Prospect to conversation",
+  "description": "Discover and qualify organizations, persist accepted records, prepare distinct outreach, execute only under authority, and observe replies.",
+  "metadata": { "owner_room_tag": "outreach" },
+  "input_contract": {
+    "fields": [
+      { "path": "target.quantity", "type": "integer", "description": "Number of accepted organizations and corresponding actions requested by the objective.", "required": true, "default_value": 1 },
+      { "path": "target.geography", "type": "string", "description": "Geographic scope explicitly requested or retained in the supplied context." },
+      { "path": "target.segment", "type": "string", "description": "Audience or organization segment explicitly requested or retained in the supplied context." },
+      { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether the objective requests actual delivery after authority is granted.", "required": true, "default_value": false }
+    ]
+  },
+  "initial_stage_id": "discover_candidates",
+  "terminal_states": ["prepared", "conversation_started", "no_viable_candidates"],
+  "stages": [
+    {
+      "id": "discover_candidates",
+      "objective": "Discover source-backed candidate organizations that match the supplied company profile, audience, geography, and quantity. Use available search and location tools; do not invent organizations or contacts.",
+      "input_refs": ["trigger.payload", "context.company", "context.target", "context.constraints"],
+      "expected_artifacts": ["candidate_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "candidate_record", "value_from": "run.context.target.quantity", "default_value": 1 },
+        { "predicate": "is_source_backed", "select": "candidate_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "unique_by", "select": "candidate_record", "path": "data.organization_key" }
+      ],
+      "transitions": [
+        { "when": { "predicate": "field_equals", "select": "candidate_record", "path": "data.viable", "value": false, "mode": "all" }, "to_terminal": "no_viable_candidates" },
+        { "default": true, "to_stage": "qualify_candidates" }
+      ],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "qualify_candidates",
+      "objective": "Qualify each candidate against retained company evidence. Preserve a distinct fit rationale, a distinct outreach angle, and the evidence used for every accepted record.",
+      "input_refs": ["context.company", "context.target", "artifacts.candidate_record"],
+      "expected_artifacts": ["qualified_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "qualified_record", "value_from": "run.context.target.quantity", "default_value": 1 },
+        { "predicate": "all_have_field", "select": "qualified_record", "path": "data.fit_rationale" },
+        { "predicate": "all_have_field", "select": "qualified_record", "path": "data.outreach_angle" },
+        { "predicate": "is_source_backed", "select": "qualified_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "unique_by", "select": "qualified_record", "path": "data.organization_key" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "persist_records" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "persist_records",
+      "objective": "Persist every accepted record in the tenant lead system and return each durable record identifier as data.persistence_ref. Do not treat prose or an unsaved list as completion.",
+      "input_refs": ["artifacts.qualified_record"],
+      "expected_artifacts": ["lead_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "lead_record", "value_from": "run.context.target.quantity", "default_value": 1 },
+        { "predicate": "all_have_field", "select": "lead_record", "path": "data.persistence_ref" },
+        { "predicate": "all_reference_existing", "select": "lead_record", "path": "data.qualified_ref", "target_select": "qualified_record", "target_path": "id" }
+      ],
+      "verifications": [
+        { "adapter_id": "tenant-records", "operation": "verify", "select": "lead_record", "config": { "record_paths": ["data.persistence_ref"] } }
+      ],
+      "transitions": [{ "default": true, "to_stage": "prepare_outreach" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 3
+    },
+    {
+      "id": "prepare_outreach",
+      "objective": "Prepare one concise personalized outreach draft for every accepted record using its verified facts, fit rationale, and distinct angle. Persist drafts and do not send during this stage.",
+      "input_refs": ["context.company", "context.constraints", "artifacts.qualified_record", "artifacts.lead_record"],
+      "expected_artifacts": ["draft_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "draft_record", "value_from": "run.context.target.quantity", "default_value": 1 },
+        { "predicate": "all_have_field", "select": "draft_record", "path": "data.draft_ref" },
+        { "predicate": "all_have_field", "select": "draft_record", "path": "data.recipient_ref" },
+        { "predicate": "all_have_field", "select": "draft_record", "path": "data.delivery_requested" },
+        { "predicate": "all_reference_existing", "select": "draft_record", "path": "data.lead_ref", "target_select": "lead_record", "target_path": "id" }
+      ],
+      "verifications": [
+        { "adapter_id": "gmail", "operation": "verify", "select": "draft_record" }
+      ],
+      "transitions": [
+        { "when": { "predicate": "field_equals", "select": "draft_record", "path": "data.delivery_requested", "value": false, "mode": "all" }, "to_terminal": "prepared" },
+        { "default": true, "to_stage": "deliver_outreach" }
+      ],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "deliver_outreach",
+      "objective": "Execute the approved outbound actions through an available adapter and persist one provider receipt per draft. Never broaden recipients or alter approved content.",
+      "input_refs": ["context.constraints", "artifacts.draft_record"],
+      "expected_artifacts": ["delivery_receipt"],
+      "authority_gate": "external_write",
+      "authority_policy_key": "external_writes",
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute" },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "delivery_receipt", "value_from": "run.context.target.quantity", "default_value": 1 },
+        { "predicate": "has_provider_receipt", "select": "delivery_receipt", "receipt_path": "data.provider_receipt_id" },
+        { "predicate": "status_in", "select": "delivery_receipt", "path": "data.status", "values": ["accepted", "delivered"] }
+      ],
+      "transitions": [{ "default": true, "to_stage": "observe_responses" }],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_responses",
+      "objective": "Create durable observation subscriptions for delivered actions and retain the provider cursors required to correlate future response events.",
+      "input_refs": ["artifacts.lead_record", "artifacts.delivery_receipt"],
+      "expected_artifacts": ["observation_subscription"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "monitor" },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "observation_subscription", "value": 1 },
+        { "predicate": "has_provider_receipt", "select": "observation_subscription", "receipt_path": "data.subscription_ref" }
+      ],
+      "waits_for_event": { "type": "response.received", "correlation_path": "data.correlation_ref" },
+      "transitions": [{ "default": true, "to_stage": "handle_response" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "handle_response",
+      "objective": "Read and classify the correlated response, update the retained record timeline, and prepare the next governed action without inventing intent.",
+      "input_refs": ["context.company", "artifacts.lead_record", "artifacts.delivery_receipt", "artifacts.observation_subscription", "event"],
+      "expected_artifacts": ["response_record"],
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "response_record", "value": 1 },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.classification" },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.timeline_ref" },
+        { "predicate": "all_have_field", "select": "response_record", "path": "data.provider_event_ref" },
+        { "predicate": "is_source_backed", "select": "response_record", "source_path": "source_refs", "value": 1 }
+      ],
+      "verifications": [
+        { "adapter_id": "tenant-records", "operation": "verify", "select": "response_record", "config": { "record_paths": ["data.timeline_ref"], "source_artifact_paths": ["data.provider_event_ref"] } }
+      ],
+      "transitions": [{ "default": true, "to_terminal": "conversation_started" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    }
+  ]
+}

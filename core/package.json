@@ -28,6 +28,8 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@langchain/langgraph": "^1.4.8",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
     "@lightpanda/browser": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@noble/post-quantum": "^0.6.1",

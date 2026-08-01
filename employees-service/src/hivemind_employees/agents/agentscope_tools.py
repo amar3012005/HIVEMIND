@@ -232,9 +232,13 @@ def _looks_like_read(name: str) -> bool:
 
 
 def begin_turn_write_gate(policy: str) -> None:
-    """Arm the write/consensus gates for the current turn. policy ∈ {"ask","auto"}.
+    """Arm the write/consensus gates for the current turn.
+
+    ``deny`` blocks every write, ``ask`` queues writes, ``auto`` preserves the
+    ordinary Room policy (outbound sends still ask), and ``authorized`` means an
+    exact upstream authority checkpoint already approved this turn.
     Output stays LOCKED until the orchestrator reaches consensus (synthesis)."""
-    _WRITE_POLICY.set(policy if policy in ("ask", "auto") else "auto")
+    _WRITE_POLICY.set(policy if policy in ("deny", "ask", "auto", "authorized") else "ask")
     _PENDING_WRITES.set([])
     _OUTPUT_UNLOCKED.set(False)
     _TURN_ARTIFACTS.set([])
@@ -337,12 +341,28 @@ def _artifact_url(payload: object) -> str:
 def _gate_write(
     label: str, summary: str, bridge: str, descriptor: dict, force: bool = False
 ) -> Optional[ToolResponse]:
-    """When policy is "ask" (or force=True), queue the write for approval and
+    """Apply the active turn's write authority before connector execution.
+
+    ``deny`` fails closed without queueing. ``ask`` (or force=True under an
+    ordinary Room policy) queues the write for approval. ``authorized`` is used
+    only for a checkpoint already approved by HQ and permits that exact turn's
+    write without another generic approval prompt.
+
     return a "pending" ToolResponse WITHOUT executing. Returns None when the
     write may run now. `force` is for outward SENDS (gmail send/reply, trash),
     which ALWAYS require the user's approval regardless of policy. `descriptor`
     carries everything the approve endpoint needs to replay the bridge call."""
-    if not force and _WRITE_POLICY.get() != "ask":
+    policy = _WRITE_POLICY.get()
+    if policy == "deny":
+        return _tool_response_text(
+            f"⛔ WRITE DENIED — '{label}' was NOT executed. This turn has read-only "
+            "authority. Continue with evidence gathering and report the blocked write "
+            "as an exact gap; do not retry it.",
+            metadata={"status": "write_denied", "label": label},
+        )
+    if policy == "authorized":
+        return None
+    if not force and policy != "ask":
         return None
     approval_id = uuid.uuid4().hex[:12]
     rec = {

@@ -1,0 +1,365 @@
+import { randomUUID } from 'node:crypto';
+
+const TERMINAL_STATUSES = new Set(['COMPLETED', 'TERMINATED']);
+
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function getPath(value, path) {
+  if (!path) return value;
+  return String(path).split('.').reduce((current, part) => current == null ? undefined : current[part], value);
+}
+
+function artifactMap(artifacts) {
+  const grouped = {};
+  for (const artifact of artifacts || []) {
+    if (!grouped[artifact.key]) grouped[artifact.key] = [];
+    grouped[artifact.key].push(artifact);
+  }
+  return grouped;
+}
+
+function resolveInputs(run, stage, activeEvent = null) {
+  const grouped = artifactMap(run.artifacts);
+  const resolved = {};
+  const event = activeEvent || asObject(run.context).latest_event || null;
+  for (const ref of stage.input_refs) {
+    if (ref === 'trigger.payload') resolved[ref] = run.trigger;
+    else if (ref.startsWith('trigger.')) resolved[ref] = getPath(run.trigger, ref.slice(8));
+    else if (ref.startsWith('context.')) resolved[ref] = getPath(run.context, ref.slice(8));
+    else if (ref.startsWith('artifacts.')) resolved[ref] = grouped[ref.slice(10)] || [];
+    else if (ref === 'event') resolved[ref] = event;
+    else if (ref.startsWith('event.')) resolved[ref] = getPath(event, ref.slice(6));
+    else resolved[ref] = undefined;
+  }
+  return resolved;
+}
+
+function withoutLatestEvent(context) {
+  const next = { ...asObject(context) };
+  delete next.latest_event;
+  return next;
+}
+
+function normalizeDirectorArtifacts(result) {
+  const artifacts = Array.isArray(result?.artifacts) ? result.artifacts : [];
+  return artifacts.map((artifact) => ({
+    ...artifact,
+    id: String(artifact?.id || '').trim(),
+    key: String(artifact?.key || '').trim(),
+  }));
+}
+
+function executionErrorVerdict(error) {
+  return {
+    passed: false,
+    unmet: [{
+      predicate: 'execution_succeeded',
+      reason: String(error?.message || error || 'runtime_stage_execution_failed').slice(0, 1000),
+      ambiguous: error?.ambiguous === true,
+    }],
+  };
+}
+
+function combineVerdicts(primary, verifications) {
+  const unmet = [
+    ...(Array.isArray(primary?.unmet) ? primary.unmet : []),
+    ...verifications.flatMap((result) => Array.isArray(result?.unmet) ? result.unmet : []),
+  ];
+  return {
+    ...primary,
+    passed: primary?.passed === true && verifications.every((result) => result?.passed === true),
+    unmet,
+    verifications: verifications.map((result) => ({
+      adapter_id: result.adapter_id,
+      select: result.select,
+      passed: result.passed === true,
+      evidence: Array.isArray(result.evidence) ? result.evidence : [],
+    })),
+  };
+}
+
+function selectTransition(stage, artifacts, predicates) {
+  const conditional = stage.transitions.filter((transition) => transition.default !== true);
+  for (const transition of conditional) {
+    if (predicates.evaluate(transition.when, artifacts)) return transition;
+  }
+  return stage.transitions.find((transition) => transition.default === true);
+}
+
+function eventWait(stage, producedArtifacts) {
+  if (!stage.waits_for_event) return null;
+  const correlationPath = stage.waits_for_event.correlation_path || null;
+  let correlationValue = null;
+  if (correlationPath) {
+    for (const artifact of producedArtifacts) {
+      const candidate = getPath(artifact, correlationPath);
+      if (candidate != null) {
+        correlationValue = candidate;
+        break;
+      }
+    }
+  }
+  return {
+    ...stage.waits_for_event,
+    correlation_value: correlationValue,
+    after_stage_id: stage.id,
+  };
+}
+
+function eventMatches(waitingFor, event) {
+  if (!event || event.type !== waitingFor.type) return false;
+  if (!waitingFor.correlation_path || waitingFor.correlation_value == null) return true;
+  return getPath(event, waitingFor.correlation_path) === waitingFor.correlation_value;
+}
+
+export class GenericStageExecutor {
+  constructor({ registry, predicates, store, director, selector = null, adapters = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
+    if (!registry || !predicates || !store || !director?.execute) {
+      throw new Error('runtime_executor_dependencies_required');
+    }
+    this.registry = registry;
+    this.predicates = predicates;
+    this.store = store;
+    this.director = director;
+    this.selector = selector;
+    this.adapters = adapters;
+    this.workerId = workerId;
+    this.maxSteps = maxSteps;
+  }
+
+  async createRun(input) {
+    const playbook = this.registry.get(input.playbookId, input.playbookVersion, { scopeKey: input.scopeKey || 'global' });
+    return this.store.createRun({
+      ...input,
+      playbookVersion: playbook.version,
+      currentStageId: playbook.initial_stage_id,
+    });
+  }
+
+  async selectAndCreateRun(input) {
+    if (!this.selector) throw new Error('runtime_executor_selector_required');
+    const selected = await this.selector.select({
+      objective: input.objective,
+      context: input.context,
+      scopeKey: input.scopeKey || 'global',
+    });
+    return this.createRun({
+      ...input,
+      playbookId: selected.playbook_id,
+      playbookVersion: selected.version,
+      context: { ...asObject(input.context), playbook_selection: selected },
+    });
+  }
+
+  async grantAuthority(runId, orgId, gate, grant = {}) {
+    return this.store.grantAuthority(runId, orgId, gate, grant);
+  }
+
+  async run(runId, { orgId, event = null } = {}) {
+    if (!orgId) throw new Error('runtime_executor_org_required');
+    if (!await this.store.claimRun(runId, orgId, this.workerId)) {
+      return { status: 'ALREADY_CLAIMED', runId };
+    }
+    try {
+      for (let stepCount = 0; stepCount < this.maxSteps; stepCount += 1) {
+        let run = await this.store.loadRun(runId, orgId);
+        if (TERMINAL_STATUSES.has(run.status)) return run;
+        const playbook = this.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+
+        if (run.status === 'WAITING_EVENT') {
+          if (!eventMatches(run.waitingFor, event)) return run;
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: run.currentStageId,
+            phase: 'EVENT_RECEIVED',
+            status: 'ACTIVE',
+            state: { event_type: event.type },
+          });
+          run = await this.store.updateRun(runId, orgId, {
+            status: 'ACTIVE',
+            waitingFor: null,
+            context: { ...asObject(run.context), latest_event: event },
+          });
+        }
+
+        const stage = playbook.stages.find((candidate) => candidate.id === run.currentStageId);
+        if (!stage) throw new Error(`runtime_stage_not_found:${run.currentStageId}`);
+
+        if (run.status === 'WAITING_AUTHORITY') {
+          if (!run.authorityGates.includes(stage.authority_gate)) return run;
+          run = await this.store.updateRun(runId, orgId, { status: 'ACTIVE' });
+        }
+
+        await this.store.appendCheckpoint(runId, orgId, {
+          stageId: stage.id,
+          phase: 'BEFORE_EXECUTION',
+          status: 'ACTIVE',
+          state: { completed_stage_ids: run.completedStageIds },
+        });
+        run = await this.store.loadRun(runId, orgId);
+
+        if (stage.authority_gate && !run.authorityGates.includes(stage.authority_gate)) {
+          await this.store.updateRun(runId, orgId, { status: 'WAITING_AUTHORITY' });
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: stage.id,
+            phase: 'AUTHORITY_REQUIRED',
+            status: 'WAITING_AUTHORITY',
+            state: { gate: stage.authority_gate },
+          });
+          return this.store.loadRun(runId, orgId);
+        }
+
+        const attempts = { ...asObject(run.stageAttempts), [stage.id]: Number(asObject(run.stageAttempts)[stage.id] || 0) + 1 };
+        await this.store.updateRun(runId, orgId, { stageAttempts: attempts });
+        const executionRequest = {
+          run_id: run.id,
+          org_id: run.orgId,
+          room_id: run.roomId,
+          playbook_id: playbook.playbook_id,
+          playbook_version: playbook.version,
+          stage_id: stage.id,
+          objective: stage.objective,
+          expected_artifacts: stage.expected_artifacts,
+          authority_granted: !stage.authority_gate || run.authorityGates.includes(stage.authority_gate),
+          inputs: resolveInputs(run, stage, event),
+          checks: stage.completion_checks,
+          unmet: asObject(run.lastVerdict).unmet || [],
+          stage_attempts: attempts,
+          adapter_descriptors: this.adapters?.descriptors?.() || [],
+          invoke_adapter: this.adapters ? (adapterId, operation, input, context = {}) => this.adapters.invoke(
+            adapterId,
+            operation,
+            input,
+            { ...context, orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId },
+          ) : null,
+        };
+        let result;
+        try {
+          const execution = stage.execution || { mode: 'room' };
+          result = execution.mode === 'adapter'
+            ? await this.adapters?.invoke(execution.adapter_id, execution.operation, {
+              inputs: executionRequest.inputs,
+              expected_artifacts: stage.expected_artifacts,
+              checks: stage.completion_checks,
+            }, { orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId })
+            : await this.director.execute(executionRequest);
+          if (execution.mode === 'adapter' && !this.adapters) {
+            throw new Error('runtime_stage_adapter_registry_required');
+          }
+        } catch (error) {
+          const verdict = executionErrorVerdict(error);
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: stage.id,
+            phase: 'EXECUTION_ERROR',
+            status: 'FAILED',
+            verdict,
+          });
+          const attempt = attempts[stage.id];
+          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts && error?.ambiguous !== true) {
+            await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
+            continue;
+          }
+          const status = stage.on_failure === 'TERMINATE' ? 'TERMINATED' : 'NEEDS_INTERVENTION';
+          await this.store.updateRun(runId, orgId, {
+            status,
+            lastVerdict: verdict,
+            ...(status === 'TERMINATED' ? { completedAt: new Date() } : {}),
+          });
+          return this.store.loadRun(runId, orgId);
+        }
+        const produced = normalizeDirectorArtifacts(result);
+        const persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced);
+        run = await this.store.loadRun(runId, orgId);
+        const grouped = artifactMap(run.artifacts);
+        const predicateVerdict = this.predicates.validateChecks(stage.completion_checks, grouped, { run, stage });
+        const verificationResults = [];
+        for (const verification of stage.verifications || []) {
+          try {
+            const verified = await this.adapters?.invoke(
+              verification.adapter_id,
+              verification.operation || 'verify',
+              {
+                artifacts: grouped[verification.select] || [],
+                inputs: resolveInputs(run, stage, event),
+                checks: stage.completion_checks.filter((check) => check.select === verification.select),
+                config: asObject(verification.config),
+              },
+              { orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId },
+            );
+            verificationResults.push({ ...verified, adapter_id: verification.adapter_id, select: verification.select });
+          } catch (error) {
+            verificationResults.push({
+              adapter_id: verification.adapter_id,
+              select: verification.select,
+              passed: false,
+              unmet: [{ predicate: 'adapter_verified', reason: String(error?.message || error).slice(0, 1000) }],
+            });
+          }
+        }
+        const verdict = combineVerdicts(predicateVerdict, verificationResults);
+
+        await this.store.appendCheckpoint(runId, orgId, {
+          stageId: stage.id,
+          phase: 'AFTER_EXECUTION',
+          status: verdict.passed ? 'PASSED' : 'FAILED',
+          verdict,
+          artifactRefs: persisted.map((artifact) => artifact.id),
+        });
+
+        if (!verdict.passed) {
+          const attempt = attempts[stage.id];
+          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts) {
+            await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
+            continue;
+          }
+          const status = stage.on_failure === 'TERMINATE' ? 'TERMINATED' : 'NEEDS_INTERVENTION';
+          await this.store.updateRun(runId, orgId, { status, lastVerdict: verdict, ...(status === 'TERMINATED' ? { completedAt: new Date() } : {}) });
+          return this.store.loadRun(runId, orgId);
+        }
+
+        const transition = selectTransition(stage, grouped, this.predicates);
+        const completedStageIds = [...new Set([...run.completedStageIds, stage.id])];
+        if (transition.to_terminal) {
+          await this.store.updateRun(runId, orgId, {
+            status: 'COMPLETED',
+            completedStageIds,
+            terminalState: transition.to_terminal,
+            lastVerdict: verdict,
+            context: withoutLatestEvent(run.context),
+            completedAt: new Date(),
+          });
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: stage.id,
+            phase: 'TERMINAL',
+            status: 'COMPLETED',
+            state: { terminal_state: transition.to_terminal },
+            verdict,
+          });
+          return this.store.loadRun(runId, orgId);
+        }
+
+        const waitingFor = eventWait(stage, persisted);
+        await this.store.updateRun(runId, orgId, {
+          status: waitingFor ? 'WAITING_EVENT' : 'ACTIVE',
+          currentStageId: transition.to_stage,
+          completedStageIds,
+          waitingFor,
+          lastVerdict: verdict,
+          context: withoutLatestEvent(run.context),
+        });
+        await this.store.appendCheckpoint(runId, orgId, {
+          stageId: stage.id,
+          phase: waitingFor ? 'EVENT_REQUIRED' : 'STAGE_ADVANCED',
+          status: waitingFor ? 'WAITING_EVENT' : 'ACTIVE',
+          state: { next_stage_id: transition.to_stage, waiting_for: waitingFor },
+          verdict,
+        });
+        if (waitingFor) return this.store.loadRun(runId, orgId);
+      }
+      throw new Error('runtime_executor_step_limit_exceeded');
+    } finally {
+      await this.store.releaseRun(runId, orgId, this.workerId);
+    }
+  }
+}

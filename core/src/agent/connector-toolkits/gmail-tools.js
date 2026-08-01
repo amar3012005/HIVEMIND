@@ -11,6 +11,7 @@
  */
 
 import { nangoProxyFetch } from './nango-fetch.js';
+import { reconcileGmailWatchForTenant } from '../../connectors/providers/gmail/gmail-watcher-service.js';
 
 const GMAIL_PROVIDER = 'gmail';
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -21,6 +22,7 @@ const SKILL_NOTES = [
   '  • gmail_read_thread(thread_id) — full message bodies in a thread. Pass an id returned by search.',
   '  • gmail_send_email(to, subject, body) — composes and SENDS. Routes through draft-approval — user must click Approve before send.',
   '  • gmail_label_thread(thread_id, add_labels?, remove_labels?) — labels are Gmail label names, NOT IDs.',
+  '  • gmail_watch_mailbox(mode?) — establish or reconcile the tenant mailbox watcher; wakes HQ only for exact thread replies to HQ Runtime sends. A sender-only lead match is recorded for review and never wakes HQ.',
   'Search syntax examples: "from:ethan after:2026-05-01", "subject:invoice", "label:starred is:unread".',
 ].join('\n');
 
@@ -30,6 +32,24 @@ export function registerGmailTools(toolkit) {
     description: 'Gmail read + send + label tools (Nango-routed).',
     active: false,
     notes: SKILL_NOTES,
+  });
+
+  toolkit.registerToolFunction({
+    name: 'gmail_watch_mailbox',
+    description: 'Run the tenant-scoped Gmail watcher now. It registers or reconciles the mailbox history cursor and wakes HQ only for an exact Gmail-thread reply to a tracked HQ Runtime send. Sender-only lead matches are retained as possible replies for review. It never sends mail.',
+    parameters: {
+      type: 'object',
+      properties: { mode: { type: 'string', enum: ['reconcile', 'register'], description: 'Use register to establish or renew Gmail push watching; reconcile reads changes since the durable cursor.' } },
+    },
+    groupName: 'gmail',
+    readOnly: true,
+    handler: async (args, ctx) => reconcileGmailWatchForTenant({
+      prisma: ctx.prisma,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      reason: 'tool',
+      register: args.mode === 'register',
+    }),
   });
 
   toolkit.registerToolFunction({

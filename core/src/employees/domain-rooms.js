@@ -2,6 +2,7 @@ export const DOMAIN_ROOM_DEFINITIONS = Object.freeze([
   { key: 'general', name: 'Company HQ', purpose: 'Coordinate cross-functional company work and choose the highest-leverage next move.' },
   { key: 'seo', name: 'SEO', purpose: 'Turn search demand and website evidence into measurable organic growth.' },
   { key: 'marketing', name: 'Marketing', purpose: 'Build audience, channel, campaign, and experiment systems grounded in the company offer.' },
+  { key: 'outreach', name: 'Outreach Intelligence', purpose: 'Discover, qualify, persist, and prepare evidence-backed prospect and customer outreach without inventing contacts or exceeding granted authority.' },
   { key: 'campaign', name: 'Campaign Intelligence', purpose: 'Turn company truth into debated, channel-ready campaigns with explicit launch approval and measurement.' },
   { key: 'branding', name: 'Branding', purpose: 'Strengthen positioning, narrative, voice, and market-facing consistency.' },
   { key: 'fundraising', name: 'Fundraising', purpose: 'Prepare the investor narrative, evidence, target fit, materials, and process.' },

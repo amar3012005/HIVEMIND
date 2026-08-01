@@ -73,6 +73,7 @@ _TAG_TO_KIND = {
     "CAMPAIGN": "campaign",
     "ROOM_SEO": "seo",
     "ROOM_MARKETING": "marketing",
+    "ROOM_OUTREACH": "outreach",
     "ROOM_BRANDING": "branding",
     "ROOM_FUNDRAISING": "fundraising",
     "ROOM_RESEARCH": "research",

@@ -40,7 +40,7 @@ const NANGO_REST_GROUPS = [
 ];
 
 const CONNECTOR_CAPABILITIES = {
-  gmail: { description: 'Gmail search, thread reading, sending and labels.', tools: ['gmail_search_threads', 'gmail_read_thread', 'gmail_send_email', 'gmail_label_thread'] },
+  gmail: { description: 'Gmail search, thread reading, sending, labels, and reply watching.', tools: ['gmail_search_threads', 'gmail_read_thread', 'gmail_send_email', 'gmail_label_thread', 'gmail_watch_mailbox'] },
   'google-docs': { description: 'Google Docs search, reading and document creation.', tools: ['gdocs_search', 'gdocs_read', 'gdocs_create'] },
   'google-gemini': { description: 'Google Gemini connected application capabilities.', tools: ['gemini_generate'] },
   slack: { description: 'Slack search, channels, history, threads and posting.', tools: ['slack_search_messages', 'slack_list_channels', 'slack_channel_history', 'slack_read_thread', 'slack_post_message'] },

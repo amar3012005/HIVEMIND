@@ -430,6 +430,23 @@ export const GOOGLE_TOOLS = {
       return { id: res.id, threadId: res.threadId, sent: true };
     },
   },
+  gmail_get_draft: {
+    provider: 'gmail',
+    description: 'Fetch one Gmail draft by exact provider id. args: { draftId }.',
+    run: async (token, a) => {
+      if (!a.draftId) throw new Error('gmail_get_draft requires { draftId }');
+      const full = await g(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${encodeURIComponent(a.draftId)}?format=metadata`, token);
+      const headers = Object.fromEntries((full.message?.payload?.headers || []).map((item) => [item.name, item.value]));
+      return {
+        draftId: full.id,
+        messageId: full.message?.id,
+        threadId: full.message?.threadId,
+        subject: headers.Subject || '',
+        to: headers.To || '',
+        snippet: full.message?.snippet || '',
+      };
+    },
+  },
   gmail_list_drafts: {
     provider: 'gmail',
     description: 'List saved Gmail drafts. args: { max (default 10) }.',

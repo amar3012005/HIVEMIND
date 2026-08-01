@@ -8,6 +8,7 @@
     {"id":"growth-constraint-diagnosis","description":"Identify the highest-leverage evidenced business constraint.","model_policy":{"mode":"synthesis","model":"gpt-oss-120b","reasoning_effort":"low"}},
     {"id":"growth-stage-planning","description":"Create one bounded stage with metrics, thresholds, and stop conditions."},
     {"id":"work-order-delegation","description":"Delegate a measurable result contract to one appropriate specialist Room."},
+    {"id":"specialist-delegation","description":"Compile one exact, bounded Work Order for the required Company Room and define machine-verifiable completion without doing the specialist work inside HQ.","model_policy":{"mode":"deterministic_contract","model":null}},
     {"id":"stage-review","description":"Compare stage evidence with its decision rule and choose the next transition."},
     {"id":"performance-diagnostics","description":"Explain measured movement without inventing attribution or causality."},
     {"id":"memory-promotion","description":"Promote verified outcomes and decisions into compact company memory."},

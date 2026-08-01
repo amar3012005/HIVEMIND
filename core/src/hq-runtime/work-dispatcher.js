@@ -1,6 +1,19 @@
 import { appendHqEvent, scheduleHqWake } from './repository.js';
 import { validateWorkResultPacket } from './contracts.js';
 
+export function specialistEventSummary({ status, packet = {}, orderTitle = '' }) {
+  const artifacts = Array.isArray(packet.artifacts) ? packet.artifacts.length : 0;
+  const evidence = Array.isArray(packet.source_refs) ? packet.source_refs.length : 0;
+  const gaps = [...new Set([
+    ...(Array.isArray(packet.blockers) ? packet.blockers : []),
+    ...(Array.isArray(packet.failures) ? packet.failures : []),
+  ].map((item) => String(item || '').trim()).filter(Boolean))];
+  if (status === 'completed') {
+    return `The specialist completed ${orderTitle || 'the assigned work'} and returned ${artifacts} artifact(s) with ${evidence} evidence reference(s). HQ is verifying the completion criteria now.`;
+  }
+  return `The specialist stopped without claiming completion for ${orderTitle || 'the assigned work'}.${gaps.length ? ` Unmet: ${gaps.slice(0, 3).join('; ')}.` : ''} The full report remains in the specialist Room and durable Work Result; HQ will preserve the gap and advance independent work.`;
+}
+
 function internalKey() {
   return process.env.HIVEMIND_MASTER_API_KEY || process.env.HIVEMIND_API_KEY || '';
 }
@@ -10,27 +23,75 @@ function sidecarUrl() {
 }
 
 async function nextQueuedOrder(prisma) {
-  const rows = await prisma.$queryRawUnsafe(`
+  // Claim Room-owned work atomically so multiple bounded workers can execute
+  // independent Company Rooms concurrently without selecting the same order.
+  // Non-Room legacy work remains on the sidecar's own claim path below.
+  const roomRows = await prisma.$queryRawUnsafe(`
+    WITH candidate AS (
+      SELECT wo.id
+        FROM hivemind.hyper_work_orders wo
+        JOIN hivemind.hq_runtimes rt ON rt.org_id = wo.org_id
+       WHERE wo.hq_cycle_id IS NOT NULL
+         AND wo.room_id IS NOT NULL
+         AND wo.status = 'queued'
+         AND wo.runtime_epoch = rt.epoch
+         AND rt.state <> 'PAUSED'
+       ORDER BY wo.created_at ASC
+       FOR UPDATE OF wo SKIP LOCKED
+       LIMIT 1
+    ), claimed AS (
+      UPDATE hivemind.hyper_work_orders wo
+         SET status = 'running', started_at = COALESCE(started_at, now())
+        FROM candidate
+       WHERE wo.id = candidate.id
+       RETURNING wo.*
+    )
     SELECT wo.id, wo.org_id, wo.hq_cycle_id, wo.growth_delegation_id,
            wo.title, wo.objective, wo.kind, wo.room_id,
            wo.selected_skills, wo.acceptance_criteria, wo.required_evidence,
-           wo.input_snapshot, wo.evidence_refs,
+           wo.input_snapshot, wo.evidence_refs, wo.runtime_epoch,
            r.room_tag, r.goal AS room_goal, r.project_id, r.participant_ids,
            -- Work orders carry an owning EMPLOYEE, never a user. Tenant identity for
            -- the delegated Room turn comes from the runtime owner (server-side only),
            -- falling back to the room's creator. An LLM never supplies this.
            COALESCE(rt.owner_user_id, r.user_id) AS owner_user_id,
-           rt.id AS runtime_id
+           rt.id AS runtime_id, rt.epoch AS current_runtime_epoch
+      FROM claimed wo
+      JOIN hivemind.hq_runtimes rt ON rt.org_id = wo.org_id
+      LEFT JOIN hivemind.hyper_rooms r ON r.id = wo.room_id
+  `);
+  if (roomRows[0]) return roomRows[0];
+  const legacyRows = await prisma.$queryRawUnsafe(`
+    SELECT wo.id, wo.org_id, wo.hq_cycle_id, wo.growth_delegation_id,
+           wo.title, wo.objective, wo.kind, wo.room_id,
+           wo.selected_skills, wo.acceptance_criteria, wo.required_evidence,
+           wo.input_snapshot, wo.evidence_refs, wo.runtime_epoch,
+           r.room_tag, r.goal AS room_goal, r.project_id, r.participant_ids,
+           COALESCE(rt.owner_user_id, r.user_id) AS owner_user_id,
+           rt.id AS runtime_id, rt.epoch AS current_runtime_epoch
       FROM hivemind.hyper_work_orders wo
       JOIN hivemind.hq_runtimes rt ON rt.org_id = wo.org_id
       LEFT JOIN hivemind.hyper_rooms r ON r.id = wo.room_id
      WHERE wo.hq_cycle_id IS NOT NULL
+       AND wo.room_id IS NULL
        AND wo.status = 'queued'
+       AND wo.runtime_epoch = rt.epoch
        AND rt.state <> 'PAUSED'
      ORDER BY wo.created_at ASC
      LIMIT 1
   `);
-  return rows[0] || null;
+  return legacyRows[0] || null;
+}
+
+export async function drainHqWorkOrders({ prisma, logger = console, concurrency = 2 } = {}) {
+  const width = Math.max(1, Math.min(4, Number(concurrency) || 2));
+  const completed = [];
+  while (true) {
+    const batch = await Promise.all(Array.from({ length: width }, () => dispatchNextHqWorkOrder({ prisma, logger })));
+    const active = batch.filter(Boolean);
+    if (!active.length) return completed;
+    completed.push(...active);
+  }
 }
 
 function controlPlaneUrl() {
@@ -43,15 +104,29 @@ function asList(value) {
   return [];
 }
 
+function asObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') { try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : {}; } catch { return {}; } }
+  return {};
+}
+
 /** Machine-readable envelope the Room Director reads instead of guessing from prose.
  *  It never renders as a user turn — `execution_context` is the private contract lane. */
 export function workEnvelope(order) {
+  const snapshot = asObject(order.input_snapshot);
   return JSON.stringify({
-    contract: 'hq-work-order.v1',
+    contract: 'hq-work-order.v2',
     work_order_id: order.id,
-    todo_id: order.input_snapshot?.todo_id || null,
+    runtime_epoch: order.runtime_epoch || snapshot.runtime_epoch || null,
+    todo_id: snapshot.todo_id || null,
+    kind: order.kind || null,
     objective: order.objective || order.title,
-    location: order.input_snapshot?.location || null,
+    location: snapshot.location || snapshot.target?.location || null,
+    target: snapshot.target || {},
+    completion_requirements: asList(snapshot.completion_requirements),
+    upstream_result: snapshot.upstream_result || null,
+    room_checkpoint: snapshot.room_checkpoint || null,
+    authority: snapshot.authority || { mode: 'PREPARE', external_writes: false },
     selected_skills: asList(order.selected_skills),
     required_evidence: asList(order.required_evidence),
     acceptance_criteria: asList(order.acceptance_criteria),
@@ -61,19 +136,87 @@ export function workEnvelope(order) {
       must_return: ['concrete result of work actually performed', 'evidence refs', 'blockers or needs_input'],
       never: ['a future plan presented as completed work', 'invented facts, metrics, or contacts'],
     },
-  }).slice(0, 16000);
+  });
+}
+
+export function workOrderTaskTag(order) {
+  return order?.room_tag || null;
+}
+
+/** Plain assignment presented to the Room Director. Security and lifecycle fields
+ * stay in execution_context; the Director receives the same kind of request it
+ * would receive from a person, plus only the context needed to know when it is done. */
+export function workOrderPrompt(order) {
+  const objective = String(order?.objective || order?.title || 'Complete the assigned work.').trim();
+  const snapshot = asObject(order?.input_snapshot);
+  const location = String(snapshot.location || snapshot.target?.location || '').trim();
+  const criteria = asList(order?.acceptance_criteria).map((item) => String(item).trim()).filter(Boolean);
+  return [
+    objective,
+    location ? `Company location for this assignment: ${location}.` : '',
+    criteria.length ? `Done when:\n${criteria.map((item) => `- ${item}`).join('\n')}` : '',
+    'Perform the work now with the Room\'s normal Director, methods, skills, and tools. Return evidence and explicit gaps; do not merely recommend future work.',
+  ].filter(Boolean).join('\n\n').slice(0, 8000);
+}
+
+function requirementLabel(requirement) {
+  const type = String(requirement?.type || '').trim().replaceAll('_', ' ');
+  if (!type) return '';
+  const bounds = [];
+  if (Number.isFinite(Number(requirement.minimum))) bounds.push(`at least ${Number(requirement.minimum)}`);
+  if (Number.isFinite(Number(requirement.maximum))) bounds.push(`at most ${Number(requirement.maximum)}`);
+  const entity = requirement.entity ? ` ${String(requirement.entity).trim()}` : '';
+  const fields = Array.isArray(requirement.fields) && requirement.fields.length
+    ? ` with ${requirement.fields.map((field) => String(field).replaceAll('_', ' ')).join(', ')}` : '';
+  return `${type}: ${bounds.join(' and ') || 'required'}${entity}${fields}`;
+}
+
+/** Human-readable assignment persisted as the Room turn. This is intentionally
+ * compact and operational: the private execution envelope remains the source of
+ * truth, while people can see exactly what HQ asked the Room to complete. */
+export function workOrderDisplayMessage(order) {
+  const snapshot = asObject(order?.input_snapshot);
+  const target = asObject(snapshot.target);
+  const scope = [
+    target.quantity ? `Quantity: ${target.quantity}` : '',
+    target.location || snapshot.location ? `Location: ${target.location || snapshot.location}` : '',
+    target.sector ? `Sector: ${target.sector}` : '',
+    target.audience ? `Audience: ${target.audience}` : '',
+  ].filter(Boolean);
+  const requirements = asList(snapshot.completion_requirements)
+    .map(requirementLabel).filter(Boolean);
+  const criteria = asList(order?.acceptance_criteria)
+    .map((item) => String(item || '').trim()).filter(Boolean);
+  const dependency = snapshot.upstream_result
+    ? 'Use the accepted upstream result supplied by HQ; do not rediscover it.' : '';
+  const checkpoint = snapshot.room_checkpoint && typeof snapshot.room_checkpoint === 'object'
+    ? `Resume checkpoint: ${String(snapshot.room_checkpoint.stage || 'retained work')}.${snapshot.room_checkpoint.next ? ` Continue with ${String(snapshot.room_checkpoint.next)}.` : ''}` : '';
+  const authority = String(snapshot.authority?.mode || 'PREPARE').toUpperCase();
+  return [
+    `HQ WORK ORDER | ${String(order?.title || 'Specialist assignment').trim()}`,
+    String(order?.objective || order?.title || '').trim(),
+    scope.length ? `SCOPE\n${scope.map((item) => `- ${item}`).join('\n')}` : '',
+    dependency,
+    checkpoint,
+    `AUTHORITY\n- ${authority === 'EXECUTE'
+      ? 'Execute only through governed connected tools and return durable provider receipts.'
+      : 'Prepare and persist internal deliverables only. Do not send, publish, spend, or change policy.'}`,
+    criteria.length ? `ACCEPTANCE\n${criteria.map((item) => `- ${item}`).join('\n')}` : '',
+    requirements.length ? `MACHINE CHECKS\n${requirements.map((item) => `- ${item}`).join('\n')}` : '',
+    'The Room Director owns method, skills, tools, and internal sequencing. Return completed artifacts and evidence, or explicit unmet gaps.',
+  ].filter(Boolean).join('\n\n').slice(0, 8000);
 }
 
 /** Create the durable turn row the Room pipeline streams its events into, so the
  *  HQ-delegated turn is visible in the Room exactly like a user-submitted one. */
-async function createRoomTurn(prisma, order) {
+export async function createRoomTurn(prisma, order) {
   const rows = await prisma.$queryRawUnsafe(
     `INSERT INTO hivemind.hyper_turns (room_id, seq, user_message, status, idempotency_key)
      SELECT $1::uuid, COALESCE(MAX(seq), 0) + 1, $2, 'live', $3
        FROM hivemind.hyper_turns WHERE room_id = $1::uuid
      ON CONFLICT (idempotency_key) DO UPDATE SET status = 'live'
      RETURNING id`,
-    order.room_id, String(order.objective || order.title).slice(0, 4000), `hq-wo:${order.id}`,
+    order.room_id, workOrderDisplayMessage(order).slice(0, 8000), `hq-wo:${order.id}`,
   );
   return rows?.[0]?.id || null;
 }
@@ -83,15 +226,35 @@ async function createRoomTurn(prisma, order) {
  *  verifier says the request was met — prose alone can no longer read as done. */
 export function roomVerdict(body) {
   const verification = body?.verification || {};
-  const artifacts = Array.isArray(body?.artifacts) ? body.artifacts : [];
-  const gaps = Array.isArray(verification.gaps) ? verification.gaps.filter(Boolean) : [];
-  const sealed = String(body?.status || '') === 'complete' || body?.ok === true;
-  const grounded = verification.grounded_ok !== false;
-  const met = verification.met !== false;
-  if (!sealed) return { status: 'failed', gaps: gaps.length ? gaps : ['Room turn did not seal.'], artifacts };
-  if (!grounded) return { status: 'blocked', gaps: gaps.length ? gaps : ['Room grounding gate rejected the output.'], artifacts };
-  if (!met) return { status: 'blocked', gaps: gaps.length ? gaps : ['Room verifier did not meet the work order.'], artifacts };
-  return { status: 'completed', gaps, artifacts };
+  const contract = body?.result?.contract_version === 'work-order-result.v2'
+    ? body.result
+    : verification?.work_order_result?.contract_version === 'work-order-result.v2'
+      ? verification.work_order_result
+      : null;
+  const responseArtifacts = Array.isArray(body?.artifacts) ? body.artifacts : [];
+  if (contract) {
+    const artifacts = Array.isArray(contract.deliverables) && contract.deliverables.length
+      ? contract.deliverables : responseArtifacts;
+    const gaps = Array.isArray(contract.gaps) ? contract.gaps.map((gap) =>
+      String(gap?.why || gap?.criterion || gap)).filter(Boolean) : [];
+    const acceptanceMet = Array.isArray(contract.acceptance)
+      && contract.acceptance.every((item) => item?.met === true);
+    const checksMet = Array.isArray(contract.subtasks) && contract.subtasks.length > 0
+      && contract.subtasks.every((task) => task?.status === 'completed'
+        && Array.isArray(task.checks) && task.checks.length > 0
+        && task.checks.some((check) => check?.type !== 'judgment')
+        && task.checks.every((check) => check?.passed === true));
+    if (contract.status === 'completed' && acceptanceMet && checksMet && gaps.length === 0) {
+      return { status: 'completed', gaps: [], artifacts, contract };
+    }
+    const contractStatus = String(contract.status || '').toLowerCase();
+    const checkpointDisposition = String(contract?.checkpoint?.disposition || '').toLowerCase();
+    const checkpointedPartial = contractStatus === 'partial'
+      && ['continue_room', 'wait_event', 'wait_capability', 'request_hq'].includes(checkpointDisposition);
+    return { status: checkpointedPartial ? 'partial' : 'blocked',
+      gaps: gaps.length ? gaps : ['Room work-order contract did not pass deterministic acceptance.'], artifacts, contract };
+  }
+  return { status: 'blocked', gaps: ['Room did not return the required work-order-result.v2 governance contract.'], artifacts: responseArtifacts };
 }
 
 function resultPacket(body, status) {
@@ -130,24 +293,24 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
         body: JSON.stringify({
-          schema_version: 'hq-work-order.v1',
+          schema_version: 'hq-work-order.v2',
           room_id: order.room_id,
           turn_id: roomTurnId,
           user_id: order.owner_user_id,
           org_id: order.org_id,
           // The Room sees the objective as its request; the contract rides the
           // private execution_context lane so it is never rendered as a user turn.
-          user_message: String(order.objective || order.title).slice(0, 8000),
+          user_message: workOrderPrompt(order),
           display_message: `HQ Runtime work order — ${order.title}`.slice(0, 8000),
           execution_context: workEnvelope(order),
-          // The Room's PERSISTED tag is authoritative for room-kind resolution, so
-          // routing never falls through to keyword matching on the message text.
-          task_tag: order.room_tag || null,
+          // Keep physical Room ownership, but let the typed workload select the
+          // normal domain methodology catalog without keyword routing.
+          task_tag: workOrderTaskTag(order),
           room_goal: order.room_goal || null,
           project_id: order.project_id || null,
           participant_ids: asList(order.participant_ids).map(String).slice(0, 8),
           callback_url: `${controlPlaneUrl()}/internal/hyper/turn-event`,
-          write_policy: 'ask',
+          write_policy: asObject(order.input_snapshot).authority?.mode === 'EXECUTE' ? 'ask' : 'deny',
         }),
         signal: AbortSignal.timeout(600000),
       });
@@ -170,6 +333,19 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     return null;
   }
 
+  const currentRuntime = await prisma.hqRuntime.findFirst({
+    where: { id: order.runtime_id, orgId: order.org_id }, select: { epoch: true },
+  });
+  const orderEpoch = String(order.runtime_epoch || '');
+  if (!currentRuntime || !orderEpoch || String(currentRuntime.epoch) !== orderEpoch) {
+    logger.warn('[hq-runtime] discarded specialist result from an obsolete Runtime epoch:', order.id);
+    await prisma.hyperWorkOrder.updateMany({
+      where: { id: order.id, orgId: order.org_id, runtimeEpoch: orderEpoch },
+      data: { status: 'cancelled', error: 'Runtime epoch changed before the result returned.', completedAt: new Date() },
+    }).catch(() => {});
+    return { workOrderId: order.id, status: 'OBSOLETE_EPOCH' };
+  }
+
   if (!response.ok && !body.status) {
     throw new Error(`hq_dispatch_sidecar_http_${response.status}`);
   }
@@ -186,18 +362,19 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     const verdict = roomVerdict(body);
     status = verdict.status;
     packet = validateWorkResultPacket({
-      result: { text: String(body?.summary || body?.result?.text || '').slice(0, 4000), room_turn_id: roomTurnId },
+      result: { text: String(body?.summary || body?.result?.report_markdown || body?.result?.text || '').slice(0, 4000), room_turn_id: roomTurnId,
+        work_order_result: verdict.contract || null },
       actions: [], metrics: { cost_tokens: Number(body?.cost_tokens || 0) },
       cost: { total_tokens: Number(body?.cost_tokens || 0) },
       failures: status === 'failed' ? verdict.gaps : [],
-      blockers: status === 'blocked' ? verdict.gaps : [],
+      blockers: ['blocked', 'partial'].includes(status) ? verdict.gaps : [],
       recommendation: status === 'completed' ? 'continue' : 'escalate',
-      source_refs: verdict.artifacts.map((a) => a?.url || a?.title).filter(Boolean),
+      source_refs: [...new Set([...(verdict.contract?.evidence_refs || []), ...verdict.artifacts.map((a) => a?.url || a?.title).filter(Boolean)])],
     });
     packet.artifacts = verdict.artifacts;
     packet.verification = body?.verification || {};
     await prisma.hyperWorkOrder.updateMany({
-      where: { id: order.id, orgId: order.org_id },
+      where: { id: order.id, orgId: order.org_id, runtimeEpoch: orderEpoch },
       data: { status, completedAt: new Date(), ...(status === 'completed' ? {} : { error: verdict.gaps.join('; ').slice(0, 2000) }) },
     });
     // HQ's REVIEWING path reads the DURABLE result row, not this response. The
@@ -205,19 +382,22 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     // next work_result wake finds nothing and escalates "could not be reconciled".
     await prisma.$executeRawUnsafe(
       `INSERT INTO hivemind.hyper_work_results
-         (work_order_id, attempt, status, summary, output, evidence, artifacts, usage)
-       VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb)`,
-      order.id, 1, status,
+         (work_order_id, runtime_epoch, attempt, status, summary, output, evidence, artifacts, usage)
+       VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
+      order.id, orderEpoch, 1, status,
       String(body?.summary || body?.result?.text || verdict.gaps.join('; ') || status).slice(0, 4000),
       JSON.stringify({
-        todo_id: order.input_snapshot?.todo_id || null,
+        todo_id: asObject(order.input_snapshot).todo_id || null,
         room_turn_id: roomTurnId, room_id: order.room_id,
         verification: body?.verification || {},
-        // Room governance already ran; surface the machine-checkable facts the HQ
-        // acceptance gate looks for so a governed Room turn is not re-litigated.
-        discovery_complete: status === 'completed',
+        work_order_result: verdict.contract || null,
+        // Room governance already ran. Keep its typed contract intact so HQ can
+        // verify each requested outcome rather than treating every completed Room
+        // turn as prospect discovery.
+        discovery_complete: status === 'completed' && (verdict.contract?.completion_requirements || [])
+          .some((row) => row?.type === 'records_persisted' && row?.met === true),
         completed_requirements: status === 'completed' ? asList(order.acceptance_criteria) : [],
-        code: status === 'completed' ? null : 'room_verification_failed',
+        code: status === 'completed' ? null : status === 'partial' ? 'room_checkpoint_returned' : 'room_verification_failed',
       }),
       JSON.stringify(verdict.artifacts.map((a) => a?.url || a?.title).filter(Boolean)),
       JSON.stringify(verdict.artifacts),
@@ -242,14 +422,21 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     });
   }
   await appendHqEvent({
-    prisma, runtimeId: order.runtime_id, orgId: order.org_id,
-    eventType: status === 'completed' ? 'work_order_completed' : 'blocked',
-    title: status === 'completed' ? `Specialist result returned: ${order.title}` : `Specialist work ${status}: ${order.title}`,
-    summary: String(body?.result?.text || body?.error || status).slice(0, 1200),
-    details: { status, packet }, workOrderId: order.id,
+    prisma, runtimeId: order.runtime_id, orgId: order.org_id, runtimeEpoch: currentRuntime.epoch,
+    eventType: status === 'completed' ? 'work_order_completed' : status === 'partial' ? 'observation' : 'blocked',
+    title: status === 'completed' ? `Specialist result returned: ${order.title}`
+      : status === 'partial' ? `Specialist checkpoint returned: ${order.title}` : `Specialist work ${status}: ${order.title}`,
+    summary: specialistEventSummary({ status, packet, orderTitle: order.title }),
+    details: {
+      status, result_ref: order.id,
+      artifact_count: Array.isArray(packet.artifacts) ? packet.artifacts.length : 0,
+      evidence_count: Array.isArray(packet.source_refs) ? packet.source_refs.length : 0,
+      blockers: Array.isArray(packet.blockers) ? packet.blockers.slice(0, 10) : [],
+      failures: Array.isArray(packet.failures) ? packet.failures.slice(0, 10) : [],
+    }, workOrderId: order.id,
   });
   await scheduleHqWake({
-    prisma, runtimeId: order.runtime_id, orgId: order.org_id,
+    prisma, runtimeId: order.runtime_id, orgId: order.org_id, runtimeEpoch: currentRuntime.epoch,
     idempotencyKey: `work-result:${order.id}`,
     triggerType: 'work_result', dueAt: new Date(),
     payload: { work_order_id: order.id, status },

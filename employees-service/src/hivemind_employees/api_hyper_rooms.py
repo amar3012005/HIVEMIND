@@ -74,6 +74,7 @@ from .db import (
     get_room_journal,
     get_room_instructions,
     get_connected_gmail,
+    has_connected_gmail,
     update_room_playbook,
     append_room_journal_entry,
     get_company_name,
@@ -1434,7 +1435,11 @@ def _build_final_report(
         "project_scoped": project_scoped,
         "evidence": evidence_rows[:12],
         "sources": source_rows[:8],
-        "content": "\n".join(lines).strip(),
+        # The synthesis is already the polished report. Re-wrapping it with the
+        # question, room goal, another "Final report" heading and a second
+        # conclusion produced the duplicated brochure visible in the Room.
+        # Keep progress/evidence as structured fields and render the report once.
+        "content": (final_text or "").strip(),
     }
 
 
@@ -1747,6 +1752,10 @@ class RoomTurnResponse(BaseModel):
     # Artifacts the swarm produced this turn (docs/sheets) — each {connector,
     # url, title, label}; the FE renders a connector-logo "view in new tab" button.
     artifacts: Optional[List[Dict[str, Any]]] = None
+    # Present only for an HQ-delegated Room turn. Ordinary human turns keep the
+    # exact historical response shape (unset fields are omitted by callers).
+    result: Optional[Dict[str, Any]] = None
+    summary: Optional[str] = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -1993,6 +2002,42 @@ _ARTIFACT_URL_RE = re.compile(
 )
 
 
+def _apply_outreach_contract(
+    verdict: Dict[str, Any], plan: Dict[str, Any], pending: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else None
+    if not outreach:
+        return verdict
+    requested = max(1, min(50, int(outreach.get("requested_count") or 1)))
+    metrics = plan.get("outreach_metrics") if isinstance(plan.get("outreach_metrics"), dict) else {}
+    pending_count = sum(
+        1 for item in pending
+        if "gmail" in str(item.get("label") or item.get("capability") or "").lower()
+    )
+    observed = {
+        "discover": int(metrics.get("prospects_discovered") or 0),
+        "persist": int(metrics.get("prospects_persisted") or 0),
+        # A body printed in a report is not a durable email draft or delivery.
+        "draft": pending_count,
+        # Pending approval proves preparation, never delivery. Delivery requires
+        # a durable provider receipt owned by the checkpointed lifecycle.
+        "deliver": 0,
+        "monitor": 0,
+    }
+    missing = [
+        f"outreach lifecycle {phase} incomplete: {observed[phase]}/{requested}"
+        for phase in ("discover", "persist", "draft", "deliver", "monitor")
+        if outreach.get(phase) is True and observed[phase] < requested
+    ]
+    verdict["outreach_contract"] = outreach
+    verdict["outreach_observed"] = observed
+    if missing:
+        verdict["met"] = False
+        verdict["artifact_ok"] = False
+        verdict["gaps"] = list(dict.fromkeys([*(verdict.get("gaps") or []), *missing]))[:12]
+    return verdict
+
+
 async def _verify_turn(
     req: "RoomTurnRequest",
     lead: Dict[str, Any],
@@ -2045,6 +2090,7 @@ async def _verify_turn(
         '  "artifact_ok": <the intended output was actually produced or is queued for approval — see the strict rule below>,\n'
         '  "assignments_ok": <the assigned sub-tasks appear covered by the result>,\n'
         '  "grounded_ok": <specific factual claims are backed by tools/memory, not invented>,\n'
+        '  "unsupported_claims": ["<exact unsafe claim or empty>"],\n'
         '  "gaps": ["<concrete missing/unverified item>", "..."],\n'
         '  "note": "<one sentence>"\n'
         '}\n'
@@ -2087,7 +2133,12 @@ async def _verify_turn(
         "grounded_ok — a deliverable that honestly labels even 20 items UNVERIFIED is grounded_ok=TRUE "
         "(those are completeness gaps → list in gaps + met=false, but NOT grounded_ok=false). When in "
         "doubt and the text honestly flags what it couldn't confirm, grounded_ok=TRUE.\n"
-        "- grounded_ok=FALSE only on a real FABRICATION tell — a confident-as-fact claim with a FAKE "
+        "- grounded_ok=FALSE on any confident factual assertion that is not supported by EVIDENCE. This includes "
+        "guarantees, legal/compliance approval, exclusivity ('only', 'no vendor', 'white space'), market claims, "
+        "customer or regulator validation, numerical lifts/targets, named owners/dates, and performance claims. "
+        "List every unsafe assertion verbatim in unsupported_claims. A recommendation may propose a validation "
+        "step, but must not claim its result.\n"
+        "- grounded_ok=FALSE also on a real FABRICATION tell — a confident-as-fact claim with a FAKE "
         "backing: a named source/citation/document/date matching NO memory_hit or tool result (e.g. "
         "'Confluence page X, 23-APR-24', an invented file name); a person/CEO/email asserted as real "
         "without a matching tool/memory result; OR a website / press-release / public-filing citation "
@@ -2118,30 +2169,52 @@ async def _verify_turn(
         # judgment reliability is what this gate is FOR. tool-less → no routing swap.
         if model:
             verifier_emp["model"] = model
-            verifier_emp["llm_provider"] = "groq"
+            # A namespaced model such as deepseek/... must go to OpenRouter. The
+            # previous forced Groq route ignored the model and made verification
+            # silently unavailable when Groq billing was restricted.
+            verifier_emp["llm_provider"] = "openrouter"
         agent = build_react_agent(
             verifier_emp, boot_emp.get("api_key") or "",
             user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
         )
         reply = await agent(Msg(name="user", content=prompt, role="user"))
-    except Exception as exc:  # noqa: BLE001 — never fail a turn over verification
+    except Exception as exc:  # noqa: BLE001 — preserve the report, but never silently pass quality
         log.warning("[verify] pass failed: %s", exc)
-        return None
+        return {
+            "met": False, "artifact_ok": False, "assignments_ok": False,
+            "grounded_ok": False, "unsupported_claims": [],
+            "gaps": ["quality verification was unavailable; this report requires review before use"],
+            "note": f"Quality verification unavailable: {str(exc)[:180]}",
+            "produced_artifacts": produced, "pending_writes": [p.get("label") for p in pending],
+            "intended_output": plan.get("intended_output"), "done_criterion": plan.get("done_criterion"),
+            "verification_available": False,
+        }
     obj = _first_json_object(_msg_to_text(reply) or "")
     if not isinstance(obj, dict):
-        return None
+        return {
+            "met": False, "artifact_ok": False, "assignments_ok": False,
+            "grounded_ok": False, "unsupported_claims": [],
+            "gaps": ["quality verification returned no usable verdict; this report requires review before use"],
+            "note": "Quality verification returned no usable verdict.",
+            "produced_artifacts": produced, "pending_writes": [p.get("label") for p in pending],
+            "intended_output": plan.get("intended_output"), "done_criterion": plan.get("done_criterion"),
+            "verification_available": False,
+        }
     verdict = {
         "met": bool(obj.get("met")),
         "artifact_ok": bool(obj.get("artifact_ok")),
         "assignments_ok": bool(obj.get("assignments_ok")),
         "grounded_ok": bool(obj.get("grounded_ok")),
+        "unsupported_claims": [str(item)[:300] for item in (obj.get("unsupported_claims") or []) if str(item).strip()][:10],
         "gaps": [str(g)[:200] for g in (obj.get("gaps") or []) if str(g).strip()][:8],
         "note": str(obj.get("note") or "")[:300],
         "produced_artifacts": produced,
         "pending_writes": [p.get("label") for p in pending],
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
+        "verification_available": True,
     }
+    _apply_outreach_contract(verdict, plan, pending)
     # ── Deterministic company-grounding gate (does NOT trust the LLM verdict) ──
     # A company-scoped turn with NO company context cannot be grounded: the room
     # had nothing real to stand on, so a plausible-sounding deliverable is exactly
@@ -2642,6 +2715,60 @@ async def _verify_and_emit(
     return verdict
 
 
+async def _repair_final_text(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    *,
+    final_text: str,
+    verdict: Dict[str, Any],
+    blackboard: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+) -> str:
+    """Rewrite only a verifier-flagged report; never regenerate the whole turn.
+
+    The Director's synthesis is the product. A second model call is warranted
+    only when the independent verifier finds an unsupported assertion. It gets
+    the actual evidence slice and the exact verdict, then removes or clearly
+    relabels unsafe claims without inventing a replacement.
+    """
+    facts = [str(item)[:400] for item in ((blackboard or {}).get("facts") or [])][:24]
+    unsafe = [str(item)[:300] for item in (verdict.get("unsupported_claims") or []) if str(item).strip()][:10]
+    prompt = (
+        "You are the final report editor. Return ONLY the revised report in the same useful format. "
+        "Preserve supported strategy and recommendations, but remove every assertion that lacks support. "
+        "Do not replace an unsupported claim with a different fact. A suggested future measure is allowed only "
+        "when labelled 'proposed validation target'; a compliance or positioning statement that lacks proof must "
+        "be labelled 'subject to legal and technical validation'. Do not introduce new numbers, dates, owners, "
+        "sources, guarantees, certifications, competitors, or market claims.\n\n"
+        f"VERIFIER GAPS:\n{json.dumps(verdict.get('gaps') or [], ensure_ascii=False)}\n"
+        f"UNSAFE CLAIMS:\n{json.dumps(unsafe, ensure_ascii=False)}\n"
+        f"EVIDENCE AVAILABLE:\n{json.dumps(facts, ensure_ascii=False)}\n\n"
+        f"REPORT TO REPAIR:\n{final_text[:12000]}"
+    )
+    try:
+        boot = {item["id"]: item for item in await fetch_bootstrap()}
+        boot_emp = boot.get(lead.get("id"), {}) or {}
+        repair_emp = {
+            **lead,
+            "tools": ["_verify_noop"],
+            "connectors": [],
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "max_iters": 1,
+            "model": model or "deepseek/deepseek-v4-flash",
+            "llm_provider": "openrouter",
+        }
+        agent = build_react_agent(
+            repair_emp, boot_emp.get("api_key") or "",
+            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+        )
+        repaired = (_msg_to_text(await agent(Msg(name="user", content=prompt, role="user"))) or "").strip()
+        return repaired if len(repaired) >= 80 else ""
+    except Exception as exc:  # noqa: BLE001 — verification status handles an unavailable repair path
+        log.warning("[quality-repair] failed: %s", exc)
+        return ""
+
+
 # Dedicated doc-authoring guide injected into the LLM at production time — the
 # "rendering skill" for the agents (they're AgentScope LLMs, not Claude, so this
 # is the functional equivalent of a skill: a structured authoring contract). It
@@ -3033,23 +3160,24 @@ async def _orchestrate_single_agent(
     log.info("[single] room=%s company_brief=%d chars company=%s ctx_missing=%s",
              req.room_id, len(_company_brief or ""), _company_name or "-", _company_ctx_missing)
 
-    # Derive the intended deliverable + capability-gate it BEFORE the run, so SYNTH writes the right
-    # FORMAT (a ready-to-send email vs a generic report). If the artifact's connector isn't enabled
-    # for the room, downgrade to a text answer — never write the wrong format or call an absent connector.
-    intended_output = _derive_intended_output(req.user_message)
-    # EVENT-DRIVEN outreach intent: a room whose GOAL is outreach-shaped (the
-    # onboarding task's own text — "outreach", "cold email", "messaging" — rides
-    # into the room goal at task-open) upgrades a generic first turn to a
-    # ready-to-send EMAIL deliverable. No task is hardcoded: the trigger is the
-    # task's language, so any outreach-tagged task drives the compose card.
-    if intended_output == "answer" and re.search(
-            r"\b(outreach|cold[- ]?email|email (campaign|sequence|messaging)|messaging)\b",
-            f"{req.room_goal or ''}", re.I):
-        intended_output = "email"
-    if not _artifact_connector_enabled(intended_output, conns):
-        log.info("[single] '%s' needs a connector not enabled for room=%s (enabled=%s) → text answer",
-                 intended_output, req.room_id, conns)
-        intended_output = "answer"
+    # Globally connected Gmail is available to every Room for this user and
+    # organization. Room toggles still govern optional connector reads, but an
+    # explicit Gmail action must not disappear because a per-Room switch is off.
+    _sender_email = ""
+    _gmail_connected = False
+    try:
+        _sender_email = await get_connected_gmail(req.user_id, req.org_id)
+        _gmail_connected = bool(_sender_email) or await has_connected_gmail(req.user_id, req.org_id)
+    except Exception:  # noqa: BLE001
+        _sender_email = ""
+        _gmail_connected = False
+    if _gmail_connected and not any(str(conn).lower().replace("_", "-") == "gmail" for conn in conns):
+        conns.append("gmail")
+
+    # The Director selects post-output actions from the live capability catalog.
+    # Start neutral so room names/goals and language-specific regexes cannot force
+    # a tool. The selected action later determines the deliverable format.
+    intended_output = "answer"
     # Room-level learned method lessons (skill sequences that worked for this room
     # kind) prime the planner's skill choice. Best-effort — [] pre-migration.
     _room_playbook: list = []
@@ -3070,11 +3198,6 @@ async def _orchestrate_single_agent(
     except Exception:  # noqa: BLE001
         _room_instructions = ""
 
-    _sender_email = ""
-    try:
-        _sender_email = await get_connected_gmail(req.user_id, req.org_id)
-    except Exception:  # noqa: BLE001
-        _sender_email = ""
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -3087,6 +3210,7 @@ async def _orchestrate_single_agent(
             "sim_mode": _sim_mode, "sim_agents": _sim_agents,
             "evo_mode": _evo_mode, "evo_playbooks": _evo_playbooks,
             "company_brief": _company_brief, "intended_output": intended_output,
+            "execution_context": req.execution_context or "",
             "room_kind": _room_kind,
             "room_playbook": _room_playbook, "room_journal": _room_journal,
             "room_instructions": _room_instructions,
@@ -3118,6 +3242,24 @@ async def _orchestrate_single_agent(
     gather_count = int(result.get("gather_count") or 0)
     _io = result.get("io") or {}
     _tok_by = result.get("tok_by") or {}
+    intended_output = str(result.get("intended_output") or intended_output or "answer")
+    post_output_actions = [
+        action for action in (result.get("post_output_actions") or [])
+        if isinstance(action, dict) and action.get("explicit") is True
+    ][:4]
+
+    # Conversational turns are complete when the lead replies. Do not reinterpret
+    # a greeting as an operating task by adding a plan, verifier, journal entry,
+    # or second brochure-style final report after the chat fast path returns.
+    if result.get("turn_mode") == "chat":
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+            "tok_by": {k: int(v) for k, v in _tok_by.items()}, "quality_mode": _qmode,
+        })
+        return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
 
     # A campaign tool call is a handoff, not a generic Room deliverable. The
     # dedicated Campaign Room now owns research, debate, compilation and its
@@ -3142,6 +3284,74 @@ async def _orchestrate_single_agent(
         })
         return RoomTurnResponse(ok=bool(handoff), cost_tokens=cost_tokens, status=status)
 
+    # Runtime stages are governed by the generic Core predicate engine. The Room
+    # returns evidence-backed artifacts; it does not duplicate transition logic.
+    if isinstance(result.get("runtime_stage_result"), dict):
+        contract = result["runtime_stage_result"]
+        gaps = [str(value) for value in (contract.get("gaps") or []) if str(value).strip()]
+        verdict = {
+            "met": not gaps and bool(contract.get("artifacts")),
+            "artifact_ok": bool(contract.get("artifacts")),
+            "assignments_ok": bool(result.get("work_results")),
+            "grounded_ok": all(bool(item.get("source_refs")) for item in (contract.get("artifacts") or [])),
+            "gaps": gaps,
+            "note": "Runtime stage artifacts returned for Core validation.",
+            "intended_output": "runtime_stage_result",
+        }
+        _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "runtime_stage_result": contract}
+        await _emit({"t": "verify", **verdict})
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single-runtime-stage",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+        })
+        return RoomTurnResponse(
+            ok=True,
+            cost_tokens=cost_tokens,
+            status="complete",
+            verification=verdict,
+            artifacts=contract.get("artifacts") or [],
+            result=contract,
+            summary=str(contract.get("summary") or "")[:4000],
+        )
+
+    # HQ work orders have their own deterministic, per-subtask governance. They
+    # must not enter the human producer/verifier/report path or be reinterpreted
+    # from prose. The typed contract is the only completion surface.
+    if isinstance(result.get("work_order_result"), dict):
+        contract = result["work_order_result"]
+        accepted = contract.get("status") == "completed"
+        gaps = [str((g or {}).get("why") or (g or {}).get("criterion") or g)
+                for g in (contract.get("gaps") or [])]
+        verdict = {
+            "met": accepted,
+            "artifact_ok": accepted,
+            "assignments_ok": bool(contract.get("subtasks")),
+            "grounded_ok": accepted,
+            "gaps": gaps,
+            "note": "HQ work-order contract accepted." if accepted else "HQ work-order contract contains explicit gaps.",
+            "intended_output": "work_order_result",
+            "work_order_result": contract,
+        }
+        _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "work_order_result": contract}
+        await _emit({"t": "verify", **verdict})
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens,
+            "status": "complete" if accepted else "blocked",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single-work-order",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+        })
+        return RoomTurnResponse(
+            ok=accepted,
+            cost_tokens=cost_tokens,
+            status="complete" if accepted else "blocked",
+            verification=verdict,
+            result=contract,
+            summary=str(contract.get("report_markdown") or "")[:4000],
+        )
+
     # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
     # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
     done_txt = req.room_goal or req.user_message
@@ -3150,6 +3360,17 @@ async def _orchestrate_single_agent(
          "contribution": str(x.get("text") or "")}
         for x in transcript if isinstance(x, dict)
     ]
+    # Durable worker results are the source of truth for actual assigned work.
+    # Debate remains visible and useful, but no longer masquerades as task completion.
+    work_contributions = [
+        {"owner": item.get("owner") or item.get("owner_slug") or "Agent",
+         "subtask": item.get("title") or "Work order",
+         "contribution": str(item.get("text") or "")}
+        for item in (result.get("work_results") or [])
+        if isinstance(item, dict) and item.get("status") == "completed" and str(item.get("text") or "").strip()
+    ]
+    if work_contributions:
+        contributions = [*work_contributions, *contributions]
     if not contributions:
         contributions = [{"owner": lead.get("name") or lead.get("slug"),
                           "subtask": (req.user_message or "")[:200], "contribution": final_text}]
@@ -3185,9 +3406,19 @@ async def _orchestrate_single_agent(
 
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output,
+        "artifact_steps": [
+            {"kind": action.get("artifact_kind"), "capability": action.get("capability")}
+            for action in post_output_actions
+            if action.get("connected") and action.get("artifact_kind")
+        ],
+        "post_output_actions": post_output_actions,
         "done_criterion": done_txt,
         "assignments": {c["owner"]: c["subtask"] for c in contributions},
         "execution": contributions,
+        "work_orders": result.get("work_orders") or [],
+        "work_results": result.get("work_results") or [],
+        "outreach_request": result.get("outreach_request"),
+        "outreach_metrics": result.get("outreach_metrics") or {},
         "verified_contacts": _vc,
         "enabled_connectors": conns,
         "sender_email": _sender_email,
@@ -3218,6 +3449,33 @@ async def _orchestrate_single_agent(
         }
         _PLAN_BY_TURN[req.turn_id]["verification"] = verdict
         await _emit({"t": "verify", **verdict})
+    elif _room_kind == "hq" and isinstance(result.get("growth_plan_contract"), dict):
+        contract = result["growth_plan_contract"]
+        baseline_ref = str((contract.get("baseline_ref") or {}).get("resource_id") or "")
+        delegation = contract.get("delegation") or {}
+        hypotheses = contract.get("hypotheses") or []
+        accepted = bool(
+            contract.get("contract_version") == "growth-plan.v1"
+            and baseline_ref
+            and (contract.get("constraint") or {}).get("evidence_refs")
+            and 1 <= len(hypotheses) <= 3
+            and delegation.get("room_tag")
+            and delegation.get("objective")
+        )
+        verdict = {
+            "met": accepted,
+            "artifact_ok": accepted,
+            "assignments_ok": accepted,
+            "grounded_ok": accepted,
+            "gaps": [] if accepted else ["The deterministic Growth Stage contract was not accepted."],
+            "note": "HQ Growth Stage accepted by deterministic governance." if accepted else "HQ Growth Stage governance rejected the contract.",
+            "produced_artifacts": [baseline_ref] if baseline_ref else [],
+            "pending_writes": [],
+            "intended_output": "growth_plan_contract",
+            "done_criterion": done_txt,
+        }
+        _PLAN_BY_TURN[req.turn_id]["verification"] = verdict
+        await _emit({"t": "verify", **verdict})
     elif _room_kind == "seo" and result.get("seo_evidence_governed"):
         artifact_id = str(result.get("seo_artifact_id") or "")
         verdict = {
@@ -3236,12 +3494,31 @@ async def _orchestrate_single_agent(
         await _emit({"t": "verify", **verdict})
     else:
         try:
-            await _verify_and_emit(req, lead, final_text=final_text,
-                                   blackboard={"hit_count": gather_count,
-                                               "facts": result.get("gather_facts") or []},
-                                   model=_m_recon,
-                                   company_name=_company_name,
-                                   company_context_missing=_company_ctx_missing)
+            _quality_board = {"hit_count": gather_count, "facts": result.get("gather_facts") or []}
+            _quality_verdict = await _verify_and_emit(
+                req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
+                company_name=_company_name, company_context_missing=_company_ctx_missing,
+            )
+            # Repair only a real, available quality finding. A verifier outage is
+            # surfaced as review-required rather than producing a speculative edit.
+            if (_quality_verdict and _quality_verdict.get("verification_available")
+                    and not _quality_verdict.get("grounded_ok")):
+                repaired = await _repair_final_text(
+                    req, lead, final_text=final_text, verdict=_quality_verdict,
+                    blackboard=_quality_board, model=_m_recon,
+                )
+                if repaired:
+                    final_text = repaired
+                    await _emit({
+                        "t": "quality_repair",
+                        "reason": "unsupported_claims",
+                        "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
+                        "message": "The report was rewritten to remove unsupported claims and rechecked.",
+                    })
+                    await _verify_and_emit(
+                        req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
+                        company_name=_company_name, company_context_missing=_company_ctx_missing,
+                    )
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
@@ -3257,6 +3534,8 @@ async def _orchestrate_single_agent(
         status = "blocked"
     elif _gv and not _gv.get("grounded_ok"):
         status = "escalated"
+    elif _gv and not _gv.get("met"):
+        status = "blocked"
 
     # The single-engine path must emit the same durable report contract as the
     # legacy orchestrator. CampaignOperatingReport uses this event as its render
@@ -3671,7 +3950,7 @@ async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     req.write_policy wins; otherwise gate ("ask") when the room has connectors
     enabled, else "auto" (no side-effectful tools in play)."""
     explicit = (req.write_policy or "").strip().lower()
-    if explicit in ("ask", "auto"):
+    if explicit in ("deny", "ask", "auto", "authorized"):
         return explicit
     try:
         conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
@@ -3690,9 +3969,19 @@ def _goalkeeper_max_rounds() -> int:
         return 3
 
 
-def _goalkeeper_rounds_for_room(room_kind: str) -> int:
+def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False) -> int:
     """Campaign contracts own their repair pass; other Rooms use the goalkeeper."""
-    return 1 if str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
+    return 1 if work_order or str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
+
+
+def _is_hq_work_order_context(execution_context: str) -> bool:
+    """Recognize every versioned HQ work-order envelope.
+
+    HQ work orders already run a typed subtask executor and deterministic result
+    governor. Replaying the entire Room goalkeeper only repeats the same work.
+    """
+    context = str(execution_context or "")
+    return "hq-work-order.v" in context or "runtime-stage.v" in context
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
@@ -3806,7 +4095,8 @@ async def post_room_turn(
     # Re-running the general goalkeeper duplicates research, debate and synthesis,
     # burns tokens, and can replace a nearly-complete campaign with a later draft.
     # Every other specialist Room keeps its independent goalkeeper policy.
-    max_rounds = _goalkeeper_rounds_for_room(room_kind)
+    is_work_order = _is_hq_work_order_context(req.execution_context)
+    max_rounds = _goalkeeper_rounds_for_room(room_kind, work_order=is_work_order)
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None

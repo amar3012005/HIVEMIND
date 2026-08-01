@@ -1,6 +1,46 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dispatchNextHqWorkOrder } from '../../src/hq-runtime/work-dispatcher.js';
+import {
+  dispatchNextHqWorkOrder,
+  specialistEventSummary,
+  workOrderDisplayMessage,
+} from '../../src/hq-runtime/work-dispatcher.js';
+
+test('HQ Room turn visibly carries scope, authority, dependency, and completion checks', () => {
+  const message = workOrderDisplayMessage({
+    title: 'Prepare Berlin outreach',
+    objective: 'Write one grounded draft for every accepted prospect.',
+    input_snapshot: {
+      target: { quantity: 10, location: 'Berlin, Germany', sector: 'regulated finance' },
+      authority: { mode: 'PREPARE' },
+      upstream_result: { deliverables: [{ kind: 'prospect_records' }] },
+      completion_requirements: [
+        { type: 'email_drafts', minimum: 10, maximum: 10, entity: 'prospect' },
+        { type: 'external_actions', maximum: 0 },
+      ],
+    },
+    acceptance_criteria: ['One verified-recipient draft per accepted prospect.'],
+  });
+
+  assert.match(message, /HQ WORK ORDER \| Prepare Berlin outreach/);
+  assert.match(message, /Quantity: 10/);
+  assert.match(message, /Location: Berlin, Germany/);
+  assert.match(message, /Use the accepted upstream result/);
+  assert.match(message, /Prepare and persist internal deliverables only/);
+  assert.match(message, /email drafts: at least 10 and at most 10 prospect/);
+  assert.match(message, /external actions: at most 0/);
+});
+
+test('specialist Runtime events acknowledge outcomes without dumping the full report', () => {
+  const summary = specialistEventSummary({
+    status: 'blocked', orderTitle: 'SEO foundations',
+    packet: { blockers: ['keyword evidence missing'], artifacts: [{ title: 'draft' }], source_refs: ['source-1'] },
+  });
+  assert.match(summary, /stopped without claiming completion/);
+  assert.match(summary, /keyword evidence missing/);
+  assert.doesNotMatch(summary, /HQ Work-Order Summary/);
+  assert.ok(summary.length < 500);
+});
 
 test('HQ dispatcher persists a terminal specialist result event and immediate review wake', async (t) => {
   const previousKey = process.env.HIVEMIND_MASTER_API_KEY;
@@ -25,6 +65,7 @@ test('HQ dispatcher persists a terminal specialist result event and immediate re
     hqRuntime: {
       update: async () => ({ eventSequence: 9n }),
       updateMany: async () => ({ count: 1 }),
+      findFirst: async () => ({ id: 'runtime-1' }),
     },
     hqRuntimeEvent: {
       create: async ({ data }) => { captured.event = data; return data; },
@@ -37,11 +78,13 @@ test('HQ dispatcher persists a terminal specialist result event and immediate re
     $queryRawUnsafe: async () => [{
       id: 'work-1', org_id: 'org-1', hq_cycle_id: 'cycle-1',
       growth_delegation_id: 'delegation-1', title: 'Validate the market', runtime_id: 'runtime-1',
+      runtime_epoch: 'epoch-1', input_snapshot: { runtime_epoch: 'epoch-1' },
     }],
     $transaction: async (callback) => callback(transactionClient),
     growthDelegation: {
       updateMany: async ({ data }) => { captured.delegation = data; return { count: 1 }; },
     },
+    hqRuntime: { findFirst: async () => ({ epoch: 'epoch-1' }) },
   };
 
   const result = await dispatchNextHqWorkOrder({ prisma });
@@ -65,6 +108,41 @@ test('HQ dispatcher does not replay a claimed Work Order', async (t) => {
     status: 200, headers: { 'Content-Type': 'application/json' },
   });
   t.after(() => { globalThis.fetch = previousFetch; });
-  const prisma = { $queryRawUnsafe: async () => [{ id: 'work-2', org_id: 'org-1', runtime_id: 'runtime-1' }] };
+  const prisma = {
+    $queryRawUnsafe: async () => [{ id: 'work-2', org_id: 'org-1', runtime_id: 'runtime-1', runtime_epoch: 'epoch-1', input_snapshot: { runtime_epoch: 'epoch-1' } }],
+    hqRuntime: { findFirst: async () => ({ epoch: 'epoch-1' }) },
+  };
   assert.deepEqual(await dispatchNextHqWorkOrder({ prisma }), { workOrderId: 'work-2', status: 'ALREADY_CLAIMED' });
+});
+
+test('HQ dispatcher discards a result returned from an obsolete Runtime epoch', async (t) => {
+  const previousKey = process.env.HIVEMIND_MASTER_API_KEY;
+  process.env.HIVEMIND_MASTER_API_KEY = 'internal-test-key';
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.HIVEMIND_MASTER_API_KEY;
+    else process.env.HIVEMIND_MASTER_API_KEY = previousKey;
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: true, status: 'completed', result: { text: 'Late result.' },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  t.after(() => { globalThis.fetch = previousFetch; });
+
+  let cancelled = null;
+  const prisma = {
+    $queryRawUnsafe: async () => [{
+      id: 'work-old', org_id: 'org-1', runtime_id: 'runtime-1',
+      runtime_epoch: 'epoch-old', input_snapshot: {},
+    }],
+    hqRuntime: { findFirst: async () => ({ epoch: 'epoch-new' }) },
+    hyperWorkOrder: {
+      updateMany: async (args) => { cancelled = args; return { count: 1 }; },
+    },
+  };
+
+  assert.deepEqual(await dispatchNextHqWorkOrder({ prisma, logger: { warn: () => {} } }), {
+    workOrderId: 'work-old', status: 'OBSOLETE_EPOCH',
+  });
+  assert.equal(cancelled.where.runtimeEpoch, 'epoch-old');
+  assert.equal(cancelled.data.status, 'cancelled');
 });

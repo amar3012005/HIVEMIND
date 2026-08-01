@@ -1,7 +1,9 @@
 import {
   appendHqEvent,
   ensureHqRuntime,
+  FIRST_LIFE_OBJECTIVE,
   getHqRuntime,
+  resetHqForCompanyReplacement,
   scheduleHqWake,
   transitionHqRuntime,
 } from './repository.js';
@@ -69,7 +71,7 @@ async function requestWake({ prisma, runtime, triggerType, payload = {}, key }) 
   const dueAt = new Date();
   const idempotencyKey = key || `${triggerType}:${dueAt.toISOString().slice(0, 16)}`;
   return scheduleHqWake({
-    prisma, runtimeId: runtime.id, orgId: runtime.orgId,
+    prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
     idempotencyKey, triggerType, dueAt, payload,
   });
 }
@@ -97,6 +99,7 @@ function queueStatus(value) {
   const status = String(value || '').toUpperCase();
   if (['COMPLETED', 'COMPLETE'].includes(status)) return 'COMPLETED';
   if (status === 'WAITING_FOR_CONNECTOR') return 'WAITING_FOR_CONNECTOR';
+  if (status === 'WAITING_FOR_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
   if (status === 'BLOCKED') return 'BLOCKED';
   if (['RUNNING', 'ACTIVE', 'QUEUED'].includes(status)) return 'RUNNING';
   return 'READY';
@@ -131,7 +134,7 @@ function runtimeQueue({ todos, stages, delegations }) {
     .sort((left, right) => left.priority - right.priority || left.position - right.position || new Date(left.updated_at) - new Date(right.updated_at));
 }
 
-export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null }) {
+export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, emailLifecycle = null, runtimePlaybooks = null }) {
   return async function handleHqRuntimeRoute(req, res, url) {
     const pathname = url.pathname;
     if (!pathname.startsWith('/v1/hq/')) return false;
@@ -173,7 +176,11 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const body = await parseBody(req).catch(() => ({}));
         const instructionBody = String(body.instruction || '').trim().slice(0, 5000);
         if (!instructionBody) return jsonResponse(res, { error: 'hq_instruction_required' }, 400);
-        const objective = String(body.objective || await findDefaultObjective(prisma, orgId)).trim().slice(0, 5000);
+        const existingRuntime = await getHqRuntime({ prisma, orgId });
+        const freshStart = !existingRuntime || existingRuntime.state === 'INACTIVE';
+        const objective = String(freshStart
+          ? FIRST_LIFE_OBJECTIVE
+          : body.objective || await findDefaultObjective(prisma, orgId)).trim().slice(0, 5000);
         if (!objective) return jsonResponse(res, { error: 'hq_runtime_objective_required' }, 400);
 
         let runtime = await ensureHqRuntime({
@@ -203,7 +210,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         });
         const schedule = await requestWake({
           prisma, runtime, triggerType: 'user_first_activation',
-          payload: { instruction_id: instruction.id, source: 'runtime_invitation' },
+          payload: { instruction_id: instruction.id, source: 'runtime_invitation', fresh_start: freshStart },
           key: `runtime_launch:${instruction.id}`,
         });
         return jsonResponse(res, {
@@ -239,15 +246,46 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         if (runtime.state === 'PAUSED') return jsonResponse(res, { error: 'hq_runtime_paused' }, 409);
         const activeCycle = await prisma.hqCycle.findFirst({
-          where: { orgId, status: { in: ['QUEUED', 'RUNNING'] } }, orderBy: { createdAt: 'desc' },
+          where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['QUEUED', 'RUNNING'] } }, orderBy: { createdAt: 'desc' },
         });
         if (activeCycle) return jsonResponse(res, { runtime: asJsonRuntime(runtime), cycle: activeCycle, already_running: true });
+        const activeWorkOrder = await prisma.hyperWorkOrder.findFirst({
+          where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null }, status: { in: ['queued', 'running', 'processing'] } },
+          select: { id: true, title: true, status: true },
+        });
+        if (activeWorkOrder) {
+          return jsonResponse(res, { runtime: asJsonRuntime(runtime), work_order: activeWorkOrder, already_operating: true });
+        }
         const body = await parseBody(req).catch(() => ({}));
         const schedule = await requestWake({
           prisma, runtime, triggerType: 'user_wake', payload: body.payload || {},
           key: String(body.idempotency_key || `user_wake:${Date.now()}`).slice(0, 160),
         });
         return jsonResponse(res, { runtime: asJsonRuntime(await getHqRuntime({ prisma, orgId })), schedule }, 202);
+      }
+
+      if (pathname === '/v1/hq/restart' && req.method === 'POST') {
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
+        if (lifecycle?.deleteCheckpoints) {
+          const workflows = await prisma.hqWorkflow.findMany({
+            where: { runtimeId: runtime.id, orgId },
+            select: { id: true, context: true },
+          });
+          for (const workflow of workflows) {
+            if (workflow.context?.email_lifecycle?.execution_id) {
+              await lifecycle.deleteCheckpoints({ organizationId: orgId, executionId: workflow.id });
+            }
+          }
+        }
+        await prisma.runtimePlaybookRun?.deleteMany?.({ where: { orgId } }).catch?.(() => {});
+        const reset = await resetHqForCompanyReplacement({ prisma, orgId });
+        return jsonResponse(res, {
+          runtime: asJsonRuntime(reset),
+          reset: true,
+          next: 'runtime_invitation',
+        });
       }
 
       if (pathname === '/v1/hq/objective' && req.method === 'POST') {
@@ -302,16 +340,92 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
         await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
-        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations] = await Promise.all([
-          prisma.hyperWorkOrder.findMany({ where: { orgId, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
-          prisma.hqSchedule.findMany({ where: { orgId, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
+        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
+        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations, workflowApprovals, playbookRuns] = await Promise.all([
+          prisma.hyperWorkOrder.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
+          prisma.hqSchedule.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
           prisma.hqTodo.findMany({ where: { orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
           prisma.hqCapabilityRequest.findMany({ where: { orgId, status: 'REQUIRED' }, orderBy: { createdAt: 'asc' }, take: 20 }),
           prisma.hqInstruction.findMany({ where: { orgId }, orderBy: { createdAt: 'desc' }, take: 20 }),
           prisma.growthStage.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 }),
           prisma.growthDelegation.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 30 }),
+          lifecycle?.listPendingApprovals?.({ organizationId: orgId }).catch(() => []) || [],
+          prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
+            where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 50,
+            include: { checkpoints: { orderBy: { sequence: 'desc' }, take: 1 } },
+          }).catch(() => []) : Promise.resolve([]),
         ]);
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }) });
+        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), workflow_approvals: workflowApprovals, playbook_runs: playbookRuns });
+      }
+
+      if (pathname === '/v1/hq/playbooks/runs' && req.method === 'GET') {
+        const runs = await prisma.runtimePlaybookRun.findMany({
+          where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 100,
+          include: {
+            artifacts: { orderBy: { createdAt: 'asc' } },
+            checkpoints: { orderBy: { sequence: 'asc' } },
+            authorities: { orderBy: { grantedAt: 'asc' } },
+          },
+        });
+        return jsonResponse(res, { runs });
+      }
+
+      if (pathname === '/v1/hq/playbooks/runs' && req.method === 'POST') {
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        const objective = String(body.objective || '').trim().slice(0, 8000);
+        const roomId = String(body.room_id || '').trim();
+        if (!objective || !roomId) return jsonResponse(res, { error: 'runtime_playbook_objective_and_room_required' }, 400);
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true } });
+        if (!room) return jsonResponse(res, { error: 'runtime_playbook_room_not_found' }, 404);
+        const created = await service.tryCreateAssignment({
+          orgId, roomId, objective,
+          idempotencyKey: String(body.idempotency_key || `user:${userId}:${Date.now()}`).slice(0, 180),
+          trigger: body.trigger || { type: 'user_request', payload: body.payload || {} },
+          context: body.context || {},
+          scopeKey: String(body.scope_key || 'global').slice(0, 80),
+        });
+        if (!created.matched) return jsonResponse(res, { error: 'runtime_playbook_no_compatible_lifecycle', selection: created.selection }, 422);
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, created, 201);
+      }
+
+      const playbookAuthorityMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/authority$/i);
+      if (playbookAuthorityMatch && req.method === 'POST') {
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        const gate = String(body.gate || '').trim().slice(0, 120);
+        if (!gate) return jsonResponse(res, { error: 'runtime_playbook_authority_gate_required' }, 400);
+        await service.grantAuthority(playbookAuthorityMatch[1], orgId, gate, { grantedBy: userId, payload: body.payload || {} });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { ok: true }, 202);
+      }
+
+      const playbookEventMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/events$/i);
+      if (playbookEventMatch && req.method === 'POST') {
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        const event = body.event && typeof body.event === 'object' ? body.event : {};
+        if (!event.type) return jsonResponse(res, { error: 'runtime_playbook_event_type_required' }, 400);
+        const run = await service.resumeEvent(playbookEventMatch[1], orgId, event);
+        return jsonResponse(res, { run }, 202);
+      }
+
+      const approvalMatch = pathname.match(/^\/v1\/hq\/workflows\/([0-9a-f-]{36})\/approval$/i);
+      if (approvalMatch && req.method === 'POST') {
+        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
+        if (!lifecycle) return jsonResponse(res, { error: 'email_lifecycle_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        const decision = String(body.decision || '').toLowerCase();
+        if (!['approve', 'reject'].includes(decision)) return jsonResponse(res, { error: 'decision_must_be_approve_or_reject' }, 400);
+        const result = await lifecycle.approve({
+          organizationId: orgId, executionId: approvalMatch[1], approved: decision === 'approve',
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { ok: true, decision, result });
       }
 
       if (pathname === '/v1/hq/instructions' && req.method === 'POST') {

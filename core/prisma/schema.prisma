@@ -123,6 +123,8 @@ model Organization {
   hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
   seoSearchConsoleProperties   SeoSearchConsoleProperty[] @relation("OrgSeoSearchConsoleProperties")
   seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
+  zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
+  zernioWebhookEvents          ZernioWebhookEvent[]
 
   @@map("organizations")
 }
@@ -592,6 +594,47 @@ model Campaign {
   @@index([orgId, status, createdAt(sort: Desc)])
   @@index([ownerUserId, createdAt(sort: Desc)])
   @@map("campaigns")
+}
+
+/// White-label Zernio execution boundary. One durable profile belongs to one
+/// Singulance organization; browser clients only receive the sanitized account
+/// and capability snapshots, never this provider identifier or API credential.
+model ZernioOrgProfile {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String       @unique @map("org_id") @db.Uuid
+  zernioProfileId   String       @unique @map("zernio_profile_id") @db.VarChar(80)
+  status            String       @default("ACTIVE") @db.VarChar(24)
+  displayName       String       @map("display_name") @db.VarChar(255)
+  connectedAccounts Json         @default("[]") @map("connected_accounts") @db.JsonB
+  capabilities      Json         @default("{}") @db.JsonB
+  selectedAdAccounts Json        @default("{}") @map("selected_ad_accounts") @db.JsonB
+  createdBy         String?      @map("created_by") @db.Uuid
+  lastSyncedAt      DateTime?    @map("last_synced_at") @db.Timestamptz(6)
+  lastError         String?      @map("last_error") @db.Text
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization      Organization @relation("OrgZernioExecutionProfile", fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([status, lastSyncedAt])
+  @@map("zernio_org_profiles")
+}
+
+model ZernioWebhookEvent {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  providerEventId String        @unique @map("provider_event_id") @db.VarChar(100)
+  eventType       String        @map("event_type") @db.VarChar(100)
+  providerProfileId String?     @map("provider_profile_id") @db.VarChar(80)
+  orgId           String?       @map("org_id") @db.Uuid
+  status          String        @default("ACCEPTED") @db.VarChar(24)
+  payload         Json          @default("{}") @db.JsonB
+  error           String?       @db.Text
+  receivedAt      DateTime      @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt     DateTime?     @map("processed_at") @db.Timestamptz(6)
+  organization    Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, receivedAt(sort: Desc)])
+  @@index([status, receivedAt])
+  @@map("zernio_webhook_events")
 }
 
 model CampaignChannel {
@@ -1374,6 +1417,7 @@ model HqRuntime {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId           String    @unique @map("org_id") @db.Uuid
   ownerUserId     String    @map("owner_user_id") @db.Uuid
+  epoch           String    @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   objective       String
   state           String    @default("INACTIVE") @db.VarChar(24)
   authorityPolicy Json      @default("{}") @map("authority_policy") @db.JsonB
@@ -1390,6 +1434,7 @@ model HqRuntime {
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([state, nextWakeAt])
+  @@index([orgId, epoch], map: "hq_runtimes_org_epoch_idx")
   @@map("hq_runtimes")
 }
 
@@ -1398,6 +1443,7 @@ model HqCycle {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   runtimeId      String    @map("runtime_id") @db.Uuid
   orgId          String    @map("org_id") @db.Uuid
+  runtimeEpoch   String    @map("runtime_epoch") @db.Uuid
   idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
   triggerType    String    @map("trigger_type") @db.VarChar(60)
   triggerPayload Json      @default("{}") @map("trigger_payload") @db.JsonB
@@ -1414,6 +1460,7 @@ model HqCycle {
   updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@unique([orgId, idempotencyKey])
+  @@index([runtimeId, runtimeEpoch, createdAt(sort: Desc)])
   @@index([runtimeId, createdAt(sort: Desc)])
   @@index([status, leaseExpiresAt])
   @@map("hq_cycles")
@@ -1448,6 +1495,7 @@ model HqSchedule {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   runtimeId      String    @map("runtime_id") @db.Uuid
   orgId          String    @map("org_id") @db.Uuid
+  runtimeEpoch   String    @map("runtime_epoch") @db.Uuid
   idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
   triggerType    String    @map("trigger_type") @db.VarChar(60)
   payload        Json      @default("{}") @db.JsonB
@@ -1462,6 +1510,7 @@ model HqSchedule {
   updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@unique([orgId, idempotencyKey])
+  @@index([runtimeId, runtimeEpoch, dueAt])
   @@index([status, dueAt])
   @@index([runtimeId, createdAt(sort: Desc)])
   @@map("hq_schedules")
@@ -1503,6 +1552,96 @@ model HqTodo {
   updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   @@index([runtimeId, status, priority, position])
   @@map("hq_todos")
+}
+
+/// HqWorkflow is the durable operating graph owned by HQ. A workflow is not a
+/// report or a Room turn: it is the authoritative lifecycle for one bounded
+/// business outcome, whose individual steps may be delegated to specialist
+/// Rooms and resumed from external events.
+model HqWorkflow {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId         String    @map("runtime_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  todoId            String?   @map("todo_id") @db.Uuid
+  kind              String    @db.VarChar(80)
+  title             String    @db.VarChar(240)
+  objective         String
+  status            String    @default("READY") @db.VarChar(32)
+  graphVersion      Int       @default(1) @map("graph_version")
+  authorityPolicy   Json      @default("{}") @map("authority_policy") @db.JsonB
+  context           Json      @default("{}") @db.JsonB
+  terminalReason    String?   @map("terminal_reason")
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  steps             HqWorkflowStep[]
+  artifacts         HqWorkflowArtifact[]
+
+  @@index([runtimeId, status, createdAt])
+  @@index([orgId, kind, status])
+  @@unique([runtimeId, todoId])
+  @@map("hq_workflows")
+}
+
+/// One idempotent, observable transition inside an HQ workflow. Each step is
+/// owned by HQ, but may point at exactly one delegated Room work order.
+model HqWorkflowStep {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workflowId        String    @map("workflow_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  stepKey           String    @map("step_key") @db.VarChar(100)
+  title             String    @db.VarChar(240)
+  kind              String    @db.VarChar(80)
+  status            String    @default("PENDING") @db.VarChar(32)
+  position          Int
+  dependsOn         String[]  @default([]) @map("depends_on")
+  roomTag           String?   @map("room_tag") @db.VarChar(80)
+  workOrderId       String?   @map("work_order_id") @db.Uuid
+  acceptance        Json      @default("[]") @db.JsonB
+  input             Json      @default("{}") @db.JsonB
+  result            Json      @default("{}") @db.JsonB
+  retryCount        Int       @default(0) @map("retry_count")
+  maxRetries        Int       @default(2) @map("max_retries")
+  blockedReason     String?   @map("blocked_reason")
+  dueAt             DateTime? @map("due_at") @db.Timestamptz(6)
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  workflow          HqWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  artifacts         HqWorkflowArtifact[]
+
+  @@unique([workflowId, stepKey])
+  @@unique([workOrderId])
+  @@index([orgId, status, dueAt])
+  @@index([workflowId, position])
+  @@map("hq_workflow_steps")
+}
+
+/// Artifact records are the only completion evidence HQ accepts from a Room.
+/// Payloads may contain lead IDs, internal drafts, provider receipts, and
+/// source references, but never credentials.
+model HqWorkflowArtifact {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workflowId        String    @map("workflow_id") @db.Uuid
+  stepId            String?   @map("step_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  artifactKey       String    @map("artifact_key") @db.VarChar(180)
+  artifactType      String    @map("artifact_type") @db.VarChar(80)
+  status            String    @default("READY") @db.VarChar(32)
+  externalRef       String?   @map("external_ref") @db.VarChar(500)
+  payload           Json      @default("{}") @db.JsonB
+  sourceRefs        Json      @default("[]") @map("source_refs") @db.JsonB
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  workflow          HqWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  step              HqWorkflowStep? @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, artifactKey])
+  @@index([orgId, artifactType, status])
+  @@index([stepId, createdAt])
+  @@map("hq_workflow_artifacts")
 }
 
 model HqCapabilityRequest {
@@ -2564,6 +2703,7 @@ model HyperWorkOrder {
   roomId              String   @map("room_id") @db.Uuid
   turnId              String?  @map("turn_id") @db.Uuid
   hqCycleId           String?  @map("hq_cycle_id") @db.Uuid
+  runtimeEpoch        String?  @map("runtime_epoch") @db.Uuid
   growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
   orderKey            String   @map("order_key") @db.VarChar(80)
   kind                String   @db.VarChar(40)
@@ -2591,6 +2731,7 @@ model HyperWorkOrder {
   @@index([orgId, roomId, status])
   @@index([turnId])
   @@index([hqCycleId, status])
+  @@index([orgId, runtimeEpoch, status])
   @@map("hyper_work_orders")
 }
 
@@ -2599,6 +2740,7 @@ model HyperWorkOrder {
 model HyperWorkResult {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workOrderId String   @map("work_order_id") @db.Uuid
+  runtimeEpoch String? @map("runtime_epoch") @db.Uuid
   attempt     Int      @default(1)
   status      String   @default("completed") @db.VarChar(20)
   summary     String   @db.Text
@@ -2610,6 +2752,7 @@ model HyperWorkResult {
 
   @@unique([workOrderId, attempt])
   @@index([workOrderId])
+  @@index([runtimeEpoch, createdAt(sort: Desc)])
   @@map("hyper_work_results")
 }
 
@@ -3321,6 +3464,123 @@ model Playbook {
 
   @@index([organizationId, status])
   @@map("playbooks")
+}
+
+/// Immutable, versioned lifecycle data consumed by the domain-agnostic Room
+/// executor. This is intentionally separate from learned Playbook records.
+model RuntimePlaybookDefinition {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scopeKey       String   @default("global") @map("scope_key") @db.VarChar(80)
+  organizationId String?  @map("organization_id") @db.Uuid
+  playbookId     String   @map("playbook_id") @db.VarChar(160)
+  version        Int
+  definition     Json     @db.JsonB
+  contentHash    String   @map("content_hash") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([scopeKey, playbookId, version])
+  @@index([organizationId])
+  @@index([playbookId, version(sort: Desc)])
+  @@map("runtime_playbook_definitions")
+}
+
+/// One tenant-scoped execution of an immutable Runtime playbook.
+model RuntimePlaybookRun {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  roomId            String?   @map("room_id") @db.Uuid
+  scopeKey          String    @default("global") @map("scope_key") @db.VarChar(80)
+  playbookId        String    @map("playbook_id") @db.VarChar(160)
+  playbookVersion   Int       @map("playbook_version")
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(180)
+  status            String    @default("ACTIVE") @db.VarChar(32)
+  currentStageId    String    @map("current_stage_id") @db.VarChar(120)
+  completedStageIds String[]  @default([]) @map("completed_stage_ids")
+  terminalState     String?   @map("terminal_state") @db.VarChar(120)
+  trigger           Json      @default("{}") @db.JsonB
+  context           Json      @default("{}") @db.JsonB
+  stageAttempts     Json      @default("{}") @map("stage_attempts") @db.JsonB
+  waitingFor        Json?     @map("waiting_for") @db.JsonB
+  lastVerdict       Json      @default("{}") @map("last_verdict") @db.JsonB
+  checkpointSequence Int      @default(0) @map("checkpoint_sequence")
+  version           Int       @default(1)
+  leaseOwner        String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt    DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  artifacts         RuntimePlaybookArtifact[]
+  checkpoints       RuntimePlaybookCheckpoint[]
+  authorities       RuntimePlaybookAuthority[]
+
+  @@unique([orgId, idempotencyKey])
+  @@index([orgId, status, updatedAt(sort: Desc)])
+  @@index([roomId, status])
+  @@index([status, leaseExpiresAt])
+  @@map("runtime_playbook_runs")
+}
+
+/// Immutable evidence emitted by one Runtime stage.
+model RuntimePlaybookArtifact {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId       String   @map("run_id") @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  stageId     String   @map("stage_id") @db.VarChar(120)
+  artifactId  String   @map("artifact_id") @db.VarChar(180)
+  artifactKey String   @map("artifact_key") @db.VarChar(180)
+  status      String   @default("READY") @db.VarChar(32)
+  data        Json     @default("{}") @db.JsonB
+  sourceRefs  Json     @default("[]") @map("source_refs") @db.JsonB
+  externalRef String?  @map("external_ref") @db.VarChar(500)
+  contentHash String   @map("content_hash") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  run         RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, artifactId])
+  @@index([orgId, artifactKey, createdAt(sort: Desc)])
+  @@index([runId, stageId])
+  @@map("runtime_playbook_artifacts")
+}
+
+/// Append-only execution state captured before and after every stage transition.
+model RuntimePlaybookCheckpoint {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId        String   @map("run_id") @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  sequence     Int
+  stageId      String?  @map("stage_id") @db.VarChar(120)
+  phase        String   @db.VarChar(40)
+  status       String   @db.VarChar(32)
+  state        Json     @default("{}") @db.JsonB
+  verdict      Json     @default("{}") @db.JsonB
+  artifactRefs Json     @default("[]") @map("artifact_refs") @db.JsonB
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  run          RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([runId, stageId, sequence])
+  @@map("runtime_playbook_checkpoints")
+}
+
+/// Explicit authority grant for one opaque playbook gate.
+model RuntimePlaybookAuthority {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId       String    @map("run_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  gate        String    @db.VarChar(120)
+  status      String    @default("GRANTED") @db.VarChar(24)
+  grantedBy   String?   @map("granted_by") @db.Uuid
+  payload     Json      @default("{}") @db.JsonB
+  grantedAt   DateTime  @default(now()) @map("granted_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  run         RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, gate])
+  @@index([orgId, status])
+  @@map("runtime_playbook_authorities")
 }
 
 /// Durable cluster-state index — powers dirty-cluster scheduling in cognition-loop

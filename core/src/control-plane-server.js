@@ -52,7 +52,7 @@ import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
-import { activateHqAfterOnboarding, resetHqForCompanyReplacement } from './hq-runtime/repository.js';
+import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
@@ -626,6 +626,13 @@ function removeCompanyVisual(orgId) {
   }
 }
 
+function removeCompanyCampaignAssets(orgId) {
+  const root = path.resolve(process.env.HIVEMIND_DATA_DIR || '/app/data', 'campaign-assets');
+  const tenantDir = path.resolve(root, String(orgId || ''));
+  if (!orgId || !tenantDir.startsWith(`${root}${path.sep}`)) return;
+  try { fs.rmSync(tenantDir, { recursive: true, force: true }); } catch { /* best-effort after durable rows are cleared */ }
+}
+
 async function clearHyperCompanyContext({ orgId, userId }) {
   if (!orgId || !userId) throw new Error('organization and user are required for company reset');
 
@@ -647,11 +654,32 @@ async function clearHyperCompanyContext({ orgId, userId }) {
   }
 
   const resetAt = new Date();
+  const roomRows = await prisma.hyperRoom.findMany({ where: { orgId }, select: { id: true } });
+  const roomIds = roomRows.map((row) => row.id);
   await prisma.$transaction(async (tx) => {
+    // Company replacement retires the previous operating surface. Provider
+    // credentials and immutable outbound/audit ledgers remain intact, while
+    // local drafts, lead books, Room work, and generated company artifacts go.
+    await tx.campaign.deleteMany({ where: { orgId } });
+    await tx.outreachCampaign.deleteMany({ where: { orgId } });
+    await tx.audienceContact.deleteMany({ where: { orgId } });
+    await tx.xAdsCampaign.deleteMany({ where: { orgId, xCampaignId: null } });
+    if (roomIds.length) {
+      const workOrders = await tx.hyperWorkOrder.findMany({
+        where: { orgId, roomId: { in: roomIds } }, select: { id: true },
+      });
+      if (workOrders.length) {
+        await tx.hyperWorkResult.deleteMany({ where: { workOrderId: { in: workOrders.map((row) => row.id) } } });
+      }
+      await tx.hyperWorkOrder.deleteMany({ where: { orgId, roomId: { in: roomIds } } });
+      await tx.hyperTurn.deleteMany({ where: { roomId: { in: roomIds } } });
+    }
     await tx.$executeRawUnsafe(
       `UPDATE "hivemind"."hyper_rooms"
           SET archived_at = COALESCE(archived_at, now()),
-              agent_connectors = agent_connectors - '_company'
+              agent_connectors = agent_connectors - '_company',
+              room_journal = '[]'::jsonb,
+              summary_memory_id = NULL
         WHERE org_id = $1::uuid`,
       orgId,
     );
@@ -669,14 +697,37 @@ async function clearHyperCompanyContext({ orgId, userId }) {
     });
   }, { timeout: 15000, maxWait: 8000 });
 
-  await resetHqForCompanyReplacement({ prisma, orgId });
+  const hqReset = await resetHqForCompanyReplacement({ prisma, orgId });
 
   try {
     const { getSharedProfileStore } = await import('./memory/profile-store.js');
     getSharedProfileStore(prisma)?.invalidateOrg(orgId);
   } catch { /* cache expires naturally if the store is unavailable */ }
   removeCompanyVisual(orgId);
-  return memoryResult;
+  removeCompanyCampaignAssets(orgId);
+
+  const [activeRooms, activeEmployees, oldTurns, oldWorkOrders, campaigns, outreachCampaigns, audienceContacts, xAdsDrafts, companyProfiles] = await Promise.all([
+    prisma.hyperRoom.count({ where: { orgId, archivedAt: null } }),
+    prisma.digitalEmployee.count({ where: { orgId, archivedAt: null } }),
+    roomIds.length ? prisma.hyperTurn.count({ where: { roomId: { in: roomIds } } }) : 0,
+    roomIds.length ? prisma.hyperWorkOrder.count({ where: { orgId, roomId: { in: roomIds } } }) : 0,
+    prisma.campaign.count({ where: { orgId } }),
+    prisma.outreachCampaign.count({ where: { orgId } }),
+    prisma.audienceContact.count({ where: { orgId } }),
+    prisma.xAdsCampaign.count({ where: { orgId, xCampaignId: null } }),
+    prisma.userProfile.count({ where: { orgId, deletedAt: null, OR: [{ key: 'company' }, { key: { startsWith: 'company:' } }] } }),
+  ]);
+  const verification = {
+    activeRooms, activeEmployees, oldTurns, oldWorkOrders, campaigns,
+    outreachCampaigns, audienceContacts, xAdsDrafts, companyProfiles,
+    hq: hqReset?.resetVerification || {},
+  };
+  const nonZero = Object.entries(verification)
+    .filter(([key, value]) => key !== 'hq' && value !== 0);
+  if (nonZero.length || Object.values(verification.hq).some((count) => count !== 0)) {
+    throw new Error(`company_reset_verification_failed:${JSON.stringify(verification)}`);
+  }
+  return { memory: memoryResult, verification };
 }
 
 function decodeHtmlAttribute(value) {
@@ -2533,6 +2584,8 @@ const server = http.createServer(async (req, res) => {
   const handleHqRuntimeRoute = createHqRuntimeRouteHandler({
     prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse,
     wakeScheduler: () => hqScheduler?.wake?.(),
+    emailLifecycle: () => hqScheduler?.emailLifecycle || null,
+    runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;
 
@@ -6741,6 +6794,88 @@ Write the persona now.`;
   // workspace WS at boot. App-level tokens (xapp-) remain admin-managed
   // via env (SLACK_APP_TOKEN_<team_id>) since Slack issues them per-app,
   // not per-OAuth-grant.
+  if (pathname === '/internal/hyper/prospects/bulk' && req.method === 'POST') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body?.org_id || '');
+    const userId = String(body?.user_id || '');
+    const turnId = /^[0-9a-f-]{36}$/i.test(String(body?.turn_id || '')) ? String(body.turn_id) : null;
+    const records = Array.isArray(body?.prospects) ? body.prospects.slice(0, 50) : [];
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId) || !records.length) {
+      return jsonResponse(res, { error: 'org_id, user_id and prospects are required' }, 400);
+    }
+    const normalized = records.map((row) => {
+      const company = String(row?.company || '').trim().slice(0, 300);
+      const slug = company.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+      const value = (key, limit = 1000) => String(row?.[key] || '').trim().slice(0, limit);
+      const phone = value('phone', 120); const email = value('email', 320);
+      const website = value('website', 1000); const address = value('address', 1000);
+      const fitReason = value('fit_reason'); const signal = value('distinctive_signal');
+      const angle = value('outreach_angle'); const note = value('note', 1600);
+      const lines = [`PROSPECT: ${company}`];
+      if (phone) lines.push(`PHONE: ${phone}`);
+      if (email) lines.push(`EMAIL: ${email}`);
+      if (website) lines.push(`WEBSITE: ${website}`);
+      if (address) lines.push(`ADDRESS: ${address}`);
+      if (fitReason) lines.push(`FIT_REASON: ${fitReason}`);
+      if (signal) lines.push(`DISTINCTIVE_SIGNAL: ${signal}`);
+      if (angle) lines.push(`OUTREACH_ANGLE: ${angle}`);
+      lines.push(`NOTE: ${note || 'Verified prospect retained by Room Intelligence.'}`);
+      return { company, slug, content: lines.join('\n'), phone, email, website, address,
+        fitReason, signal, angle, source: value('source', 120) || 'room-intelligence' };
+    }).filter((row) => row.company && row.slug && row.fitReason && row.angle);
+    // A Places response can contain aliases for the same organization. Collapse
+    // them before concurrent writes so one request cannot race itself.
+    const clean = [...new Map(normalized.map((row) => [row.slug, row])).values()];
+    if (!clean.length) return jsonResponse(res, { error: 'no complete qualified prospects' }, 400);
+    try {
+      let created = 0; let updated = 0;
+      const ids = [];
+      const persistedRecords = [];
+      const workers = Math.min(8, clean.length);
+      let cursor = 0;
+      await Promise.all(Array.from({ length: workers }, async () => {
+        while (cursor < clean.length) {
+          const row = clean[cursor++];
+          const companyTag = `company:${row.slug}`;
+          const tags = ['prospect', 'lead', companyTag,
+            ...(row.phone ? ['has-phone'] : []), ...(row.email ? ['has-email'] : [])];
+          const provenance = { source_type: 'prospect', source_platform: 'hyperagents-prospect',
+            prospect_source: row.source, company: row.company, phone: row.phone || null,
+            email: row.email || null, website: row.website || null, address: row.address || null,
+            fit_reason: row.fitReason, distinctive_signal: row.signal || null,
+            outreach_angle: row.angle, produced_by: 'room-intelligence' };
+          const existing = await prisma.memory.findFirst({
+            where: { orgId, deletedAt: null, isLatest: true, tags: { has: companyTag } },
+            orderBy: { createdAt: 'desc' }, select: { id: true },
+          });
+          const data = { title: `Prospect: ${row.company}`.slice(0, 500), content: row.content,
+            tags, sourcePlatform: 'hyperagents-prospect', scope: 'organization',
+            visibility: 'organization', producedByTurn: turnId, producedByAgent: 'room-intelligence',
+            actionable: true, provenance, lastConfirmedAt: new Date() };
+          if (existing) {
+            const saved = await prisma.memory.update({ where: { id: existing.id }, data });
+            ids.push(saved.id); persistedRecords.push({ memory_id: saved.id, company: row.company, email: row.email || null }); updated += 1;
+          } else {
+            const saved = await prisma.memory.create({ data: { ...data, userId, orgId, memoryType: 'fact' } });
+            ids.push(saved.id); persistedRecords.push({ memory_id: saved.id, company: row.company, email: row.email || null }); created += 1;
+          }
+        }
+      }));
+      return jsonResponse(res, { status: 'completed', received: clean.length,
+        persisted: ids.length, created, updated, ids, records: persistedRecords }, 200);
+    } catch (err) {
+      console.warn('[prospects.bulk] failed:', err.message);
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   if (pathname === '/v1/employees/bootstrap' && req.method === 'GET') {
     const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
       || (req.headers['x-hivemind-master-key'] || '').trim();
@@ -7563,7 +7698,7 @@ Write the persona now.`;
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
           ? body.template : 'debate';
-        const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+        const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'outreach', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
         const roomTag = (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag))
           ? body.room_tag : 'general';
         let permanentLeadId = null;
@@ -8319,6 +8454,7 @@ Write the persona now.`;
             const fallbackTasks = {
               seo: ['Establish the search growth baseline', `Audit ${companyName}'s rendered website, indexability, page structure, search demand, and competitor visibility. Rank the technical and content opportunities by likely business impact, effort, and supporting evidence so the SEO room has a measurable starting point.`, 'Prioritized SEO baseline'],
               marketing: ['Choose the first growth experiment', `Use the verified offer, audience, and market context to select one focused experiment for ${localMarket}. Define the audience, message, channel, expected behavior, measurement method, and stop-or-scale decision without relying on unsupported demand assumptions.`, 'Growth experiment brief'],
+              outreach: ['Build the first qualified prospect set', `Use the verified company profile, ICP, location, existing lead book, and source-backed discovery to identify relevant prospects for ${localMarket}. Persist only qualified records with evidence, a distinct fit rationale, and a personalized outreach angle. Do not contact anyone without the organization policy allowing it.`, 'Qualified prospect set'],
               campaign: ['Design the first campaign system', `Turn ${companyName}'s strongest defensible position into an approval-ready campaign direction. Specify the objective, audience, channel roles, content sequence, creative requirements, schedule, and success signals while keeping every public claim tied to available company evidence.`, 'Campaign operating brief'],
               branding: ['Sharpen the company narrative', `Compare ${companyName}'s current language with verified buyer needs and credible alternatives. Recommend a differentiated narrative, message hierarchy, voice principles, proof points, and prohibited claims that every market-facing room can reuse consistently.`, 'Brand narrative framework'],
               fundraising: ['Assess fundraising readiness', `Evaluate the company story, market evidence, traction signals, milestones, investor fit, and material gaps. Produce a candid readiness recommendation that separates verified facts from assumptions and identifies what must be proven before beginning investor outreach.`, 'Fundraising readiness memo'],
@@ -8413,15 +8549,10 @@ Write the persona now.`;
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
           try {
-            const objective = [
-              `Operate ${companyName} toward measurable company growth.`,
-              mission ? `Mission: ${mission}` : '',
-              profile?.goal ? `Company goal: ${profile.goal}` : '',
-            ].filter(Boolean).join(' ').slice(0, 5000);
             await activateHqAfterOnboarding({
-              prisma, orgId, userId, objective, onboardedAt: resultPayload.onboarded_at,
+              prisma, orgId, userId, objective: FIRST_LIFE_OBJECTIVE, onboardedAt: resultPayload.onboarded_at,
             });
-            say('HQ is awake and establishing the current position');
+            say('Runtime is ready for its first wake');
           } catch (error) {
             console.warn('[hyper-onboarding] HQ activation failed:', error.message);
             say('HQ activation is queued for retry');
@@ -8678,7 +8809,7 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       try {
-        const rows = await prisma.$queryRawUnsafe(
+        const [rows, prospectMemories] = await Promise.all([prisma.$queryRawUnsafe(
           `SELECT
              COUNT(*) FILTER (WHERE channel = 'email' AND sent_at >= now() - interval '7 days')  AS emails_7d,
              COUNT(*) FILTER (WHERE channel = 'call'  AND sent_at >= now() - interval '7 days')  AS calls_7d,
@@ -8691,7 +8822,18 @@ Write the persona now.`;
            FROM "hivemind"."outbound_actions"
           WHERE org_id = $1::uuid AND status = 'sent'`,
           current.session.orgId,
-        );
+        ), prisma.$queryRawUnsafe(
+          `SELECT id, title, content, tags, source_platform, created_at, updated_at
+             FROM "hivemind"."memories"
+            WHERE org_id = $1::uuid
+              AND deleted_at IS NULL
+              AND is_latest = true
+              AND ('prospect' = ANY(COALESCE(tags, ARRAY[]::text[]))
+                   OR source_platform = 'hyperagents-prospect')
+            ORDER BY created_at DESC
+            LIMIT 500`,
+          current.session.orgId,
+        )]);
         const r0 = rows?.[0] || {};
         const n = (v) => Number(v || 0);
         return jsonResponse(res, {
@@ -8717,7 +8859,8 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       try {
-        const rows = await prisma.$queryRawUnsafe(
+        const [rows, prospectMemories, correspondenceArtifacts] = await Promise.all([
+          prisma.$queryRawUnsafe(
           `SELECT
              t.id, t.company, t.email, t.phone, t.website, t.address,
              t.state, t.result_ref, t.updated_at,
@@ -8736,13 +8879,90 @@ Write the persona now.`;
            WHERE c.org_id = $1::uuid
            ORDER BY COALESCE(oa.sent_at, t.updated_at) DESC
            LIMIT 500`,
-          current.session.orgId,
-        );
+            current.session.orgId,
+          ),
+          prisma.$queryRawUnsafe(
+            `SELECT id, title, content, tags, source_platform, created_at, updated_at
+               FROM "hivemind"."memories"
+              WHERE org_id = $1::uuid
+                AND deleted_at IS NULL
+                AND is_latest = true
+                AND ('prospect' = ANY(COALESCE(tags, ARRAY[]::text[]))
+                     OR source_platform = 'hyperagents-prospect')
+              ORDER BY created_at DESC
+              LIMIT 500`,
+            current.session.orgId,
+          ),
+          prisma.sourceArtifact.findMany({
+            where: { orgId: current.session.orgId, sourcePlatform: 'gmail_watcher' },
+            select: { payload: true, metadata: true, createdAt: true },
+            orderBy: { createdAt: 'desc' },
+            take: 500,
+          }),
+        ]);
         // Collapse to one row per prospect (email or company+phone) — latest wins.
+        const field = (content, label) => {
+          const match = String(content || '').match(new RegExp(`(?:^|\\n)${label}:\\s*(.*)`, 'i'));
+          return match ? match[1].trim() : null;
+        };
+        const keyFor = (row) => {
+          const company = String(row.company || '').toLowerCase()
+            .replace(/[^a-z0-9äöüß]+/gi, ' ').replace(/\s+/g, ' ').trim();
+          return company || String(row.email || row.phone || row.id || '').toLowerCase().trim();
+        };
         const byKey = new Map();
+        const correspondenceByLead = new Map();
+        const correspondenceByEmail = new Map();
+        for (const artifact of correspondenceArtifacts) {
+          const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload : {};
+          const metadata = artifact.metadata && typeof artifact.metadata === 'object' ? artifact.metadata : {};
+          const correspondence = {
+            state: metadata.match_type === 'sender_fallback' ? 'possible_reply' : 'replied',
+            match_type: metadata.match_type || 'thread',
+            sender: payload.sender || null,
+            subject: payload.subject || null,
+            received_at: payload.received_at || artifact.createdAt,
+          };
+          if (payload.lead_memory_id && !correspondenceByLead.has(`memory:${payload.lead_memory_id}`)) {
+            correspondenceByLead.set(`memory:${payload.lead_memory_id}`, correspondence);
+          }
+          const sender = String(payload.sender || '').trim().toLowerCase();
+          if (sender && !correspondenceByEmail.has(sender)) correspondenceByEmail.set(sender, correspondence);
+        }
+        for (const memory of prospectMemories) {
+          const content = String(memory.content || '');
+          const company = field(content, 'PROSPECT') || String(memory.title || '').replace(/^Prospect:\s*/i, '').trim();
+          if (!company) continue;
+          const lead = {
+            id: `memory:${memory.id}`, company,
+            email: field(content, 'EMAIL'), phone: field(content, 'PHONE'),
+            website: field(content, 'WEBSITE'), address: field(content, 'ADDRESS'),
+            note: field(content, 'NOTE'), fit_reason: field(content, 'FIT_REASON'),
+            distinctive_signal: field(content, 'DISTINCTIVE_SIGNAL'),
+            outreach_angle: field(content, 'OUTREACH_ANGLE'),
+            source: memory.source_platform || 'hyperagents-prospect',
+            channel: null, state: 'discovered', sent: false, replied: false,
+            booked: false, potential: 'none', subject: null, sent_at: null,
+            outcome: null, outcome_at: null, skipped_reason: null, error: null,
+            discovered_at: memory.created_at,
+            correspondence: correspondenceByLead.get(`memory:${memory.id}`) || correspondenceByEmail.get(String(field(content, 'EMAIL') || '').toLowerCase()) || null,
+          };
+          byKey.set(keyFor(lead), lead);
+        }
         for (const r of rows) {
-          const key = (r.email || `${r.company}|${r.phone || ''}`).toLowerCase();
-          if (!byKey.has(key)) byKey.set(key, r);
+          const key = keyFor(r);
+          const existing = byKey.get(key);
+          byKey.set(key, { ...(existing || {}), ...r,
+            email: r.email || existing?.email || null,
+            phone: r.phone || existing?.phone || null,
+            website: r.website || existing?.website || null,
+            address: r.address || existing?.address || null,
+            note: existing?.note || null, fit_reason: existing?.fit_reason || null,
+            distinctive_signal: existing?.distinctive_signal || null,
+            outreach_angle: existing?.outreach_angle || null,
+            discovered_at: existing?.discovered_at || r.campaign_at,
+            correspondence: existing?.correspondence || correspondenceByEmail.get(String(r.email || '').toLowerCase()) || null,
+          });
         }
         const leads = [...byKey.values()].map((r) => {
           const rr = r.result_ref || {};
@@ -8760,6 +8980,12 @@ Write the persona now.`;
             outcome: r.outcome || null, outcome_at: r.outcome_at || null,
             skipped_reason: rr.skipped || null,
             error: rr.error || null,
+            note: r.note || null,
+            fit_reason: r.fit_reason || null,
+            distinctive_signal: r.distinctive_signal || null,
+            outreach_angle: r.outreach_angle || null,
+            discovered_at: r.discovered_at || r.campaign_at || null,
+            correspondence: r.correspondence || null,
           };
         });
         const summary = {
@@ -9306,7 +9532,7 @@ Write the persona now.`;
           updated.goal = nextGoal;
         } catch (e) { console.warn('[hyper-rooms] goal update failed:', e.message); }
       }
-      const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
+        const ALLOWED_ROOM_TAGS = new Set(['general', 'campaign', 'seo', 'marketing', 'outreach', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance']);
       if (typeof body.room_tag === 'string' && ALLOWED_ROOM_TAGS.has(body.room_tag)) {
         try {
           await prisma.$executeRawUnsafe(

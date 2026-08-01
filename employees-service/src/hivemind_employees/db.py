@@ -802,20 +802,32 @@ async def complete_hyper_work_order(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT attempt FROM hivemind.hyper_work_orders WHERE id = $1::uuid AND org_id = $2::uuid FOR UPDATE",
+                    """
+                    SELECT work_order.attempt, work_order.runtime_epoch,
+                           runtime.epoch AS current_runtime_epoch
+                      FROM hivemind.hyper_work_orders AS work_order
+                      LEFT JOIN hivemind.hq_runtimes AS runtime
+                        ON runtime.org_id = work_order.org_id
+                     WHERE work_order.id = $1::uuid AND work_order.org_id = $2::uuid
+                     FOR UPDATE OF work_order
+                    """,
                     work_order_id, org_id,
                 )
                 if not row:
+                    return False
+                runtime_epoch = row["runtime_epoch"]
+                if runtime_epoch is not None and runtime_epoch != row["current_runtime_epoch"]:
+                    log.info("discarding work result from obsolete Runtime epoch: %s", work_order_id)
                     return False
                 attempt = max(1, int(row["attempt"] or 1))
                 await conn.execute(
                     """
                     INSERT INTO hivemind.hyper_work_results
-                      (work_order_id, attempt, status, summary, output, evidence, artifacts, usage)
-                    VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb)
+                      (work_order_id, runtime_epoch, attempt, status, summary, output, evidence, artifacts, usage)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
                     ON CONFLICT (work_order_id, attempt) DO NOTHING
                     """,
-                    work_order_id, attempt, status, summary,
+                    work_order_id, runtime_epoch, attempt, status, summary,
                     json.dumps(output or {}, ensure_ascii=False), json.dumps(evidence or [], ensure_ascii=False),
                     json.dumps(artifacts or [], ensure_ascii=False), json.dumps(usage or {}, ensure_ascii=False),
                 )
@@ -825,9 +837,10 @@ async def complete_hyper_work_order(
                     SET status = $1, completed_at = now(), updated_at = now(), error = $2,
                         evidence_refs = $3::jsonb, artifact_refs = $4::jsonb
                     WHERE id = $5::uuid AND org_id = $6::uuid
+                      AND (runtime_epoch IS NULL OR runtime_epoch = $7::uuid)
                     """,
                     status, error, json.dumps(evidence or [], ensure_ascii=False),
-                    json.dumps(artifacts or [], ensure_ascii=False), work_order_id, org_id,
+                    json.dumps(artifacts or [], ensure_ascii=False), work_order_id, org_id, runtime_epoch,
                 )
         return True
     except Exception as exc:
@@ -1061,3 +1074,35 @@ async def get_connected_gmail(user_id: str, org_id: Optional[str] = None) -> str
         except Exception as exc:  # noqa: BLE001
             log.warning("get_connected_gmail failed: %s", exc)
     return ""
+
+
+async def has_connected_gmail(user_id: str, org_id: Optional[str] = None) -> bool:
+    """Return whether Gmail is available to this user in the active organization.
+
+    Gmail may be represented by the legacy platform integration or by the current
+    tenant-scoped Nango connection. Keep the address lookup separate: a valid Nango
+    connection is usable even when its metadata does not expose the mailbox address.
+    """
+    if not user_id:
+        return False
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            legacy = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM hivemind.platform_integrations "
+                "WHERE user_id = $1::uuid AND platform_type = 'gmail' AND is_active IS NOT FALSE)",
+                user_id,
+            )
+            if legacy:
+                return True
+            if not org_id:
+                return False
+            return bool(await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM hivemind.nango_connections "
+                "WHERE user_id = $1::uuid AND org_id = $2::uuid "
+                "AND provider_key IN ('gmail', 'google-mail') AND status = 'active')",
+                user_id, org_id,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("has_connected_gmail failed: %s", exc)
+    return False

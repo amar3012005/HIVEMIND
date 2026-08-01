@@ -12,7 +12,7 @@ export class HqScheduleStore {
           attempts=attempts+1,updated_at=now()
         WHERE id=(
           SELECT s.id FROM hivemind.hq_schedules s
-          JOIN hivemind.hq_runtimes r ON r.id=s.runtime_id AND r.org_id=s.org_id
+          JOIN hivemind.hq_runtimes r ON r.id=s.runtime_id AND r.org_id=s.org_id AND r.epoch=s.runtime_epoch
           WHERE s.due_at<=now()
             AND (s.status='PENDING' OR (s.status='LEASED' AND s.lease_expires_at<now()))
             AND r.state NOT IN ('INACTIVE','PAUSED')

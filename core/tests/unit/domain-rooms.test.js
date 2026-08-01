@@ -11,7 +11,7 @@ import {
 test('domain room registry exposes every permanent expertise home', () => {
   assert.deepEqual(
     DOMAIN_ROOM_DEFINITIONS.map((room) => room.key),
-    ['general', 'seo', 'marketing', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance'],
+    ['general', 'seo', 'marketing', 'outreach', 'campaign', 'branding', 'fundraising', 'research', 'product', 'design', 'legal_finance'],
   );
 });
 
@@ -41,8 +41,8 @@ test('domain room provisioning is idempotent and marks system homes', async () =
     company: { company: 'Acme', mission: 'Make work clearer' },
   });
 
-  assert.equal(rooms.length, 9);
-  assert.equal(creates.length, 7);
+  assert.equal(rooms.length, 11);
+  assert.equal(creates.length, 9);
   assert.deepEqual(updates, [{ where: { id: 'existing-general' }, data: { name: 'Acme HQ' } }]);
   assert.equal(rooms.find((room) => room.room_tag === 'research').created, false);
   assert.ok(creates.every((data) => data.agentConnectors._domain_home === true));

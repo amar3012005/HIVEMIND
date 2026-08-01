@@ -40,6 +40,8 @@ class GenerateRequest(BaseModel):
     channel: str  # email | call
     turn_id: str
     sender_email: str = ""
+    sender_name: str = ""
+    sender_company: str = ""
     prospect: _Prospect
     # Tenant identity — lets generation recall the org's prior outreach learnings.
     user_id: str = ""
@@ -57,13 +59,14 @@ async def _report_for_turn(turn_id: str) -> str:
         return ""
     raw = row["lines"]
     lines = json.loads(raw) if isinstance(raw, str) else list(raw or [])
-    # Last final_report/seal body, else the last synthesis-ish line with real text.
+    # `final_report.content` is the canonical Room report. Older runs used
+    # body/text/report, so keep those fallbacks for historical campaigns.
     body = ""
     for l in lines:
         if not isinstance(l, dict):
             continue
-        if l.get("t") in _REPORT_EVENTS and (l.get("body") or l.get("text") or l.get("report")):
-            body = str(l.get("body") or l.get("text") or l.get("report"))
+        if l.get("t") in _REPORT_EVENTS and (l.get("content") or l.get("body") or l.get("text") or l.get("report")):
+            body = str(l.get("content") or l.get("body") or l.get("text") or l.get("report"))
         elif not body and l.get("t") == "line" and len(str(l.get("text") or "")) > 400:
             body = str(l.get("text"))
     return body[:_MAX_REPORT_CHARS]
@@ -123,14 +126,17 @@ async def generate(req: GenerateRequest) -> Dict[str, Any]:
             "method skills exactly:\n" + _skill + "\n" + _polish + "\n"
             "GROUNDING RULES: this is Touch 1 to THIS firm. Derive the why-now hook and value point "
             "from the TEAM REPORT and the firm's own profile below (their business, city, website). "
-            "Reference something specific about THEM (what they do / where they operate) so it could "
-            "not have been sent to anyone else. Include the firm's REAL website URL from the profile "
-            "when referencing them, and our site https://singulancelabs.com as the sender's link. "
+            "Reference only a verified prospect fact from the profile (name, website, address, or a "
+            "specific fact in the TEAM REPORT) so it could not have been sent to anyone else. Do not "
+            "infer their business, customers, or needs from a name, address, or domain. Include the "
+            "firm's REAL website URL from the profile when referencing them, and our site "
+            "https://singulancelabs.com as the sender's link. "
             "Brand names exactly: SINGULANCE, HIVEMIND, TARA, HYPERAGENTS. Under 160 words. Never "
             "invent facts, numbers, links, or placeholder contacts."
             + (
-                f" SENDER IDENTITY: the email is sent from {req.sender_email} — sign off with the "
-                f"sender's real name/role if known (else just the address) and this exact address."
+                f" SENDER IDENTITY: the email is sent by {req.sender_name or req.sender_email} "
+                f"from {req.sender_company or 'our company'} at {req.sender_email}. Sign with this "
+                "exact verified identity. Do not invent a title or role."
                 if req.sender_email else ""
             )
             + ' Respond with ONLY a JSON object: {"subject": "...", "body": "..."} '

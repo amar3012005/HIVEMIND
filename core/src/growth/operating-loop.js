@@ -77,6 +77,10 @@ export async function buildGrowthPlanningContext({ prisma, orgId }) {
     where: { orgId, archivedAt: null },
     select: { id: true, name: true, roomTag: true, participantIds: true, permanentLeadId: true },
   });
+  const instructions = await prisma.hqInstruction.findMany({
+    where: { orgId, status: 'APPLIED' }, orderBy: { createdAt: 'desc' }, take: 12,
+    select: { id: true, body: true, interpreted: true, createdAt: true },
+  }).catch(() => []);
   const baselinePayload = state.baseline.payload || {};
   return {
     contract: 'growth-stage-context.v1',
@@ -103,13 +107,16 @@ export async function buildGrowthPlanningContext({ prisma, orgId }) {
     },
     active_goal: state.goals.find((goal) => goal.status === 'ACTIVE') || null,
     active_stage: state.stage,
+    operating_instructions: instructions.reverse().map((item) => ({
+      id: item.id, instruction: item.body, interpretation: item.interpreted, created_at: item.createdAt,
+    })),
     available_rooms: rooms.filter((room) => room.roomTag !== 'general').map((room) => ({
       room_id: room.id, room_tag: room.roomTag, name: room.name,
       participant_ids: room.participantIds, permanent_lead_id: room.permanentLeadId,
     })),
     rules: {
-      choose_one_constraint: [...CONSTRAINTS], stage_duration_days: { min: 7, max: 30 },
-      max_hypotheses: 3, delegate_one_room: true,
+      rank_constraints: [...CONSTRAINTS], stage_duration_days: { min: 7, max: 30 },
+      max_hypotheses: 3, ordered_todo_queue: true,
       numbers_require_evidence: true, provider_results_are_source_of_truth: true,
     },
   };
@@ -144,10 +151,9 @@ export function serializeGrowthPlanningContext(context) {
 export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, hqCycleId = null, contract }) {
   if (!turnId && !hqCycleId) throw new Error('Growth plan requires a Room turn or HQ cycle');
   const existingRows = await prisma.$queryRawUnsafe(
-    `SELECT j.growth_goal_id,j.growth_stage_id,j.decision->>'delegation_id' AS delegation_id,
-            j.decision->>'work_order_id' AS work_order_id,j.decision->>'room_id' AS room_id
+    `SELECT j.growth_goal_id,j.growth_stage_id,j.decision
        FROM hivemind.growth_journal j
-      WHERE j.org_id=$1::uuid AND j.event_type='stage_planned_and_delegated'
+      WHERE j.org_id=$1::uuid AND j.event_type='initial_operating_queue_committed'
         AND (($2::text IS NOT NULL AND j.decision->>'turn_id'=$2)
           OR ($3::text IS NOT NULL AND j.decision->>'hq_cycle_id'=$3)) LIMIT 1`, orgId, turnId, hqCycleId,
   );
@@ -155,12 +161,20 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
     const existing = existingRows[0];
     const [goal] = await prisma.$queryRawUnsafe('SELECT * FROM hivemind.growth_goals WHERE id=$1::uuid', existing.growth_goal_id);
     const [stage] = await prisma.$queryRawUnsafe('SELECT * FROM hivemind.growth_stages WHERE id=$1::uuid', existing.growth_stage_id);
-    const [delegation] = await prisma.$queryRawUnsafe('SELECT * FROM hivemind.growth_delegations WHERE id=$1::uuid', existing.delegation_id);
-    return { goal, stage, delegation, work_order: { id: existing.work_order_id, status: 'queued' }, room: { id: existing.room_id } };
+    const todoIds = Array.isArray(existing.decision?.todo_ids) ? existing.decision.todo_ids : [];
+    const todos = todoIds.length ? await prisma.hqTodo.findMany({ where: { id: { in: todoIds }, orgId } }) : [];
+    return { goal, stage, todos };
   }
-  if (!contract || contract.contract_version !== 'growth-plan.v1') throw new Error('Invalid growth plan contract version');
-  const constraint = String(contract.constraint?.type || '').toLowerCase();
+  if (!contract || contract.contract_version !== 'growth-plan.v2') throw new Error('Invalid growth plan contract version');
+  const constraints = Array.isArray(contract.constraints) ? contract.constraints : [];
+  const primary = constraints.find((item) => item?.id === contract.primary_constraint_id);
+  const constraint = String(primary?.type || '').toLowerCase();
   if (!CONSTRAINTS.has(constraint)) throw new Error('Growth plan must choose one supported constraint');
+  const queue = Array.isArray(contract.operating_queue) ? contract.operating_queue : [];
+  if (!queue.length) throw new Error('Growth plan must contain an operating queue');
+  if (queue.some((item) => !ROOM_TAGS.has(String(item?.room_tag || '').toLowerCase()))) {
+    throw new Error('Growth plan queue contains an unsupported specialist room');
+  }
   const stage = contract.stage || {};
   const durationDays = Number(stage.duration_days);
   if (!Number.isInteger(durationDays) || durationDays < 7 || durationDays > 30) throw new Error('Growth stage must be bounded to 7-30 days');
@@ -168,10 +182,7 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
   if (!hypotheses.length || hypotheses.some((item) => !item.statement || !(item.evidence_refs || []).length)) {
     throw new Error('Every growth hypothesis must include a statement and evidence references');
   }
-  const delegation = contract.delegation || {};
-  const roomTag = String(delegation.room_tag || '').toLowerCase();
-  if (!ROOM_TAGS.has(roomTag)) throw new Error('Growth plan must delegate to one supported specialist room');
-  const sourceRefs = [...new Set([contract.baseline_ref?.resource_id, ...(contract.constraint?.evidence_refs || [])].filter(Boolean))];
+  const sourceRefs = [...new Set([contract.baseline_ref?.resource_id, ...(primary?.evidence_refs || [])].filter(Boolean))];
   if (!sourceRefs.length) throw new Error('Growth plan must reference the baseline artifact');
   const baselineArtifact = await prisma.sourceArtifact.findFirst({
     where: { id: contract.baseline_ref?.resource_id, orgId, sourcePlatform: 'growth_baseline', artifactType: 'api_response' },
@@ -179,14 +190,15 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
   });
   if (!baselineArtifact) throw new Error('Growth plan references a baseline outside this organization or one that does not exist');
 
+  const roomTags = [...new Set(queue.map((item) => String(item.room_tag).toLowerCase()))];
   const rooms = await prisma.hyperRoom.findMany({
-    where: { orgId, archivedAt: null, roomTag }, orderBy: { updatedAt: 'desc' }, take: 1,
-    select: { id: true, participantIds: true, permanentLeadId: true },
+    where: { orgId, archivedAt: null, roomTag: { in: roomTags } }, select: { roomTag: true },
   });
-  const room = rooms[0];
-  if (!room) throw new Error(`No ${roomTag} Company Room is available for delegation`);
-  const ownerId = room.permanentLeadId || room.participantIds?.[0] || null;
-  const owner = ownerId ? await prisma.digitalEmployee.findUnique({ where: { id: ownerId }, select: { id: true, slug: true, roleArchetype: true } }) : null;
+  const available = new Set(rooms.map((room) => room.roomTag));
+  const missingRooms = roomTags.filter((tag) => !available.has(tag));
+  if (missingRooms.length) throw new Error(`Missing Company Room(s): ${missingRooms.join(', ')}`);
+  const runtime = await prisma.hqRuntime.findUnique({ where: { orgId }, select: { id: true, epoch: true } });
+  if (!runtime) throw new Error('Growth plan requires an active HQ Runtime');
   const now = new Date();
   const checkpointAt = new Date(now.getTime() + Math.max(1, Number(stage.checkpoint_day || durationDays)) * 86400000);
   const endsAt = new Date(now.getTime() + durationDays * 86400000);
@@ -225,31 +237,39 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
         String(hypothesis.expected_signal || ''), String(hypothesis.falsification || ''),
       );
     }
-    const delegationRows = await tx.$queryRawUnsafe(
-      `INSERT INTO hivemind.growth_delegations
-       (org_id,growth_stage_id,room_id,room_tag,objective,inputs,deliverable,success_metric,status)
-       VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7,$8,'PENDING') RETURNING *`,
-      orgId, createdStage.id, room.id, roomTag, String(delegation.objective),
-      JSON.stringify({ baseline_ref: contract.baseline_ref, evidence_refs: sourceRefs, constraints: contract.policy || {} }),
-      String(delegation.deliverable || ''), String(delegation.success_measure || ''),
-    );
-    const workOrderRows = await tx.$queryRawUnsafe(
-      `INSERT INTO hivemind.hyper_work_orders
-       (org_id,room_id,turn_id,hq_cycle_id,growth_delegation_id,order_key,kind,title,objective,owner_employee_id,owner_slug,owner_lane,selected_skills,required_evidence,acceptance_criteria,input_snapshot)
-       VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,'growth_stage',$7,$8,$9::uuid,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb)
-       RETURNING id,status`,
-      orgId, room.id, turnId, hqCycleId, delegationRows[0].id, `growth-stage:${createdStage.id}`, String(stage.name), String(delegation.objective),
-      owner?.id || null, owner?.slug || null, owner?.roleArchetype || null, JSON.stringify(delegation.skills || []),
-      JSON.stringify(sourceRefs), JSON.stringify(delegation.acceptance_criteria || []),
-      JSON.stringify({ growth_stage_id: createdStage.id, delegation_id: delegationRows[0].id, baseline_ref: contract.baseline_ref }),
-    );
+    const todos = [];
+    for (const [index, item] of queue.entries()) {
+      const target = item.target && typeof item.target === 'object' ? item.target : {};
+      const todo = await tx.hqTodo.create({ data: {
+        runtimeId: runtime.id, orgId,
+        title: String(item.title).slice(0, 240), objective: String(item.objective),
+        kind: String(item.kind || item.room_tag).toLowerCase(), status: 'READY',
+        priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : (index + 1) * 10,
+        position: Number.isFinite(Number(item.position)) ? Number(item.position) : index,
+        requiredCapabilities: Array.isArray(item.required_capabilities) ? item.required_capabilities : [],
+        context: {
+          room_tag: String(item.room_tag).toLowerCase(), skill: item.skills?.[0] || null,
+          skills: Array.isArray(item.skills) ? item.skills : [],
+          deliverable: String(item.deliverable || ''), success_measure: String(item.success_measure || ''),
+          acceptance_criteria: Array.isArray(item.acceptance_criteria) ? item.acceptance_criteria : [],
+          activation_condition: String(item.activation_condition || ''), target,
+          location: target.location || null, growth_stage_id: createdStage.id,
+          constraint_id: item.constraint_id || contract.primary_constraint_id,
+          baseline_ref: contract.baseline_ref, growth_plan_cycle_id: hqCycleId || null,
+          runtime_epoch: runtime.epoch,
+          authority_mode: 'PREPARE',
+          ignored_capability_suggestions: Array.isArray(item.ignored_capability_suggestions) ? item.ignored_capability_suggestions : [],
+        },
+      } });
+      todos.push(todo);
+    }
     await tx.$executeRawUnsafe(
       `INSERT INTO hivemind.growth_journal
        (org_id,growth_goal_id,growth_stage_id,actor_user_id,event_type,summary,evidence_refs,decision)
-       VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,'stage_planned_and_delegated',$5,$6::jsonb,$7::jsonb)`,
-      orgId, goal.id, createdStage.id, userId, `HQ selected ${constraint} and delegated ${stage.name} to ${roomTag}.`,
-      JSON.stringify(sourceRefs), JSON.stringify({ turn_id: turnId, hq_cycle_id: hqCycleId, room_id: room.id, delegation_id: delegationRows[0].id, work_order_id: workOrderRows[0]?.id }),
+       VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,'initial_operating_queue_committed',$5,$6::jsonb,$7::jsonb)`,
+      orgId, goal.id, createdStage.id, userId, `HQ ranked ${constraints.length} constraints and committed ${todos.length} ordered operating todo(s).`,
+      JSON.stringify(sourceRefs), JSON.stringify({ turn_id: turnId, hq_cycle_id: hqCycleId, todo_ids: todos.map((todo) => todo.id), runtime_epoch: runtime.epoch }),
     );
-    return { goal, stage: createdStage, delegation: delegationRows[0], work_order: workOrderRows[0], room };
+    return { goal, stage: createdStage, todos };
   }, { timeout: 15000 });
 }

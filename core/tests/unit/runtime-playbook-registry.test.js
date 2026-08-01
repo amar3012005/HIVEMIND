@@ -1,0 +1,700 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import {
+  PredicateEngine,
+  GenericStageExecutor,
+  DirectorPlaybookSelector,
+  RuntimeAdapterRegistry,
+  RuntimeRoomDirector,
+  RuntimePlaybookService,
+  RuntimePlaybookRegistry,
+  createJsonPlaybookSource,
+  createPrismaPlaybookSource,
+  defaultPredicateNames,
+  runtimePlaybookContentHash,
+} from '../../src/runtime-playbooks/index.js';
+
+class TestRuntimeStore {
+  constructor() {
+    this.runs = new Map();
+    this.checkpoints = [];
+  }
+
+  async createRun(input) {
+    const existing = [...this.runs.values()].find((run) => run.orgId === input.orgId && run.idempotencyKey === input.idempotencyKey);
+    if (existing) return structuredClone(existing);
+    const run = {
+      id: `run-${this.runs.size + 1}`,
+      orgId: input.orgId,
+      roomId: input.roomId || null,
+      scopeKey: input.scopeKey || 'global',
+      playbookId: input.playbookId,
+      playbookVersion: input.playbookVersion,
+      idempotencyKey: input.idempotencyKey,
+      status: 'ACTIVE',
+      currentStageId: input.currentStageId,
+      completedStageIds: [],
+      terminalState: null,
+      trigger: input.trigger || {},
+      context: input.context || {},
+      stageAttempts: {},
+      waitingFor: null,
+      lastVerdict: {},
+      artifacts: [],
+      authorityGates: [],
+    };
+    this.runs.set(run.id, run);
+    return structuredClone(run);
+  }
+
+  async loadRun(runId, orgId) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    return structuredClone(run);
+  }
+
+  async claimRun(runId, orgId, owner) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId || (run.leaseOwner && run.leaseOwner !== owner)) return false;
+    run.leaseOwner = owner;
+    return true;
+  }
+
+  async releaseRun(runId, orgId, owner) {
+    const run = this.runs.get(runId);
+    if (run?.orgId === orgId && run.leaseOwner === owner) run.leaseOwner = null;
+  }
+
+  async updateRun(runId, orgId, data) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    Object.assign(run, structuredClone(data));
+    return this.loadRun(runId, orgId);
+  }
+
+  async appendCheckpoint(runId, orgId, checkpoint) {
+    await this.loadRun(runId, orgId);
+    const row = { runId, orgId, sequence: this.checkpoints.length + 1, ...structuredClone(checkpoint) };
+    this.checkpoints.push(row);
+    return row;
+  }
+
+  async persistArtifacts(runId, orgId, stageId, artifacts) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    for (const artifact of artifacts) {
+      const previous = run.artifacts.find((candidate) => candidate.id === artifact.id);
+      if (!previous) run.artifacts.push({ ...structuredClone(artifact), stage_id: stageId });
+      else assert.deepEqual(previous, { ...structuredClone(artifact), stage_id: stageId });
+    }
+    return structuredClone(artifacts);
+  }
+
+  async grantAuthority(runId, orgId, gate) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    run.authorityGates = [...new Set([...run.authorityGates, gate])];
+    return { gate, status: 'GRANTED' };
+  }
+}
+
+const fixturePath = fileURLToPath(new URL('../../src/runtime-playbooks/fixtures/greenleaf-order-operations.v1.json', import.meta.url));
+const outreachFixturePath = fileURLToPath(new URL('../../src/runtime-playbooks/fixtures/outreach-prospect-to-conversation.v1.json', import.meta.url));
+
+async function loadFixture() {
+  return JSON.parse(await readFile(fixturePath, 'utf8'));
+}
+
+function stage(playbook, id) {
+  return playbook.stages.find((candidate) => candidate.id === id);
+}
+
+test('GreenLeaf Bakery playbook is pure data and validates without engine changes', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([fixturePath])]);
+  const playbook = registry.get('greenleaf.order-operations', 1);
+
+  assert.equal(playbook.initial_stage_id, 'capture_request');
+  assert.deepEqual(playbook.terminal_states, ['notified', 'cancelled']);
+  assert.equal(stage(playbook, 'fulfill_request').waits_for_event.type, 'fulfillment.completed');
+  assert.equal(stage(playbook, 'notify_customer').authority_gate, 'external_write');
+  assert.equal(registry.descriptors()[0].content_hash, runtimePlaybookContentHash(playbook));
+
+  const artifacts = {
+    request_record: [{
+      id: 'request-1',
+      key: 'request_record',
+      data: {
+        request_id: 'GL-1001',
+        customer_contact: 'customer@example.test',
+        items: [{ sku: 'LOAF-1', quantity: 2 }],
+        cancelled: false,
+      },
+    }],
+    confirmation_record: [{
+      id: 'confirmation-1',
+      key: 'confirmation_record',
+      data: { request_ref: 'request-1', confirmed_at: '2026-08-01T10:00:00.000Z' },
+    }],
+    fulfillment_record: [{
+      id: 'fulfillment-1',
+      key: 'fulfillment_record',
+      data: { request_ref: 'request-1', state: 'fulfilled', completed_at: '2026-08-01T11:00:00.000Z' },
+    }],
+    notification_receipt: [{
+      id: 'receipt-1',
+      key: 'notification_receipt',
+      data: { provider_receipt_id: 'provider-42', status: 'accepted' },
+    }],
+  };
+
+  const predicates = new PredicateEngine();
+  for (const current of playbook.stages) {
+    const verdict = predicates.validateChecks(current.completion_checks, artifacts);
+    assert.equal(verdict.passed, true, `${current.id}: ${JSON.stringify(verdict.unmet)}`);
+  }
+  assert.equal(predicates.evaluate(stage(playbook, 'capture_request').transitions[0].when, artifacts), false);
+});
+
+test('Room Director sends a generic stage envelope and accepts only correlated expected artifacts', async () => {
+  const calls = [];
+  const director = new RuntimeRoomDirector({
+    transport: async (payload) => {
+      calls.push(payload);
+      const context = JSON.parse(payload.execution_context);
+      return { result: {
+        contract: 'runtime-stage-result.v1',
+        run_id: context.run_id,
+        stage_id: context.stage_id,
+        artifacts: [{
+          id: 'artifact-1', key: 'request_record', status: 'READY',
+          data: { request_id: 'GL-1003' }, source_refs: ['work:1'], external_ref: null,
+        }],
+        gaps: [],
+      } };
+    },
+  });
+  const result = await director.execute({
+    run_id: 'run-1', org_id: 'org-1', room_id: 'room-1', owner_user_id: 'user-1',
+    room_context: { user_id: 'user-1', participant_ids: ['employee-1'], room_tag: 'operations' },
+    playbook_id: 'greenleaf.order-operations', playbook_version: 1,
+    stage_id: 'capture_request', objective: 'Capture the supplied request.',
+    expected_artifacts: ['request_record'], checks: [{ predicate: 'has_min_count', select: 'request_record', value: 1 }],
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].schema_version, 'runtime-stage.v1');
+  assert.equal(calls[0].write_policy, 'deny');
+  assert.equal(JSON.parse(calls[0].execution_context).contract, 'runtime-stage.v1');
+  assert.deepEqual(result.artifacts.map((artifact) => artifact.key), ['request_record']);
+});
+
+test('Room Director marks only an authority-granted stage as authorized', async () => {
+  const policies = [];
+  const director = new RuntimeRoomDirector({ transport: async (payload) => {
+    policies.push(payload.write_policy);
+    const context = JSON.parse(payload.execution_context);
+    return { result: {
+      contract: 'runtime-stage-result.v1', run_id: context.run_id, stage_id: context.stage_id,
+      artifacts: [{ id: 'receipt-1', key: 'receipt', data: {}, source_refs: ['work:1'] }], gaps: [],
+    } };
+  } });
+  await director.execute({
+    run_id: 'run-authorized', org_id: 'org-1', room_id: 'room-1', owner_user_id: 'user-1',
+    room_context: { user_id: 'user-1' }, playbook_id: 'opaque.lifecycle', playbook_version: 1,
+    stage_id: 'execute', objective: 'Execute the approved action.', expected_artifacts: ['receipt'],
+    checks: [], authority_granted: true,
+  });
+  assert.deepEqual(policies, ['authorized']);
+});
+
+test('Room Director fails closed on invented artifact keys and mismatched stages', async () => {
+  const baseRequest = {
+    run_id: 'run-2', org_id: 'org-1', room_id: 'room-1', owner_user_id: 'user-1',
+    room_context: { user_id: 'user-1' }, playbook_id: 'greenleaf.order-operations',
+    playbook_version: 1, stage_id: 'capture_request', objective: 'Capture it.',
+    expected_artifacts: ['request_record'], checks: [],
+  };
+  const wrongKey = new RuntimeRoomDirector({ transport: async () => ({ result: {
+    contract: 'runtime-stage-result.v1', run_id: 'run-2', stage_id: 'capture_request',
+    artifacts: [{ id: 'bad-1', key: 'made_up_record', data: {} }], gaps: [],
+  } }) });
+  await assert.rejects(() => wrongKey.execute(baseRequest), /runtime_room_artifact_key_unexpected/);
+
+  const wrongStage = new RuntimeRoomDirector({ transport: async () => ({ result: {
+    contract: 'runtime-stage-result.v1', run_id: 'run-2', stage_id: 'another_stage', artifacts: [], gaps: [],
+  } }) });
+  await assert.rejects(() => wrongStage.execute(baseRequest), /runtime_room_result_correlation_mismatch/);
+});
+
+test('generic executor checkpoints and resumes the GreenLeaf lifecycle end to end', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([fixturePath])]);
+  const store = new TestRuntimeStore();
+  const director = {
+    async execute({ stage_id: stageId }) {
+      const outputs = {
+        capture_request: [{ id: 'request-1', key: 'request_record', data: {
+          request_id: 'GL-1001', customer_contact: 'customer@example.test',
+          items: [{ sku: 'LOAF-1', quantity: 2 }], cancelled: false,
+        } }],
+        confirm_terms: [{ id: 'confirmation-1', key: 'confirmation_record', data: {
+          request_ref: 'request-1', confirmed_at: '2026-08-01T10:00:00.000Z',
+        } }],
+        fulfill_request: [{ id: 'fulfillment-1', key: 'fulfillment_record', data: {
+          request_ref: 'request-1', state: 'fulfilled', completed_at: '2026-08-01T11:00:00.000Z',
+        } }],
+        notify_customer: [{ id: 'receipt-1', key: 'notification_receipt', data: {
+          provider_receipt_id: 'provider-42', status: 'accepted',
+        } }],
+      };
+      return { artifacts: outputs[stageId] || [] };
+    },
+  };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'test-worker' });
+  const created = await executor.createRun({
+    orgId: 'organization-1',
+    playbookId: 'greenleaf.order-operations',
+    playbookVersion: 1,
+    idempotencyKey: 'order-1001',
+    trigger: { request: 'two loaves' },
+  });
+
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'WAITING_AUTHORITY');
+  assert.equal(run.currentStageId, 'confirm_terms');
+
+  await executor.grantAuthority(run.id, run.orgId, 'commit_terms');
+  run = await executor.run(run.id, { orgId: run.orgId });
+  assert.equal(run.status, 'WAITING_EVENT');
+  assert.equal(run.currentStageId, 'notify_customer');
+  assert.equal(run.waitingFor.type, 'fulfillment.completed');
+
+  run = await executor.run(run.id, {
+    orgId: run.orgId,
+    event: { type: 'fulfillment.completed', data: { request_ref: 'request-1' } },
+  });
+  assert.equal(run.status, 'WAITING_AUTHORITY');
+  assert.equal(run.currentStageId, 'notify_customer');
+
+  await executor.grantAuthority(run.id, run.orgId, 'external_write');
+  run = await executor.run(run.id, { orgId: run.orgId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.terminalState, 'notified');
+  assert.deepEqual(run.completedStageIds, ['capture_request', 'confirm_terms', 'fulfill_request', 'notify_customer']);
+  assert.deepEqual(store.checkpoints.map((checkpoint) => checkpoint.phase), [
+    'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'STAGE_ADVANCED',
+    'BEFORE_EXECUTION', 'AUTHORITY_REQUIRED',
+    'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'STAGE_ADVANCED',
+    'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'EVENT_REQUIRED',
+    'EVENT_RECEIVED', 'BEFORE_EXECUTION', 'AUTHORITY_REQUIRED',
+    'BEFORE_EXECUTION', 'AFTER_EXECUTION', 'TERMINAL',
+  ]);
+});
+
+test('generic executor follows an alternate terminal transition from playbook data', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([fixturePath])]);
+  const store = new TestRuntimeStore();
+  const executor = new GenericStageExecutor({
+    registry,
+    predicates: new PredicateEngine(),
+    store,
+    workerId: 'test-worker',
+    director: { async execute() { return { artifacts: [{
+      id: 'request-cancelled', key: 'request_record', data: {
+        request_id: 'GL-1002', customer_contact: 'customer@example.test',
+        items: [{ sku: 'ROLL-1', quantity: 1 }], cancelled: true,
+      },
+    }] }; } },
+  });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'greenleaf.order-operations', playbookVersion: 1,
+    idempotencyKey: 'order-1002',
+  });
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.terminalState, 'cancelled');
+  assert.deepEqual(run.completedStageIds, ['capture_request']);
+});
+
+test('Director selects an exact registered playbook without local content routing', async () => {
+  const fixture = await loadFixture();
+  const alternate = structuredClone(fixture);
+  alternate.playbook_id = 'alternate.service-cycle';
+  alternate.name = 'Alternate service cycle';
+  alternate.description = 'A second lifecycle with an independently selected purpose.';
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  registry.register(alternate);
+  const calls = [];
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async (model, request) => {
+      calls.push({ model, body: JSON.parse(request.body) });
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: JSON.stringify({
+            playbook_id: alternate.playbook_id, version: 1, reason: 'semantic fit',
+          }) } }] };
+        },
+      };
+    },
+  });
+  const selected = await selector.select({ objective: '任意の業務を処理してください', context: { signal: 7 } });
+  assert.deepEqual(selected, { playbook_id: alternate.playbook_id, version: 1, reason: 'semantic fit' });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body.messages[1].content.includes(alternate.playbook_id), true);
+});
+
+test('Director selection rejects invented identifiers rather than guessing a fallback', async () => {
+  const fixture = await loadFixture();
+  const alternate = structuredClone(fixture);
+  alternate.playbook_id = 'alternate.service-cycle';
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  registry.register(alternate);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: '{"playbook_id":"invented.route","version":1}' } }] }; },
+    }),
+  });
+  await assert.rejects(() => selector.select({ objective: 'ambiguous request' }), /runtime_playbook_selection_not_in_registry/);
+});
+
+test('Director may decline every registered playbook instead of forcing a bad fit', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(await loadFixture());
+  const calls = [];
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async (_model, request) => {
+      calls.push(JSON.parse(request.body));
+      return {
+        ok: true,
+        async json() { return { choices: [{ message: { content: '{"playbook_id":null,"version":null,"reason":"no lifecycle fit"}' } }] }; },
+      };
+    },
+  });
+  const selected = await selector.select({ objective: 'A task unrelated to the available lifecycle.' });
+  assert.deepEqual(selected, { playbook_id: null, version: null, reason: 'no lifecycle fit' });
+  assert.equal(calls.length, 1, 'selection must still use the Director when one playbook is registered');
+});
+
+test('Director binds only playbook-declared inputs without keyword parsing in the engine', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: 'outreach.prospect-to-conversation', version: 1, reason: 'complete lifecycle fit',
+        bindings: {
+          'target.quantity': 10,
+          'target.geography': 'Hannover, Germany',
+          'target.segment': 'industrial automation manufacturers',
+          'constraints.delivery_requested': true,
+          'undeclared.value': 'ignored',
+        },
+      }) } }] }; },
+    }),
+  });
+  const selected = await selector.select({ objective: '任意の言語で十社へ連絡してください' });
+  assert.deepEqual(selected.context_patch, {
+    target: { quantity: 10, geography: 'Hannover, Germany', segment: 'industrial automation manufacturers' },
+    constraints: { delivery_requested: true },
+  });
+  assert.equal(JSON.stringify(selected).includes('undeclared'), false);
+});
+
+test('adapter registry exposes generic operations and injects immutable tenant execution context', async () => {
+  const calls = [];
+  const adapters = new RuntimeAdapterRegistry();
+  adapters.register({
+    id: 'sample.transport',
+    name: 'Sample transport',
+    description: 'A test implementation of the generic boundary.',
+    inputSchema: { type: 'object' },
+    async execute(input, context) {
+      calls.push({ operation: 'execute', input, context });
+      return { accepted: true, receipt: 'receipt-1' };
+    },
+    async verify(input, context) {
+      calls.push({ operation: 'verify', input, context });
+      return { verified: true };
+    },
+    async monitor(input, context) {
+      calls.push({ operation: 'monitor', input, context });
+      return { changed: false };
+    },
+  });
+  assert.deepEqual(adapters.descriptors()[0].operations, ['execute', 'verify', 'monitor']);
+  const result = await adapters.invoke('sample.transport', 'execute', { value: 3 }, {
+    orgId: 'organization-1', runId: 'run-1', stageId: 'stage-1', roomId: 'room-1',
+  });
+  assert.deepEqual(result, { accepted: true, receipt: 'receipt-1' });
+  assert.equal(calls[0].context.orgId, 'organization-1');
+  await assert.rejects(
+    () => adapters.invoke('sample.transport', 'execute', {}, { runId: 'run-1', stageId: 'stage-1' }),
+    /runtime_adapter_execution_context_required/,
+  );
+  await assert.rejects(
+    () => adapters.invoke('sample.transport', 'unknown', {}, { orgId: 'organization-1', runId: 'run-1', stageId: 'stage-1' }),
+    /runtime_adapter_operation_invalid/,
+  );
+});
+
+test('service-level authority grant resumes the exact waiting run immediately', async () => {
+  const calls = [];
+  const service = new RuntimePlaybookService({
+    prisma: { runtimePlaybookRun: { async findFirst() { return { status: 'WAITING_AUTHORITY' }; } } },
+    registry: {}, selector: {},
+    executor: {
+      async grantAuthority(...args) { calls.push(['grant', ...args]); return { status: 'GRANTED' }; },
+      async run(...args) { calls.push(['run', ...args]); return { id: args[0], status: 'WAITING_EVENT' }; },
+    },
+  });
+  const result = await service.grantAuthority('run-1', 'org-1', 'external_write', { grantedBy: 'user-1' });
+  assert.equal(result.authority.status, 'GRANTED');
+  assert.equal(result.run.status, 'WAITING_EVENT');
+  assert.deepEqual(calls.map((call) => call[0]), ['grant', 'run']);
+});
+
+test('predicate engine exposes a bounded generic vocabulary and exact unmet checks', () => {
+  assert.equal(defaultPredicateNames.length, 20);
+  const engine = new PredicateEngine();
+  const verdict = engine.validateChecks([
+    { id: 'minimum', predicate: 'has_min_count', select: 'records', value: 2 },
+    { id: 'grounding', predicate: 'is_source_backed', select: 'records', source_path: 'source_refs', value: 1 },
+    { id: 'distinct', predicate: 'unique_by', select: 'records', path: 'data.external_id' },
+  ], {
+    records: [{ id: 'one', key: 'records', data: { external_id: 'A' }, source_refs: ['source-1'] }],
+  });
+
+  assert.equal(verdict.passed, false);
+  assert.deepEqual(verdict.unmet.map((item) => item.id), ['minimum']);
+  assert.throws(
+    () => engine.validateChecks([{ predicate: 'unknown_check' }], {}),
+    /runtime_predicate_unknown/,
+  );
+  assert.throws(
+    () => engine.validateChecks([{ predicate: 'has_min_count', select: 'records' }], {}),
+    /runtime_predicate_argument_missing:has_min_count:value/,
+  );
+});
+
+test('dynamic predicate thresholds resolve from run context without engine domain logic', () => {
+  const engine = new PredicateEngine();
+  const check = {
+    predicate: 'has_min_count', select: 'records',
+    value_from: 'run.context.target.quantity', default_value: 1,
+  };
+  const artifacts = { records: [{ id: '1' }, { id: '2' }] };
+  assert.equal(engine.validateChecks([check], artifacts, { run: { context: { target: { quantity: 2 } } } }).passed, true);
+  assert.equal(engine.validateChecks([check], artifacts, { run: { context: { target: { quantity: 3 } } } }).passed, false);
+});
+
+test('Outreach lifecycle loads as versioned data with no engine modification', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  const playbook = registry.get('outreach.prospect-to-conversation', 1);
+  assert.equal(playbook.stages.length, 7);
+  assert.deepEqual(playbook.terminal_states, ['prepared', 'conversation_started', 'no_viable_candidates']);
+  assert.equal(stage(playbook, 'deliver_outreach').authority_gate, 'external_write');
+  assert.equal(stage(playbook, 'observe_responses').waits_for_event.type, 'response.received');
+});
+
+test('Outreach lifecycle advances through the Room contract and stops prepared without delivery', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  const store = new TestRuntimeStore();
+  const outputs = {
+    discover_candidates: [
+      { id: 'candidate-1', key: 'candidate_record', data: { organization_key: 'one', viable: true }, source_refs: ['source:1'] },
+      { id: 'candidate-2', key: 'candidate_record', data: { organization_key: 'two', viable: true }, source_refs: ['source:2'] },
+    ],
+    qualify_candidates: [
+      { id: 'qualified-1', key: 'qualified_record', data: { organization_key: 'one', fit_rationale: 'Fit one', outreach_angle: 'Angle one' }, source_refs: ['source:1'] },
+      { id: 'qualified-2', key: 'qualified_record', data: { organization_key: 'two', fit_rationale: 'Fit two', outreach_angle: 'Angle two' }, source_refs: ['source:2'] },
+    ],
+    persist_records: [
+      { id: 'lead-1', key: 'lead_record', data: { persistence_ref: 'leadbook:1', qualified_ref: 'qualified-1' }, source_refs: ['source:1'] },
+      { id: 'lead-2', key: 'lead_record', data: { persistence_ref: 'leadbook:2', qualified_ref: 'qualified-2' }, source_refs: ['source:2'] },
+    ],
+    prepare_outreach: [
+      { id: 'draft-1', key: 'draft_record', data: { draft_ref: 'drafts:1', recipient_ref: 'leadbook:1', lead_ref: 'lead-1', delivery_requested: false }, source_refs: ['source:1'] },
+      { id: 'draft-2', key: 'draft_record', data: { draft_ref: 'drafts:2', recipient_ref: 'leadbook:2', lead_ref: 'lead-2', delivery_requested: false }, source_refs: ['source:2'] },
+    ],
+  };
+  const calls = [];
+  const adapters = new RuntimeAdapterRegistry();
+  adapters.register({
+    id: 'tenant-records',
+    async verify() { return { passed: true, evidence: [{ id: 'tenant-record-verified' }], unmet: [] }; },
+  });
+  adapters.register({
+    id: 'gmail',
+    async verify() { return { passed: true, evidence: [{ id: 'draft-verified' }], unmet: [] }; },
+  });
+  const director = new RuntimeRoomDirector({ transport: async (payload) => {
+    const envelope = JSON.parse(payload.execution_context);
+    calls.push(envelope);
+    return { result: {
+      contract: 'runtime-stage-result.v1', run_id: envelope.run_id, stage_id: envelope.stage_id,
+      artifacts: outputs[envelope.stage_id] || [], gaps: [],
+    } };
+  } });
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, adapters, workerId: 'outreach-worker' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', roomId: 'room-1', playbookId: 'outreach.prospect-to-conversation',
+    playbookVersion: 1, idempotencyKey: 'outreach-1',
+    context: { target: { quantity: 2 }, company: { name: 'Any Company' }, constraints: { delivery: false } },
+  });
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.terminalState, 'prepared');
+  assert.deepEqual(run.completedStageIds, ['discover_candidates', 'qualify_candidates', 'persist_records', 'prepare_outreach']);
+  assert.deepEqual(calls.map((call) => call.stage_id), run.completedStageIds);
+  assert.equal(calls.every((call) => call.contract === 'runtime-stage.v1'), true);
+  assert.equal(run.artifacts.length, 8);
+});
+
+test('Outreach lifecycle delegates provider execution and event monitoring to adapters', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachFixturePath])]);
+  const store = new TestRuntimeStore();
+  const roomOutputs = {
+    discover_candidates: [{ id: 'candidate-1', key: 'candidate_record', data: { organization_key: 'one', viable: true }, source_refs: ['source:1'] }],
+    qualify_candidates: [{ id: 'qualified-1', key: 'qualified_record', data: { organization_key: 'one', fit_rationale: 'Fit', outreach_angle: 'Angle' }, source_refs: ['source:1'] }],
+    persist_records: [{ id: 'lead-1', key: 'lead_record', data: { persistence_ref: 'record-1', qualified_ref: 'qualified-1' }, source_refs: ['source:1'] }],
+    prepare_outreach: [{ id: 'draft-1', key: 'draft_record', data: { draft_ref: 'provider-draft-1', recipient_ref: 'record-1', lead_ref: 'lead-1', delivery_requested: true }, source_refs: ['source:1'] }],
+    handle_response: [{ id: 'response-1', key: 'response_record', data: { classification: 'interested', timeline_ref: 'record-1', provider_event_ref: 'event-artifact-1' }, source_refs: ['provider:reply-1'] }],
+  };
+  const roomCalls = [];
+  const seenEvents = [];
+  const director = { async execute({ stage_id: stageId, inputs }) {
+    roomCalls.push(stageId);
+    if (stageId === 'handle_response') seenEvents.push(inputs.event);
+    return { artifacts: roomOutputs[stageId] || [] };
+  } };
+  const adapterCalls = [];
+  const adapters = new RuntimeAdapterRegistry();
+  adapters.register({ id: 'tenant-records', async verify() { return { passed: true, evidence: [], unmet: [] }; } });
+  adapters.register({
+    id: 'gmail',
+    async verify() { adapterCalls.push('verify'); return { passed: true, evidence: [], unmet: [] }; },
+    async execute() {
+      adapterCalls.push('execute');
+      return { artifacts: [{
+        id: 'receipt-1', key: 'delivery_receipt', source_refs: ['provider:sent-1'],
+        data: { provider_receipt_id: 'sent-1', thread_id: 'thread-1', correlation_ref: 'thread-1', status: 'accepted' },
+      }] };
+    },
+    async monitor() {
+      adapterCalls.push('monitor');
+      return { artifacts: [{
+        id: 'subscription-1', key: 'observation_subscription', source_refs: ['provider:sent-1'],
+        data: { subscription_ref: 'gmail-thread:thread-1', correlation_ref: 'thread-1' },
+      }] };
+    },
+  });
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, adapters, workerId: 'outreach-adapter-worker' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', roomId: 'room-1', playbookId: 'outreach.prospect-to-conversation',
+    playbookVersion: 1, idempotencyKey: 'outreach-adapter-1', context: { target: { quantity: 1 } },
+  });
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'WAITING_AUTHORITY');
+  assert.equal(run.currentStageId, 'deliver_outreach');
+  await executor.grantAuthority(run.id, run.orgId, 'external_write');
+  run = await executor.run(run.id, { orgId: run.orgId });
+  assert.equal(run.status, 'WAITING_EVENT');
+  assert.equal(run.currentStageId, 'handle_response');
+  assert.equal(run.waitingFor.correlation_value, 'thread-1');
+  assert.deepEqual(adapterCalls, ['verify', 'execute', 'monitor']);
+  assert.equal(roomCalls.includes('deliver_outreach'), false);
+  assert.equal(roomCalls.includes('observe_responses'), false);
+  run = await executor.run(run.id, {
+    orgId: run.orgId,
+    event: { type: 'response.received', data: { correlation_ref: 'thread-1' } },
+  });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.terminalState, 'conversation_started');
+  assert.equal(seenEvents[0].data.correlation_ref, 'thread-1');
+});
+
+test('registry enforces immutable versions, scope precedence, and schema integrity', async () => {
+  const fixture = await loadFixture();
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  registry.register(fixture);
+
+  assert.throws(
+    () => registry.register({ ...fixture, description: 'Mutated after publication.' }),
+    /runtime_playbook_version_immutable/,
+  );
+  assert.throws(
+    () => registry.register({ definition: fixture, content_hash: '0'.repeat(64) }),
+    /runtime_playbook_content_hash_mismatch/,
+  );
+
+  const scoped = structuredClone(fixture);
+  scoped.name = 'Organization-specific order operations';
+  registry.register({ scope_key: 'organization-1', definition: scoped });
+  assert.equal(registry.get(fixture.playbook_id, 1, { scopeKey: 'organization-1' }).name, scoped.name);
+  assert.equal(registry.get(fixture.playbook_id, 1, { scopeKey: 'organization-2' }).name, fixture.name);
+
+  const broken = structuredClone(fixture);
+  broken.version = 2;
+  broken.stages[0].transitions = [{ default: true, to_stage: 'missing_stage' }];
+  assert.throws(() => registry.register(broken), /runtime_playbook_transition_stage_missing/);
+});
+
+test('Prisma source maps persisted playbook records without coupling registry to storage', async () => {
+  const fixture = await loadFixture();
+  const calls = [];
+  const source = createPrismaPlaybookSource({
+    scopeKey: 'organization-1',
+    prisma: {
+      runtimePlaybookDefinition: {
+        async findMany(query) {
+          calls.push(query);
+          return [{
+            scopeKey: 'global',
+            playbookId: fixture.playbook_id,
+            version: fixture.version,
+            definition: fixture,
+            contentHash: runtimePlaybookContentHash(fixture),
+          }];
+        },
+      },
+    },
+  });
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([source]);
+  assert.equal(registry.get(fixture.playbook_id, 1).name, fixture.name);
+  assert.deepEqual(calls[0].where.scopeKey.in, ['global', 'organization-1']);
+});
+
+test('generic modules contain no forbidden company, task, or channel routing terms', async () => {
+  const modulePaths = [
+    new URL('../../src/runtime-playbooks/registry.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/predicate-engine.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/playbook-schema.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/postgres-store.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/stage-executor.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/director-selector.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/adapter-registry.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/room-director.js', import.meta.url),
+    new URL('../../src/runtime-playbooks/service.js', import.meta.url),
+  ];
+  const source = (await Promise.all(modulePaths.map((path) => readFile(path, 'utf8')))).join('\n').toLowerCase();
+  for (const forbidden of ['singulance', 'greenleaf', 'bakery', 'email', 'instagram', 'prospect', 'berlin', 'gmail', 'linkedin']) {
+    assert.equal(source.includes(forbidden), false, `generic module leaked domain term: ${forbidden}`);
+  }
+});

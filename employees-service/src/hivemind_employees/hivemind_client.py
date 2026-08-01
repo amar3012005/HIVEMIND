@@ -10,7 +10,7 @@ import os
 import re
 import httpx
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import get_settings
 
@@ -110,6 +110,8 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
 
 async def save_prospect_emulated(*, company: str, note: str, user_id: Optional[str], org_id: Optional[str],
                                  phone: str = "", email: str = "", website: str = "",
+                                 address: str = "", fit_reason: str = "",
+                                 distinctive_signal: str = "", outreach_angle: str = "",
                                  project_id: Optional[str] = None, api_key: str = "",
                                  source: str = "discovery") -> Dict[str, Any]:
     """Persist a prospect/lead as an org-scoped memory (tag 'prospect') with a PERSONAL NOTE,
@@ -127,15 +129,30 @@ async def save_prospect_emulated(*, company: str, note: str, user_id: Optional[s
         lines.append(f"EMAIL: {email}")
     if website:
         lines.append(f"WEBSITE: {website}")
+    if address:
+        lines.append(f"ADDRESS: {address}")
+    if fit_reason:
+        lines.append(f"FIT_REASON: {fit_reason}")
+    if distinctive_signal:
+        lines.append(f"DISTINCTIVE_SIGNAL: {distinctive_signal}")
+    if outreach_angle:
+        lines.append(f"OUTREACH_ANGLE: {outreach_angle}")
     lines.append(f"NOTE: {note}")
     slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")[:60]
     tags = ["prospect", "lead", f"company:{slug}"] + (["has-phone"] if phone else []) + (["has-email"] if email else [])
     body: Dict[str, Any] = {
         "title": f"Prospect: {company}"[:120], "content": "\n".join(lines), "tags": tags,
-        "sync": True, "memory_type": "fact", "source_platform": "hyperagents-prospect",
+        "sync": True, "smartIngest": False, "skipProcessing": True,
+        "skipPredictCalibrate": True, "skipAdvisoryLock": True,
+        "skip_relationship_classification": True, "skip_contradiction_detection": True,
+        "defer_entity_linking": True,
+        "memory_type": "fact", "source_platform": "hyperagents-prospect",
         "source_metadata": {"source_type": "prospect", "source_platform": "hyperagents-prospect",
                             "prospect_source": source, "company": company,
-                            "phone": phone or None, "email": email or None, "website": website or None},
+                            "phone": phone or None, "email": email or None, "website": website or None,
+                            "address": address or None, "fit_reason": fit_reason or None,
+                            "distinctive_signal": distinctive_signal or None,
+                            "outreach_angle": outreach_angle or None},
     }
     if project_id:
         body["project_id"] = project_id
@@ -149,6 +166,31 @@ async def save_prospect_emulated(*, company: str, note: str, user_id: Optional[s
             return r.json()
     except Exception:
         return {}
+
+
+async def save_prospects_bulk_emulated(*, prospects: List[Dict[str, Any]], user_id: Optional[str],
+                                        org_id: Optional[str], turn_id: Optional[str] = None,
+                                        api_key: str = "") -> Dict[str, Any]:
+    """Persist a qualified Room result atomically through the shared Leads boundary."""
+    if not prospects or not user_id or not org_id:
+        return {"error": "prospects, user_id and org_id are required"}
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    # Service-to-service writes stay on the private Compose network. The public
+    # URL is only a fallback for non-Compose development environments.
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL") or "http://hm-control:3000").rstrip("/")
+    headers = {"Authorization": f"Bearer {key}", "X-API-Key": key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            response = await client.post(f"{base}/internal/hyper/prospects/bulk", headers=headers, json={
+                "org_id": org_id, "user_id": user_id, "turn_id": turn_id,
+                "prospects": prospects[:50],
+            })
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[prospects.bulk] failed: %s", exc)
+        return {"error": str(exc)[:200]}
 
 
 async def list_tagged_emulated(*, tags: str, user_id: Optional[str], org_id: Optional[str],

@@ -9,7 +9,7 @@ from hivemind_employees.hyper.skills import (
 )
 
 
-EXPECTED = {"seo", "marketing", "branding", "fundraising", "research", "product", "design", "legal_finance", "campaign"}
+EXPECTED = {"seo", "marketing", "outreach", "branding", "fundraising", "research", "product", "design", "legal_finance", "campaign"}
 
 
 def test_initial_domain_packs_are_complete_and_versioned():
@@ -21,13 +21,15 @@ def test_initial_domain_packs_are_complete_and_versioned():
         assert pack.director_prompt
         assert pack.toolkit_prompt
         assert "## " in pack.report_contract
-        assert len(pack.skills) >= 2
+        if slug != "outreach":
+            assert len(pack.skills) >= 2
 
 
 def test_explicit_room_tag_wins_over_message_keyword_classification():
     assert resolve_room_kind("ROOM_SEO", "", "write a fundraising campaign") == "seo"
     assert resolve_room_kind("ROOM_BRANDING", "", "research competitors") == "branding"
     assert resolve_room_kind("ROOM_FUNDRAISING", "", "improve our SEO") == "fundraising"
+    assert resolve_room_kind("ROOM_OUTREACH", "", "research industrial prospects") == "outreach"
 
 
 def test_general_rooms_keep_existing_dynamic_classifier():
@@ -92,6 +94,7 @@ def test_domain_pack_controls_room_lead_shape():
     assert lead_shape_for("branding") == "panel"
     assert lead_shape_for("fundraising") == "panel"
     assert lead_shape_for("campaign") == "maker"
+    assert lead_shape_for("outreach") == "maker"
     assert lead_shape_for("fundraising", "doc") == "maker"
 
 

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from .agents.agentscope_factory import build_react_agent
+from .agents.agentscope_tools import get_places_search_count, get_places_search_total
 from .bootstrap_client import fetch_bootstrap
 from .config import get_settings
 from .db import (
@@ -177,6 +178,7 @@ async def execute_hq_work_order(
         "tools": [
             "hivemind_recall", "hivemind_list_memories", "hivemind_get_memory",
             "hivemind_traverse_graph", "hivemind_at", "hivemind_list_projects",
+            "list_prospects", "places_search", "save_prospect",
         ],
         "max_iters": 12,
     }
@@ -197,7 +199,22 @@ Acceptance criteria:
 
 Complete only this bounded assignment. The source references above are artifact
 IDs, not Memory IDs; do not call get_memory with them. Use the resolved snapshots
-first, then call recall only for a specific remaining evidence gap.
+first, then call recall only for a specific remaining evidence gap. For outreach
+or local pipeline work, call list_prospects first. If the existing book is empty
+or insufficient, call places_search with a concrete category and location, then
+save only verified results. Do not return a future plan as completed work: report
+the records actually found, tool calls made, and any blockers.
+When scope is incomplete, use the retained company location, the Work Order,
+and available tools to complete the maximum safe portion yourself. Do not turn
+missing optional detail into a clarification request or a future plan. For
+pipeline work, discover and persist real prospects before describing outreach.
+For one local-pipeline Work Order, use one strongest ICP category-and-location
+Places query, persist that returned lead set, and stop. Do not turn one bounded
+assignment into repeated sector searches; HQ will schedule the next segment from
+the result and measurement evidence.
+For content or marketing work, draft the requested asset or its concrete brief
+from available evidence. A completed result must describe what you actually
+did, not what another room or user should do next.
 Do not publish, send, spend, mutate external systems, or invent measurements.
 Return a compact result packet with headings: RESULT, EVIDENCE, ARTIFACTS,
 METRICS, BLOCKERS, RECOMMENDATION. Explicitly mark unknowns.
@@ -213,7 +230,10 @@ METRICS, BLOCKERS, RECOMMENDATION. Explicitly mark unknowns.
             "owner_employee_id": str(employee.get("id")),
             "owner_slug": employee.get("slug"),
             "skills": skills,
-            "tool_calls": int(getattr(agent, "tool_call_count", 0)),
+            "tool_calls": [{"count": int(getattr(agent, "tool_call_count", 0))}],
+            "places_search_calls": get_places_search_count(),
+            "prospects_created": get_places_search_total(),
+            "discovery_complete": get_places_search_count() > 0 and get_places_search_total() > 0,
         }
         await complete_hyper_work_order(
             work_order_id=req.work_order_id, org_id=req.org_id, status="completed",

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getGrowthPlanToolCatalog } from '../../src/agent/connector-toolkits/growth-plan-tools.js';
-import { buildGrowthPlanArtifactData, growthPlanArtifactMetadata, normalizeGrowthPlanEvidence, renderGrowthPlanReport, selectGrowthPlanAspects } from '../../src/growth/planner.js';
+import { buildGrowthPlanArtifactData, compilePrepareQueue, completeGrowthPlanAssessments, growthPlanArtifactMetadata, normalizeGrowthPlanEvidence, renderGrowthPlanReport, selectGrowthPlanAspects } from '../../src/growth/planner.js';
 
 test('initial growth plan always assesses the complete operating system', () => {
   assert.deepEqual(selectGrowthPlanAspects('initial_full', ['pipeline']), [
@@ -27,9 +27,9 @@ test('growth plan toolkit exposes run, latest, and history without Room orchestr
 test('growth report is rendered outside the model JSON contract', () => {
   const report = renderGrowthPlanReport({
     executive_thesis: 'Build evidence before scaling.', aspect_assessments: [],
-    constraint: { type: 'measurement', statement: 'Outcomes are not connected.', known_facts: [], unknowns: [] },
+    constraints: [{ type: 'measurement', statement: 'Outcomes are not connected.', known_facts: [], unknowns: [] }],
     hypotheses: [], stage: { name: 'Measurement foundation', objective: 'Connect outcomes.', duration_days: 7, checkpoint_day: 7, measurement: {} },
-    delegation: { room_tag: 'marketing', objective: 'Define measurement.', acceptance_criteria: [] }, roadmap: [],
+    operating_queue: [{ title: 'Define measurement', room_tag: 'marketing', objective: 'Define measurement.', deliverable: 'Measurement map', acceptance_criteria: [] }], roadmap: [],
   });
   assert.match(report, /# Growth Operating Plan/);
   assert.match(report, /Measurement foundation/);
@@ -56,12 +56,34 @@ test('growth plan artifacts use the canonical SourceArtifact Prisma fields', () 
 
 test('deterministic compiler attaches the authoritative baseline reference', () => {
   const plan = normalizeGrowthPlanEvidence({
-    baseline_ref: {}, constraint: { type: 'measurement', evidence_refs: [] },
+    baseline_ref: {}, constraints: [{ type: 'measurement', evidence_refs: [] }],
     aspect_assessments: [{ aspect: 'measurement', evidence_refs: [] }],
     hypotheses: [{ statement: 'Connected outcomes may change prioritization.' }],
   }, { baseline: { resource_id: 'baseline-1', captured_at: '2026-07-29T00:00:00Z' } });
   assert.equal(plan.baseline_ref.resource_id, 'baseline-1');
-  assert.deepEqual(plan.constraint.evidence_refs, ['baseline-1']);
+  assert.deepEqual(plan.constraints[0].evidence_refs, ['baseline-1']);
   assert.deepEqual(plan.aspect_assessments[0].evidence_refs, ['baseline-1']);
   assert.deepEqual(plan.hypotheses[0].evidence_refs, ['baseline-1']);
+});
+
+test('missing initial assessment rows become explicit unknowns instead of failing the cycle', () => {
+  const plan = completeGrowthPlanAssessments({
+    aspect_assessments: [{ aspect: 'Positioning', status: 'strength', evidence_refs: ['baseline-1'] }],
+  }, { baseline: { resource_id: 'baseline-1' } }, ['positioning', 'audience']);
+  assert.equal(plan.aspect_assessments[0].aspect, 'positioning');
+  assert.equal(plan.aspect_assessments[1].aspect, 'audience');
+  assert.equal(plan.aspect_assessments[1].status, 'unknown');
+  assert.deepEqual(plan.aspect_assessments[1].evidence_refs, ['baseline-1']);
+});
+
+test('prepare queue ignores invented execution connectors while retaining Maps discovery', () => {
+  const plan = compilePrepareQueue({ operating_queue: [
+    { kind: 'seo', required_capabilities: ['google-search-console', 'content-management'] },
+    { kind: 'outreach', required_capabilities: ['google-maps', 'email-automation'] },
+    { kind: 'marketing', required_capabilities: ['zernio', 'instagram', 'linkedin', 'x_organic'] },
+    { kind: 'legal_finance', required_capabilities: ['document_review'] },
+  ] });
+  assert.deepEqual(plan.operating_queue.map((item) => item.required_capabilities), [[], ['google-maps'], [], []]);
+  assert.ok(plan.operating_queue.every((item) => item.authority_mode === 'PREPARE' && item.external_actions_required === false));
+  assert.deepEqual(plan.operating_queue[2].ignored_capability_suggestions, ['zernio', 'instagram', 'linkedin', 'x_organic']);
 });

@@ -1446,7 +1446,7 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions = false } = {}) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions: picDescOpt } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
@@ -1477,6 +1477,20 @@ if (process.env.DOCLING_URL) {
         const smart = smartOpt === true
           || (LAYOUT_EXTS.has(ext)
               && String(process.env.KB_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
+        // Exactly the same defect as `smart` above, one identifier along:
+        // `picture_descriptions = false` in this destructure, and the upload route
+        // never passes it — so do_picture_description was NEVER sent to Docling and
+        // every figure, chart and diagram in every PDF was dropped. The whole path
+        // is otherwise live and configured (adapter ~line 103: do_picture_description
+        // + enable_remote_services + a Groq vision config, and GROQ_API_KEY is set).
+        // This is the last capability gap against supermemory, whose chunks carry
+        // "Diagram showing energy flow within a home system…" for this same deck.
+        // Opt out via env, NOT a false argument — the upload path coerces to a
+        // strict boolean, so an absent field is indistinguishable from a deliberate
+        // false (the mistake that made my first `smart` fix a no-op).
+        const picture_descriptions = picDescOpt === true
+          || (LAYOUT_EXTS.has(ext)
+              && String(process.env.KB_PICTURE_DESC ?? 'true').toLowerCase() !== 'false');
         const tParse = Date.now();
 
         // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──

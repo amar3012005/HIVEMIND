@@ -98,7 +98,7 @@ test('Gmail adapter creates one provider draft per accepted message through gene
   assert.equal(result.artifacts[0].data.delivery_requested, true);
 });
 
-test('Gmail adapter marks provider write timeouts ambiguous so the executor cannot replay them', async () => {
+test('Gmail adapter persists an uncertain outcome for a provider timeout instead of replaying it', async () => {
   const adapter = createGmailRuntimeAdapter({
     prisma: {
       hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } },
@@ -109,10 +109,10 @@ test('Gmail adapter marks provider write timeouts ambiguous so the executor cann
       throw new Error('provider_timeout');
     },
   });
-  await assert.rejects(
-    () => adapter.execute({ inputs: { 'artifacts.draft_record': [{ data: { draft_ref: 'draft-1' } }] } }, context()),
-    (error) => error.ambiguous === true && /runtime_gmail_send_ambiguous/.test(error.message),
-  );
+  const result = await adapter.execute({ inputs: { 'artifacts.draft_record': [{ id: 'draft-artifact-1', data: { draft_ref: 'draft-1' } }] } }, context());
+  assert.equal(result.artifacts.length, 1);
+  assert.equal(result.artifacts[0].key, 'action_uncertain');
+  assert.equal(result.artifacts[0].data.input_ref, 'draft-artifact-1');
 });
 
 test('reply watcher produces one exact generic playbook event correlation', () => {

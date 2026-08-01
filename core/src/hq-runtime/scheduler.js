@@ -4,7 +4,6 @@ import { appendHqEvent, createHqCycle, getHqRuntime, scheduleHqWake } from './re
 import { NativeHqEngine } from './native-engine.js';
 import { HqScheduleStore } from './schedule-store.js';
 import { drainHqWorkOrders } from './work-dispatcher.js';
-import { createProductionEmailLifecycleService } from './langgraph/email-lifecycle-service.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
 
 function artifactCountSummary(artifacts = []) {
@@ -19,7 +18,7 @@ function artifactCountSummary(artifacts = []) {
   };
 }
 
-export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, emailLifecycle = null, runtimePlaybooks = null }) {
+export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, runtimePlaybooks = null }) {
   const store = new HqScheduleStore({ prisma, logger });
   const schedule = await store.leaseNext(leaseOwner);
   if (!schedule) return null;
@@ -37,19 +36,6 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, e
         throw new Error('runtime_playbook_event_payload_invalid');
       }
       const result = await runtimePlaybooks.resumeEvent(runId, runtime.orgId, providerEvent);
-      await store.complete(schedule.id);
-      return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
-    }
-    if (schedule.trigger_type === 'email_lifecycle_event') {
-      if (!emailLifecycle) throw new Error('email_lifecycle_service_unavailable');
-      const executionId = String(schedule.payload?.execution_id || '');
-      const providerEvent = schedule.payload?.event;
-      if (!executionId || !providerEvent?.id || !providerEvent?.type) {
-        throw new Error('email_lifecycle_schedule_payload_invalid');
-      }
-      const result = await emailLifecycle.resumeEvent({
-        organizationId: runtime.orgId, executionId, event: providerEvent,
-      });
       await store.complete(schedule.id);
       return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
     }
@@ -104,7 +90,6 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   if (!prisma) return { enabled: false, reason: 'database_unavailable' };
   const exists = await prisma.$queryRawUnsafe(`SELECT to_regclass('hivemind.hq_schedules') IS NOT NULL AS available`).catch(() => []);
   if (!exists[0]?.available) return { enabled: false, reason: 'migration_not_applied' };
-  const emailLifecycle = await createProductionEmailLifecycleService({ prisma, logger });
   const runtimePlaybooks = await createProductionRuntimePlaybookService({
     prisma,
     logger,
@@ -144,6 +129,15 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
       if (!['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION', 'WAITING_AUTHORITY', 'WAITING_EVENT'].includes(String(run.status))) return;
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
+      if (run.status === 'WAITING_EVENT' && run.waitingFor?.deadline) {
+        const correlation = (run.waitingFor.correlation_values || [run.waitingFor.correlation_value]).filter(Boolean)[0] || null;
+        await scheduleHqWake({
+          prisma, runtimeId: trigger.runtime_id, orgId: run.orgId, runtimeEpoch: trigger.runtime_epoch,
+          idempotencyKey: `runtime-playbook-timeout:${run.id}:${run.checkpointSequence}`,
+          triggerType: 'runtime_playbook_event', dueAt: new Date(run.waitingFor.deadline),
+          payload: { run_id: run.id, event: { id: `wait-timeout:${run.id}:${run.checkpointSequence}`, type: 'wait.timeout', data: { correlation_ref: correlation, deadline: run.waitingFor.deadline } } },
+        });
+      }
       await scheduleHqWake({
         prisma,
         runtimeId: trigger.runtime_id,
@@ -166,7 +160,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
     if (schedulesRunning) return;
     schedulesRunning = true;
     try {
-      while (await runDueHqSchedule({ prisma, leaseOwner, logger, emailLifecycle, runtimePlaybooks })) { /* drain due work serially */ }
+      while (await runDueHqSchedule({ prisma, leaseOwner, logger, runtimePlaybooks })) { /* drain due work serially */ }
     } finally { schedulesRunning = false; }
   };
   const drainWorkers = async () => {
@@ -198,7 +192,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   wake();
   logger.log(`[hq-runtime] scheduler active as ${leaseOwner}`);
   return {
-    enabled: true, leaseOwner, wake, emailLifecycle, runtimePlaybooks,
-    stop: async () => { clearInterval(timer); await emailLifecycle.close(); },
+    enabled: true, leaseOwner, wake, runtimePlaybooks,
+    stop: async () => { clearInterval(timer); },
   };
 }

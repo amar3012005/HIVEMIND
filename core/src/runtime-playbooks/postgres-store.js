@@ -76,6 +76,7 @@ export class PostgresRuntimeStore {
       ...run,
       artifacts: run.artifacts.map(publicArtifact),
       authorityGates: run.authorities.map((authority) => authority.gate),
+      authorityRecords: run.authorities,
     };
   }
 

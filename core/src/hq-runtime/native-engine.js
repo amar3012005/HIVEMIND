@@ -3,6 +3,7 @@ import { buildHqContext } from './context.js';
 import { HqSkillRegistry, HqToolkitRegistry } from './skill-registry.js';
 import { ingestPendingInstructions, reconcileTodoCapabilities } from './instruction-loop.js';
 import { narrateAwakening } from './awakening-narrator.js';
+import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 
 const DAY = 86400000;
 
@@ -302,7 +303,7 @@ export class NativeHqEngine {
         if (authority.autoGrant) {
           await this.runtimePlaybooks.grantAuthority(run.id, runtime.orgId, authority.gate, {
             grantedBy: runtime.ownerUserId,
-            payload: { source: 'organization_policy', policy_key: authority.policyKey },
+            payload: { source: 'organization_policy', policy_key: authority.policyKey, input_hash: stageAuthorityHash(run, stage) },
           });
           await prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'RUNNING', blockedReason: null } });
           await event(prisma, runtime, cycle, {

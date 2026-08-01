@@ -112,14 +112,14 @@ export class RuntimeRoomDirector {
     return rows[0];
   }
 
-  async #createTurn(roomId, message, idempotencyKey) {
+  async #createTurn(roomId, message, idempotencyKey, runtime) {
     const rows = await this.prisma.$queryRawUnsafe(
-      `INSERT INTO hivemind.hyper_turns (room_id, seq, user_message, status, idempotency_key)
-       SELECT $1::uuid, COALESCE(MAX(seq), 0) + 1, $2, 'live', $3
+      `INSERT INTO hivemind.hyper_turns (room_id, seq, user_message, status, idempotency_key, runtime_playbook_run_id, runtime_stage_id, runtime_checkpoint_sequence, runtime_attempt)
+       SELECT $1::uuid, COALESCE(MAX(seq), 0) + 1, $2, 'live', $3, $4::uuid, $5, $6::integer, $7::integer
          FROM hivemind.hyper_turns WHERE room_id = $1::uuid
-       ON CONFLICT (idempotency_key) DO UPDATE SET status = 'live'
+       ON CONFLICT (idempotency_key) DO UPDATE SET status = 'live', runtime_playbook_run_id=EXCLUDED.runtime_playbook_run_id, runtime_stage_id=EXCLUDED.runtime_stage_id, runtime_checkpoint_sequence=EXCLUDED.runtime_checkpoint_sequence, runtime_attempt=EXCLUDED.runtime_attempt
        RETURNING id`,
-      roomId, message, idempotencyKey,
+      roomId, message, idempotencyKey, runtime.runId, runtime.stageId, runtime.checkpointSequence, runtime.attempt,
     );
     return rows?.[0]?.id;
   }
@@ -153,6 +153,7 @@ export class RuntimeRoomDirector {
         request.room_id,
         `Runtime stage | ${String(request.objective || '').trim()}`.slice(0, 8000),
         turnIdempotencyKey(request),
+        { runId: request.run_id, stageId: request.stage_id, checkpointSequence: request.checkpoint_sequence, attempt: asObject(request.stage_attempts)[request.stage_id] || 1 },
       );
     }
     turnId = turnId || `runtime-turn-${randomUUID()}`;

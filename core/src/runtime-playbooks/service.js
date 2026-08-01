@@ -119,7 +119,7 @@ export class RuntimePlaybookService {
   }
 
   async resumeEvent(runId, orgId, event) {
-    return this.executor.run(runId, { orgId, event });
+    return this.execute(runId, orgId, { event });
   }
 
   async drainActive({ limit = 4 } = {}) {

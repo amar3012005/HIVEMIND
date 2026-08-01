@@ -12,3 +12,4 @@ export { DirectorPlaybookSelector } from './director-selector.js';
 export { RuntimeAdapterRegistry, runtimeAdapterOperations } from './adapter-registry.js';
 export { RuntimeRoomDirector, roomPhaseEnvelope, runtimeStageEnvelope } from './room-director.js';
 export { RuntimePlaybookService, createProductionRuntimePlaybookService } from './service.js';
+export { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot } from './snapshot.js';

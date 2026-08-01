@@ -546,7 +546,7 @@ test('service-level authority grant resumes the exact waiting run immediately', 
 });
 
 test('predicate engine exposes a bounded generic vocabulary and exact unmet checks', () => {
-  assert.equal(defaultPredicateNames.length, 22);
+  assert.equal(defaultPredicateNames.length, 24);
   const engine = new PredicateEngine();
   const verdict = engine.validateChecks([
     { id: 'minimum', predicate: 'has_min_count', select: 'records', value: 2 },

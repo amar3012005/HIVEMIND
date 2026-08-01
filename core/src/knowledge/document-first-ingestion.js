@@ -328,6 +328,25 @@ function extractJsonArray(text) {
 }
 
 
+// Path-safety for anything derived from a user-supplied filename. The upload
+// route accepts an arbitrary multipart filename, and while the file WRITER
+// already sanitises before touching disk (verified: "../../../etc/passwd"
+// landed as ".._.._.._etc_passwd" and /etc/passwd was untouched), the recorded
+// storageLocation kept the raw string:
+//     kb/<user>/<sha>/../../../etc/passwd
+// The write path was safe; the stored path was poisoned. Any later reader that
+// resolves storageLocation — download, re-extract, export — would traverse out
+// of the tenant directory. Sanitise at the point of RECORD so the stored value
+// can never disagree with what is on disk.
+function safePathSegment(name) {
+  return String(name || 'file')
+    .replace(/[\\/]/g, '_')      // path separators, both flavours
+    .replace(/\.\./g, '_')        // parent-directory hops
+    .replace(/^[.\s]+/, '')       // leading dots/space (hidden files, ". ." tricks)
+    .replace(/[\u0000-\u001f]/g, '') // control bytes incl. NUL truncation
+    .slice(0, 255) || 'file';
+}
+
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
     this.db = db;
@@ -496,8 +515,8 @@ FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
 
 DO NOT EXTRACT — these are NOT facts, skip them entirely (a section that is ONLY these → "facts":[]):
 - Page furniture: headers, footers, page numbers, document/article/part numbers (e.g. "33567-3", "Art.-Nr. 30792", "Dokument-Nr."), "Technische Änderungen vorbehalten"/copyright/legal-disclaimer lines, and table-of-contents or chapter-number lines.
-- Contact/company blocks: postal addresses, phone/fax numbers, email addresses, company registration or legal-form lines (e.g. "SOLVIS GmbH, Grotrian-Steinweg-Straße 12, Telefon 0531 28904-0").
-- Raw tabular number dumps with no prose: a run of bare numbers, axis labels, or dimensions with no stated claim is NOT a fact (e.g. "0 0,5 1 1,5 2 2,5 ..."). Only extract a measurement when you can state it as a complete sentence naming WHAT the value is and for WHICH thing (e.g. "The SolvisBruno 10 kW has a fuel heat output of 3.1–10.7 kW") — otherwise skip it.
+- Contact/company blocks: postal addresses, phone/fax numbers, email addresses, company registration or legal-form lines (a company name followed by a street address and phone number is a contact block, not a claim).
+- Raw tabular number dumps with no prose: a run of bare numbers, axis labels, or dimensions with no stated claim is NOT a fact (e.g. "0 0,5 1 1,5 2 2,5 ..."). Only extract a measurement when you can state it as a complete sentence naming WHAT the value is and for WHICH thing (state the named thing and its measured quantity in one complete sentence) — otherwise skip it.
 - Garbled/unreadable text: if a passage is OCR garbage, mojibake, or non-language glyph soup (e.g. "ĞŝƐƚƵŶŐ ΀Ŭt΁"), SKIP it — never reconstruct or extract from it.
 
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
@@ -774,7 +793,7 @@ Output the JSON object and nothing else.`;
             if (/\bDIN\s?[A-Z]?\d|\bA[3-6]\b|\b\d{2,4}\s?(x|×)\s?\d{2,4}\b/i.test(s)) return true;                  // paper/format sizes
             if (/\b(regular|bold|italic|light|medium|thin|black|condensed|extended|oblique)\b/i.test(s) && /^[A-Z][a-z]+(\s[A-Z]?[a-z]+)*$/.test(s)) return true; // font faces
             if (/^https?:\/\//i.test(s) || /\bwww\./i.test(s)) return true;                                        // URLs
-            if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (SOLVIS_RG_4C)
+            if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (an all-caps token with underscores/slashes and no spaces)
             return false;
           };
           const rawEntityNames = (ex.entities || [])
@@ -874,12 +893,55 @@ Output the JSON object and nothing else.`;
     // (0.65) + the curator keep the extra candidates from becoming noise.
     const factCap = Math.max(1, Math.min(Number(maxFacts) || 1,
       compact ? 3 : Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10)));
-    const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
+    // DETERMINISTIC LANGUAGE PIN. Telling the model to "use the section's language"
+    // does not hold: the surrounding prompt is entirely English and the model reads
+    // that as the target. Measured twice — a German document produced 16 English /
+    // 2 German claims even WITH an explicit final override line, and a German
+    // spreadsheet produced 10 English / 0 German.
+    //
+    // So decide it in code and NAME the language in the instruction. Function words
+    // rather than characters, because diacritics are absent from plenty of real
+    // German text and common in French/Spanish/Portuguese. Fully tenant-neutral —
+    // a generic marker table, no customer terms — and it degrades to the generic
+    // wording when undecided rather than guessing and translating the corpus.
+    const _langProbe = String(content).slice(0, 4000).toLowerCase();
+    const _langHits = (words) => words.reduce((n, w) => {
+      const m = _langProbe.match(new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, 'gu'));
+      return n + (m ? m.length : 0);
+    }, 0);
+    const _LANG_MARKERS = [
+      ['German', ['der', 'die', 'das', 'und', 'nicht', 'mit', 'für', 'ist', 'ein', 'auch', 'werden']],
+      ['French', ['le', 'la', 'les', 'des', 'et', 'pour', 'dans', 'est', 'une', 'avec']],
+      ['Spanish', ['el', 'los', 'las', 'de', 'para', 'con', 'una', 'que', 'por']],
+      ['Italian', ['il', 'lo', 'gli', 'delle', 'per', 'con', 'una', 'che', 'sono']],
+      ['Dutch', ['het', 'een', 'niet', 'voor', 'met', 'zijn', 'wordt']],
+      ['Portuguese', ['os', 'as', 'do', 'da', 'para', 'com', 'uma', 'não']],
+      ['English', ['the', 'and', 'of', 'for', 'with', 'that', 'this', 'are']],
+    ];
+    let _bestLang = null; let _bestScore = 0;
+    for (const [name, markers] of _LANG_MARKERS) {
+      const score = _langHits(markers);
+      if (score > _bestScore) { _bestScore = score; _bestLang = name; }
+    }
+    const _langLine = (_bestLang && _bestScore >= 5)
+      ? `LANGUAGE: the SECTION is written in ${_bestLang}. Write every "t" and "f" in ${_bestLang}. Do NOT translate.`
+      : 'LANGUAGE: write "t" and "f" in the SAME language the SECTION is written in. Do NOT translate.';
+    const sys = `Extract only high-value durable workspace memory from the SECTION.
+${_langLine} These instructions are in English for your benefit only — they are NOT a language sample. A tenant must be able to quote their own memories back to their own stakeholders, and same-language recall degrades when claims are silently translated. Only "memory_type" and the JSON keys stay English.
+Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
+SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
+Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
+BAD   <bare role or kinship> + <attribute>        — the role is not a subject; whose?
+BAD   <attribute or deficiency> with no owner     — belongs to nobody, cannot be retrieved
+BAD   <pronoun> + <attribute>                     — the referent is lost once stored alone
+GOOD  <named entity, persona, or document topic> + <attribute, scope, numbers>
+If the subject of a claim is a bare role, kinship term, pronoun, or unnamed person or organisation, RESOLVE it: carry the named person, organisation, persona, product, or the document's own topic from the surrounding section INTO the claim text. Resolve pronouns to their referent. A claim you cannot give a concrete subject is not durable — drop it rather than emit it subjectless.
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (e.g. "…White Paper…20251106 (1).pdf"), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (e.g. "Art.-Nr. 27770"), fonts or typefaces (e.g. "Calibri Regular", "Antenna Medium"), colours (e.g. "Solvis-Grau"), paper/format sizes (e.g. "DIN A5"), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.`;
+Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
+FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.`;
     // Model fallback: if the primary extraction model fails (provider error,
     // finish=error, unparseable), fall through to a DIFFERENT family so a
     // section's facts are never lost to one model/provider hiccup. Configurable
@@ -1686,6 +1748,34 @@ Every item must include a non-empty content field and one or more valid support_
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
   async ingestKnowledgeDocument(opts) {
+    // IMAGES NEVER TAKE THE DOCUMENT PATH — enforced here, not left to callers.
+    //
+    // An image is not a document. There is no text to segment, so the evidence
+    // rows this path would create are chunks of a vision description pointing at
+    // themselves: self-referential provenance that adds rows without adding
+    // proof. services/image-ingest.js is the correct owner and is explicit that
+    // its description "becomes the ONE and ONLY memory of this image — nothing
+    // else is stored".
+    //
+    // The FE already routes images to uploadImage(), but this entry point is
+    // reachable directly over the API and would build a knowledge_document,
+    // knowledge_segments and memory_evidence_links for a PNG. That is how
+    // image-upload memories ended up 27 of 38 anchored to evidence they should
+    // never have had. Fail closed with an actionable message rather than
+    // silently producing the wrong shape.
+    const _ext = String(opts?.filename || '').split('.').pop()?.toLowerCase();
+    const _isImage = String(opts?.contentType || '').toLowerCase().startsWith('image/')
+      || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif', 'avif'].includes(_ext);
+    if (_isImage && String(process.env.KB_ALLOW_IMAGE_DOCUMENTS || '').toLowerCase() !== 'true') {
+      const err = new Error(
+        `"${opts?.filename || 'image'}" is an image and must be ingested via the image endpoint `
+        + '(/api/ingest/image), which stores exactly one memory and no evidence rows. '
+        + 'The document path would create segments and evidence links an image cannot support.');
+      err.code = 'IMAGE_NOT_A_DOCUMENT';
+      err.statusCode = 415;
+      this.logger?.warn?.(`[kb] rejected image on the document path: ${opts?.filename}`);
+      throw err;
+    }
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
     const metadata = opts?.metadata || {};
     const scopeKey = metadata.primary_team_id
@@ -1743,7 +1833,7 @@ Every item must include a non-empty content field and one or more valid support_
           contentType,
           sizeBytes: BigInt(fileBuffer.length),
           checksum,
-          storageLocation: `kb/${userId}/${checksum}/${filename}`,
+          storageLocation: `kb/${userId}/${checksum}/${safePathSegment(filename)}`,
           payload: { filename, uploadedAt: new Date().toISOString() },
           metadata
         },
@@ -2114,7 +2204,7 @@ Every item must include a non-empty content field and one or more valid support_
         contentType,
         sizeBytes: BigInt(fileBuffer.length),
         checksum,
-        storageLocation: `enterprise/${userId}/${checksum}/${filename}`,
+        storageLocation: `enterprise/${userId}/${checksum}/${safePathSegment(filename)}`,
         payload: { filename, schema, uploadedAt: new Date().toISOString() },
         metadata
       },
@@ -3187,10 +3277,41 @@ Every item must include a non-empty content field and one or more valid support_
         // (keep the most complete, union the dupes' tags into it, delete the rest).
         // Runs BEFORE entity-linking so edges attach only to survivors. Default
         // ON; KB_CONSOLIDATE=0 disables. Best-effort: on failure facts ship as-is.
+        // Deterministic exact-duplicate pass BEFORE the LLM consolidator. An
+        // identical claim should never need a model to notice it, and relying on
+        // one meant real duplicates shipped: a 54-page deck stored "Home Energy
+        // Management Systems (HEMS) like E3DC Hauskraftwerk / One, Fenecon Home 10,
+        // and Huawei's EMMA-A02…" TWICE in a single run while KB_CONSOLIDATE=1 and
+        // the consolidator logged nothing in three hours of ingests. Source decks
+        // legitimately repeat pages verbatim, so identical windows extract
+        // identical claims; comparing normalised text catches that for free and
+        // leaves the LLM to do what it is actually good at — near-duplicates that
+        // differ in wording.
+        if (uFacts.length >= 2) {
+          const seenClaim = new Map();
+          const exactDupes = [];
+          for (const f of uFacts) {
+            const norm = String(f?.f || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]/gu, '').trim();
+            if (!norm) continue;
+            if (seenClaim.has(norm)) { exactDupes.push(f); continue; }
+            seenClaim.set(norm, f);
+          }
+          if (exactDupes.length) {
+            const drop = new Set(exactDupes);
+            for (let i = uFacts.length - 1; i >= 0; i--) if (drop.has(uFacts[i])) uFacts.splice(i, 1);
+            this.logger.info?.(`[kb-unified] dropped ${exactDupes.length} EXACT duplicate claim(s) `
+              + `for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+          }
+        }
         if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
           try {
+            const before = uFacts.length;
             const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
-            if (removed) this.logger.info?.(`[kb-unified] consolidated ${removed} cross-window duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+            // Log unconditionally. This previously logged only when removed > 0, so
+            // a consolidator that silently caught NOTHING was indistinguishable from
+            // one that was never called — which is exactly the state it was in.
+            this.logger.info?.(`[kb-unified] consolidate doc ${String(documentId).slice(0, 8)}: `
+              + `${before} facts → removed ${removed || 0} → ${uFacts.length} kept`);
           } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         }
         if (uFacts.length) {
@@ -3229,6 +3350,37 @@ Every item must include a non-empty content field and one or more valid support_
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
         const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
         this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${extractedCandidates.length} candidates → ${uFacts.length} curated memories + parent=${uDocParent ? 'y' : 'n'}`);
+        // OBSERVABILITY: a silently THIN extraction was previously invisible without
+        // a hand-written SQL query — a 54-page deck yielding 8 memories logged
+        // exactly like a one-page note yielding 8, and the corpus quietly degraded.
+        // Warn when yield falls below the expected rate so it shows up in the log
+        // stream a human already reads. Rate, not absolute count, so a genuinely
+        // short document never trips it.
+        try {
+          // THIRD attempt at this line, so it is worth stating what failed.
+          //   v1 read `wordCount` — not in scope; the catch below swallowed the
+          //      ReferenceError and the warning could never fire.
+          //   v2 summed `segments[].wordCount` — `segments` IS in scope (2150) but
+          //      its rows do not carry wordCount, so the sum was always 0 and the
+          //      `_srcWords >= 500` guard never passed. Silent again.
+          // Verified inert against a real 12,245-word document that yielded 10
+          // memories (0.8/1k, floor 2/1k) and printed nothing.
+          // Now measured from the parse output itself, which is the same text the
+          // segments were cut from and is always populated on this path — plus a
+          // segment-content fallback so a thin/empty parseResult cannot re-mute it.
+          const _parseText = String(parseResult?.text || parseResult?.markdown || '');
+          const _segChars = (segments || []).reduce((n, sg) => n + String(sg?.content || '').length, 0);
+          const _srcWords = _parseText.trim()
+            ? _parseText.split(/\s+/).filter(Boolean).length
+            : Math.round(_segChars / 6);
+          const _per1k = _srcWords > 0 ? (uFacts.length / (_srcWords / 1000)) : 0;
+          const _floor = Number(process.env.KB_THIN_EXTRACTION_PER_1K || 2);
+          if (_srcWords >= 500 && _per1k < _floor) {
+            this.logger.warn?.(`[kb-unified] THIN EXTRACTION doc ${String(documentId).slice(0, 8)}: `
+              + `${uFacts.length} memories from ${_srcWords} words (${_per1k.toFixed(1)}/1k, floor ${_floor}/1k) — `
+              + `check parse tier, segment count, and the curator cap`);
+          }
+        } catch { /* observability must never break ingest */ }
         return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: curated._coverage || null };
       }
 

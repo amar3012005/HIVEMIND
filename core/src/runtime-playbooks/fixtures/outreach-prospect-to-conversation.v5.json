@@ -1,0 +1,175 @@
+{
+  "playbook_id": "outreach.prospect-to-conversation",
+  "version": 5,
+  "status": "ACTIVE",
+  "name": "Prospect to conversation",
+  "description": "A recipient-isolated outreach lifecycle from evidence-backed prospecting through replies, follow-ups and explicit conversation outcomes.",
+  "metadata": { "owner_room_tag": "outreach", "default_follow_up_limit": 2 },
+  "input_contract": { "fields": [
+    { "path": "target.quantity", "type": "integer", "description": "Optional bounded result count explicitly supplied by the objective.", "default_value": 10 },
+    { "path": "target.location", "type": "string", "description": "Requested or retained geographic scope." },
+    { "path": "target.segment", "type": "string", "description": "Requested or retained organization segment." },
+    { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether delivery is requested after authority is granted.", "required": true, "default_value": false },
+    { "path": "policy.follow_up_limit", "type": "integer", "description": "Maximum follow-ups allowed by organization policy.", "default_value": 2 },
+    { "path": "policy.response_window_seconds", "type": "integer", "description": "Time before a no-reply event advances the lifecycle.", "default_value": 604800 }
+  ]},
+  "initial_stage_id": "prepare_outreach_bundle",
+  "terminal_states": ["prepared", "qualified_conversation", "declined", "unsubscribed", "bounced", "sequence_completed", "no_deliverable_recipients"],
+  "stages": [
+    {
+      "id": "prepare_outreach_bundle",
+      "objective": "Use the Outreach Room Director's normal skills and tools to research and qualify useful prospects, persist accepted leads, and prepare one evidence-grounded personalized message for every verified recipient. Preserve distinct fit rationale and outreach angle. Do not send.",
+      "input_refs": ["trigger.payload", "context.company", "context.target", "context.constraints", "context.policy"],
+      "expected_artifacts": ["lead_record", "message_record"],
+      "execution": { "mode": "room", "config": { "contract": "room-phase.v1", "phase_kind": "prepare" } },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "lead_record", "value": 1 },
+        { "predicate": "is_source_backed", "select": "lead_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "lead_record", "path": "data.persistence_ref" },
+        { "predicate": "all_have_nonempty_field", "select": "lead_record", "path": "data.fit_rationale" },
+        { "predicate": "all_have_nonempty_field", "select": "lead_record", "path": "data.outreach_angle" },
+        { "predicate": "has_min_count", "select": "message_record", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.recipient" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.subject" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.body" },
+        { "predicate": "all_reference_existing", "select": "message_record", "path": "data.lead_ref", "target_select": "lead_record", "target_path": "id" }
+      ],
+      "verifications": [{ "adapter_id": "tenant-records", "operation": "verify", "select": "lead_record", "config": { "record_paths": ["data.persistence_ref"] } }],
+      "transitions": [{ "default": true, "to_stage": "prepare_provider_drafts" }], "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_provider_drafts", "objective": "Create provider drafts independently for each accepted message.",
+      "input_refs": ["artifacts.message_record"], "expected_artifacts": ["draft_record", "draft_rejection", "draft_uncertain"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "prepare_drafts", "input_key": "message_record", "output_key": "draft_record", "rejection_key": "draft_rejection", "uncertain_key": "draft_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["draft_record", "draft_rejection", "draft_uncertain"], "path": "data.input_ref", "target_select": "message_record", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "draft_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "draft_record", "value": 0 },
+        { "predicate": "has_min_count", "select": "draft_rejection", "value": 0 }
+      ],
+      "verifications": [{ "adapter_id": "gmail", "operation": "verify", "select": "draft_record" }],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "draft_record", "value": 0 }, "to_terminal": "no_deliverable_recipients" },
+        { "when": { "predicate": "field_equals", "select": "draft_record", "path": "data.delivery_requested", "value": false, "mode": "all" }, "to_terminal": "prepared" },
+        { "default": true, "to_stage": "deliver_outreach" }
+      ], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "deliver_outreach", "objective": "Send each exact authority-approved draft independently and retain its terminal provider outcome.",
+      "input_refs": ["artifacts.draft_record"], "expected_artifacts": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"],
+      "authority_gate": "external_write", "authority_policy_key": "outbound_messages", "authority_binding": "stage_inputs",
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "deliver", "input_key": "draft_record", "output_key": "delivery_receipt", "rejection_key": "delivery_rejection", "uncertain_key": "delivery_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"], "path": "data.input_ref", "target_select": "draft_record", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "delivery_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "delivery_receipt", "value": 0 },
+        { "predicate": "has_min_count", "select": "delivery_rejection", "value": 0 }
+      ],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "delivery_receipt", "value": 0 }, "to_terminal": "no_deliverable_recipients" },
+        { "default": true, "to_stage": "observe_responses" }
+      ], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_responses", "objective": "Register response observation for each delivered thread and wait for a correlated provider event or deadline.",
+      "input_refs": ["artifacts.delivery_receipt"], "expected_artifacts": ["observation_subscription", "observation_rejection"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "monitor", "config": { "input_key": "delivery_receipt", "output_key": "observation_subscription", "rejection_key": "observation_rejection" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["observation_subscription", "observation_rejection"], "path": "data.input_ref", "target_select": "delivery_receipt", "target_path": "id" },
+        { "predicate": "has_min_count", "select": "observation_subscription", "value": 0 },
+        { "predicate": "has_min_count", "select": "observation_rejection", "value": 0 }
+      ],
+      "waits_for_event": { "types": ["response.received", "delivery.bounced", "recipient.unsubscribed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 604800 },
+      "transitions": [{ "default": true, "to_stage": "handle_response" }], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "handle_response", "objective": "Classify the correlated response or timeout, update the lead timeline, and persist the next lifecycle decision using prior artifacts without rediscovery. When the configured follow-up limit has been reached, select sequence_completed instead of requesting another follow-up.",
+      "input_refs": ["context.company", "context.policy", "artifacts.lead_record", "artifacts.delivery_receipt", "artifacts.observation_subscription", "artifacts.follow_up_message", "event"],
+      "expected_artifacts": ["conversation_event"], "execution": { "mode": "room", "config": { "contract": "room-phase.v1", "phase_kind": "review" } },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "conversation_event", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "conversation_event", "path": "data.timeline_ref" },
+        { "predicate": "all_have_nonempty_field", "select": "conversation_event", "path": "data.next_action" },
+        { "predicate": "is_source_backed", "select": "conversation_event", "source_path": "source_refs", "value": 1 }
+      ],
+      "transitions": [
+        { "when": { "predicate": "latest_field_equals", "select": "conversation_event", "path": "data.next_action", "value": "follow_up" }, "to_stage": "prepare_follow_up" },
+        { "default": true, "to_stage": "evaluate_conversation" }
+      ], "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_follow_up", "objective": "Write the next context-aware follow-up for eligible no-reply conversations using retained lead, message and delivery evidence. Respect the supplied follow-up limit and do not rediscover prospects.",
+      "input_refs": ["context.company", "context.policy", "artifacts.lead_record", "artifacts.message_record", "artifacts.delivery_receipt", "artifacts.conversation_event", "artifacts.follow_up_message"],
+      "expected_artifacts": ["follow_up_message"], "execution": { "mode": "room", "config": { "contract": "room-phase.v1", "phase_kind": "prepare" } },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "follow_up_message", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "follow_up_message", "path": "data.recipient" },
+        { "predicate": "all_have_nonempty_field", "select": "follow_up_message", "path": "data.subject" },
+        { "predicate": "all_have_nonempty_field", "select": "follow_up_message", "path": "data.body" },
+        { "predicate": "has_max_count", "select": "follow_up_message", "value_from": "run.context.policy.follow_up_limit", "default_value": 2 }
+      ],
+      "transitions": [{ "default": true, "to_stage": "prepare_follow_up_drafts" }], "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_follow_up_drafts", "objective": "Create provider drafts independently for each follow-up message.",
+      "input_refs": ["artifacts.follow_up_message"], "expected_artifacts": ["follow_up_draft", "follow_up_draft_rejection", "follow_up_draft_uncertain"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "prepare_drafts", "input_key": "follow_up_message", "output_key": "follow_up_draft", "rejection_key": "follow_up_draft_rejection", "uncertain_key": "follow_up_draft_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["follow_up_draft", "follow_up_draft_rejection", "follow_up_draft_uncertain"], "path": "data.input_ref", "target_select": "follow_up_message", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "follow_up_draft_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "follow_up_draft", "value": 0 },
+        { "predicate": "has_min_count", "select": "follow_up_draft_rejection", "value": 0 }
+      ],
+      "verifications": [{ "adapter_id": "gmail", "operation": "verify", "select": "follow_up_draft" }],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "follow_up_draft", "value": 0 }, "to_stage": "evaluate_conversation" },
+        { "default": true, "to_stage": "deliver_follow_up" }
+      ], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "deliver_follow_up", "objective": "Send each exact authority-approved follow-up draft independently and retain its terminal provider outcome.",
+      "input_refs": ["artifacts.follow_up_draft"], "expected_artifacts": ["follow_up_receipt", "follow_up_delivery_rejection", "follow_up_delivery_uncertain"],
+      "authority_gate": "follow_up_external_write", "authority_policy_key": "outbound_messages", "authority_binding": "stage_inputs",
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "deliver", "input_key": "follow_up_draft", "output_key": "follow_up_receipt", "rejection_key": "follow_up_delivery_rejection", "uncertain_key": "follow_up_delivery_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["follow_up_receipt", "follow_up_delivery_rejection", "follow_up_delivery_uncertain"], "path": "data.input_ref", "target_select": "follow_up_draft", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "follow_up_delivery_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "follow_up_receipt", "value": 0 },
+        { "predicate": "has_min_count", "select": "follow_up_delivery_rejection", "value": 0 }
+      ],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "follow_up_receipt", "value": 0 }, "to_stage": "evaluate_conversation" },
+        { "default": true, "to_stage": "observe_follow_up" }
+      ], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_follow_up", "objective": "Register response observation for each delivered follow-up and wait for a correlated event or deadline.",
+      "input_refs": ["artifacts.follow_up_receipt"], "expected_artifacts": ["follow_up_subscription", "follow_up_observation_rejection"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "monitor", "config": { "input_key": "follow_up_receipt", "output_key": "follow_up_subscription", "rejection_key": "follow_up_observation_rejection" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["follow_up_subscription", "follow_up_observation_rejection"], "path": "data.input_ref", "target_select": "follow_up_receipt", "target_path": "id" },
+        { "predicate": "has_min_count", "select": "follow_up_subscription", "value": 0 },
+        { "predicate": "has_min_count", "select": "follow_up_observation_rejection", "value": 0 }
+      ],
+      "waits_for_event": { "types": ["response.received", "delivery.bounced", "recipient.unsubscribed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 604800 },
+      "transitions": [{ "default": true, "to_stage": "handle_response" }], "on_failure": "ESCALATE"
+    },
+    {
+      "id": "evaluate_conversation", "objective": "Produce the evidence-backed terminal conversation state and persist the final lead timeline update.",
+      "input_refs": ["artifacts.lead_record", "artifacts.conversation_event", "event"],
+      "expected_artifacts": ["conversation_outcome"], "execution": { "mode": "room", "config": { "contract": "room-phase.v1", "phase_kind": "review" } },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "conversation_outcome", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "conversation_outcome", "path": "data.terminal_state" },
+        { "predicate": "all_have_nonempty_field", "select": "conversation_outcome", "path": "data.timeline_ref" }
+      ],
+      "transitions": [
+        { "when": { "predicate": "field_equals", "select": "conversation_outcome", "path": "data.terminal_state", "value": "qualified_conversation", "mode": "any" }, "to_terminal": "qualified_conversation" },
+        { "when": { "predicate": "field_equals", "select": "conversation_outcome", "path": "data.terminal_state", "value": "declined", "mode": "any" }, "to_terminal": "declined" },
+        { "when": { "predicate": "field_equals", "select": "conversation_outcome", "path": "data.terminal_state", "value": "unsubscribed", "mode": "any" }, "to_terminal": "unsubscribed" },
+        { "when": { "predicate": "field_equals", "select": "conversation_outcome", "path": "data.terminal_state", "value": "bounced", "mode": "any" }, "to_terminal": "bounced" },
+        { "default": true, "to_terminal": "sequence_completed" }
+      ], "on_failure": "REPAIR", "max_attempts": 2
+    }
+  ]
+}

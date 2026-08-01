@@ -104,6 +104,7 @@ export const runtimePlaybookSchema = {
               mode: { enum: ['room', 'adapter'] },
               adapter_id: { type: 'string', minLength: 2, maxLength: 120 },
               operation: { enum: ['execute', 'monitor'] },
+              config: { type: 'object' },
             },
           },
           verifications: {
@@ -122,13 +123,16 @@ export const runtimePlaybookSchema = {
           },
           authority_gate: { type: 'string', minLength: 1, maxLength: 120 },
           authority_policy_key: { type: 'string', minLength: 1, maxLength: 120 },
+          authority_binding: { enum: ['stage_inputs'] },
           waits_for_event: {
             type: 'object',
             additionalProperties: false,
-            required: ['type'],
+            anyOf: [{ required: ['type'] }, { required: ['types'] }],
             properties: {
               type: { type: 'string', minLength: 1, maxLength: 160 },
+              types: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 160 } },
               correlation_path: { type: 'string', minLength: 1, maxLength: 240 },
+              timeout_after_seconds: { type: 'integer', minimum: 60, maximum: 31536000 },
             },
           },
           transitions: { type: 'array', minItems: 1, items: transitionSchema },
@@ -198,7 +202,7 @@ export function validateRuntimePlaybookShape(playbook) {
       throw new Error(`runtime_playbook_room_execution_invalid:${stage.id}`);
     }
     for (const expected of stage.expected_artifacts) {
-      if (!stage.completion_checks.some((check) => check.select === expected)) {
+      if (!stage.completion_checks.some((check) => (Array.isArray(check.select) ? check.select : [check.select]).includes(expected))) {
         throw new Error(`runtime_playbook_expected_artifact_unchecked:${stage.id}:${expected}`);
       }
     }

@@ -51,3 +51,45 @@ def test_prepare_only_outreach_passes_when_requested_internal_phases_are_complet
 
     assert result["met"] is True
     assert result["gaps"] == []
+
+
+def test_outreach_without_explicit_quantity_uses_actual_results_not_a_fake_quota():
+    verdict = {
+        "met": True, "artifact_ok": True, "assignments_ok": True,
+        "grounded_ok": True, "gaps": [],
+    }
+    plan = {
+        "outreach_request": {
+            "requested_count": None, "discover": True, "persist": True,
+            "draft": False, "deliver": False, "monitor": False,
+        },
+        "outreach_metrics": {
+            "prospects_discovered": 7,
+            "prospects_persisted": 7,
+        },
+    }
+
+    result = _apply_outreach_contract(verdict, plan, [])
+
+    assert result["met"] is True
+    assert result["outreach_contract"]["requested_count"] is None
+    assert result["outreach_observed"]["discover"] == 7
+
+
+def test_outreach_without_explicit_quantity_still_requires_real_evidence():
+    verdict = {
+        "met": True, "artifact_ok": True, "assignments_ok": True,
+        "grounded_ok": True, "gaps": [],
+    }
+    plan = {
+        "outreach_request": {
+            "requested_count": None, "discover": True, "persist": True,
+            "draft": False, "deliver": False, "monitor": False,
+        },
+        "outreach_metrics": {},
+    }
+
+    result = _apply_outreach_contract(verdict, plan, [])
+
+    assert result["met"] is False
+    assert "outreach lifecycle discover produced no verified result" in result["gaps"]

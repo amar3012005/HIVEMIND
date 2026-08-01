@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'TERMINATED']);
 
@@ -14,10 +14,28 @@ function getPath(value, path) {
 function artifactMap(artifacts) {
   const grouped = {};
   for (const artifact of artifacts || []) {
-    if (!grouped[artifact.key]) grouped[artifact.key] = [];
-    grouped[artifact.key].push(artifact);
+    const key = artifact.key || artifact.artifactKey;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(artifact);
   }
   return grouped;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  return value;
+}
+
+export function stageAuthorityHash(run, stage) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonical(resolveInputs(run, stage)))).digest('hex');
+}
+
+function authorityGranted(run, stage) {
+  if (!stage.authority_gate) return true;
+  const grant = (run.authorityRecords || []).find((record) => record.gate === stage.authority_gate);
+  if (!grant) return stage.authority_binding !== 'stage_inputs' && (run.authorityGates || []).includes(stage.authority_gate);
+  return stage.authority_binding !== 'stage_inputs' || grant.payload?.input_hash === stageAuthorityHash(run, stage);
 }
 
 function resolveInputs(run, stage, activeEvent = null) {
@@ -91,31 +109,46 @@ function selectTransition(stage, artifacts, predicates) {
 function eventWait(stage, producedArtifacts) {
   if (!stage.waits_for_event) return null;
   const correlationPath = stage.waits_for_event.correlation_path || null;
-  let correlationValue = null;
+  const correlationValues = [];
   if (correlationPath) {
     for (const artifact of producedArtifacts) {
       const candidate = getPath(artifact, correlationPath);
       if (candidate != null) {
-        correlationValue = candidate;
-        break;
+        correlationValues.push(candidate);
       }
     }
   }
   return {
     ...stage.waits_for_event,
-    correlation_value: correlationValue,
+    types: stage.waits_for_event.types || [stage.waits_for_event.type],
+    correlation_values: [...new Set(correlationValues)],
+    correlation_value: correlationValues[0] ?? null,
+    deadline: stage.waits_for_event.timeout_after_seconds
+      ? new Date(Date.now() + stage.waits_for_event.timeout_after_seconds * 1000).toISOString()
+      : null,
     after_stage_id: stage.id,
   };
 }
 
 function eventMatches(waitingFor, event) {
-  if (!event || event.type !== waitingFor.type) return false;
-  if (!waitingFor.correlation_path || waitingFor.correlation_value == null) return true;
-  return getPath(event, waitingFor.correlation_path) === waitingFor.correlation_value;
+  const accepted = waitingFor.types || [waitingFor.type];
+  if (!event || !accepted.includes(event.type)) return false;
+  const correlations = waitingFor.correlation_values || (waitingFor.correlation_value == null ? [] : [waitingFor.correlation_value]);
+  if (!waitingFor.correlation_path || correlations.length === 0 || event.type === 'wait.timeout') return true;
+  return correlations.includes(getPath(event, waitingFor.correlation_path));
+}
+
+async function notifyStage(listener, payload) {
+  if (typeof listener !== 'function') return;
+  try {
+    await listener(payload);
+  } catch {
+    // User-facing progress is observability. It must not alter durable execution.
+  }
 }
 
 export class GenericStageExecutor {
-  constructor({ registry, predicates, store, director, selector = null, adapters = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
+  constructor({ registry, predicates, store, director, selector = null, adapters = null, onStageState = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
     if (!registry || !predicates || !store || !director?.execute) {
       throw new Error('runtime_executor_dependencies_required');
     }
@@ -125,6 +158,7 @@ export class GenericStageExecutor {
     this.director = director;
     this.selector = selector;
     this.adapters = adapters;
+    this.onStageState = onStageState;
     this.workerId = workerId;
     this.maxSteps = maxSteps;
   }
@@ -159,9 +193,19 @@ export class GenericStageExecutor {
 
   async run(runId, { orgId, event = null } = {}) {
     if (!orgId) throw new Error('runtime_executor_org_required');
-    if (!await this.store.claimRun(runId, orgId, this.workerId)) {
+    // The executor instance is shared by scheduler, callbacks and API requests.
+    // A unique invocation owner prevents two calls in the same process from
+    // treating the shared worker ID as permission to execute the run twice.
+    const leaseOwner = `${this.workerId}:${randomUUID()}`;
+    if (!await this.store.claimRun(runId, orgId, leaseOwner)) {
       return { status: 'ALREADY_CLAIMED', runId };
     }
+    const heartbeat = typeof this.store.renewRun === 'function'
+      ? setInterval(() => {
+        this.store.renewRun(runId, orgId, leaseOwner).catch(() => {});
+      }, 20_000)
+      : null;
+    heartbeat?.unref?.();
     try {
       for (let stepCount = 0; stepCount < this.maxSteps; stepCount += 1) {
         let run = await this.store.loadRun(runId, orgId);
@@ -169,6 +213,8 @@ export class GenericStageExecutor {
         const playbook = this.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
 
         if (run.status === 'WAITING_EVENT') {
+          const eventId = String(event?.id || event?.event_id || '').trim();
+          if (eventId && (asObject(run.context).consumed_event_ids || []).includes(eventId)) return run;
           if (!eventMatches(run.waitingFor, event)) return run;
           await this.store.appendCheckpoint(runId, orgId, {
             stageId: run.currentStageId,
@@ -179,7 +225,10 @@ export class GenericStageExecutor {
           run = await this.store.updateRun(runId, orgId, {
             status: 'ACTIVE',
             waitingFor: null,
-            context: { ...asObject(run.context), latest_event: event },
+            context: {
+              ...asObject(run.context), latest_event: event,
+              consumed_event_ids: [...new Set([...(asObject(run.context).consumed_event_ids || []), eventId].filter(Boolean))].slice(-500),
+            },
           });
         }
 
@@ -187,7 +236,7 @@ export class GenericStageExecutor {
         if (!stage) throw new Error(`runtime_stage_not_found:${run.currentStageId}`);
 
         if (run.status === 'WAITING_AUTHORITY') {
-          if (!run.authorityGates.includes(stage.authority_gate)) return run;
+          if (!authorityGranted(run, stage)) return run;
           run = await this.store.updateRun(runId, orgId, { status: 'ACTIVE' });
         }
 
@@ -198,8 +247,9 @@ export class GenericStageExecutor {
           state: { completed_stage_ids: run.completedStageIds },
         });
         run = await this.store.loadRun(runId, orgId);
+        await notifyStage(this.onStageState, { phase: 'STARTED', run, stage, artifacts: [], verdict: null });
 
-        if (stage.authority_gate && !run.authorityGates.includes(stage.authority_gate)) {
+        if (stage.authority_gate && !authorityGranted(run, stage)) {
           await this.store.updateRun(runId, orgId, { status: 'WAITING_AUTHORITY' });
           await this.store.appendCheckpoint(runId, orgId, {
             stageId: stage.id,
@@ -221,12 +271,14 @@ export class GenericStageExecutor {
           stage_id: stage.id,
           objective: stage.objective,
           expected_artifacts: stage.expected_artifacts,
-          authority_granted: !stage.authority_gate || run.authorityGates.includes(stage.authority_gate),
+          authority_granted: authorityGranted(run, stage),
           inputs: resolveInputs(run, stage, event),
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
+          checkpoint_sequence: run.checkpointSequence,
           adapter_descriptors: this.adapters?.descriptors?.() || [],
+          execution_config: asObject(stage.execution?.config),
           invoke_adapter: this.adapters ? (adapterId, operation, input, context = {}) => this.adapters.invoke(
             adapterId,
             operation,
@@ -242,6 +294,7 @@ export class GenericStageExecutor {
               inputs: executionRequest.inputs,
               expected_artifacts: stage.expected_artifacts,
               checks: stage.completion_checks,
+              config: asObject(execution.config),
             }, { orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId })
             : await this.director.execute(executionRequest);
           if (execution.mode === 'adapter' && !this.adapters) {
@@ -297,15 +350,17 @@ export class GenericStageExecutor {
             });
           }
         }
-        const verdict = combineVerdicts(predicateVerdict, verificationResults);
+        const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+        const verdict = { ...combineVerdicts(predicateVerdict, verificationResults), warnings };
 
         await this.store.appendCheckpoint(runId, orgId, {
           stageId: stage.id,
           phase: 'AFTER_EXECUTION',
-          status: verdict.passed ? 'PASSED' : 'FAILED',
+          status: verdict.passed ? (warnings.length ? 'PASSED_WITH_WARNINGS' : 'PASSED') : 'FAILED',
           verdict,
           artifactRefs: persisted.map((artifact) => artifact.id),
         });
+        await notifyStage(this.onStageState, { phase: verdict.passed ? 'ACCEPTED' : 'REJECTED', run, stage, artifacts: persisted, verdict });
 
         if (!verdict.passed) {
           const attempt = attempts[stage.id];
@@ -359,7 +414,8 @@ export class GenericStageExecutor {
       }
       throw new Error('runtime_executor_step_limit_exceeded');
     } finally {
-      await this.store.releaseRun(runId, orgId, this.workerId);
+      if (heartbeat) clearInterval(heartbeat);
+      await this.store.releaseRun(runId, orgId, leaseOwner);
     }
   }
 }

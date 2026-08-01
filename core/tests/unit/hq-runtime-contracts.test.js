@@ -19,6 +19,7 @@ test('HQ authority defaults external consequences to approval', () => {
   assert.deepEqual(normalizeAuthorityPolicy(), {
     internal_autonomy: true,
     external_writes: 'approval_required',
+    outbound_messages: 'unconfigured',
     spending: 'approval_required',
     deletion: 'approval_required',
     policy_changes: 'approval_required',

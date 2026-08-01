@@ -76,6 +76,7 @@ export class PostgresRuntimeStore {
       ...run,
       artifacts: run.artifacts.map(publicArtifact),
       authorityGates: run.authorities.map((authority) => authority.gate),
+      authorityRecords: run.authorities,
     };
   }
 
@@ -98,6 +99,15 @@ export class PostgresRuntimeStore {
       where: { id: runId, orgId, leaseOwner: owner },
       data: { leaseOwner: null, leaseExpiresAt: null },
     });
+  }
+
+  async renewRun(runId, orgId, owner) {
+    const now = this.now();
+    const result = await this.prisma.runtimePlaybookRun.updateMany({
+      where: { id: runId, orgId, leaseOwner: owner },
+      data: { leaseExpiresAt: new Date(now.getTime() + this.leaseMs) },
+    });
+    return result.count === 1;
   }
 
   async updateRun(runId, orgId, data) {

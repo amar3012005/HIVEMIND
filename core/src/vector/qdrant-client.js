@@ -181,7 +181,6 @@ export class QdrantClient {
       // createOrgContainer. The legacy createMemoriesCollection (m=16, no on_disk)
       // is gone along with the BUNDB AGENT singleton.
       await collections.createOrgContainer(resolvedCollectionName);
-      await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
       this.collectionReady.add(collectionName);
       return true;
     } catch (error) {

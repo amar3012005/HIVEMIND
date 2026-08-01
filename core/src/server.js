@@ -1446,7 +1446,7 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions = false } = {}) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions: picDescOpt } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
@@ -1473,10 +1473,61 @@ if (process.env.DOCLING_URL) {
         // as an explicit `false`, indistinguishable from a deliberate opt-out.
         // Guarding on `smartOpt !== false` therefore disabled the default for
         // every real upload (verified: still `tier=fast-pdf ms=800`).
-        const LAYOUT_EXTS = new Set(['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt']);
+        // PER-FORMAT PROFILES, not one bucket. Collapsing every layout format into
+        // a single LAYOUT_EXTS set and running the full enrichment stack on all of
+        // them was wrong, and PPTX proved it in production: "Nutzen und Vorteile des
+        // Leo.pptx" spent 479s, returned chunks=0 with `chunker error: fetch failed`,
+        // recorded a nonsense word_count of 463,080, and produced ZERO memories.
+        // A spreadsheet has no figures to describe and no OCR to run — it has cells.
+        // A deck is mostly images with sparse text. Ask each format only for what it
+        // actually has.
+        //   ocr    — raster text needs recognising (scans; slide images)
+        //   tables — cell structure matters (PDF, XLSX)
+        //   pics   — figures carry meaning worth describing (PDF, PPTX)
+        const FORMAT_PROFILES = {
+          pdf:  { smart: true,  ocr: true,  tables: true,  pics: true  },
+          docx: { smart: true,  ocr: false, tables: true,  pics: false }, // text layer; best yield in prod (21 mem/1k)
+          doc:  { smart: true,  ocr: false, tables: true,  pics: false },
+          xlsx: { smart: true,  ocr: false, tables: true,  pics: false }, // cells, never prose or OCR
+          xls:  { smart: true,  ocr: false, tables: true,  pics: false },
+          // pics:false is deliberate and measured. With picture description ON, a
+          // real .pptx ran the convert to the full 600s ceiling and TIMED OUT —
+          // Docling issues one vision call per slide image, serially. It produced
+          // memories only because the hybrid chunker finished separately and the
+          // chunk-survival path kept its output. Slide TEXT already carries the
+          // substance and the chunker returns it in seconds.
+          // The right way to get slide figures is one vision pass over the whole
+          // deck (as figure-rich PDFs do), which needs a PPTX→PDF render step that
+          // does not exist yet. Until then a fast, complete text extraction beats a
+          // 10-minute one that times out. Re-enable per deployment with
+          // KB_PPTX_PICTURE_DESC=true once that path exists.
+          pptx: { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
+          ppt:  { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
+        };
+        const profile = FORMAT_PROFILES[ext] || null;
         const smart = smartOpt === true
-          || (LAYOUT_EXTS.has(ext)
+          || (!!profile?.smart
               && String(process.env.KB_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
+        const LAYOUT_EXTS = new Set(Object.keys(FORMAT_PROFILES));
+        // Exactly the same defect as `smart` above, one identifier along:
+        // `picture_descriptions = false` in this destructure, and the upload route
+        // never passes it — so do_picture_description was NEVER sent to Docling and
+        // every figure, chart and diagram in every PDF was dropped. The whole path
+        // is otherwise live and configured (adapter ~line 103: do_picture_description
+        // + enable_remote_services + a Groq vision config, and GROQ_API_KEY is set).
+        // This is the last capability gap against supermemory, whose chunks carry
+        // "Diagram showing energy flow within a home system…" for this same deck.
+        // Opt out via env, NOT a false argument — the upload path coerces to a
+        // strict boolean, so an absent field is indistinguishable from a deliberate
+        // false (the mistake that made my first `smart` fix a no-op).
+        // Now driven by the profile: only formats whose figures actually carry
+        // meaning ask for descriptions. XLSX/DOCX no longer pay for a vision pass
+        // they have nothing to gain from.
+        const picture_descriptions = picDescOpt === true
+          || (!!profile?.pics
+              && String(process.env.KB_PICTURE_DESC ?? 'true').toLowerCase() !== 'false');
         const tParse = Date.now();
 
         // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──
@@ -1620,7 +1671,19 @@ if (process.env.DOCLING_URL) {
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
-            if (fast.isImageHeavy && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+            // FIGURE-RICH decks join this tier. They have a text layer, so they were
+            // never image-heavy and always fell through to Docling — where figures
+            // are dropped. Vision reads chart and diagram content a text extractor
+            // cannot see at any setting, and it is fast and already proven here
+            // (3-10s on real branding PDFs). KB_FIGURE_RICH_TO_VISION=false reverts.
+            const _visionWanted = fast.isImageHeavy
+              || (fast.isFigureRich
+                  && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false');
+            if (_visionWanted && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+              if (fast.isFigureRich && !fast.isImageHeavy) {
+                console.log(`[docling-adapter] figure-rich ${filename} (${Math.round(fast.avgPerPage)} chars/page over `
+                  + `${fast.pages}p) → vision for figure content`);
+              }
               const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {
@@ -1699,7 +1762,16 @@ if (process.env.DOCLING_URL) {
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
         const [parseResult, chunkResult] = await Promise.all([
-          parseWithDocling(tempPath, filename, { smart: useSmart, picture_descriptions }),
+          // Pass the format profile through so the adapter can skip passes this
+          // format has nothing to gain from (slides need picture description, not
+          // a document-wide OCR + accurate-table sweep). Undefined for unknown
+          // formats, which the adapter treats as "run everything" — unchanged.
+          parseWithDocling(tempPath, filename, {
+            smart: useSmart,
+            picture_descriptions,
+            ocr: profile ? profile.ocr : undefined,
+            tables: profile ? profile.tables : undefined,
+          }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
@@ -1728,7 +1800,22 @@ if (process.env.DOCLING_URL) {
           (parseResult?.markdown || '').length,
         );
         const usableChunks = chunkResult?.chunks?.length || 0;
-        const parseFailed = Boolean(parseResult?.error) || (usableChars < 200 && usableChunks === 0);
+        // A parse ERROR is not a reason to fall back when the chunker still
+        // returned usable chunks. Parse and chunk run concurrently and each
+        // re-converts the document, so on a slow file the async convert can time
+        // out while the chunker completes — observed live:
+        //   parseError=Docling async polling timeout after 600000ms
+        //   chunks=42 chunkerError=none
+        // and 42 layout-aware Docling chunks were discarded in favour of fast-pdf's
+        // flattened text. My previous fix keyed on parseResult.error alone and so
+        // still lost them. Fall back only when there is genuinely nothing usable
+        // from EITHER call.
+        const parseFailed = usableChunks === 0
+          && (Boolean(parseResult?.error) || usableChars < 200);
+        if (parseResult?.error && usableChunks > 0) {
+          console.warn(`[docling-adapter] parse errored (${String(parseResult.error).slice(0, 80)}) but `
+            + `${usableChunks} chunks survived — using them instead of falling back for ${filename}`);
+        }
         if (parseFailed && ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
@@ -6515,7 +6602,13 @@ exit \$RC
             let deletedMemories = 0;
             if (clusterIds.length) {
               if (hard && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
-                await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                // The return value was discarded and success reported regardless —
+                // so a backend that removed nothing still answered 200. Keep it and
+                // gate on BEHAVIOUR below rather than trusting any single store.
+                const _hardRemoved = await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                if (_hardRemoved === 0 && clusterIds.length > 0) {
+                  console.warn(`[delete] hardDeleteMemories removed 0 of ${clusterIds.length} for org=${mOrg}`);
+                }
                 try {
                   const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
                   const qColl = (process.env.QDRANT_PER_TENANT === 'true' && mOrg) ? `org_${mOrg}` : 'HIVEMIND_PERSONAL';
@@ -6528,7 +6621,33 @@ exit \$RC
               } else {
                 for (const cid of clusterIds) { try { await persistentMemoryStore.deleteMemory(cid); } catch { /* continue */ } }
               }
-              deletedMemories = clusterIds.length;
+              // BEHAVIOUR-BASED HONESTY GATE. This used to report
+              // clusterIds.length unconditionally — the count of what we ASKED to
+              // delete, not what was deleted. Combined with hardDeleteMemories
+              // silently removing nothing for a remote org, the API answered
+              // "deleted 5" while all 5 were still being served by the agent.
+              //
+              // Re-read instead of trusting any store's return value, so a future
+              // backend that fails to delete surfaces here rather than lying.
+              let _stillPresent = 0;
+              for (const cid of clusterIds) {
+                try {
+                  const still = await persistentMemoryStore.getMemory?.(cid);
+                  if (still && !still.deletedAt) _stillPresent += 1;
+                } catch { /* absent → treat as deleted, which is the goal */ }
+              }
+              deletedMemories = clusterIds.length - _stillPresent;
+              if (_stillPresent > 0) {
+                console.error(`[delete] INCOMPLETE: ${_stillPresent}/${clusterIds.length} memories survived `
+                  + `hard=${hard} org=${mOrg} — reporting failure rather than a false success`);
+                return jsonResponse(res, {
+                  error: 'delete_incomplete',
+                  message: `${_stillPresent} of ${clusterIds.length} memories could not be deleted. `
+                    + 'Nothing was reported as removed that still exists.',
+                  requested: clusterIds.length,
+                  deleted: deletedMemories,
+                }, 500);
+              }
             }
             let meetingDeleted = false;
             if (scope === 'both') {

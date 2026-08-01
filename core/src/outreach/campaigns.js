@@ -94,6 +94,25 @@ export function createOutreachModule(deps) {
     } catch { return null; }
   }
 
+  async function senderIdentity(campaign) {
+    const [user, organization] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: campaign.userId },
+        select: { displayName: true, email: true },
+      }).catch(() => null),
+      prisma.organization.findUnique({
+        where: { id: campaign.orgId },
+        select: { name: true },
+      }).catch(() => null),
+    ]);
+    const senderEmail = campaign.senderEmail || user?.email || '';
+    return {
+      email: String(senderEmail || '').trim(),
+      name: String(user?.displayName || senderEmail || '').trim(),
+      company: String(organization?.name || '').trim(),
+    };
+  }
+
   async function loadCampaign(id, orgId, withTargets = true) {
     return prisma.outreachCampaign.findFirst({
       where: { id, orgId },
@@ -135,13 +154,16 @@ export function createOutreachModule(deps) {
   async function generateTarget(campaign, target) {
     await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'generating' } });
     try {
+      const sender = await senderIdentity(campaign);
       const r = await fetch(`${sidecarBaseUrl}/outreach/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           channel: campaign.channel,
           turn_id: campaign.turnId,
-          sender_email: campaign.senderEmail || '',
+          sender_email: sender.email,
+          sender_name: sender.name,
+          sender_company: sender.company,
           user_id: campaign.userId, org_id: campaign.orgId,
           prospect: {
             company: target.company, email: target.email, phone: target.phone,

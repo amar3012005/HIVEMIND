@@ -172,7 +172,8 @@ async function firecrawlGet(path, { apiKey, timeoutMs = 65000 } = {}) {
 
 /**
  * Read a bounded set of public pages without treating the result as account
- * analytics. Platform metrics remain connector-owned.
+ * analytics. This is used by short operating workflows that need observable
+ * profile/content evidence, while platform metrics remain connector-owned.
  */
 export async function scrapePublicPages(urls, {
   apiKey = process.env.FIRECRAWL_API_KEY,
@@ -184,7 +185,7 @@ export async function scrapePublicPages(urls, {
     .slice(0, Math.max(1, Math.min(8, Number(maxPages) || 5)));
   if (!apiKey || !targets.length) return [];
 
-  return Promise.all(targets.map(async (url) => {
+  const rows = await Promise.all(targets.map(async (url) => {
     try {
       const payload = await firecrawlRequest('/scrape', {
         url,
@@ -217,6 +218,7 @@ export async function scrapePublicPages(urls, {
       };
     }
   }));
+  return rows;
 }
 
 function normalizedSocialProfile(rawUrl) {

@@ -176,6 +176,236 @@ def test_outreach_director_preserves_full_compound_lifecycle(monkeypatch):
     assert plan["post_output_actions"][0]["capability"] == "gmail.send_email"
 
 
+def test_runtime_outreach_keeps_room_selected_lifecycle_and_action(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    director, _events = _director(
+        message="Find relevant companies nearby and prepare personalized outreach",
+        room_kind="outreach",
+        enabled_connectors=["gmail"],
+    )
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-1",
+        "objective": "Build a source-backed local pipeline and prepare outreach.",
+    }
+    payload = {
+        "recall_queries": ["existing qualified leads"],
+        "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
+        "places_query": "regulated companies in Hannover", "needs_debate": True,
+        "method_skills": ["prospect-qualification", "cold-email-sequence"],
+        "campaign_method_assignments": [],
+        "work_orders": [{
+            "kind": "research", "owner_lane": "Researcher",
+            "title": "Build and prepare the local pipeline",
+            "objective": "Discover, persist, and prepare personalized outreach.",
+            "required_evidence": ["company context", "provider evidence"],
+            "acceptance_criteria": ["Return durable records and prepared actions"],
+        }],
+        "turn_mode": "task", "collaboration_intensity": "deep",
+        "response_depth": "operating", "evidence_mode": "prospecting",
+        "post_output_actions": [{
+            "capability": "gmail.create_draft", "explicit": True, "target_hint": None,
+        }],
+        "outreach_request": {
+            "requested_count": None, "geography": "Hannover", "sector": None,
+            "audience": "regulated companies", "offer": None, "discover": True,
+            "persist": True, "draft": True, "deliver": False, "monitor": False,
+        },
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["outreach_request"] == payload["outreach_request"]
+    assert plan["post_output_actions"][0]["capability"] == "gmail.create_draft"
+    assert plan["places_query"] == "regulated companies in Hannover"
+    assert plan["needs_debate"] is False
+    assert plan["collaboration_intensity"] == "standard"
+    assert len(plan["work_orders"]) == 1
+
+
+def test_runtime_outreach_uses_same_run_records_for_one_batch_of_drafts(monkeypatch):
+    director, _events = _director(
+        message="Find relevant local companies and prepare personalized drafts",
+        room_kind="outreach",
+    )
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-2",
+        "objective": "Build and prepare a local outreach batch.",
+        "completion_requirements": [
+            {"type": "records_persisted", "minimum": 2},
+            {"type": "email_drafts", "minimum": 2},
+        ],
+    }
+    director.post_output_actions = [{
+        "capability": "gmail.create_draft", "operation": "draft_email",
+        "connected": True,
+    }]
+    model_calls = []
+    records = [{
+        "company": "Alpha GmbH", "email": "hello@alpha.example",
+        "source_url": "https://alpha.example", "fit_reason": "Strong fit",
+        "outreach_angle": "Relevant workflow",
+    }, {
+        "company": "Beta GmbH", "email": "hello@beta.example",
+        "source_url": "https://beta.example", "fit_reason": "Strong fit",
+        "outreach_angle": "Different workflow",
+    }]
+
+    async def execute(name, _args):
+        director._exec_counts[name] += 1
+        return json.dumps({"prospects": records, "persisted": 2})
+
+    async def compose(record, _sender_company):
+        model_calls.append(record["company"])
+        return {
+            "subject": f"A note for {record['company']}",
+            "body": "A grounded and personalized message. Open to a short conversation?",
+        }
+
+    monkeypatch.setattr(director, "_exec", execute)
+    monkeypatch.setattr(director, "_compose_outreach_email", compose)
+    plan = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "places_query": "companies in Hannover",
+        "method_skills": ["prospect-qualification", "cold-email-sequence"],
+        "post_output_actions": director.post_output_actions,
+        "outreach_request": {
+            "requested_count": 2, "discover": True, "persist": True,
+            "draft": True, "deliver": False, "monitor": False,
+        },
+        "work_orders": [{
+            "kind": "research", "owner_lane": "Researcher", "title": "Build batch",
+            "objective": "Discover, persist, and draft.", "required_evidence": [],
+            "acceptance_criteria": [],
+        }],
+    }
+
+    results = asyncio.run(director._run_work_order_subtasks(plan))
+
+    assert model_calls == ["Alpha GmbH", "Beta GmbH"]
+    assert results[0]["status"] == "completed", results[0]
+    artifacts = results[0]["output"]["artifacts"]
+    assert [artifact["kind"] for artifact in artifacts] == ["prospect_records", "email_drafts"]
+    assert artifacts[1]["record_count"] == 2
+
+
+def test_runtime_outreach_persists_upstream_records_before_accepting_drafts(monkeypatch):
+    director, events = _director(
+        message="Reuse the accepted batch and prepare personalized drafts",
+        room_kind="outreach",
+    )
+    records = [{
+        "company": "Alpha GmbH", "email": "hello@alpha.example",
+        "source_url": "https://alpha.example/evidence", "fit_reason": "Strong fit",
+        "outreach_angle": "Relevant workflow",
+    }, {
+        "company": "Beta GmbH", "email": "hello@beta.example",
+        "source_url": "https://beta.example/evidence", "fit_reason": "Strong fit",
+        "outreach_angle": "Different workflow",
+    }]
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-upstream",
+        "objective": "Persist the accepted batch and prepare outreach.",
+        "upstream_result": {"deliverables": [{
+            "kind": "prospect_records", "record_count": 2, "records": records,
+        }]},
+        "completion_requirements": [
+            {"type": "records_persisted", "minimum": 2},
+            {"type": "source_evidence", "minimum": 2},
+            {"type": "distinct_fields", "minimum": 2},
+            {"type": "email_drafts", "minimum": 2},
+        ],
+    }
+
+    async def persist(*, prospects, **_kwargs):
+        assert [row["company"] for row in prospects] == ["Alpha GmbH", "Beta GmbH"]
+        return {"persisted": 2, "records": [
+            {"company": row["company"], "memory_id": f"memory-{index}"}
+            for index, row in enumerate(prospects, start=1)
+        ]}
+
+    async def compose(record, _sender_company):
+        return {
+            "subject": f"A note for {record['company']}",
+            "body": "A grounded message. Open to a short conversation?",
+        }
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.save_prospects_bulk_emulated", persist)
+    monkeypatch.setattr(director, "_compose_outreach_email", compose)
+    plan = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "places_query": None,
+        "method_skills": ["cold-email-sequence"], "post_output_actions": [],
+        "outreach_request": {
+            "requested_count": 2, "discover": False, "persist": True,
+            "draft": True, "deliver": False, "monitor": False,
+        },
+        "work_orders": [{
+            "kind": "outreach", "owner_lane": "Builder", "title": "Prepare batch",
+            "objective": "Persist and draft.", "required_evidence": [],
+            "acceptance_criteria": [],
+        }],
+    }
+
+    results = asyncio.run(director._run_work_order_subtasks(plan))
+
+    assert not [check for check in results[0]["checks"] if not check["passed"]]
+    assert results[0]["status"] == "completed", results[0]
+    prospects, drafts = results[0]["output"]["artifacts"]
+    assert prospects["persisted_count"] == 2
+    assert all(row.get("memory_id") for row in prospects["records"])
+    assert drafts["record_count"] == 2
+    assert any(event.get("tool") == "leads_persist" for event in events)
+
+
+def test_runtime_formatter_cannot_invent_input_after_machine_checks_pass(monkeypatch):
+    director, _events = _director(message="Prepare the accepted artifacts", room_kind="outreach")
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-complete",
+        "objective": "Prepare artifacts only.", "acceptance_criteria": [],
+        "completion_requirements": [],
+    }
+    director.work_results = [{
+        "id": "subtask_1", "title": "Prepare accepted artifacts", "status": "completed",
+        "checks": [{
+            "criterion": "machine:deliverables", "type": "deliverables",
+            "observed": "count=1", "passed": True,
+        }],
+        "output": {"kind": "rows", "text": "Prepared.", "artifacts": [{
+            "kind": "prepared_records", "source": "room_worker",
+            "record_count": 1, "records": [{"id": "record-1"}],
+        }]},
+        "evidence_refs": ["source:record-1"], "gaps": [],
+    }]
+
+    async def formatter(*_args, **_kwargs):
+        return {"content": json.dumps({
+            "report_markdown": "Prepared.",
+            "deliverables": [],
+            "needs_input": [{"item": "Approval from a Room employee"}],
+            "blockers": [{"description": "Wait for approval"}],
+            "checkpoint": {
+                "stage": "prepared", "completed": True, "next": "await approval",
+                "disposition": "request_hq", "reason": "Approval needed",
+                "requires": "approval_from_owner",
+            },
+        })}
+
+    monkeypatch.setattr(director, "_groq", formatter)
+    result = asyncio.run(director._synthesize_work_order_result())
+
+    assert result["status"] == "completed"
+    assert result["needs_input"] == []
+    assert result["blockers"] == []
+    assert result["checkpoint"]["disposition"] == "complete"
+    assert result["checkpoint"]["completed"] == ["Prepare accepted artifacts"]
+
+
 def test_work_brief_is_short_natural_language_and_mentions_the_report():
     director, events = _director(message="Build a market-entry strategy")
     director.response_depth = "operating"

@@ -11,8 +11,51 @@ _CHECKPOINT_DISPOSITIONS = {
 }
 
 
+def _proposed_actions(authored: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    for value in authored.get("proposed_actions") or []:
+        if not isinstance(value, dict):
+            continue
+        capability = str(value.get("capability") or "").strip()
+        operation = str(value.get("operation") or "").strip()
+        if not capability or not operation:
+            continue
+        actions.append({
+            "capability": capability[:160],
+            "operation": operation[:160],
+            "target_hint": str(value.get("target_hint") or "").strip()[:500] or None,
+            "connected": bool(value.get("connected")),
+            "authority_required": value.get("authority_required") is not False,
+            "status": str(value.get("status") or "requested").strip().lower()[:40],
+        })
+    return actions[:20]
+
+
+def _actual_counts(authored: dict[str, Any], metrics: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    raw_counts = authored.get("actual_counts")
+    for key, value in (raw_counts.items() if isinstance(raw_counts, dict) else []):
+        name = str(key or "").strip()[:120]
+        if not name:
+            continue
+        try:
+            counts[name] = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    counts.setdefault("records_created", int(metrics.get("records_created") or 0))
+    counts.setdefault("records_persisted", int(metrics.get("records_persisted") or 0))
+    counts.setdefault("tool_calls_total", int(metrics.get("tool_calls_total") or 0))
+    return counts
+
+
 def _checkpoint(authored: dict[str, Any], status: str) -> dict[str, Any]:
     value = authored.get("checkpoint") if isinstance(authored.get("checkpoint"), dict) else {}
+    completed_values = value.get("completed") or []
+    if not isinstance(completed_values, list):
+        completed_values = [completed_values]
+    required_values = value.get("requires") or []
+    if not isinstance(required_values, list):
+        required_values = [required_values]
     disposition = str(value.get("disposition") or "").strip().lower()
     if status == "completed":
         disposition = "complete"
@@ -20,11 +63,11 @@ def _checkpoint(authored: dict[str, Any], status: str) -> dict[str, Any]:
         disposition = "continue_room" if authored.get("deliverables") else "request_hq"
     return {
         "stage": str(value.get("stage") or "work_order").strip()[:120],
-        "completed": [str(item).strip()[:120] for item in (value.get("completed") or []) if str(item).strip()][:20],
+        "completed": [str(item).strip()[:120] for item in completed_values if str(item).strip()][:20],
         "next": str(value.get("next") or "").strip()[:240] or None,
         "disposition": disposition,
         "reason": str(value.get("reason") or "").strip()[:1000],
-        "requires": [str(item).strip()[:240] for item in (value.get("requires") or []) if str(item).strip()][:20],
+        "requires": [str(item).strip()[:240] for item in required_values if str(item).strip()][:20],
     }
 
 
@@ -48,6 +91,8 @@ def assemble_work_order_result(
         "status": initial_status,
         "subtasks": copy.deepcopy(subtasks),
         "deliverables": authored.get("deliverables") if isinstance(authored.get("deliverables"), list) else [],
+        "proposed_actions": _proposed_actions(authored),
+        "actual_counts": _actual_counts(authored, metrics),
         "evidence_refs": sorted({
             str(ref) for row in subtasks for ref in (row.get("evidence_refs") or []) if str(ref).strip()
         }),
@@ -131,8 +176,13 @@ def work_order_result_errors(result: Any) -> list[str]:
         if any(item.get("met") is not True for item in (result.get("acceptance") or [])):
             errors.append("completed result has unmet acceptance criteria")
         requirements = result.get("completion_requirements") or []
-        if not requirements or any(item.get("met") is not True for item in requirements):
+        if any(item.get("met") is not True for item in requirements):
             errors.append("completed result has unmet completion requirements")
+        for action in result.get("proposed_actions") or []:
+            if not isinstance(action, dict) or not action.get("capability") or not action.get("operation"):
+                errors.append("completed result contains an invalid proposed action")
+            if action.get("authority_required") is not True:
+                errors.append("Room proposed actions must retain the HQ authority boundary")
         if (result.get("checkpoint") or {}).get("disposition") != "complete":
             errors.append("completed result must close its execution checkpoint")
     return errors

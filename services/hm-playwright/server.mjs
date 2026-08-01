@@ -169,6 +169,9 @@ async function crawl(input) {
   const depth = Math.max(0, Math.min(Number(input.depth || 0), 4));
   const pageLimit = Math.max(1, Math.min(Number(input.page_limit || 25), 100));
   const settleMs = Math.max(0, Math.min(Number(input.settle_ms ?? 350), 3000));
+  // Homepage capture is opt-in so ordinary SEO crawls retain their compact
+  // responses. Onboarding requests exactly one bounded browser visual.
+  const captureScreenshot = Boolean(input.capture_screenshot);
   const queue = seeds.map((url, index) => ({ url, depth: 0, source: index ? 'sitemap' : 'seed', from: null }));
   const visited = new Set();
   const pages = [];
@@ -199,6 +202,10 @@ async function crawl(input) {
         const finalUrl = await publicUrl(page.url());
         if (!finalUrl || finalUrl.origin !== origin) throw new Error('cross_origin_redirect_blocked');
         const evidence = await extractPage(page, response, { source: current.source, depth: current.depth, discovered_from: current.from });
+        if (captureScreenshot && current.depth === 0 && !pages.length) {
+          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false, timeout: NAVIGATION_TIMEOUT_MS });
+          if (screenshot.length <= 5 * 1024 * 1024) evidence.screenshot = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
+        }
         pages.push(evidence);
         if (current.depth >= depth) continue;
         for (const link of evidence.links.slice().reverse()) {

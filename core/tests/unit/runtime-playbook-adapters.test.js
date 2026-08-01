@@ -75,7 +75,30 @@ test('Gmail adapter verifies drafts, sends once, records runtime correlation, an
   assert.equal(monitored.artifacts[0].data.subscription_ref, 'gmail-thread:thread-1');
 });
 
-test('Gmail adapter marks provider write timeouts ambiguous so the executor cannot replay them', async () => {
+test('Gmail adapter creates one provider draft per accepted message through generic execute', async () => {
+  const created = [];
+  const adapter = createGmailRuntimeAdapter({
+    prisma: { hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } } },
+    runTool: async (tool, args) => {
+      assert.equal(tool, 'gmail_create_draft');
+      created.push(args);
+      return { draftId: `draft-${created.length}`, messageId: `message-${created.length}`, threadId: `thread-${created.length}` };
+    },
+  });
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' },
+    inputs: { 'artifacts.message_record': [{
+      id: 'message-artifact-1', key: 'message_record', source_refs: ['source:1'],
+      data: { recipient: 'lead@example.test', subject: 'Grounded subject', body: 'Grounded body', lead_ref: 'lead-1', delivery_requested: true },
+    }] },
+  }, context());
+  assert.equal(created.length, 1);
+  assert.equal(result.artifacts[0].key, 'draft_record');
+  assert.equal(result.artifacts[0].data.message_ref, 'message-artifact-1');
+  assert.equal(result.artifacts[0].data.delivery_requested, true);
+});
+
+test('Gmail adapter persists an uncertain outcome for a provider timeout instead of replaying it', async () => {
   const adapter = createGmailRuntimeAdapter({
     prisma: {
       hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } },
@@ -86,10 +109,10 @@ test('Gmail adapter marks provider write timeouts ambiguous so the executor cann
       throw new Error('provider_timeout');
     },
   });
-  await assert.rejects(
-    () => adapter.execute({ inputs: { 'artifacts.draft_record': [{ data: { draft_ref: 'draft-1' } }] } }, context()),
-    (error) => error.ambiguous === true && /runtime_gmail_send_ambiguous/.test(error.message),
-  );
+  const result = await adapter.execute({ inputs: { 'artifacts.draft_record': [{ id: 'draft-artifact-1', data: { draft_ref: 'draft-1' } }] } }, context());
+  assert.equal(result.artifacts.length, 1);
+  assert.equal(result.artifacts[0].key, 'action_uncertain');
+  assert.equal(result.artifacts[0].data.input_ref, 'draft-artifact-1');
 });
 
 test('reply watcher produces one exact generic playbook event correlation', () => {

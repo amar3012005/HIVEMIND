@@ -1,0 +1,9 @@
+FROM hivemind/control-plane:prod-20260731-lead-intelligence-v2
+COPY core/src/control-plane-server.js /app/src/control-plane-server.js
+COPY core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY core/src/hq-runtime/awakening-narrator.js /app/src/hq-runtime/awakening-narrator.js
+COPY core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js
+COPY core/src/growth/operating-loop.js /app/src/growth/operating-loop.js
+COPY core/src/growth/planner.js /app/src/growth/planner.js
+COPY core/src/agent/toolkit-factory.js /app/src/agent/toolkit-factory.js
+COPY core/src/agent/connector-toolkits/growth-plan-tools.js /app/src/agent/connector-toolkits/growth-plan-tools.js

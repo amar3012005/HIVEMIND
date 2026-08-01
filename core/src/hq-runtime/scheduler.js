@@ -4,10 +4,21 @@ import { appendHqEvent, createHqCycle, getHqRuntime, scheduleHqWake } from './re
 import { NativeHqEngine } from './native-engine.js';
 import { HqScheduleStore } from './schedule-store.js';
 import { drainHqWorkOrders } from './work-dispatcher.js';
-import { createProductionEmailLifecycleService } from './langgraph/email-lifecycle-service.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
 
-export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, emailLifecycle = null, runtimePlaybooks = null }) {
+function artifactCountSummary(artifacts = []) {
+  const counts = artifacts.reduce((result, artifact) => {
+    const key = String(artifact?.key || 'artifact');
+    result[key] = Number(result[key] || 0) + 1;
+    return result;
+  }, {});
+  return {
+    counts,
+    text: Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(', '),
+  };
+}
+
+export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, runtimePlaybooks = null }) {
   const store = new HqScheduleStore({ prisma, logger });
   const schedule = await store.leaseNext(leaseOwner);
   if (!schedule) return null;
@@ -25,19 +36,6 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, e
         throw new Error('runtime_playbook_event_payload_invalid');
       }
       const result = await runtimePlaybooks.resumeEvent(runId, runtime.orgId, providerEvent);
-      await store.complete(schedule.id);
-      return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
-    }
-    if (schedule.trigger_type === 'email_lifecycle_event') {
-      if (!emailLifecycle) throw new Error('email_lifecycle_service_unavailable');
-      const executionId = String(schedule.payload?.execution_id || '');
-      const providerEvent = schedule.payload?.event;
-      if (!executionId || !providerEvent?.id || !providerEvent?.type) {
-        throw new Error('email_lifecycle_schedule_payload_invalid');
-      }
-      const result = await emailLifecycle.resumeEvent({
-        organizationId: runtime.orgId, executionId, event: providerEvent,
-      });
       await store.complete(schedule.id);
       return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
     }
@@ -92,14 +90,54 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   if (!prisma) return { enabled: false, reason: 'database_unavailable' };
   const exists = await prisma.$queryRawUnsafe(`SELECT to_regclass('hivemind.hq_schedules') IS NOT NULL AS available`).catch(() => []);
   if (!exists[0]?.available) return { enabled: false, reason: 'migration_not_applied' };
-  const emailLifecycle = await createProductionEmailLifecycleService({ prisma, logger });
   const runtimePlaybooks = await createProductionRuntimePlaybookService({
     prisma,
     logger,
-    onRunState: async ({ run }) => {
-      if (!['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION', 'WAITING_AUTHORITY'].includes(String(run.status))) return;
+    onStageState: async ({ phase, run, stage, artifacts, verdict }) => {
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
+      const accepted = artifactCountSummary(artifacts);
+      await appendHqEvent({
+        prisma,
+        runtimeId: trigger.runtime_id,
+        orgId: run.orgId,
+        runtimeEpoch: trigger.runtime_epoch,
+        cycleId: trigger.cycle_id || null,
+        eventType: phase === 'REJECTED' ? 'blocked' : phase === 'ACCEPTED' ? 'tool_result' : 'tool_started',
+        title: phase === 'STARTED' ? `Room checkpoint started: ${stage.id}`
+          : phase === 'ACCEPTED' ? `I read and accepted the Room output: ${stage.id}`
+          : `Room checkpoint needs evidence: ${stage.id}`,
+        summary: phase === 'STARTED'
+          ? stage.objective
+          : phase === 'ACCEPTED'
+            ? `I read ${(artifacts || []).length} persisted output(s)${accepted.text ? `: ${accepted.text}` : ''}. Every declared predicate and provider verification passed, so this lifecycle can advance from ${stage.id}.`
+            : `The checkpoint retained its current evidence but did not advance. Unmet predicates: ${(verdict?.unmet || []).map((item) => item.id || item.predicate || item.reason).join(', ') || 'unknown'}.`,
+        details: {
+          runtime_playbook_run_id: run.id,
+          playbook_id: run.playbookId,
+          playbook_version: run.playbookVersion,
+          stage_id: stage.id,
+          phase,
+          artifact_refs: (artifacts || []).map((artifact) => artifact.id),
+          artifact_counts: accepted.counts,
+          verdict: verdict || null,
+        },
+        evidenceRefs: (artifacts || []).map((artifact) => artifact.id),
+      });
+    },
+    onRunState: async ({ run }) => {
+      if (!['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION', 'WAITING_AUTHORITY', 'WAITING_EVENT'].includes(String(run.status))) return;
+      const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
+      if (!trigger.runtime_id || !trigger.runtime_epoch) return;
+      if (run.status === 'WAITING_EVENT' && run.waitingFor?.deadline) {
+        const correlation = (run.waitingFor.correlation_values || [run.waitingFor.correlation_value]).filter(Boolean)[0] || null;
+        await scheduleHqWake({
+          prisma, runtimeId: trigger.runtime_id, orgId: run.orgId, runtimeEpoch: trigger.runtime_epoch,
+          idempotencyKey: `runtime-playbook-timeout:${run.id}:${run.checkpointSequence}`,
+          triggerType: 'runtime_playbook_event', dueAt: new Date(run.waitingFor.deadline),
+          payload: { run_id: run.id, event: { id: `wait-timeout:${run.id}:${run.checkpointSequence}`, type: 'wait.timeout', data: { correlation_ref: correlation, deadline: run.waitingFor.deadline } } },
+        });
+      }
       await scheduleHqWake({
         prisma,
         runtimeId: trigger.runtime_id,
@@ -122,7 +160,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
     if (schedulesRunning) return;
     schedulesRunning = true;
     try {
-      while (await runDueHqSchedule({ prisma, leaseOwner, logger, emailLifecycle, runtimePlaybooks })) { /* drain due work serially */ }
+      while (await runDueHqSchedule({ prisma, leaseOwner, logger, runtimePlaybooks })) { /* drain due work serially */ }
     } finally { schedulesRunning = false; }
   };
   const drainWorkers = async () => {
@@ -154,7 +192,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   wake();
   logger.log(`[hq-runtime] scheduler active as ${leaseOwner}`);
   return {
-    enabled: true, leaseOwner, wake, emailLifecycle, runtimePlaybooks,
-    stop: async () => { clearInterval(timer); await emailLifecycle.close(); },
+    enabled: true, leaseOwner, wake, runtimePlaybooks,
+    stop: async () => { clearInterval(timer); },
   };
 }

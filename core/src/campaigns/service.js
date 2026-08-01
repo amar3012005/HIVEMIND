@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { campaignCapabilitySnapshot, getCampaignCapabilities } from './capabilities.js';
 import { campaignWorkerEnabled, KNOWN_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
 import { buildCampaignDisplayMessage, buildCampaignRoomDispatch } from './contracts.js';
-import { captureCampaignChannelBaseline, reconcileCampaignAction as reconcileWithAdapter, syncCampaignActionMetrics } from './adapters/index.js';
+import { captureCampaignChannelBaseline, pauseCampaignAction, reconcileCampaignAction as reconcileWithAdapter, resumeCampaignAction, syncCampaignActionMetrics } from './adapters/index.js';
 import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
 import { buildCampaignImagePrompt, creativeBriefErrors, normalizeCreativeBrief } from './visual-prompt.js';
 import { campaignError } from './errors.js';
@@ -55,6 +55,10 @@ const DIRECT_ACTION_RANGES = {
   FOCUSED: [[2, 3], [3, 5], [5, 8]],
   HIGH: [[3, 5], [5, 8], [8, 12]],
 };
+const ORGANIC_SOCIAL_CHANNELS = new Set([
+  'x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube',
+  'pinterest', 'reddit', 'threads', 'bluesky', 'google_business',
+]);
 
 export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED', channels = [] } = {}) {
   const normalizedIntensity = String(intensity || 'FOCUSED').trim().toUpperCase();
@@ -62,7 +66,7 @@ export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED',
   const horizonIndex = Number(durationDays) <= 7 ? 0 : Number(durationDays) <= 14 ? 1 : 2;
   const expected = {};
   for (const channel of channels) {
-    const range = channel === 'x_organic'
+    const range = ORGANIC_SOCIAL_CHANNELS.has(channel)
       ? CONTENT_ACTION_RANGES[normalizedIntensity][horizonIndex]
       : DIRECT_ACTION_RANGES[normalizedIntensity][horizonIndex];
     expected[channel] = { minimum: range[0], maximum: range[1] };
@@ -398,8 +402,11 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         } });
       }
     }
+    // The operating plan is useful before a visual render finishes. Keep images
+    // as asynchronous action work; launch preflight still requires each selected
+    // required asset, but the Room and dashboard do not wait on the image queue.
     await tx.campaign.update({ where: { id: run.campaignId }, data: {
-      status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
+      status: 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
     } });
     await tx.campaignChannel.updateMany({ where: { campaignId: run.campaignId }, data: { status: 'READY' } });
     await tx.campaignRun.update({ where: { id: run.id }, data: {
@@ -419,8 +426,12 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         launch_blocker_count: Array.isArray(bundle.launch_plan?.blocked_by) ? bundle.launch_plan.blocked_by.length : 0,
       },
     } });
+    await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_ready', data: {
+      campaign_id: run.campaignId, room_id: run.campaign.roomId, turn_id: run.turnId, plan_version_id: plan.id,
+      display: { title: run.campaign.name, objective: run.campaign.objective, channels: run.campaign.requestedChannels, action_count: bundle.actions.length, status: 'READY_FOR_APPROVAL', message: visualActionCount ? 'Your campaign plan is ready. Visuals are generating for selected actions.' : 'Your campaign plan is ready to review.' },
+    } } });
     if (visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_asset_generation_queued', data: { plan_version_id: plan.id, action_count: visualActionCount, source: 'campaign_room' } } });
-    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: visualActionCount ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL', visualActionCount };
+    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: 'READY_FOR_APPROVAL', visualActionCount };
   });
 }
 
@@ -478,11 +489,32 @@ export function normalizeCampaignInput(body = {}) {
   };
 }
 
+const HYPERAGENTS_ORGANIC_CHANNEL_PRIORITY = [
+  'x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube',
+  'pinterest', 'reddit', 'threads', 'bluesky', 'google_business',
+];
+
+// A director can propose a channel, but it cannot make an unavailable account
+// executable. HyperAgents handoffs therefore converge on the organization’s
+// live connected organic surface instead of failing after the user asked for
+// the strongest connected channels.
+export function resolveHyperagentsOrganicChannels(requestedChannels, capabilities) {
+  const ready = new Set((capabilities?.channels || [])
+    .filter((channel) => channel?.execution_ready && channel?.executable)
+    .map((channel) => String(channel.id || '').toLowerCase()));
+  const requested = Array.isArray(requestedChannels)
+    ? requestedChannels.map((channel) => String(channel || '').toLowerCase())
+    : [];
+  const requestedReady = requested.filter((channel) => ready.has(channel));
+  if (requestedReady.length) return [...new Set(requestedReady)];
+  return HYPERAGENTS_ORGANIC_CHANNEL_PRIORITY.filter((channel) => ready.has(channel)).slice(0, 3);
+}
+
 export async function createCampaign({ prisma, userId, orgId, body }) {
   requireCampaignsV2(orgId);
   const organization = await prisma.organization.findUnique({ where: { id: orgId }, select: { campaignAutonomyMode: true } });
   const defaultMode = organization?.campaignAutonomyMode === 'AUTO' ? 'FULL_AUTO' : 'APPROVE_PLAN_ONCE';
-  const input = normalizeCampaignInput({ ...body, autonomy_mode: body?.autonomy_mode || defaultMode });
+  let input = normalizeCampaignInput({ ...body, autonomy_mode: body?.autonomy_mode || defaultMode });
   const existing = await prisma.campaign.findUnique({
     where: { orgId_ownerUserId_creationKey: { orgId, ownerUserId: userId, creationKey: input.creationKey } },
     include: { runs: { orderBy: { createdAt: 'desc' }, take: 1 }, channels: true },
@@ -490,7 +522,18 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   if (existing) return { campaign: existing, created: false, dispatch: null };
 
   const capabilities = await getCampaignCapabilities({ prisma, userId, orgId });
-  const unavailable = input.channels.filter((id) => !capabilities.channels.find((item) => item.id === id)?.planning_ready);
+  let unavailable = input.channels.filter((id) => !capabilities.channels.find((item) => item.id === id)?.planning_ready);
+  if (unavailable.length && body?.trigger_surface === 'hyperagents') {
+    const connectedOrganicChannels = resolveHyperagentsOrganicChannels(input.channels, capabilities);
+    if (connectedOrganicChannels.length) {
+      input = normalizeCampaignInput({
+        ...body,
+        channels: connectedOrganicChannels,
+        autonomy_mode: body?.autonomy_mode || defaultMode,
+      });
+      unavailable = input.channels.filter((id) => !capabilities.channels.find((item) => item.id === id)?.planning_ready);
+    }
+  }
   if (unavailable.length) throw campaignError(`Campaign planning is unavailable for: ${unavailable.join(', ')}`, 409, 'channel_planning_unavailable');
 
   const participants = await prisma.digitalEmployee.findMany({
@@ -1103,11 +1146,16 @@ export async function controlCampaign({ prisma, orgId, userId, id, action }) {
   await requireCampaignEditor(prisma, campaign, userId);
   if (action === 'pause') {
     if (!['RUNNING', 'SCHEDULED'].includes(campaign.status)) throw campaignError('Only a running campaign can be paused', 409, 'campaign_not_running');
+    const livePaidActions = await prisma.campaignAction.findMany({
+      where: { campaignId: id, channel: { in: ['x_ads', 'google_ads', 'meta', 'linkedin_ads', 'tiktok_ads', 'pinterest_ads'] }, status: 'SUCCEEDED', externalId: { not: null } },
+      include: { campaign: true },
+    });
+    for (const campaignAction of livePaidActions) await pauseCampaignAction({ prisma, action: campaignAction });
     await prisma.$transaction([
       prisma.campaign.update({ where: { id }, data: { status: 'PAUSED', pausedAt: new Date() } }),
       prisma.campaignAction.updateMany({ where: { campaignId: id, status: 'QUEUED' }, data: { status: 'PAUSED' } }),
       prisma.campaignChannel.updateMany({ where: { campaignId: id }, data: { status: 'PAUSED' } }),
-      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_paused', actorType: 'user', actorId: userId } }),
+      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_paused', actorType: 'user', actorId: userId, data: { provider_ads_paused: livePaidActions.length } } }),
     ]);
   } else if (action === 'resume') {
     if (!campaignWorkerEnabled()) throw campaignError('Campaign execution is not enabled for this pilot yet', 409, 'campaign_execution_disabled');
@@ -1115,11 +1163,16 @@ export async function controlCampaign({ prisma, orgId, userId, id, action }) {
     const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId });
     const unavailable = campaign.requestedChannels.filter((channel) => !capabilities.channels.find((item) => item.id === channel)?.execution_ready);
     if (unavailable.length) throw campaignError(`Execution is not ready for: ${unavailable.join(', ')}`, 409, 'channel_execution_unavailable');
+    const pausedPaidActions = await prisma.campaignAction.findMany({
+      where: { campaignId: id, channel: { in: ['x_ads', 'google_ads', 'meta', 'linkedin_ads', 'tiktok_ads', 'pinterest_ads'] }, status: 'SUCCEEDED', externalId: { not: null } },
+      include: { campaign: true },
+    });
+    for (const campaignAction of pausedPaidActions) await resumeCampaignAction({ prisma, action: campaignAction });
     await prisma.$transaction([
       prisma.campaign.update({ where: { id }, data: { status: 'RUNNING', pausedAt: null, lastError: null } }),
       prisma.campaignAction.updateMany({ where: { campaignId: id, status: 'PAUSED' }, data: { status: 'QUEUED' } }),
       prisma.campaignChannel.updateMany({ where: { campaignId: id }, data: { status: 'RUNNING' } }),
-      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_resumed', actorType: 'user', actorId: userId } }),
+      prisma.campaignEvent.create({ data: { campaignId: id, orgId, eventType: 'campaign_resumed', actorType: 'user', actorId: userId, data: { provider_ads_resumed: pausedPaidActions.length } } }),
     ]);
   } else {
     throw campaignError('Unknown campaign control action', 404, 'unknown_campaign_action');

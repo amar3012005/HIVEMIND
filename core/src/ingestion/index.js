@@ -10,7 +10,7 @@ const _withOrg = (job, fn) => {
   const o = job && job.data && (job.data.org_id || (job.data.payload && job.data.payload.org_id));
   const ctx = globalThis.__hivemindOrgCtx;
   if (o && ctx && ctx.runWithOrg) {
-    if (process.env.MNEME_DEBUG_ROUTING) console.log('[ingest-route] org', o);
+    if (process.env.MNEME_DEBUG_ROUTING === '1') console.log('[ingest-route] org', o);
     return ctx.runWithOrg(o, fn);
   }
   return fn();

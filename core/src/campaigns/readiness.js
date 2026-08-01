@@ -1,8 +1,8 @@
 const PAID_CHANNELS = new Set([
-  'x_ads', 'google_ads', 'meta', 'linkedin', 'youtube_ads', 'tiktok_ads',
+  'x_ads', 'google_ads', 'meta', 'linkedin_ads', 'youtube_ads', 'tiktok_ads',
   'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
 ]);
-const CHANNEL_LABELS = { x_organic: 'X Organic Posts', x_ads: 'Paid X Ads', gmail: 'Email', tara: 'TARA' };
+const CHANNEL_LABELS = { x_organic: 'X Organic Posts', x_ads: 'Paid X Ads', linkedin: 'LinkedIn Organic', linkedin_ads: 'LinkedIn Ads', gmail: 'Email', tara: 'TARA' };
 const HEALTHY_ACTION_STATUSES = new Set(['READY', 'AWAITING_APPROVAL', 'QUEUED', 'EXECUTING', 'SUCCEEDED', 'PAUSED']);
 
 function channelLabel(value) {

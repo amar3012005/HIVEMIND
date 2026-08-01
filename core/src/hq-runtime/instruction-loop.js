@@ -133,7 +133,7 @@ export async function interpretHqInstructionSemantic(body, company = {}) {
         temperature: 0,
         response_format: { type: 'json_object' }, max_completion_tokens: 1400,
         messages: [
-          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its domain lifecycle. Return JSON only with intent, title, objective, room_tag, skill, location, target:{quantity,sector,audience}, required_capabilities, acceptance_criteria, and exactly one work_units item preserving the complete requested outcome. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, and authority gates. room_tag must be one of general,outreach,seo,marketing,campaign,branding,research,product,fundraising,legal_finance. Preserve exact audience, geography, quantity, timing, and external-action restrictions. If quantity was not specified, use null; do not invent one.' },
+          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its domain lifecycle. Return JSON only with intent, title, objective, room_tag, skill, location, target:{quantity,sector,audience}, required_capabilities, acceptance_criteria, and exactly one work_units item preserving the complete requested outcome. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, and authority gates. room_tag must be one of general,outreach,seo,marketing,campaign,branding,research,product,fundraising,legal_finance. Preserve exact audience, geography, quantity, timing, and external-action restrictions. If geography was not explicitly stated, use the supplied retained company location and do not infer a broader market from the company profile. If quantity was not specified, use null; do not invent one. Set authority_mode to EXECUTE only when the requested terminal outcome necessarily requires an external action; otherwise use PREPARE.' },
           { role: 'user', content: JSON.stringify({ instruction: String(body || '').slice(0, 5000), company }) },
         ],
       }),
@@ -174,6 +174,10 @@ export function canonicalInstructionKind(interpreted = {}) {
   return String(interpreted.intent || 'operating_focus').trim().toLowerCase();
 }
 
+export function shouldDeferInstruction({ deferTodos = false, instruction = {} } = {}) {
+  return Boolean(deferTodos && instruction?.interpreted?.execution_mode !== 'single_outcome');
+}
+
 export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false }) {
   const pending = await prisma.hqInstruction.findMany({
     where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 20,
@@ -181,9 +185,11 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
   const created = [];
   for (const instruction of pending) {
     const interpreted = await interpretHqInstructionSemantic(instruction.body, company);
-    if (deferTodos) {
+    const executionMode = instruction.interpreted?.execution_mode === 'single_outcome'
+      ? 'single_outcome' : 'operating_plan';
+    if (shouldDeferInstruction({ deferTodos, instruction })) {
       await prisma.hqInstruction.update({ where: { id: instruction.id }, data: {
-        status: 'APPLIED', interpreted: { ...interpreted, incorporated_into_initial_plan: true }, appliedAt: new Date(),
+        status: 'APPLIED', interpreted: { ...interpreted, execution_mode: executionMode, incorporated_into_initial_plan: true }, appliedAt: new Date(),
       } });
       created.push({ instruction, interpreted, todo: null });
       continue;
@@ -206,13 +212,15 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
           context: { location: unit.target?.location || interpreted.location, target: unit.target,
             skill: unit.skill, room_tag: unit.room_tag, acceptance_criteria: unit.acceptance_criteria,
             completion_requirements: unit.completion_requirements, authority_mode: unit.authority_mode,
-            workflow_index: index, workflow_size: units.length, depends_on_todo_id: dependency?.id || null },
+            execution_mode: executionMode, workflow_index: index, workflow_size: units.length,
+            depends_on_todo_id: dependency?.id || null },
         } });
         rows.push(row);
       }
       await tx.hqInstruction.update({ where: { id: instruction.id }, data: {
         status: 'APPLIED', interpreted: {
           ...interpreted,
+          execution_mode: executionMode,
           work_units: units,
           workflow_todo_ids: rows.map((row) => row.id),
         }, appliedAt: new Date(),

@@ -153,11 +153,12 @@ function _mdToPlain(md) {
 // RFC-2822 MIME → base64url for Gmail send/draft. threadId/inReplyTo optional.
 // html → multipart/alternative (plain + html). attachments [{filename, mime, data_b64}]
 // → multipart/mixed wrapping the alternative. No html/attachments → text/plain (unchanged).
-function _gmailRaw({ to, subject, body, html, cc, inReplyTo, references, attachments }) {
+function _gmailRaw({ to, subject, body, html, cc, inReplyTo, references, messageId, attachments }) {
   const top = [
     to ? `To: ${to}` : null,
     cc ? `Cc: ${cc}` : null,
     `Subject: ${_encodeHeader(subject)}`,
+    messageId ? `Message-ID: <${String(messageId).replace(/[<>\r\n]/g, '')}>` : null,
     inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
     references ? `References: ${references}` : null,
     'MIME-Version: 1.0',
@@ -441,6 +442,7 @@ export const GOOGLE_TOOLS = {
         draftId: full.id,
         messageId: full.message?.id,
         threadId: full.message?.threadId,
+        headerMessageId: headers['Message-ID'] || headers['Message-Id'] || headers['message-id'] || '',
         subject: headers.Subject || '',
         to: headers.To || '',
         snippet: full.message?.snippet || '',
@@ -457,7 +459,15 @@ export const GOOGLE_TOOLS = {
       for (const d of (list.drafts || []).slice(0, max)) {
         const full = await g(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${d.id}?format=metadata`, token);
         const h = Object.fromEntries((full.message?.payload?.headers || []).map(x => [x.name, x.value]));
-        drafts.push({ draftId: d.id, subject: h.Subject || '', to: h.To || '', snippet: full.message?.snippet || '' });
+        drafts.push({
+          draftId: d.id,
+          messageId: full.message?.id,
+          threadId: full.message?.threadId,
+          headerMessageId: h['Message-ID'] || h['Message-Id'] || h['message-id'] || '',
+          subject: h.Subject || '',
+          to: h.To || '',
+          snippet: full.message?.snippet || '',
+        });
       }
       return { count: drafts.length, drafts };
     },

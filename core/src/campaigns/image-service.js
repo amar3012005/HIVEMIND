@@ -101,11 +101,10 @@ export async function enqueueCampaignImages({ prisma, orgId, userId, campaignId,
     for (let index = 0; index < count; index += 1) {
       created.push(await tx.campaignAsset.create({ data: queuedAssetData({ campaignId, actionId, creativeBrief: brief, requestedBy: userId, variantIndex: index }) }));
     }
-    await tx.campaign.update({ where: { id: campaignId }, data: { status: 'PREPARING_ASSETS', lastError: null } });
     await tx.campaignEvent.create({ data: { campaignId, orgId, eventType: 'campaign_asset_generation_queued', actorType: 'user', actorId: userId, data: { action_id: actionId, asset_ids: created.map((asset) => asset.id), variant_count: count } } });
     return created;
   });
-  return { queued: true, assets: assets.map(publicAsset), campaign_status: 'PREPARING_ASSETS' };
+  return { queued: true, assets: assets.map(publicAsset), campaign_status: campaign.status };
 }
 
 async function storeBytes({ orgId, campaignId, assetId, bytes, contentType }) {
@@ -135,22 +134,23 @@ async function finalizeCampaignAssets(prisma, campaignId) {
   const identity = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { currentPlanVersionId: true } });
   if (!identity?.currentPlanVersionId) return;
   const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { actions: { where: { planVersionId: identity.currentPlanVersionId }, include: { assets: { where: { deletedAt: null } } } }, runs: { orderBy: { createdAt: 'desc' }, take: 1 } } });
-  if (!campaign || campaign.status !== 'PREPARING_ASSETS') return;
+  if (!campaign || !['PREPARING_ASSETS', 'READY_FOR_APPROVAL'].includes(campaign.status)) return;
   if (campaign.actions.some((action) => action.assets.some((asset) => ['QUEUED', 'GENERATING'].includes(asset.status)))) return;
   const currentActions = campaign.actions;
   const missing = currentActions.filter((action) => action.payload?.creative_brief?.required === true && !action.payload?.asset_id);
   if (missing.length) {
     const message = `Image generation needs attention for ${missing.length} campaign action${missing.length === 1 ? '' : 's'}`;
-    await prisma.$transaction([
-      prisma.campaign.update({ where: { id: campaign.id }, data: { status: 'NEEDS_INPUT', lastError: message } }),
-      prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_asset_generation_failed', data: { action_ids: missing.map((action) => action.id), error: message } } }),
-    ]);
+    await prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_asset_generation_failed', data: { action_ids: missing.map((action) => action.id), error: message } } });
     return;
   }
-  await prisma.$transaction([
-    prisma.campaign.update({ where: { id: campaign.id }, data: { status: 'READY_FOR_APPROVAL', lastError: null } }),
-    prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_ready', data: { campaign_id: campaign.id, room_id: campaign.roomId, turn_id: campaign.runs[0]?.turnId || null, plan_version_id: campaign.currentPlanVersionId, display: { title: campaign.name, objective: campaign.objective, channels: campaign.requestedChannels, action_count: currentActions.length, status: 'READY_FOR_APPROVAL', message: 'Your campaign content and visuals are ready to review.' } } } }),
-  ]);
+  if (campaign.status === 'PREPARING_ASSETS') {
+    await prisma.$transaction([
+      prisma.campaign.update({ where: { id: campaign.id }, data: { status: 'READY_FOR_APPROVAL', lastError: null } }),
+      prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_ready', data: { campaign_id: campaign.id, room_id: campaign.roomId, turn_id: campaign.runs[0]?.turnId || null, plan_version_id: campaign.currentPlanVersionId, display: { title: campaign.name, objective: campaign.objective, channels: campaign.requestedChannels, action_count: currentActions.length, status: 'READY_FOR_APPROVAL', message: 'Your campaign content and visuals are ready to review.' } } } }),
+    ]);
+  } else {
+    await prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_visuals_ready', data: { plan_version_id: campaign.currentPlanVersionId, action_count: currentActions.length } } });
+  }
   const { autoLaunchCampaignIfReady } = await import('./service.js');
   await autoLaunchCampaignIfReady({ prisma, campaignId: campaign.id });
 }
@@ -188,7 +188,6 @@ export async function selectCampaignAsset({ prisma, orgId, userId, campaignId, a
   const { campaign, action } = await editableAction(prisma, { orgId, userId, campaignId, actionId });
   const asset = await prisma.campaignAsset.findFirst({ where: { id: assetId, campaignId, actionId, status: 'READY', deletedAt: null } });
   if (!asset) throw campaignError('Campaign image not found or not ready', 404, 'campaign_asset_not_found');
-  if (campaign.status === 'NEEDS_INPUT') await prisma.campaign.update({ where: { id: campaignId }, data: { status: 'PREPARING_ASSETS', lastError: null } });
   await selectReadyAsset(prisma, { campaign, action, asset });
   await prisma.campaignEvent.create({ data: { campaignId, orgId, eventType: 'campaign_asset_selected', actorType: 'user', actorId: userId, data: { action_id: actionId, asset_id: assetId, content_hash: asset.contentHash } } });
   await finalizeCampaignAssets(prisma, campaignId);
@@ -202,7 +201,6 @@ export async function uploadCampaignAsset({ prisma, orgId, userId, campaignId, a
   const contentHash = crypto.createHash('sha256').update(bytes).digest('hex');
   const existing = await prisma.campaignAsset.findFirst({ where: { campaignId, actionId, contentHash, status: 'READY', deletedAt: null } });
   if (existing) {
-    if (campaign.status === 'NEEDS_INPUT') await prisma.campaign.update({ where: { id: campaignId }, data: { status: 'PREPARING_ASSETS', lastError: null } });
     await selectReadyAsset(prisma, { campaign, action, asset: existing }); await finalizeCampaignAssets(prisma, campaignId); return publicAsset(existing);
   }
   const asset = await prisma.campaignAsset.create({ data: { campaignId, actionId, kind: 'IMAGE', status: 'GENERATING', provider: 'upload', model: null, prompt: null, contentHash, contentType, sizeBytes: bytes.length, metadata: { alt_text: String(altText || '').slice(0, 1000), original_filename: String(filename || '').slice(0, 255) || null } } });
@@ -210,7 +208,6 @@ export async function uploadCampaignAsset({ prisma, orgId, userId, campaignId, a
     const storageKey = await storeBytes({ orgId, campaignId, assetId: asset.id, bytes, contentType });
     const size = dimensions(bytes, contentType);
     const ready = await prisma.campaignAsset.update({ where: { id: asset.id }, data: { status: 'READY', storageKey, width: size.width, height: size.height } });
-    if (campaign.status === 'NEEDS_INPUT') await prisma.campaign.update({ where: { id: campaignId }, data: { status: 'PREPARING_ASSETS', lastError: null } });
     await selectReadyAsset(prisma, { campaign, action, asset: ready });
     await prisma.campaignEvent.create({ data: { campaignId, orgId, eventType: 'campaign_asset_uploaded', actorType: 'user', actorId: userId, data: { action_id: actionId, asset_id: ready.id, content_hash: contentHash } } });
     await finalizeCampaignAssets(prisma, campaignId);
@@ -229,9 +226,6 @@ export async function deleteCampaignAsset({ prisma, orgId, userId, campaignId, a
   await prisma.$transaction([
     prisma.campaignAsset.update({ where: { id: assetId }, data: { deletedAt: new Date(), status: 'DELETED' } }),
     ...(selected ? [prisma.campaignAction.update({ where: { id: actionId }, data: { payload: { ...action.payload, asset_id: null, asset_hash: null, asset_alt_text: null } } })] : []),
-    ...(selected && action.payload?.creative_brief?.required === true && campaign.status !== 'PREPARING_ASSETS'
-      ? [prisma.campaign.update({ where: { id: campaignId }, data: { status: 'PREPARING_ASSETS', lastError: null } })]
-      : []),
     prisma.campaignEvent.create({ data: { campaignId, orgId, eventType: 'campaign_asset_removed', actorType: 'user', actorId: userId, data: { action_id: actionId, asset_id: assetId } } }),
   ]);
   if (asset.storageKey) {

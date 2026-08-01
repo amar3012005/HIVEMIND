@@ -11,15 +11,20 @@ export async function getHqRuntime({ prisma, orgId }) {
 export async function ensureHqRuntime({ prisma, orgId, userId, objective, authorityPolicy = {} }) {
   if (!orgId || !userId) throw new Error('hq_runtime_tenant_required');
   if (!String(objective || '').trim()) throw new Error('hq_runtime_objective_required');
+  const current = await prisma.hqRuntime.findUnique({ where: { orgId }, select: { authorityPolicy: true } });
+  const mergedAuthorityPolicy = normalizeAuthorityPolicy({
+    ...(current?.authorityPolicy || {}),
+    ...authorityPolicy,
+  });
   return prisma.hqRuntime.upsert({
     where: { orgId },
     create: {
       orgId, ownerUserId: userId, objective: String(objective).trim(),
-      authorityPolicy: normalizeAuthorityPolicy(authorityPolicy),
+      authorityPolicy: mergedAuthorityPolicy,
     },
     update: {
       ownerUserId: userId, objective: String(objective).trim(),
-      authorityPolicy: normalizeAuthorityPolicy(authorityPolicy),
+      authorityPolicy: mergedAuthorityPolicy,
     },
   });
 }
@@ -118,13 +123,33 @@ export async function activateHqAfterOnboarding({ prisma, orgId, userId, objecti
 export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = null, cycleId = null, eventType, title, summary, details = {}, skillRef = null, toolRef = null, workOrderId = null, evidenceRefs = [], visibility = 'USER' }) {
   if (!runtimeId || !orgId) throw new Error('hq_event_tenant_required');
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.hqRuntime.update({
-      where: { id: runtimeId, orgId, ...(runtimeEpoch ? { epoch: runtimeEpoch } : {}) },
-      data: { eventSequence: { increment: 1 }, version: { increment: 1 } },
-      select: { eventSequence: true },
+    // Runtime events can arrive concurrently from the scheduler, a Room result,
+    // and provider callbacks. Lock the Runtime row and reconcile against the
+    // append-only ledger before assigning the next sequence.
+    const locked = await tx.$queryRawUnsafe(
+      `SELECT epoch, event_sequence
+         FROM hivemind.hq_runtimes
+        WHERE id = $1::uuid AND org_id = $2::uuid
+        FOR UPDATE`,
+      runtimeId, orgId,
+    );
+    if (!locked.length || (runtimeEpoch && String(locked[0].epoch) !== String(runtimeEpoch))) {
+      throw new Error('hq_runtime_event_epoch_conflict');
+    }
+    const rows = await tx.$queryRawUnsafe(
+      `SELECT COALESCE(MAX(sequence), 0) AS max_sequence
+         FROM hivemind.hq_runtime_events
+        WHERE runtime_id = $1::uuid`,
+      runtimeId,
+    );
+    const sequence = [locked[0].event_sequence, rows[0]?.max_sequence]
+      .reduce((highest, value) => BigInt(value || 0) > highest ? BigInt(value || 0) : highest, 0n) + 1n;
+    await tx.hqRuntime.update({
+      where: { id: runtimeId },
+      data: { eventSequence: sequence, version: { increment: 1 } },
     });
     return tx.hqRuntimeEvent.create({
-      data: { runtimeId, orgId, cycleId, sequence: updated.eventSequence, eventType, title, summary, details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
+      data: { runtimeId, orgId, cycleId, sequence, eventType, title, summary, details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
     });
   });
 }

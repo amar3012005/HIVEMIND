@@ -2008,7 +2008,11 @@ def _apply_outreach_contract(
     outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else None
     if not outreach:
         return verdict
-    requested = max(1, min(50, int(outreach.get("requested_count") or 1)))
+    raw_requested = outreach.get("requested_count")
+    requested = (
+        max(1, min(50, int(raw_requested)))
+        if raw_requested is not None else None
+    )
     metrics = plan.get("outreach_metrics") if isinstance(plan.get("outreach_metrics"), dict) else {}
     pending_count = sum(
         1 for item in pending
@@ -2024,11 +2028,14 @@ def _apply_outreach_contract(
         "deliver": 0,
         "monitor": 0,
     }
-    missing = [
-        f"outreach lifecycle {phase} incomplete: {observed[phase]}/{requested}"
-        for phase in ("discover", "persist", "draft", "deliver", "monitor")
-        if outreach.get(phase) is True and observed[phase] < requested
-    ]
+    missing = []
+    for phase in ("discover", "persist", "draft", "deliver", "monitor"):
+        if outreach.get(phase) is not True:
+            continue
+        if requested is not None and observed[phase] < requested:
+            missing.append(f"outreach lifecycle {phase} incomplete: {observed[phase]}/{requested}")
+        elif requested is None and observed[phase] < 1:
+            missing.append(f"outreach lifecycle {phase} produced no verified result")
     verdict["outreach_contract"] = outreach
     verdict["outreach_observed"] = observed
     if missing:
@@ -3284,6 +3291,38 @@ async def _orchestrate_single_agent(
         })
         return RoomTurnResponse(ok=bool(handoff), cost_tokens=cost_tokens, status=status)
 
+    # Coarse Runtime phases use the Room's normal Director and work executor,
+    # then return append-only artifacts to the generic Core predicate engine.
+    if isinstance(result.get("room_phase_result"), dict):
+        contract = result["room_phase_result"]
+        gaps = [str(value) for value in (contract.get("gaps") or []) if str(value).strip()]
+        verdict = {
+            "met": not gaps and bool(contract.get("artifacts")),
+            "artifact_ok": bool(contract.get("artifacts")),
+            "assignments_ok": bool(result.get("work_results")),
+            "grounded_ok": all(bool(item.get("source_refs")) for item in (contract.get("artifacts") or [])),
+            "gaps": gaps,
+            "note": "Runtime phase artifacts returned for Core validation.",
+            "intended_output": "room_phase_result",
+        }
+        _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "room_phase_result": contract}
+        await _emit({"t": "verify", **verdict})
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single-room-phase",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+        })
+        return RoomTurnResponse(
+            ok=True,
+            cost_tokens=cost_tokens,
+            status="complete",
+            verification=verdict,
+            artifacts=contract.get("artifacts") or [],
+            result=contract,
+            summary=str(contract.get("summary") or "")[:4000],
+        )
+
     # Runtime stages are governed by the generic Core predicate engine. The Room
     # returns evidence-backed artifacts; it does not duplicate transition logic.
     if isinstance(result.get("runtime_stage_result"), dict):
@@ -3981,7 +4020,8 @@ def _is_hq_work_order_context(execution_context: str) -> bool:
     governor. Replaying the entire Room goalkeeper only repeats the same work.
     """
     context = str(execution_context or "")
-    return "hq-work-order.v" in context or "runtime-stage.v" in context
+    return ("hq-work-order.v" in context or "runtime-stage.v" in context
+            or "room-phase.v" in context)
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:

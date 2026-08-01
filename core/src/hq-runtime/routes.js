@@ -8,6 +8,8 @@ import {
   transitionHqRuntime,
 } from './repository.js';
 import { reconcileTodoCapabilities } from './instruction-loop.js';
+import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot } from '../runtime-playbooks/snapshot.js';
+import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
@@ -150,6 +152,35 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, { runtime: asJsonRuntime(runtime), usage });
       }
 
+      if (pathname === '/v1/hq/authority-policy' && req.method === 'PATCH') {
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const body = await parseBody(req).catch(() => ({}));
+        const outboundMessages = String(body.outbound_messages || '').trim().toLowerCase();
+        if (!['manual', 'auto'].includes(outboundMessages)) {
+          return jsonResponse(res, { error: 'hq_runtime_outbound_authority_invalid' }, 400);
+        }
+        if (runtime.authorityPolicy?.outbound_messages !== outboundMessages) {
+          await prisma.hqRuntime.update({
+            where: { id: runtime.id },
+            data: {
+              authorityPolicy: { ...(runtime.authorityPolicy || {}), outbound_messages: outboundMessages },
+              version: { increment: 1 },
+            },
+          });
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'verification',
+            title: outboundMessages === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review enabled',
+            summary: outboundMessages === 'auto'
+              ? 'Future verified outbound-message checkpoints may proceed automatically. Existing pending batches still require their exact approval action.'
+              : 'Future outbound-message checkpoints will wait for explicit approval before delivery.',
+            details: { actor: userId, policy_key: 'outbound_messages', preference: outboundMessages },
+          });
+        }
+        return jsonResponse(res, { runtime: asJsonRuntime(await getHqRuntime({ prisma, orgId })) });
+      }
+
       if (pathname === '/v1/hq/activate' && req.method === 'POST') {
         const body = await parseBody(req).catch(() => ({}));
         const objective = String(body.objective || await findDefaultObjective(prisma, orgId)).trim().slice(0, 5000);
@@ -205,6 +236,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             interpreted: {
               source: 'runtime_invitation',
               focuses: Array.isArray(body.focuses) ? body.focuses.map(String).slice(0, 12) : [],
+              execution_mode: body.execution_mode === 'single_outcome' ? 'single_outcome' : 'operating_plan',
             },
           },
         });
@@ -340,8 +372,8 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
         await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
-        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
-        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations, workflowApprovals, playbookRuns] = await Promise.all([
+        const playbookService = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations, playbookRuns] = await Promise.all([
           prisma.hyperWorkOrder.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
           prisma.hqSchedule.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
           prisma.hqTodo.findMany({ where: { orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
@@ -349,13 +381,45 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           prisma.hqInstruction.findMany({ where: { orgId }, orderBy: { createdAt: 'desc' }, take: 20 }),
           prisma.growthStage.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 }),
           prisma.growthDelegation.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 30 }),
-          lifecycle?.listPendingApprovals?.({ organizationId: orgId }).catch(() => []) || [],
           prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
             where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 50,
-            include: { checkpoints: { orderBy: { sequence: 'desc' }, take: 1 } },
+            include: {
+              artifacts: { orderBy: { createdAt: 'asc' } },
+              checkpoints: { orderBy: { sequence: 'desc' }, take: 1 },
+              authorities: { orderBy: { grantedAt: 'asc' } },
+            },
           }).catch(() => []) : Promise.resolve([]),
         ]);
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), workflow_approvals: workflowApprovals, playbook_runs: playbookRuns });
+        const todoById = new Map(todos.map((todo) => [todo.id, todo]));
+        const playbookApprovals = playbookRuns.filter((run) => run.status === 'WAITING_AUTHORITY').map((run) => {
+          const playbook = playbookService?.registry?.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+          const stage = playbook?.stages?.find((candidate) => candidate.id === run.currentStageId);
+          if (!stage?.authority_gate || !stage?.authority_policy_key) return null;
+          const messages = run.artifacts.filter((artifact) => artifact.artifactKey === 'message_record').map((artifact) => ({
+            id: artifact.artifactId,
+            lead_ref: artifact.data?.lead_ref || null,
+            to: artifact.data?.recipient || null,
+            subject: artifact.data?.subject || null,
+            body: artifact.data?.body || null,
+          }));
+          const todo = todoById.get(String(run.trigger?.todo_id || ''));
+          return {
+            run_id: run.id,
+            todo_id: todo?.id || null,
+            title: todo?.title || playbook?.name || 'External messages are ready',
+            gate: stage.authority_gate,
+            policy_key: stage.authority_policy_key,
+            preference: runtime.authorityPolicy?.[stage.authority_policy_key] || 'unconfigured',
+            messages,
+          };
+        }).filter(Boolean);
+        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), playbook_approvals: playbookApprovals, playbook_runs: playbookRuns, playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)) });
+      }
+
+      const playbookSnapshotMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/snapshot$/i);
+      if (playbookSnapshotMatch && req.method === 'GET') {
+        const snapshot = await loadRuntimePlaybookSnapshot(prisma, playbookSnapshotMatch[1], orgId);
+        return snapshot ? jsonResponse(res, { snapshot }) : jsonResponse(res, { error: 'runtime_playbook_run_not_found' }, 404);
       }
 
       if (pathname === '/v1/hq/playbooks/runs' && req.method === 'GET') {
@@ -398,9 +462,43 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const body = await parseBody(req).catch(() => ({}));
         const gate = String(body.gate || '').trim().slice(0, 120);
         if (!gate) return jsonResponse(res, { error: 'runtime_playbook_authority_gate_required' }, 400);
-        await service.grantAuthority(playbookAuthorityMatch[1], orgId, gate, { grantedBy: userId, payload: body.payload || {} });
+        const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: playbookAuthorityMatch[1], orgId } });
+        if (!run || run.status !== 'WAITING_AUTHORITY') return jsonResponse(res, { error: 'runtime_playbook_authority_not_waiting' }, 409);
+        const playbook = service.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+        const stage = playbook.stages.find((candidate) => candidate.id === run.currentStageId);
+        if (!stage || stage.authority_gate !== gate || !stage.authority_policy_key) {
+          return jsonResponse(res, { error: 'runtime_playbook_authority_stage_mismatch' }, 409);
+        }
+        if (typeof body.approve !== 'boolean') return jsonResponse(res, { error: 'runtime_playbook_authority_approve_required' }, 400);
+        const preference = body.preference == null ? null : String(body.preference).toLowerCase();
+        if (preference && !['auto', 'manual'].includes(preference)) {
+          return jsonResponse(res, { error: 'runtime_playbook_authority_preference_invalid' }, 400);
+        }
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        if (preference) {
+          const policyValue = preference;
+          await prisma.hqRuntime.updateMany({
+            where: { id: runtime.id, orgId, epoch: runtime.epoch },
+            data: { authorityPolicy: { ...(runtime.authorityPolicy || {}), [stage.authority_policy_key]: policyValue }, version: { increment: 1 } },
+          });
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'verification',
+            title: preference === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review retained',
+            summary: preference === 'auto'
+              ? 'This organization authorized future checkpoints governed by this exact outbound-message policy. Other external writes, spending, deletion, and policy changes remain separately governed.'
+              : 'Every future outbound-message checkpoint will wait for an explicit Approve and send decision.',
+            details: { policy_key: stage.authority_policy_key, preference: policyValue, run_id: run.id },
+          });
+        }
+        const approve = body.approve;
+        if (approve) {
+          const loadedRun = await service.executor.store.loadRun(run.id, orgId);
+          await service.grantAuthority(run.id, orgId, gate, { grantedBy: userId, payload: { ...(body.payload || {}), preference: preference || null, input_hash: stageAuthorityHash(loadedRun, stage) } });
+        }
         Promise.resolve(wakeScheduler?.()).catch(() => {});
-        return jsonResponse(res, { ok: true }, 202);
+        return jsonResponse(res, { ok: true, approved: approve, preference: preference || null }, approve ? 202 : 200);
       }
 
       const playbookEventMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/events$/i);
@@ -412,20 +510,6 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!event.type) return jsonResponse(res, { error: 'runtime_playbook_event_type_required' }, 400);
         const run = await service.resumeEvent(playbookEventMatch[1], orgId, event);
         return jsonResponse(res, { run }, 202);
-      }
-
-      const approvalMatch = pathname.match(/^\/v1\/hq\/workflows\/([0-9a-f-]{36})\/approval$/i);
-      if (approvalMatch && req.method === 'POST') {
-        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
-        if (!lifecycle) return jsonResponse(res, { error: 'email_lifecycle_unavailable' }, 503);
-        const body = await parseBody(req).catch(() => ({}));
-        const decision = String(body.decision || '').toLowerCase();
-        if (!['approve', 'reject'].includes(decision)) return jsonResponse(res, { error: 'decision_must_be_approve_or_reject' }, 400);
-        const result = await lifecycle.approve({
-          organizationId: orgId, executionId: approvalMatch[1], approved: decision === 'approve',
-        });
-        Promise.resolve(wakeScheduler?.()).catch(() => {});
-        return jsonResponse(res, { ok: true, decision, result });
       }
 
       if (pathname === '/v1/hq/instructions' && req.method === 'POST') {

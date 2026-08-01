@@ -2,7 +2,7 @@ export const CAMPAIGN_ROOM_TASK_TAG = 'CAMPAIGN';
 
 const CHANNEL_LABELS = {
   x_organic: 'X organic', gmail: 'Email', tara: 'TARA', x_ads: 'X Ads',
-  google_ads: 'Google Ads', meta: 'Meta Ads', linkedin: 'LinkedIn', youtube_ads: 'YouTube Ads',
+  google_ads: 'Google Ads', meta: 'Meta Ads', linkedin: 'LinkedIn organic', linkedin_ads: 'LinkedIn Ads', youtube_ads: 'YouTube Ads',
   tiktok_ads: 'TikTok Ads', microsoft_ads: 'Microsoft Ads', apple_ads: 'Apple Ads',
   amazon_ads: 'Amazon Ads', reddit_ads: 'Reddit Ads', pinterest_ads: 'Pinterest Ads', snapchat_ads: 'Snapchat Ads',
 };
@@ -32,6 +32,7 @@ export function buildCampaignExecutionContext(campaign, feedback = '', channelCa
     `CHANNEL_CAPABILITIES_JSON: ${JSON.stringify(Array.isArray(channelCapabilities) ? channelCapabilities : [])}`,
     feedback ? `USER_FEEDBACK: ${String(feedback).slice(0, 4000)}` : null,
     'For X, create exactly one Post per x_organic action. payload.text and final_copy must match and be 280 characters or fewer. Represent a thread as separate ordered actions, one action per Post.',
+    'For paid actions, include payload.goal, payload.destination_url when the goal needs a landing page, payload.targeting.countries as ISO two-letter country codes, optional payload.targeting.languages, and payload.dsa_beneficiary when targeting EU users. Keep budget and currency in media_plan; never invent either.',
     'For every selected channel, distinguish planning readiness from execution readiness. If an account, connector, permission, budget ceiling, tracking setup, or publisher adapter is unavailable, still create the best approval-ready plan and record the exact missing prerequisite in launch_plan.blocked_by. Never imply that a plan-only channel can publish.',
     'Treat the active organization profile and supplied company evidence as ground truth. Never substitute another company or invent audience size, proof, URLs, performance, budgets, quotes, or customer results.',
     'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and govern the complete delivery with campaign__govern_delivery. Do not send any external action.',

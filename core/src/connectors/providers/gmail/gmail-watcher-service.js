@@ -43,6 +43,13 @@ async function patchConnectionMetadata(prisma, connection, watcher) {
 
 async function persistReplyEvent({ prisma, connection, message, outbound }) {
   const headers = headersOf(message);
+  const sender = address(headers.from);
+  const subject = String(headers.subject || '');
+  const eventType = /mailer-daemon|postmaster/i.test(sender) || /undeliver|delivery status|failure notice|mail delivery/i.test(subject)
+    ? 'delivery.bounced'
+    : /unsubscribe|remove me|stop emailing/i.test(subject)
+      ? 'recipient.unsubscribed'
+      : 'response.received';
   const providerEventId = `gmail:${message.id}`;
   const payload = {
     provider_event_id: providerEventId,
@@ -57,8 +64,9 @@ async function persistReplyEvent({ prisma, connection, message, outbound }) {
     runtime_playbook_stage_id: outbound?.meta?.runtime_playbook_stage_id || null,
     runtime_correlation_ref: outbound?.meta?.correlation_ref || message.threadId || null,
     match_type: outbound?.matchType || 'thread',
-    sender: address(headers.from),
-    subject: String(headers.subject || '').slice(0, 500),
+    event_type: eventType,
+    sender,
+    subject: subject.slice(0, 500),
     received_at: headers.date || null,
   };
   const checksum = hash(payload);
@@ -107,7 +115,7 @@ export function runtimePlaybookReplyWake({ runtime, payload, artifact }) {
       run_id: payload.runtime_playbook_run_id,
       event: {
         id: payload.provider_event_id,
-        type: 'response.received',
+        type: payload.event_type || 'response.received',
         data: {
           correlation_ref: payload.runtime_correlation_ref || payload.thread_id,
           artifact_id: artifact.id,

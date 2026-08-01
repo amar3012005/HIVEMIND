@@ -25,8 +25,9 @@ function materializeCheck(check, context) {
 }
 
 function selectArtifacts(artifacts, select) {
-  if (Array.isArray(artifacts)) return artifacts.filter((artifact) => artifact?.key === select);
-  return asArray(artifacts?.[select]);
+  const selectors = asArray(select);
+  if (Array.isArray(artifacts)) return artifacts.filter((artifact) => selectors.includes(artifact?.key));
+  return selectors.flatMap((key) => asArray(artifacts?.[key]));
 }
 
 function compareSelected(artifacts, check, comparator) {
@@ -41,13 +42,37 @@ const predicates = {
   has_min_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length >= check.value,
   has_max_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length <= check.value,
   has_exact_count: ({ artifacts, check }) => selectArtifacts(artifacts, check.select).length === check.value,
+  count_matches: ({ artifacts, check }) => (
+    selectArtifacts(artifacts, check.select).length === selectArtifacts(artifacts, check.target_select).length
+  ),
+  references_cover_all: ({ artifacts, check }) => {
+    const targetValues = selectArtifacts(artifacts, check.target_select)
+      .map((artifact) => getPath(artifact, check.target_path || 'id'));
+    const outcomeValues = selectArtifacts(artifacts, check.select)
+      .map((artifact) => getPath(artifact, check.path));
+    if (targetValues.length === 0 || outcomeValues.length !== targetValues.length) return false;
+    const targets = new Set(targetValues);
+    return targets.size === targetValues.length
+      && outcomeValues.every((value) => value != null && targets.has(value))
+      && new Set(outcomeValues).size === outcomeValues.length;
+  },
   has_field: ({ artifacts, check }) => compareSelected(artifacts, { ...check, mode: 'any' }, (value) => value !== undefined && value !== null),
   all_have_field: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => value !== undefined && value !== null),
+  all_have_nonempty_field: ({ artifacts, check }) => compareSelected(
+    artifacts,
+    check,
+    (value) => value != null && (typeof value !== 'string' || value.trim().length > 0),
+  ),
   none_have_field: ({ artifacts, check }) => {
     const selected = selectArtifacts(artifacts, check.select);
     return selected.length > 0 && selected.every((artifact) => getPath(artifact, check.path) == null);
   },
   field_equals: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => value === check.value),
+  latest_field_equals: ({ artifacts, check }) => {
+    const selected = selectArtifacts(artifacts, check.select);
+    if (selected.length === 0) return false;
+    return getPath(selected.at(-1), check.path) === check.value;
+  },
   field_not_equals: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => value !== check.value),
   field_in: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => asArray(check.values).includes(value)),
   status_in: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => asArray(check.values).includes(value)),
@@ -100,10 +125,14 @@ const requiredArguments = {
   has_min_count: ['select', 'value'],
   has_max_count: ['select', 'value'],
   has_exact_count: ['select', 'value'],
+  count_matches: ['select', 'target_select'],
+  references_cover_all: ['select', 'path', 'target_select'],
   has_field: ['select', 'path'],
   all_have_field: ['select', 'path'],
+  all_have_nonempty_field: ['select', 'path'],
   none_have_field: ['select', 'path'],
   field_equals: ['select', 'path', 'value'],
+  latest_field_equals: ['select', 'path', 'value'],
   field_not_equals: ['select', 'path', 'value'],
   field_in: ['select', 'path', 'values'],
   status_in: ['select', 'path', 'values'],

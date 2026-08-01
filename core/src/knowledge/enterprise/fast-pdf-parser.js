@@ -68,7 +68,26 @@ export async function fastPdfExtract(filePath) {
     const isImageHeavy = !longAlnumWord
       || avgPerPage < 300
       || (text.length < 2000 && avgPerPage < 500);
-    return { text, pages, isImageHeavy, error: null };
+    // FIGURE-RICH: carries a real text layer (so NOT image-heavy) but far too
+    // little text per page to be prose — the signature of a slide deck or report
+    // where charts and diagrams hold much of the meaning.
+    //
+    // A prose page runs ~2500-3000 chars. A real 54-page strategy deck measured
+    // 474. Because it had text it was not image-heavy, so it took the Docling path
+    // and every figure was lost — the EV-adoption curve, the market-collapse
+    // chart, the product timeline, the partner-split — none of which exist as text
+    // anywhere in that file. This was the last capability gap against supermemory,
+    // whose chunks for the SAME document carry "Diagram showing energy flow within
+    // a home system…".
+    //
+    // Vision already handles precisely this and is proven on real uploads
+    // (branding PDFs, 3-10s each); it was simply unreachable for a deck that
+    // happened to carry captions.
+    const isFigureRich = !isImageHeavy
+      && longAlnumWord
+      && pages >= Number(process.env.KB_FIGURE_RICH_MIN_PAGES || 4)
+      && avgPerPage < Number(process.env.KB_FIGURE_RICH_CHARS_PER_PAGE || 900);
+    return { text, pages, isImageHeavy, isFigureRich, avgPerPage, error: null };
   } catch (err) {
     return { text: '', pages: 0, isImageHeavy: true, error: err.message };
   }

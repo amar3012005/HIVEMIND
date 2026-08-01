@@ -2789,12 +2789,19 @@ model HyperTurn {
   startedAt      DateTime    @default(now()) @map("started_at") @db.Timestamptz(6)
   sealedAt       DateTime?   @map("sealed_at") @db.Timestamptz(6)
   idempotencyKey String      @unique @map("idempotency_key") @db.VarChar(64)
+  runtimePlaybookRunId String? @map("runtime_playbook_run_id") @db.Uuid
+  runtimeStageId String? @map("runtime_stage_id") @db.VarChar(120)
+  runtimeCheckpointSequence Int? @map("runtime_checkpoint_sequence")
+  runtimeAttempt Int? @map("runtime_attempt")
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
+  runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
 
   @@unique([roomId, seq])
   @@index([roomId])
   @@index([status])
+  @@index([runtimePlaybookRunId, runtimeCheckpointSequence])
+  @@index([runtimePlaybookRunId, runtimeStageId, runtimeAttempt])
   @@map("hyper_turns")
 }
 
@@ -3514,6 +3521,7 @@ model RuntimePlaybookRun {
   artifacts         RuntimePlaybookArtifact[]
   checkpoints       RuntimePlaybookCheckpoint[]
   authorities       RuntimePlaybookAuthority[]
+  turns             HyperTurn[]
 
   @@unique([orgId, idempotencyKey])
   @@index([orgId, status, updatedAt(sort: Desc)])

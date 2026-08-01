@@ -90,12 +90,33 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   const wantFormulas = opts.formulas === true;
   const wantPicClass = opts.picture_classification === true;
   if (smart) {
-    formData.append('do_ocr', 'true');
-    formData.append('do_table_structure', 'true');
-    formData.append('table_mode', 'accurate');
+    // OCR and table structure are the two most expensive passes and are NOT
+    // wanted by every format. The caller's per-format profile decides; absent a
+    // profile both stay on, preserving the previous behaviour exactly.
+    //
+    // Why this matters: a real .pptx spent 600s and TIMED OUT running a
+    // document-wide OCR + accurate-table pass over slides that have neither a
+    // scanned text layer nor document tables. It only produced memories at all
+    // because the hybrid chunker finished and the chunk-survival path kept its
+    // output. Slides need picture description, not OCR.
+    const wantOcr = opts.ocr !== false;
+    const wantTables = opts.tables !== false;
+    if (wantOcr) formData.append('do_ocr', 'true');
+    if (wantTables) {
+      formData.append('do_table_structure', 'true');
+      formData.append('table_mode', 'accurate');
+    }
     formData.append('pdf_backend', process.env.DOCLING_PDF_BACKEND || 'dlparse_v4');
-    const ocrLangs = (process.env.DOCLING_OCR_LANGS || 'de,en').split(',').map(s => s.trim()).filter(Boolean);
-    for (const lang of ocrLangs) formData.append('ocr_lang', lang);
+    // Only meaningful when OCR actually runs; appending it otherwise is noise.
+    // The default was 'de,en' — one tenant's languages baked into a multi-tenant
+    // path, which quietly degrades OCR for every French, Spanish, Italian, Dutch
+    // or Portuguese customer. Widened to the Latin-script set the engine ships,
+    // still overridable per deployment via DOCLING_OCR_LANGS.
+    if (wantOcr) {
+      const ocrLangs = (process.env.DOCLING_OCR_LANGS || 'en,de,fr,es,it,nl,pt')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      for (const lang of ocrLangs) formData.append('ocr_lang', lang);
+    }
     if (wantCharts)   formData.append('do_chart_extraction', 'true');
     if (wantPicClass) formData.append('do_picture_classification', 'true');
     if (wantCode)     formData.append('do_code_enrichment', 'true');

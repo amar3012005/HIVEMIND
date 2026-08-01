@@ -2,9 +2,14 @@ import { gmailAdapter } from './gmail.js';
 import { taraAdapter } from './tara.js';
 import { assertCampaignAdapter, CampaignAdapterError } from './contract.js';
 import { xOrganicAdapter } from './x-organic.js';
+import { createZernioSocialAdapter, zernioSocialAdapters } from './zernio-social.js';
+import { zernioAdsAdapters } from './zernio-ads.js';
 import { campaignChannelExecutionEnabled } from '../state.js';
 
-const ADAPTERS = new Map([xOrganicAdapter, gmailAdapter, taraAdapter].map((adapter) => {
+const socialAdapters = zernioSocialAdapters.map((adapter) => (
+  adapter.channel === 'x_organic' ? createZernioSocialAdapter('x_organic', { fallback: xOrganicAdapter }) : adapter
+));
+const ADAPTERS = new Map([...socialAdapters, ...zernioAdsAdapters, gmailAdapter, taraAdapter].map((adapter) => {
   assertCampaignAdapter(adapter); return [adapter.channel, adapter];
 }));
 
@@ -43,4 +48,9 @@ export async function captureCampaignChannelBaseline(context) {
 
 export async function pauseCampaignAction(context) {
   return getCampaignAdapter(context.action.channel).pause(context);
+}
+
+export async function resumeCampaignAction(context) {
+  const adapter = getCampaignAdapter(context.action.channel);
+  return typeof adapter.resume === 'function' ? adapter.resume(context) : { status: 'QUEUED', provider_mutation: false };
 }

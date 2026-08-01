@@ -3,6 +3,7 @@ import { buildHqContext } from './context.js';
 import { HqSkillRegistry, HqToolkitRegistry } from './skill-registry.js';
 import { ingestPendingInstructions, reconcileTodoCapabilities } from './instruction-loop.js';
 import { narrateAwakening } from './awakening-narrator.js';
+import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 
 const DAY = 86400000;
 
@@ -54,6 +55,24 @@ export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
 
+export function compactCompanyOperatingContext(company = {}) {
+  const profile = company.profile && typeof company.profile === 'object' ? company.profile : {};
+  return {
+    name: company.company || company.name || profile.name || null,
+    website: company.website || profile.website || null,
+    location: company.company_location || profile.location || company.location || null,
+    mission: company.mission || profile.mission || null,
+    profile: {
+      industry: profile.industry || null,
+      business_model: profile.business_model || null,
+      offer: profile.offer || null,
+      icp: profile.icp || null,
+      positioning: profile.positioning || null,
+      capabilities: Array.isArray(profile.capabilities) ? profile.capabilities.slice(0, 20) : [],
+      risks: Array.isArray(profile.risks) ? profile.risks.slice(0, 12) : [],
+    },
+  };
+}
 export function verifySpecialistDelivery({ order, result, resultOutput }) {
   const status = String(result?.status || '').toLowerCase();
   const summary = String(result?.summary || '').trim();
@@ -126,7 +145,7 @@ export class NativeHqEngine {
       : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { narration_model: awakening.model, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
     await event(prisma, runtime, cycle, {
       eventType: 'context_loaded', title: 'I have the company in view',
-      summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected capability${context.capabilities.connected.length === 1 ? '' : 'ies'}. I will use only what is actually present.`,
+      summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected ${context.capabilities.connected.length === 1 ? 'capability' : 'capabilities'}. I will use only what is actually present.`,
       evidenceRefs: [context.evidence.baseline?.id, context.evidence.latest_growth_plan?.id].filter(Boolean),
     });
 
@@ -174,6 +193,9 @@ export class NativeHqEngine {
       });
     }
     const readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
+    const focusedOutcome = capabilityState.todos.find((todo) => (
+      todo.context?.execution_mode === 'single_outcome' && todo.status !== 'COMPLETED'
+    ));
     if (!firstAwakening || readyTodo) await event(prisma, runtime, cycle, {
       eventType: 'queue_checked', title: 'I re-ranked the operating queue',
       summary: readyTodo
@@ -265,6 +287,14 @@ export class NativeHqEngine {
         return { transition: 'ESCALATE', reason: 'runtime_playbook_result_missing' };
       }
       const artifactRefs = run.artifacts.map((artifact) => artifact.artifactId);
+      const artifactCounts = run.artifacts.reduce((counts, artifact) => {
+        const key = String(artifact.artifactKey || 'artifact');
+        counts[key] = Number(counts[key] || 0) + 1;
+        return counts;
+      }, {});
+      const artifactSummary = Object.entries(artifactCounts)
+        .map(([key, count]) => `${count} ${key}`)
+        .join(', ');
       if (run.status === 'WAITING_AUTHORITY') {
         const playbook = this.runtimePlaybooks?.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
         const stage = playbook?.stages?.find((candidate) => candidate.id === run.currentStageId);
@@ -272,7 +302,7 @@ export class NativeHqEngine {
         if (authority.autoGrant) {
           await this.runtimePlaybooks.grantAuthority(run.id, runtime.orgId, authority.gate, {
             grantedBy: runtime.ownerUserId,
-            payload: { source: 'organization_policy', policy_key: authority.policyKey },
+            payload: { source: 'organization_policy', policy_key: authority.policyKey, input_hash: stageAuthorityHash(run, stage) },
           });
           await prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'RUNNING', blockedReason: null } });
           await event(prisma, runtime, cycle, {
@@ -291,6 +321,24 @@ export class NativeHqEngine {
             details: { run_id: run.id, gate: authority.gate, policy_key: authority.policyKey },
           });
         }
+      } else if (run.status === 'WAITING_EVENT') {
+        await prisma.hqTodo.update({ where: { id: todo.id }, data: {
+          status: 'RUNNING', blockedReason: null,
+          result: {
+            runtime_playbook_run_id: run.id,
+            playbook_id: run.playbookId,
+            playbook_version: run.playbookVersion,
+            status: run.status,
+            waiting_for: run.waitingFor || {},
+            artifact_refs: artifactRefs,
+          },
+        } });
+        await event(prisma, runtime, cycle, {
+          eventType: 'observation', title: `Response monitoring is active: ${todo.title}`,
+          summary: `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). Provider response correlation is active; a matching event will resume this same run immediately.`,
+          details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
+          evidenceRefs: artifactRefs,
+        });
       } else {
         const completed = run.status === 'COMPLETED';
         await prisma.hqTodo.update({
@@ -314,9 +362,9 @@ export class NativeHqEngine {
           eventType: completed ? 'decision' : 'blocked',
           title: completed ? `Completed: ${todo.title}` : `Playbook needs intervention: ${todo.title}`,
           summary: completed
-            ? `The versioned lifecycle reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). HQ accepted ${artifactRefs.length} durable artifact(s).`
+            ? `I read the completed lifecycle and accepted ${artifactRefs.length} durable output(s)${artifactSummary ? `: ${artifactSummary}` : ''}. It reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). This todo is complete; the next executable queue item can now start.`
             : 'The lifecycle stopped at a failed predicate or terminal safety condition. Exact unmet checks remain attached to the run.',
-          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, artifact_refs: artifactRefs, verdict: run.lastVerdict || {} },
+          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, artifact_refs: artifactRefs, artifact_counts: artifactCounts, verdict: run.lastVerdict || {} },
           evidenceRefs: artifactRefs,
         });
         await scheduleHqWake({
@@ -438,7 +486,7 @@ export class NativeHqEngine {
       const rooms = await prisma.hyperRoom.findMany({ where: { orgId: runtime.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' } });
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
       const lifecycleContext = {
-        company: context.company || {},
+        company: compactCompanyOperatingContext(context.company),
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),
@@ -475,24 +523,32 @@ export class NativeHqEngine {
             selector_error: selectionError ? String(selectionError.message || selectionError).slice(0, 1000) : null,
           },
         });
-        await scheduleHqWake({
-          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-          idempotencyKey: `queue-after-missing-playbook:${readyTodo.id}`,
-          triggerType: 'queue_advance', dueAt: new Date(),
-          payload: { todo_id: readyTodo.id, reason: 'playbook_unavailable' },
-        });
+        const anotherReady = capabilityState.todos.some((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
+        if (anotherReady) {
+          await scheduleHqWake({
+            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+            idempotencyKey: `queue-after-missing-playbook:${readyTodo.id}`,
+            triggerType: 'queue_advance', dueAt: new Date(),
+            payload: { todo_id: readyTodo.id, reason: 'playbook_unavailable' },
+          });
+          queueContinuationScheduled = true;
+        }
       } else {
         const roomTag = String(selectedLifecycle.playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
         const room = rooms.find((candidate) => candidate.roomTag === roomTag);
         if (!room) {
           await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'BLOCKED', blockedReason: `No ${roomTag} Company Room is available.` } });
           await event(prisma, runtime, cycle, { eventType: 'blocked', title: 'The right specialist room is unavailable', summary: `I retained the todo, but no ${roomTag} Company Room exists to own it. I will advance to another independent priority instead of substituting the wrong Room.`, details: { todo_id: readyTodo.id, required_room_tag: roomTag } });
-          await scheduleHqWake({
-            prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-            idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
-            triggerType: 'queue_advance', dueAt: new Date(),
-            payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
-          });
+          const anotherReady = capabilityState.todos.some((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
+          if (anotherReady) {
+            await scheduleHqWake({
+              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+              idempotencyKey: `queue-after-missing-room:${readyTodo.id}`,
+              triggerType: 'queue_advance', dueAt: new Date(),
+              payload: { todo_id: readyTodo.id, missing_room_tag: roomTag },
+            });
+            queueContinuationScheduled = true;
+          }
         } else {
           const playbookAssignment = await this.runtimePlaybooks.createSelectedAssignment({
             orgId: runtime.orgId,
@@ -536,7 +592,7 @@ export class NativeHqEngine {
           }
         }
       }
-    } else if (!context.evidence.latest_growth_plan) {
+    } else if (!context.evidence.latest_growth_plan && !focusedOutcome) {
       await move('DIAGNOSING');
       const selectedSkill = this.skills.load('growth-constraint-diagnosis');
       const [growthToolkit] = this.toolkits.select(['growth_plan']);
@@ -556,8 +612,8 @@ export class NativeHqEngine {
       }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
       const acknowledged = summarizeGrowthPlanResult(result);
       await event(prisma, runtime, cycle, {
-        eventType: 'tool_result', title: 'I have a governed operating plan',
-        summary: acknowledged.summary,
+        eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
+        summary: `${acknowledged.summary} The persisted queue is now the source of truth; I will dispatch its first executable item next.`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
@@ -576,6 +632,12 @@ export class NativeHqEngine {
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
         idempotencyKey: `initial-plan-queue:${result.artifact_id}`,
         triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id },
+      });
+    } else if (focusedOutcome) {
+      await event(prisma, runtime, cycle, {
+        eventType: 'observation', title: 'The focused outcome remains retained',
+        summary: 'The single requested outcome has not reached a terminal lifecycle state. I will not replace it with a broader operating plan.',
+        details: { todo_id: focusedOutcome.id, todo_status: focusedOutcome.status },
       });
     } else {
       await move('DIAGNOSING');
@@ -598,17 +660,17 @@ export class NativeHqEngine {
       });
     }
 
-    const dueAt = context.growth.active_stage?.checkpoint_at
-      ? new Date(context.growth.active_stage.checkpoint_at)
-      : new Date(Date.now() + DAY);
-    await scheduleHqWake({
+    const stageCheckpoint = context.growth.active_stage?.checkpoint_at
+      ? new Date(context.growth.active_stage.checkpoint_at) : null;
+    const dueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
+    if (dueAt) await scheduleHqWake({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-      idempotencyKey: `checkpoint:${runtime.activeStageId || cycle.id}:${dueAt.toISOString()}`,
+      idempotencyKey: `checkpoint:${runtime.activeStageId}:${dueAt.toISOString()}`,
       triggerType: 'checkpoint', dueAt, payload: { stage_id: runtime.activeStageId },
     });
     const measurement = context.growth.active_stage?.measurement || {};
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
-    const waitingDays = Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY));
+    const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
     const [pendingLegacySpecialist, pendingPlaybookRun] = await Promise.all([
       prisma.hyperWorkOrder.findFirst({
@@ -616,23 +678,36 @@ export class NativeHqEngine {
         select: { title: true, status: true },
       }),
       prisma.runtimePlaybookRun?.findFirst ? prisma.runtimePlaybookRun.findFirst({
-        where: { orgId: runtime.orgId, status: 'ACTIVE' },
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
         orderBy: { updatedAt: 'asc' }, select: { id: true, currentStageId: true, status: true },
       }).catch(() => null) : Promise.resolve(null),
     ]);
     const pendingSpecialist = pendingLegacySpecialist || (pendingPlaybookRun ? {
       title: `stage ${pendingPlaybookRun.currentStageId}`, status: pendingPlaybookRun.status,
     } : null);
+    const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
+    const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
     const sleepReason = queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability
       ? `I am pausing because ${openCapability.provider} is not connected. That capability is required by the next todo; pretending otherwise would produce an unusable result. Connect it and I will wake immediately, verify the tenant binding, and continue the same todo.`
+      : waitingForResponse
+        ? 'I am watching the accepted provider correlations for matching responses. The configured monitor resumes this exact checkpoint when an event arrives; there is no arbitrary measurement delay.'
       : pendingSpecialist
-        ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately. The ${waitingDays}-day checkpoint is only the next measurement review; it is not a delay before I can continue.`
-      : `I am sleeping because assigned work is owned and no material evidence has changed. The next useful decision needs about ${waitingDays} day(s) of observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} to compare results with the active stage thresholds. I will wake earlier for a campaign result, connector change or failure, specialist result, new instruction, or material performance change.`;
-    await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next checkpoint', summary: `The next evidence review is ${dueAt.toISOString()}. Its timing comes from the active Growth Stage, not an arbitrary sleep interval.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
+        ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately.`
+      : blockedTodos.length
+        ? `${blockedTodos.length} retained todo(s) cannot advance because their exact lifecycle or owner is unavailable. No work is running, and I will not describe this as observation or completed activity.`
+      : dueAt
+        ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
+      : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
+    if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
     await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null });
-    await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled ? 'observation' : 'sleep', title: queueContinuationScheduled ? 'The queue is still moving' : openCapability ? 'I am waiting for access' : pendingSpecialist ? 'I am waiting for specialist work' : 'I am sleeping', summary: sleepReason, details: { due_at: dueAt.toISOString(), capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist } });
+    const waitingTitle = queueContinuationScheduled ? 'The queue is still moving'
+      : openCapability ? 'I am waiting for access'
+      : waitingForResponse ? 'I am monitoring for replies'
+      : pendingSpecialist ? 'I am waiting for specialist work'
+      : blockedTodos.length ? 'The operating queue needs intervention' : 'I am sleeping';
+    await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
     return { transition: 'WAIT', nextWakeAt: dueAt };
   }
 }

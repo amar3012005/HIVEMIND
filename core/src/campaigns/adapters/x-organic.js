@@ -44,7 +44,7 @@ export const xOrganicAdapter = {
       confirmed: true,
       mediaIds,
     });
-    return { externalId: post.id, response: { ...post, campaign_asset_id: selectedAsset?.asset?.id || null } };
+    return { externalId: post.id, response: { ...post, provider: 'native_x', campaign_asset_id: selectedAsset?.asset?.id || null } };
   },
   async reconcile({ action }) {
     if (action.externalId) return { status: 'SUCCEEDED', externalId: action.externalId };

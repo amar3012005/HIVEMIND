@@ -34,6 +34,7 @@ export function normalizeAuthorityPolicy(value = {}) {
   return {
     internal_autonomy: value.internal_autonomy !== false,
     external_writes: value.external_writes || 'approval_required',
+    outbound_messages: value.outbound_messages || 'unconfigured',
     spending: value.spending || 'approval_required',
     deletion: value.deletion || 'approval_required',
     policy_changes: value.policy_changes || 'approval_required',

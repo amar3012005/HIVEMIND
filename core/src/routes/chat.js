@@ -167,23 +167,38 @@ export async function buildChatRecallContext(ctx = {}) {
 
     memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
       const isFact = (m.tags || []).includes('extracted-fact');
-      // An image memory is ONE long visual-evidence description whose entity list
-      // is deliberately its LAST section — exactly what head-truncation discards.
-      // Observed live: asked what we know about HEIDELBERG from the Solvis docs,
-      // chat retrieved and CITED the right memory, then answered "none of them
-      // mention Heidelberg" — because "HEIDELBERG" sits at char 2428 of 5314 and
-      // the top-3 cap of 2400 cut 28 characters short of the word. Retrieval was
-      // correct; the context window truncated the answer away. Every improvement to
-      // image-description richness makes this worse, pushing entities further out.
-      const isImage = (m.tags || []).includes('kind:image')
-        || /^File: .*Visual evidence:/.test(String(m.content || '').slice(0, 200));
-      const cap = isImage
-        ? Number(process.env.CHAT_IMAGE_MEMORY_CHARS || 6000)
-        : (idx < 3 ? 2400 : isFact ? 400 : 700);
+      // WHAT RANKS TOP IS PASSED WHOLE. The pipeline searches wide then ranks
+      // narrow through RRF, MMR, collapse and a Cohere cross-encoder — and then
+      // this line used to throw away the tail of whatever won. Observed live: asked
+      // about HEIDELBERG, chat retrieved and CITED the right memory, then answered
+      // "none of them mention Heidelberg" because the token sits at char 2428 of
+      // 5314 and the top-3 cap was 2400. Twenty-eight characters.
+      //
+      // Truncating the winner is never right. Everything upstream exists to decide
+      // what deserves the model's attention; discarding part of the answer after
+      // that decision wastes the whole pipeline. Top results now pass in full up to
+      // a generous ceiling.
+      const TOP_FULL = Number(process.env.CHAT_TOP_MEMORY_CHARS || 8000);
+      const cap = idx < 3 ? TOP_FULL : (isFact ? 400 : 700);
+      // For the lower ranks a cap is still needed for context budget — but cut from
+      // the MIDDLE, never the tail. Structured content puts its most identifying
+      // material last (an image description's entity list, a document's conclusion,
+      // a table's final rows). Head-only truncation reliably destroys exactly the
+      // part that answers "what is this about". Keep both ends and mark the elision
+      // so the model knows it is reading an excerpt rather than a complete record.
+      const _clip = (text, limit) => {
+        const s = String(text || '');
+        if (s.length <= limit) return s;
+        const head = Math.floor(limit * 0.6);
+        const tail = limit - head - 24;
+        return tail > 0
+          ? `${s.slice(0, head)}\n…[trimmed]…\n${s.slice(-tail)}`
+          : s.slice(0, limit);
+      };
       return {
         id: m.id,
         title: m.title || (m.content || '').slice(0, 60),
-        content: (m.content || '').slice(0, cap),
+        content: _clip(m.content, cap),
         parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, idx < 3 ? 1200 : 500) : undefined,
         score: m.score || 0,
         tags: m.tags || [],
@@ -224,7 +239,17 @@ export async function buildChatRecallContext(ctx = {}) {
             memories.push({
               id: cm.id,
               title: cm.title || (cm.content || '').slice(0, 60),
-              content: (cm.content || '').slice(0, 1200),
+              // Graph-expanded neighbours: same middle-elision rule as the main
+              // set. Head-only truncation here discarded the tail of a memory that
+              // the graph explicitly said was relevant to the top hit.
+              content: (() => {
+                const s = String(cm.content || '');
+                const limit = Number(process.env.CHAT_GRAPH_MEMORY_CHARS || 1600);
+                if (s.length <= limit) return s;
+                const head = Math.floor(limit * 0.6);
+                const tail = limit - head - 24;
+                return tail > 0 ? `${s.slice(0, head)}\n…[trimmed]…\n${s.slice(-tail)}` : s.slice(0, limit);
+              })(),
               score: 0.5,
               tags: cm.tags || [],
               memory_type: cm.memoryType,

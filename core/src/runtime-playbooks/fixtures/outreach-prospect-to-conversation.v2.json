@@ -7,7 +7,7 @@
   "metadata": { "owner_room_tag": "outreach" },
   "input_contract": { "fields": [
     { "path": "target.quantity", "type": "integer", "description": "Bounded batch size. Open-ended requests use this playbook-defined batch.", "required": true, "default_value": 10 },
-    { "path": "target.geography", "type": "string", "description": "Requested or retained geographic scope." },
+    { "path": "target.location", "type": "string", "description": "Requested or retained geographic scope." },
     { "path": "target.segment", "type": "string", "description": "Requested or retained organization segment." },
     { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether delivery is requested after authority is granted.", "required": true, "default_value": false }
   ]},

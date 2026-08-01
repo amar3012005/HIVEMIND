@@ -54,6 +54,25 @@ export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
 
+export function compactCompanyOperatingContext(company = {}) {
+  const profile = company.profile && typeof company.profile === 'object' ? company.profile : {};
+  return {
+    name: company.company || company.name || profile.name || null,
+    website: company.website || profile.website || null,
+    location: company.company_location || profile.location || company.location || null,
+    mission: company.mission || profile.mission || null,
+    profile: {
+      industry: profile.industry || null,
+      business_model: profile.business_model || null,
+      offer: profile.offer || null,
+      icp: profile.icp || null,
+      positioning: profile.positioning || null,
+      capabilities: Array.isArray(profile.capabilities) ? profile.capabilities.slice(0, 20) : [],
+      risks: Array.isArray(profile.risks) ? profile.risks.slice(0, 12) : [],
+    },
+  };
+}
+
 export function verifySpecialistDelivery({ order, result, resultOutput }) {
   const status = String(result?.status || '').toLowerCase();
   const summary = String(result?.summary || '').trim();
@@ -459,7 +478,7 @@ export class NativeHqEngine {
       const rooms = await prisma.hyperRoom.findMany({ where: { orgId: runtime.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' } });
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
       const lifecycleContext = {
-        company: context.company || {},
+        company: compactCompanyOperatingContext(context.company),
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),
@@ -605,6 +624,12 @@ export class NativeHqEngine {
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
         idempotencyKey: `initial-plan-queue:${result.artifact_id}`,
         triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id },
+      });
+    } else if (focusedOutcome) {
+      await event(prisma, runtime, cycle, {
+        eventType: 'observation', title: 'The focused outcome remains retained',
+        summary: 'The single requested outcome has not reached a terminal lifecycle state. I will not replace it with a broader operating plan.',
+        details: { todo_id: focusedOutcome.id, todo_status: focusedOutcome.status },
       });
     } else {
       await move('DIAGNOSING');

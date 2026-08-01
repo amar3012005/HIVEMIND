@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fallbackAwakeningNarration } from '../../src/hq-runtime/awakening-narrator.js';
-import { summarizeBaselineResult, summarizeGrowthPlanResult } from '../../src/hq-runtime/native-engine.js';
+import { compactCompanyOperatingContext, summarizeBaselineResult, summarizeGrowthPlanResult } from '../../src/hq-runtime/native-engine.js';
 
 test('HQ awakening fallback is specific to loaded company facts', () => {
   const narration = fallbackAwakeningNarration({
@@ -40,4 +40,19 @@ test('growth plan acknowledgement names constraints and ordered specialist work'
   assert.match(result.summary, /reach, pipeline/);
   assert.match(result.summary, /1\. Audit search position -> seo/);
   assert.match(result.summary, /2\. Qualify prospects -> outreach/);
+});
+
+test('Room lifecycle receives a compact company snapshot without dashboard history', () => {
+  const compact = compactCompanyOperatingContext({
+    company: 'GreenLeaf', website: 'https://greenleaf.example', company_location: 'Leeds',
+    mission: 'Serve the neighborhood.',
+    tasks: Array.from({ length: 50 }, (_, index) => ({ id: index, detail: 'not execution context' })),
+    research: Array.from({ length: 50 }, (_, index) => ({ id: index, snippet: 'not execution context' })),
+    profile: { industry: 'Bakery', icp: 'Local households', capabilities: ['Bread'], risks: ['Supply'] },
+  });
+  assert.equal(compact.name, 'GreenLeaf');
+  assert.equal(compact.location, 'Leeds');
+  assert.equal(Object.hasOwn(compact, 'tasks'), false);
+  assert.equal(Object.hasOwn(compact, 'research'), false);
+  assert.ok(JSON.stringify(compact).length < 2000);
 });

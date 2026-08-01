@@ -105,7 +105,10 @@ export class RuntimeRoomDirector {
       signal: AbortSignal.timeout(600_000),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(`runtime_room_director_http_${response.status}`);
+    if (!response.ok) {
+      const detail = JSON.stringify(body?.detail || body || {}).slice(0, 1000);
+      throw new Error(`runtime_room_director_http_${response.status}:${detail}`);
+    }
     return body;
   }
 

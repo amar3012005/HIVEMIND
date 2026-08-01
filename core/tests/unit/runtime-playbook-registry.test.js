@@ -429,7 +429,7 @@ test('Director binds only playbook-declared inputs without keyword parsing in th
         playbook_id: 'outreach.prospect-to-conversation', version: 2, reason: 'complete lifecycle fit',
         bindings: {
           'target.quantity': 10,
-          'target.geography': 'Hannover, Germany',
+          'target.location': 'Hannover, Germany',
           'target.segment': 'industrial automation manufacturers',
           'constraints.delivery_requested': true,
           'undeclared.value': 'ignored',
@@ -439,7 +439,7 @@ test('Director binds only playbook-declared inputs without keyword parsing in th
   });
   const selected = await selector.select({ objective: '任意の言語で十社へ連絡してください' });
   assert.deepEqual(selected.context_patch, {
-    target: { quantity: 10, geography: 'Hannover, Germany', segment: 'industrial automation manufacturers' },
+    target: { quantity: 10, location: 'Hannover, Germany', segment: 'industrial automation manufacturers' },
     constraints: { delivery_requested: true },
   });
   assert.equal(JSON.stringify(selected).includes('undeclared'), false);
@@ -456,7 +456,7 @@ test('Director applies a declared default when an open-ended binding is null', a
         playbook_id: 'outreach.prospect-to-conversation', version: 2, reason: 'complete lifecycle fit',
         bindings: {
           'target.quantity': null,
-          'target.geography': 'Hannover, Germany',
+          'target.location': 'Hannover, Germany',
           'constraints.delivery_requested': true,
         },
       }) } }] }; },
@@ -464,7 +464,7 @@ test('Director applies a declared default when an open-ended binding is null', a
   });
   const selected = await selector.select({ objective: 'Pursue as many suitable organizations as possible.' });
   assert.equal(selected.context_patch.target.quantity, 10);
-  assert.equal(selected.context_patch.target.geography, 'Hannover, Germany');
+  assert.equal(selected.context_patch.target.location, 'Hannover, Germany');
 });
 
 test('adapter registry exposes generic operations and injects immutable tenant execution context', async () => {

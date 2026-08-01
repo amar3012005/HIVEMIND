@@ -1703,9 +1703,33 @@ if (process.env.DOCLING_URL) {
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
-        // Smart-mode timeout fallback: if Docling failed AND we still have a
+        // Smart-mode timeout fallback: if the PARSE failed AND we still have a
         // PDF, try Tier 1 fast-pdf so the upload isn't lost.
-        if ((parseResult?.error || (parseResult?.text || '').length < 200) && ext === 'pdf') {
+        //
+        // Deliberately keyed on the PARSE only. A failed chunker must NOT trigger
+        // this: parse and chunk run concurrently above and each re-converts the
+        // document, so on a heavy file the chunker can abort while the parse
+        // succeeds. Observed on a 54-page deck — `parseError=none chunkerError=The
+        // operation was aborted due to timeout` — and the good Docling markdown,
+        // with its table structure and picture descriptions intact, was thrown away
+        // in favour of fast-pdf's flattened text. Losing layout because a SECOND
+        // call was slow is strictly worse than shipping the parse we already have;
+        // segmentation can re-chunk the markdown itself.
+        //
+        // "Usable" means text OR markdown OR chunks — not text alone. Docling can
+        // return a rich markdown body (and the hybrid chunker a full chunk list)
+        // while `text` stays short, and keying only on `text` threw all of it away:
+        // observed `chunks=81 parseError=none chunkerError=none` on a 54-page deck
+        // that STILL fell back to fast-pdf, discarding 81 layout-aware chunks —
+        // the same granularity supermemory achieves on this file — in favour of
+        // flattened text. Fall back only when we genuinely have nothing.
+        const usableChars = Math.max(
+          (parseResult?.text || '').length,
+          (parseResult?.markdown || '').length,
+        );
+        const usableChunks = chunkResult?.chunks?.length || 0;
+        const parseFailed = Boolean(parseResult?.error) || (usableChars < 200 && usableChunks === 0);
+        if (parseFailed && ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fb = await fastPdfExtract(tempPath);

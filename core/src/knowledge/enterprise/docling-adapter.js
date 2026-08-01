@@ -148,9 +148,27 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
       if (!taskId) return fallbackResult(`Docling async submit missing task_id`);
       const deadline = Date.now() + overallTimeout;
       let pollDelay = 1500;
+      // A 404 means the task is GONE, not "not ready yet" — docling-serve returns
+      // the task record from submit onwards, so the only way it disappears is the
+      // worker dying mid-conversion (OOM on a large enriched PDF, taking the
+      // in-flight task with it). Treated as a transient blip by `continue`, that
+      // turned a crash into a full-timeout stall: observed burning the entire
+      // 600s on a 54-page deck while every poll 404'd, then falling back anyway.
+      // Allow a short grace for registration lag, then fail fast to the fallback.
+      const MAX_404 = Number(process.env.DOCLING_POLL_MAX_404 || 3);
+      let notFound = 0;
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, pollDelay));
         const statusRes = await fetch(`${DOCLING_URL}/v1/status/poll/${taskId}`).catch(() => null);
+        if (statusRes && statusRes.status === 404) {
+          if (++notFound >= MAX_404) {
+            return fallbackResult(
+              `Docling task ${taskId} vanished (${notFound}× 404) — worker likely died mid-conversion; `
+              + `check hm-docling mem_limit and restart count`);
+          }
+          continue;
+        }
+        if (statusRes && statusRes.ok) notFound = 0;
         if (!statusRes || !statusRes.ok) continue;
         const status = await statusRes.json().catch(() => ({}));
         const taskStatus = status.task_status || status.status;
@@ -230,10 +248,17 @@ export async function chunkWithDocling(filePath, filename) {
   formData.append('merge_peers', 'true');
   formData.append('repeat_table_header', 'true');
   try {
+    // This endpoint is SYNCHRONOUS and re-converts the document to chunk it, so it
+    // costs roughly what the parse costs — on a 54-page enriched PDF the parse
+    // alone took 228s, and 180s here aborted the chunker while the parse was still
+    // succeeding. The caller runs parse+chunk under Promise.all, so both must be
+    // allowed to outlive a slow document or the pair is discarded and the whole
+    // upload silently degrades to fast-pdf. Server side must also permit it:
+    // DOCLING_SERVE_MAX_SYNC_WAIT (900s in compose).
     const res = await fetch(`${DOCLING_URL}/v1/chunk/hybrid/file`, {
       method: 'POST',
       body: formData,
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(Number(process.env.DOCLING_CHUNK_TIMEOUT_MS || 600_000)),
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => 'unknown');

@@ -290,10 +290,81 @@ def test_runtime_outreach_uses_same_run_records_for_one_batch_of_drafts(monkeypa
     results = asyncio.run(director._run_work_order_subtasks(plan))
 
     assert len(model_calls) == 1
-    assert results[0]["status"] == "completed"
+    assert results[0]["status"] == "completed", results[0]
     artifacts = results[0]["output"]["artifacts"]
     assert [artifact["kind"] for artifact in artifacts] == ["prospect_records", "email_drafts"]
     assert artifacts[1]["record_count"] == 2
+
+
+def test_runtime_outreach_persists_upstream_records_before_accepting_drafts(monkeypatch):
+    director, events = _director(
+        message="Reuse the accepted batch and prepare personalized drafts",
+        room_kind="outreach",
+    )
+    records = [{
+        "company": "Alpha GmbH", "email": "hello@alpha.example",
+        "source_url": "https://alpha.example/evidence", "fit_reason": "Strong fit",
+        "outreach_angle": "Relevant workflow",
+    }, {
+        "company": "Beta GmbH", "email": "hello@beta.example",
+        "source_url": "https://beta.example/evidence", "fit_reason": "Strong fit",
+        "outreach_angle": "Different workflow",
+    }]
+    director.work_order = {
+        "contract": "hq-work-order.v2", "work_order_id": "wo-upstream",
+        "objective": "Persist the accepted batch and prepare outreach.",
+        "upstream_result": {"deliverables": [{
+            "kind": "prospect_records", "record_count": 2, "records": records,
+        }]},
+        "completion_requirements": [
+            {"type": "records_persisted", "minimum": 2},
+            {"type": "source_evidence", "minimum": 2},
+            {"type": "distinct_fields", "minimum": 2},
+            {"type": "email_drafts", "minimum": 2},
+        ],
+    }
+
+    async def persist(*, prospects, **_kwargs):
+        assert [row["company"] for row in prospects] == ["Alpha GmbH", "Beta GmbH"]
+        return {"persisted": 2, "records": [
+            {"company": row["company"], "memory_id": f"memory-{index}"}
+            for index, row in enumerate(prospects, start=1)
+        ]}
+
+    async def model(*_args, **_kwargs):
+        return {"content": json.dumps({"email_drafts": [{
+            "prospect_company": row["company"], "to": row["email"],
+            "subject": f"A note for {row['company']}",
+            "body": "A grounded message. Open to a short conversation?",
+            "rationale": row["outreach_angle"],
+        } for row in records]})}
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.save_prospects_bulk_emulated", persist)
+    monkeypatch.setattr(director, "_groq", model)
+    plan = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "places_query": None,
+        "method_skills": ["cold-email-sequence"], "post_output_actions": [],
+        "outreach_request": {
+            "requested_count": 2, "discover": False, "persist": True,
+            "draft": True, "deliver": False, "monitor": False,
+        },
+        "work_orders": [{
+            "kind": "outreach", "owner_lane": "Builder", "title": "Prepare batch",
+            "objective": "Persist and draft.", "required_evidence": [],
+            "acceptance_criteria": [],
+        }],
+    }
+
+    results = asyncio.run(director._run_work_order_subtasks(plan))
+
+    assert not [check for check in results[0]["checks"] if not check["passed"]]
+    assert results[0]["status"] == "completed", results[0]
+    prospects, drafts = results[0]["output"]["artifacts"]
+    assert prospects["persisted_count"] == 2
+    assert all(row.get("memory_id") for row in prospects["records"])
+    assert drafts["record_count"] == 2
+    assert any(event.get("tool") == "leads_persist" for event in events)
 
 
 def test_work_brief_is_short_natural_language_and_mentions_the_report():

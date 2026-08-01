@@ -2351,6 +2351,83 @@ class Director:
                 if company:
                     worker_record_index[company.casefold()] = record
             worker_records = list(worker_record_index.values())
+            # A Runtime assignment may intentionally reuse a qualified result from
+            # an earlier Room checkpoint instead of paying for discovery again.
+            # When the Director selects the persist phase, reconcile every complete
+            # source-backed record through the same tenant Leads boundary used by
+            # Places discovery. Governance must see durable IDs, not model prose.
+            persisted_companies = {
+                str(record.get("company") or "").strip().casefold()
+                for record in worker_records if str(record.get("memory_id") or "").strip()
+            }
+            # The Places boundary also returns an aggregate provider receipt. Keep
+            # compatibility with older receipts that predate per-record memory IDs.
+            if persisted_records and not persisted_companies:
+                persisted_companies.update(
+                    str(record.get("company") or "").strip().casefold()
+                    for record in current_records[:persisted_records]
+                    if str(record.get("company") or "").strip()
+                )
+            if outreach.get("persist") and worker_records:
+                pending_records = [
+                    record for record in worker_records
+                    if str(record.get("company") or "").strip().casefold() not in persisted_companies
+                    and str(record.get("company") or "").strip()
+                    and str(record.get("fit_reason") or "").strip()
+                    and str(record.get("outreach_angle") or "").strip()
+                    and (record.get("source_url") or record.get("place_id") or record.get("website"))
+                ]
+                if pending_records:
+                    await self.emit({
+                        "t": "typing", "agent": owner.get("slug"),
+                        "note": "Saving qualified records to Your Leads…",
+                    })
+                    persisted = await save_prospects_bulk_emulated(
+                        prospects=[{
+                            **record,
+                            "source": str(record.get("source") or "room-intelligence"),
+                            "note": str(record.get("note") or (
+                                f"Qualified for this Room assignment. "
+                                f"{record.get('fit_reason') or ''} Recommended angle: "
+                                f"{record.get('outreach_angle') or ''}"
+                            )),
+                        } for record in pending_records],
+                        user_id=self.user_id,
+                        org_id=self.org_id,
+                        turn_id=self.turn_id,
+                    )
+                    persisted_rows = persisted.get("records") if isinstance(persisted, dict) else []
+                    persisted_by_company = {
+                        str(row.get("company") or "").strip().casefold(): str(row.get("memory_id") or "").strip()
+                        for row in (persisted_rows or []) if isinstance(row, dict)
+                    }
+                    for record in worker_records:
+                        company_key = str(record.get("company") or "").strip().casefold()
+                        memory_id = persisted_by_company.get(company_key)
+                        if memory_id:
+                            record["memory_id"] = memory_id
+                            persisted_companies.add(company_key)
+                    if persisted_by_company:
+                        successful_tools["leads_persist"] += 1
+                        await self.emit({
+                            "t": "gather", "sources": ["your-leads"], "tool": "leads_persist",
+                            "query": str(order.get("title") or "")[:160],
+                            "connector_hits": ["leads_persist"], "memory_hits": len(persisted_by_company),
+                        })
+            persisted_records = max(persisted_records, len(persisted_companies))
+            if worker_records:
+                grounded_artifacts = [
+                    artifact for artifact in grounded_artifacts
+                    if artifact.get("kind") != "prospect_records"
+                ]
+                grounded_artifacts.insert(0, {
+                    "kind": "prospect_records",
+                    "source": "room_intelligence",
+                    "records": worker_records,
+                    "record_count": len(worker_records),
+                    "persisted_count": len(persisted_companies),
+                })
+                current_records = worker_records
             context = self._work_order_context(list(order.get("required_evidence") or []))
             prior = "\n\n".join(str(row.get("output", {}).get("text") or "") for row in results)[-4000:]
             prompt = (

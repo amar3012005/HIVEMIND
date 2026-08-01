@@ -48,8 +48,10 @@ function bindContext(playbook, selected, context) {
   const supplied = asObject(selected.bindings);
   const patch = {};
   for (const field of fields) {
-    let value = supplied[field.path];
-    if (value === undefined) value = getPath(context, field.path);
+    // Durable runtime context is canonical. The Director may fill absent fields,
+    // but it cannot replace tenant evidence with an inferred value.
+    let value = getPath(context, field.path);
+    if (value === undefined || value === null) value = supplied[field.path];
     if (value === null) value = undefined;
     if (value === undefined && Object.prototype.hasOwnProperty.call(field, 'default_value')) value = field.default_value;
     if (value === undefined) {

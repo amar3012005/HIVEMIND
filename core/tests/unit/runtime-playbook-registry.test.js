@@ -467,6 +467,31 @@ test('Director applies a declared default when an open-ended binding is null', a
   assert.equal(selected.context_patch.target.location, 'Hannover, Germany');
 });
 
+test('durable runtime context wins over an inferred Director binding', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: 'outreach.prospect-to-conversation', version: 2, reason: 'complete lifecycle fit',
+        bindings: {
+          'target.quantity': 50,
+          'target.location': 'Europe',
+          'constraints.delivery_requested': true,
+        },
+      }) } }] }; },
+    }),
+  });
+  const selected = await selector.select({
+    objective: 'Pursue suitable organizations.',
+    context: { target: { location: 'Hannover, Germany' } },
+  });
+  assert.equal(selected.context_patch.target.location, 'Hannover, Germany');
+  assert.equal(selected.context_patch.target.quantity, 50);
+});
+
 test('adapter registry exposes generic operations and injects immutable tenant execution context', async () => {
   const calls = [];
   const adapters = new RuntimeAdapterRegistry();

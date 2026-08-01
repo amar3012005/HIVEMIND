@@ -10,5 +10,5 @@ export { PostgresRuntimeStore } from './postgres-store.js';
 export { GenericStageExecutor } from './stage-executor.js';
 export { DirectorPlaybookSelector } from './director-selector.js';
 export { RuntimeAdapterRegistry, runtimeAdapterOperations } from './adapter-registry.js';
-export { RuntimeRoomDirector, runtimeStageEnvelope } from './room-director.js';
+export { RuntimeRoomDirector, roomPhaseEnvelope, runtimeStageEnvelope } from './room-director.js';
 export { RuntimePlaybookService, createProductionRuntimePlaybookService } from './service.js';

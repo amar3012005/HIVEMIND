@@ -26,6 +26,10 @@ function turnIdempotencyKey(request) {
   return `runtime-stage:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 48)}`;
 }
 
+function usesRoomPhase(request) {
+  return asObject(request.execution_config).contract === 'room-phase.v1';
+}
+
 function normalizeArtifact(artifact, expectedKeys) {
   const id = String(artifact?.id || '').trim();
   const key = String(artifact?.key || '').trim();
@@ -59,6 +63,29 @@ export function runtimeStageEnvelope(request) {
       contract: 'runtime-stage-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
       rule: 'Return only artifacts actually produced during this Room turn. State exact gaps when evidence is insufficient.',
+    },
+  };
+}
+
+export function roomPhaseEnvelope(request) {
+  return {
+    contract: 'room-phase.v1',
+    run_id: request.run_id,
+    playbook_id: request.playbook_id,
+    playbook_version: request.playbook_version,
+    phase_id: request.stage_id,
+    phase_kind: String(asObject(request.execution_config).phase_kind || 'execute'),
+    objective: request.objective,
+    inputs: asObject(request.inputs),
+    expected_artifacts: asArray(request.expected_artifacts),
+    completion_checks: asArray(request.checks),
+    unmet: asArray(request.unmet),
+    adapter_descriptors: asArray(request.adapter_descriptors),
+    authority: { external_writes: request.authority_granted === true },
+    result_contract: {
+      contract: 'room-phase-result.v1',
+      artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
+      rule: 'Return append-only artifacts actually produced by this Room phase and exact unresolved gaps.',
     },
   };
 }
@@ -114,7 +141,10 @@ export class RuntimeRoomDirector {
 
   async execute(request) {
     if (!request.room_id) throw new Error('runtime_room_id_required');
-    const envelope = runtimeStageEnvelope(request);
+    const roomPhase = usesRoomPhase(request);
+    const envelope = roomPhase ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
+    const requestContract = roomPhase ? 'room-phase.v1' : 'runtime-stage.v1';
+    const resultContract = roomPhase ? 'room-phase-result.v1' : 'runtime-stage-result.v1';
     let room = asObject(request.room_context);
     let turnId = String(request.turn_id || '').trim();
     if (this.prisma) {
@@ -127,13 +157,13 @@ export class RuntimeRoomDirector {
     }
     turnId = turnId || `runtime-turn-${randomUUID()}`;
     const body = await this.transport({
-      schema_version: 'runtime-stage.v1',
+      schema_version: requestContract,
       room_id: request.room_id,
       turn_id: turnId,
       user_id: String(room.user_id || request.owner_user_id || ''),
       org_id: request.org_id,
       user_message: String(request.objective || '').slice(0, 8000),
-      display_message: `Runtime stage - ${String(request.objective || '').trim()}`.slice(0, 8000),
+      display_message: `${roomPhase ? 'Runtime phase' : 'Runtime stage'} - ${String(request.objective || '').trim()}`.slice(0, 8000),
       execution_context: JSON.stringify(envelope),
       participant_ids: asArray(room.participant_ids).map(String).slice(0, 8),
       callback_url: this.callbackUrl,
@@ -143,10 +173,11 @@ export class RuntimeRoomDirector {
       write_policy: request.authority_granted === true ? 'authorized' : 'deny',
     });
     const result = body?.result;
-    if (result?.contract !== 'runtime-stage-result.v1') {
+    if (result?.contract !== resultContract) {
       throw new Error('runtime_room_result_contract_required');
     }
-    if (String(result.run_id) !== String(request.run_id) || String(result.stage_id) !== String(request.stage_id)) {
+    const resultStageId = roomPhase ? result.phase_id : result.stage_id;
+    if (String(result.run_id) !== String(request.run_id) || String(resultStageId) !== String(request.stage_id)) {
       throw new Error('runtime_room_result_correlation_mismatch');
     }
     const expectedKeys = new Set(asArray(request.expected_artifacts).map(String));

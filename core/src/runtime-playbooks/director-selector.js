@@ -80,7 +80,13 @@ export class DirectorPlaybookSelector {
   }
 
   async select({ objective, context = {}, scopeKey = 'global' } = {}) {
-    const catalog = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
+    const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
+    // New assignments always use the newest active version. Existing runs remain
+    // pinned to their immutable version through RuntimePlaybookRun.
+    const catalog = [...active.reduce((latest, entry) => {
+      if (!latest.has(entry.playbook_id)) latest.set(entry.playbook_id, entry);
+      return latest;
+    }, new Map()).values()];
     if (catalog.length === 0) throw new Error('runtime_playbook_catalog_empty');
     let previousError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {

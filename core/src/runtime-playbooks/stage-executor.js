@@ -238,6 +238,7 @@ export class GenericStageExecutor {
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
           adapter_descriptors: this.adapters?.descriptors?.() || [],
+          execution_config: asObject(stage.execution?.config),
           invoke_adapter: this.adapters ? (adapterId, operation, input, context = {}) => this.adapters.invoke(
             adapterId,
             operation,

@@ -1208,8 +1208,10 @@ class Director:
         # queries + the deliverable in THIS company — not a generic industry. '' = no brief.
         self.company_brief = str(company_brief or "")
         self.execution_context = str(execution_context or "")[:16000]
+        self.room_phase = self._parse_room_phase_envelope(self.execution_context)
         self.runtime_stage = self._parse_runtime_stage_envelope(self.execution_context)
-        self.work_order = self._parse_work_order_envelope(self.execution_context)
+        self.work_order = (self._parse_work_order_envelope(self.execution_context)
+                           or self._work_order_from_room_phase(self.room_phase))
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
@@ -1337,6 +1339,66 @@ class Director:
         except (TypeError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) and parsed.get("contract") == "runtime-stage.v1" else None
+
+    @staticmethod
+    def _parse_room_phase_envelope(raw: str) -> Optional[Dict[str, Any]]:
+        if "room-phase.v1" not in str(raw or ""):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) and parsed.get("contract") == "room-phase.v1" else None
+
+    @staticmethod
+    def _work_order_from_room_phase(phase: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Run a coarse Runtime phase through the Room's proven Director pipeline.
+
+        The playbook controls the outer lifecycle. Inside this envelope the Room
+        owns decomposition, methods, skills, and tools exactly as it does for a
+        human request. This compatibility view is private to the Room executor.
+        """
+        if not isinstance(phase, dict):
+            return None
+        inputs = phase.get("inputs") if isinstance(phase.get("inputs"), dict) else {}
+        target = inputs.get("context.target") if isinstance(inputs.get("context.target"), dict) else {}
+        constraints = (inputs.get("context.constraints")
+                       if isinstance(inputs.get("context.constraints"), dict) else {})
+        authority = phase.get("authority") if isinstance(phase.get("authority"), dict) else {}
+        expected = {str(value) for value in (phase.get("expected_artifacts") or [])}
+        requirements: List[Dict[str, Any]] = []
+        if "lead_record" in expected:
+            requirements.extend([
+                {"type": "records_persisted", "minimum": 1},
+                {"type": "source_evidence", "minimum": 1},
+                {"type": "distinct_fields", "minimum": 1},
+            ])
+        if "message_record" in expected:
+            requirements.append({"type": "email_drafts", "minimum": 1})
+        requirements.append({"type": "external_actions", "maximum": 0})
+        return {
+            "contract": "hq-work-order.v2",
+            "work_order_id": f"room-phase:{phase.get('run_id')}:{phase.get('phase_id')}",
+            "objective": str(phase.get("objective") or "Complete the assigned Runtime phase."),
+            "location": target.get("location") or target.get("geography"),
+            "target": target,
+            "completion_requirements": requirements,
+            "upstream_result": None,
+            "room_checkpoint": None,
+            "authority": {
+                "mode": "EXECUTE" if authority.get("external_writes") is True else "PREPARE",
+                "external_writes": authority.get("external_writes") is True,
+            },
+            "selected_skills": [],
+            "required_evidence": ["company context", "source-backed records", "durable lead identifiers"],
+            "acceptance_criteria": [
+                "Produce every expected phase artifact from real Room tools and retained company evidence.",
+                "Persist accepted records before preparing personalized messages.",
+                "Return exact gaps rather than presenting unfinished work as complete.",
+            ],
+            "evidence_refs": [],
+            "constraints": constraints,
+        }
 
     # ── LLM ───────────────────────────────────────────────────────────
     async def _groq(
@@ -2638,6 +2700,107 @@ class Director:
             if status == "blocked":
                 break
         return results
+
+    def _compile_room_phase_result(self, work_order_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Compile verified Room deliverables into append-only playbook artifacts."""
+        phase = self.room_phase or {}
+        expected = {str(value) for value in (phase.get("expected_artifacts") or [])}
+        deliverables = [row for row in (work_order_result.get("deliverables") or []) if isinstance(row, dict)]
+        prospect_records = [
+            record for artifact in deliverables if artifact.get("kind") == "prospect_records"
+            for record in (artifact.get("records") or []) if isinstance(record, dict)
+        ]
+        draft_records = [
+            record for artifact in deliverables if artifact.get("kind") == "email_drafts"
+            for record in (artifact.get("records") or []) if isinstance(record, dict)
+        ]
+        drafts_by_company = {
+            str(record.get("prospect_company") or "").strip().casefold(): record
+            for record in draft_records if str(record.get("prospect_company") or "").strip()
+        }
+        inputs = phase.get("inputs") if isinstance(phase.get("inputs"), dict) else {}
+        constraints = inputs.get("context.constraints") if isinstance(inputs.get("context.constraints"), dict) else {}
+        delivery_requested = constraints.get("delivery_requested") is True
+        artifacts: List[Dict[str, Any]] = []
+        lead_by_company: Dict[str, str] = {}
+
+        def artifact_id(key: str, identity: str) -> str:
+            material = "\0".join([
+                str(phase.get("run_id") or ""), str(phase.get("phase_id") or ""), key, identity,
+            ])
+            return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+        if "lead_record" in expected:
+            for record in prospect_records:
+                company = str(record.get("company") or "").strip()
+                company_key = company.casefold()
+                persistence_ref = str(record.get("memory_id") or "").strip()
+                draft = drafts_by_company.get(company_key)
+                recipient = str((draft or {}).get("to") or record.get("email") or "").strip()
+                # This phase promises message-ready accepted leads. Keep broader
+                # discovery evidence in the Room result, not in the accepted chain.
+                if not company or not persistence_ref or not recipient or not draft:
+                    continue
+                lead_id = artifact_id("lead_record", persistence_ref)
+                source_ref = str(record.get("source_url") or record.get("website") or "").strip()
+                place_ref = str(record.get("place_id") or "").strip()
+                refs = [value for value in [source_ref, f"google-places:{place_ref}" if place_ref else "",
+                                            f"tenant-lead:{persistence_ref}"] if value]
+                artifacts.append({
+                    "id": lead_id,
+                    "key": "lead_record",
+                    "status": "READY",
+                    "data": {
+                        "organization_key": company_key,
+                        "company": company,
+                        "persistence_ref": persistence_ref,
+                        "recipient": recipient,
+                        "fit_rationale": str(record.get("fit_reason") or record.get("fit_rationale") or "").strip(),
+                        "outreach_angle": str(record.get("outreach_angle") or "").strip(),
+                    },
+                    "source_refs": list(dict.fromkeys(refs)),
+                    "external_ref": persistence_ref,
+                })
+                lead_by_company[company_key] = lead_id
+
+        if "message_record" in expected:
+            for company_key, draft in drafts_by_company.items():
+                lead_ref = lead_by_company.get(company_key)
+                recipient = str(draft.get("to") or "").strip()
+                subject = str(draft.get("subject") or "").strip()
+                body = str(draft.get("body") or "").strip()
+                if not lead_ref or not recipient or not subject or not body:
+                    continue
+                message_id = artifact_id("message_record", lead_ref)
+                artifacts.append({
+                    "id": message_id,
+                    "key": "message_record",
+                    "status": "READY",
+                    "data": {
+                        "lead_ref": lead_ref,
+                        "recipient": recipient,
+                        "subject": subject,
+                        "body": body,
+                        "delivery_requested": delivery_requested,
+                    },
+                    "source_refs": [lead_ref],
+                    "external_ref": None,
+                })
+
+        gaps = [str((gap or {}).get("why") or (gap or {}).get("criterion") or gap)
+                for gap in (work_order_result.get("gaps") or []) if gap]
+        produced_keys = {artifact["key"] for artifact in artifacts}
+        for key in sorted(expected - produced_keys):
+            gaps.append(f"The Room did not return a verified {key} artifact for this phase.")
+        return {
+            "contract": "room-phase-result.v1",
+            "run_id": str(phase.get("run_id") or ""),
+            "phase_id": str(phase.get("phase_id") or ""),
+            "artifacts": artifacts,
+            "gaps": list(dict.fromkeys(value for value in gaps if value)),
+            "summary": str(work_order_result.get("report_markdown") or "").strip()[:4000],
+            "checkpoint": work_order_result.get("checkpoint") or {},
+        }
 
     async def _synthesize_runtime_stage_result(self) -> Dict[str, Any]:
         """Compile one Room turn into the generic artifact contract.
@@ -4722,7 +4885,13 @@ class Director:
         campaign_bundle_errors: List[str] = []
         work_order_result = None
         runtime_stage_result = None
-        if self.runtime_stage:
+        room_phase_result = None
+        if self.room_phase:
+            work_order_result = await self._synthesize_work_order_result()
+            room_phase_result = self._compile_room_phase_result(work_order_result)
+            final_text = str(room_phase_result.get("summary") or "")
+            await self.emit({"t": "room_phase_result", "result": room_phase_result})
+        elif self.runtime_stage:
             runtime_stage_result = await self._synthesize_runtime_stage_result()
             final_text = str(runtime_stage_result.get("summary") or "")
             await self.emit({"t": "runtime_stage_result", "result": runtime_stage_result})
@@ -4838,8 +5007,9 @@ class Director:
             "outreach_metrics": dict(self._outreach_metrics),
             "work_orders": list(plan.get("work_orders") or []),
             "work_results": list(self.work_results),
-            "work_order_result": work_order_result,
+            "work_order_result": None if self.room_phase else work_order_result,
             "runtime_stage_result": runtime_stage_result,
+            "room_phase_result": room_phase_result,
         }
 
 

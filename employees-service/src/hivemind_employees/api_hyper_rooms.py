@@ -3291,6 +3291,38 @@ async def _orchestrate_single_agent(
         })
         return RoomTurnResponse(ok=bool(handoff), cost_tokens=cost_tokens, status=status)
 
+    # Coarse Runtime phases use the Room's normal Director and work executor,
+    # then return append-only artifacts to the generic Core predicate engine.
+    if isinstance(result.get("room_phase_result"), dict):
+        contract = result["room_phase_result"]
+        gaps = [str(value) for value in (contract.get("gaps") or []) if str(value).strip()]
+        verdict = {
+            "met": not gaps and bool(contract.get("artifacts")),
+            "artifact_ok": bool(contract.get("artifacts")),
+            "assignments_ok": bool(result.get("work_results")),
+            "grounded_ok": all(bool(item.get("source_refs")) for item in (contract.get("artifacts") or [])),
+            "gaps": gaps,
+            "note": "Runtime phase artifacts returned for Core validation.",
+            "intended_output": "room_phase_result",
+        }
+        _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "room_phase_result": contract}
+        await _emit({"t": "verify", **verdict})
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "single-room-phase",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+        })
+        return RoomTurnResponse(
+            ok=True,
+            cost_tokens=cost_tokens,
+            status="complete",
+            verification=verdict,
+            artifacts=contract.get("artifacts") or [],
+            result=contract,
+            summary=str(contract.get("summary") or "")[:4000],
+        )
+
     # Runtime stages are governed by the generic Core predicate engine. The Room
     # returns evidence-backed artifacts; it does not duplicate transition logic.
     if isinstance(result.get("runtime_stage_result"), dict):
@@ -3988,7 +4020,8 @@ def _is_hq_work_order_context(execution_context: str) -> bool:
     governor. Replaying the entire Room goalkeeper only repeats the same work.
     """
     context = str(execution_context or "")
-    return "hq-work-order.v" in context or "runtime-stage.v" in context
+    return ("hq-work-order.v" in context or "runtime-stage.v" in context
+            or "room-phase.v" in context)
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:

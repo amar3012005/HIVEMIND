@@ -1490,8 +1490,21 @@ if (process.env.DOCLING_URL) {
           doc:  { smart: true,  ocr: false, tables: true,  pics: false },
           xlsx: { smart: true,  ocr: false, tables: true,  pics: false }, // cells, never prose or OCR
           xls:  { smart: true,  ocr: false, tables: true,  pics: false },
-          pptx: { smart: true,  ocr: true,  tables: false, pics: true  }, // slides are images; no doc-wide table pass
-          ppt:  { smart: true,  ocr: true,  tables: false, pics: true  },
+          // pics:false is deliberate and measured. With picture description ON, a
+          // real .pptx ran the convert to the full 600s ceiling and TIMED OUT —
+          // Docling issues one vision call per slide image, serially. It produced
+          // memories only because the hybrid chunker finished separately and the
+          // chunk-survival path kept its output. Slide TEXT already carries the
+          // substance and the chunker returns it in seconds.
+          // The right way to get slide figures is one vision pass over the whole
+          // deck (as figure-rich PDFs do), which needs a PPTX→PDF render step that
+          // does not exist yet. Until then a fast, complete text extraction beats a
+          // 10-minute one that times out. Re-enable per deployment with
+          // KB_PPTX_PICTURE_DESC=true once that path exists.
+          pptx: { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
+          ppt:  { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
         };
         const profile = FORMAT_PROFILES[ext] || null;
         const smart = smartOpt === true

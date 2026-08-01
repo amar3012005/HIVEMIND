@@ -46,7 +46,7 @@ x-common-env: &common-env
 services:
   core:
     build: { context: .., dockerfile: Dockerfile.production }
-    image: hivemind/core-api:prod-20260801-kb-v5
+    image: hivemind/core-api:prod-20260801-kb-v6
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped

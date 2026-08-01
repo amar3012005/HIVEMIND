@@ -1,4 +1,4 @@
-import { chatCompletionFetch, DEFAULT_CHAT_SYNTHESIS_MODEL } from '../llm/chat-provider.js';
+import { chatCompletionFetch, DEFAULT_CHAT_PLANNER_MODEL } from '../llm/chat-provider.js';
 
 function parseJsonContent(payload) {
   const content = String(payload?.choices?.[0]?.message?.content || '').trim();
@@ -66,7 +66,7 @@ export class DirectorPlaybookSelector {
   constructor({
     registry,
     completionFetch = chatCompletionFetch,
-    model = process.env.RUNTIME_PLAYBOOK_SELECTOR_MODEL || DEFAULT_CHAT_SYNTHESIS_MODEL,
+    model = process.env.RUNTIME_PLAYBOOK_SELECTOR_MODEL || DEFAULT_CHAT_PLANNER_MODEL,
     timeoutMs = 15_000,
   } = {}) {
     if (!registry) throw new Error('runtime_playbook_selector_registry_required');
@@ -87,7 +87,7 @@ export class DirectorPlaybookSelector {
         body: JSON.stringify({
           temperature: 0,
           response_format: { type: 'json_object' },
-          max_completion_tokens: 500,
+          max_completion_tokens: 1000,
           messages: [
             {
               role: 'system',

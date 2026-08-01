@@ -168,6 +168,55 @@ async function firecrawlGet(path, { apiKey, timeoutMs = 65000 } = {}) {
   return payload;
 }
 
+/**
+ * Read a bounded set of public pages without treating the result as account
+ * analytics. Platform metrics remain connector-owned.
+ */
+export async function scrapePublicPages(urls, {
+  apiKey = process.env.FIRECRAWL_API_KEY,
+  maxPages = 5,
+} = {}) {
+  const targets = [...new Set((Array.isArray(urls) ? urls : [])
+    .map((value) => cleanString(value, 1000))
+    .filter((value) => /^https:\/\//i.test(value)))]
+    .slice(0, Math.max(1, Math.min(8, Number(maxPages) || 5)));
+  if (!apiKey || !targets.length) return [];
+
+  return Promise.all(targets.map(async (url) => {
+    try {
+      const payload = await firecrawlRequest('/scrape', {
+        url,
+        formats: ['markdown', 'links'],
+        onlyMainContent: true,
+        removeBase64Images: true,
+        blockAds: true,
+        waitFor: 0,
+        timeout: 20_000,
+        maxAge: 86_400_000,
+      }, { apiKey, timeoutMs: 25_000 });
+      const data = payload?.data || payload || {};
+      return {
+        url: cleanString(data?.metadata?.sourceURL || data?.metadata?.url || url, 1000),
+        title: cleanString(data?.metadata?.title, 300),
+        description: cleanString(data?.metadata?.description, 500),
+        content: compactText(data?.markdown || data?.content, 5000),
+        status: 'observed',
+        provider: 'firecrawl',
+      };
+    } catch (error) {
+      return {
+        url,
+        title: '',
+        description: '',
+        content: '',
+        status: 'unavailable',
+        provider: 'firecrawl',
+        reason: String(error?.message || 'public_page_unavailable').slice(0, 300),
+      };
+    }
+  }));
+}
+
 function normalizedSocialProfile(rawUrl) {
   let url;
   try { url = new URL(rawUrl); } catch { return null; }

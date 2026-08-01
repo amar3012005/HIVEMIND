@@ -152,6 +152,35 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, { runtime: asJsonRuntime(runtime), usage });
       }
 
+      if (pathname === '/v1/hq/authority-policy' && req.method === 'PATCH') {
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const body = await parseBody(req).catch(() => ({}));
+        const outboundMessages = String(body.outbound_messages || '').trim().toLowerCase();
+        if (!['manual', 'auto'].includes(outboundMessages)) {
+          return jsonResponse(res, { error: 'hq_runtime_outbound_authority_invalid' }, 400);
+        }
+        if (runtime.authorityPolicy?.outbound_messages !== outboundMessages) {
+          await prisma.hqRuntime.update({
+            where: { id: runtime.id },
+            data: {
+              authorityPolicy: { ...(runtime.authorityPolicy || {}), outbound_messages: outboundMessages },
+              version: { increment: 1 },
+            },
+          });
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'verification',
+            title: outboundMessages === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review enabled',
+            summary: outboundMessages === 'auto'
+              ? 'Future verified outbound-message checkpoints may proceed automatically. Existing pending batches still require their exact approval action.'
+              : 'Future outbound-message checkpoints will wait for explicit approval before delivery.',
+            details: { actor: userId, policy_key: 'outbound_messages', preference: outboundMessages },
+          });
+        }
+        return jsonResponse(res, { runtime: asJsonRuntime(await getHqRuntime({ prisma, orgId })) });
+      }
+
       if (pathname === '/v1/hq/activate' && req.method === 'POST') {
         const body = await parseBody(req).catch(() => ({}));
         const objective = String(body.objective || await findDefaultObjective(prisma, orgId)).trim().slice(0, 5000);

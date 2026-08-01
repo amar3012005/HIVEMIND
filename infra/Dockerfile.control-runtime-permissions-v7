@@ -1,0 +1,6 @@
+FROM hivemind/control-plane:prod-20260801-runtime-loop-v6
+
+USER root
+COPY --chown=nodejs:nodejs core/src/hq-runtime/repository.js /app/src/hq-runtime/repository.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/routes.js /app/src/hq-runtime/routes.js
+USER nodejs

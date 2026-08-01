@@ -206,8 +206,12 @@ export async function buildChatRecallContext(ctx = {}) {
       // what deserves the model's attention; discarding part of the answer after
       // that decision wastes the whole pipeline. Top results now pass in full up to
       // a generous ceiling.
+      const isImage = (m.tags || []).includes('kind:image')
+        || /^File: .*Visual evidence:/.test(String(m.content || '').slice(0, 200));
       const TOP_FULL = Number(process.env.CHAT_TOP_MEMORY_CHARS || 8000);
-      const cap = idx < 3 ? TOP_FULL : (isFact ? 400 : 700);
+      const cap = idx < 3
+        ? (isImage ? Number(process.env.CHAT_IMAGE_MEMORY_CHARS || TOP_FULL) : TOP_FULL)
+        : (isFact ? 400 : 700);
       // For the lower ranks a cap is still needed for context budget — but cut from
       // the MIDDLE, never the tail. Structured content puts its most identifying
       // material last (an image description's entity list, a document's conclusion,

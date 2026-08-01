@@ -37,6 +37,47 @@ Workflow tool BANNED — agents only.
 
 ---
 
+## FOUNDATION — do this before any feature audit
+Every feature below consumes this pipeline, so fixing it once fixes them all.
+
+- [ ] **One ingestion path, not seven — source-aware.**
+  KB goes through `document-first-ingestion` (segments → evidence →
+  anchored claims). Onboarding, connectors, meetings, chat and image each write
+  memories DIRECTLY, skipping it. Measured 2026-08-01 after removing the 119
+  prospect dumps: `knowledge_base` 267 mems / 149 anchored, `image-upload`
+  38 / 27, and **`hyperagents-onboarding` 8 / 0, `connector:gmail` 3 / 0,
+  `talk-to-hive` 1 / 0** — three sources at ZERO. An unanchored memory cannot be
+  cited, verified, or re-extracted when the extractor improves.
+
+  **The seam already exists — verified, do NOT build a new one:**
+  `core/src/knowledge/canonical-ingest.js` (301 lines) exports
+  `validateEnvelope`, `resolvePlatform`, `normalizeProvenance`, `detectMode`,
+  `canonicalMemoryType`, `canonicalSourceType`, `legacyPayloadToEnvelope`, and
+  already defines the vocabularies:
+  - `INGEST_SOURCE_TYPES` = `kb | connector | mcp | meeting | chat | api`
+  - `INGEST_SCOPES` = `personal | organization | project | team`
+  - `CANONICAL_MEMORY_TYPES` = `fact | preference | decision | lesson | goal |
+    event | summary | synthesis | conversation`
+  Only `server.js` imports it today. The other writers just never call it.
+
+  **REQUIRED — the memory SHAPE must follow the source.** One pipeline does not
+  mean one output. Each source carries different structure and must yield the
+  memory types that match it, not a flat wall of `fact`:
+  | source | expected shape |
+  |---|---|
+  | **KB doc** | section-tree: one `summary` parent + `fact`/`decision`/`goal` children, each anchored to its segment. Table row-sets become ONE claim with the full enumeration. |
+  | **Meeting** | typed section-tree (already built — see the meeting section-tree work): `decision` for what was agreed, `goal` for commitments, `event` for what happened, `fact` for stated numbers. Never one memory per meeting. |
+  | **Connector** (gmail/slack/…) | thread-scoped: `conversation` for the exchange, `decision`/`goal` promoted out of it. Short inputs — do NOT force the KB windowing on them. |
+  | **Single image** | ONE atomic `fact` (already correct — `image-single-canonical-memory`). Do not fragment. |
+  | **Chat** | `conversation` + any `preference`/`decision` the turn states. |
+  | **MCP / API** | caller-declared type, validated against `CANONICAL_MEMORY_TYPES`. |
+
+  GATE: every source writes through the seam; `anchored/total` ≈ 100% for all
+  sources; a per-source fixture proves the SHAPE (a meeting yields decisions not
+  one blob; an image yields exactly one fact; a KB table yields one enumerated
+  claim). No duplicate ingestion path is left behind — delete the bypass, do not
+  leave it as a fallback.
+
 ## Your Brain
 - [ ] **Knowledge Base** — finish: close the extraction-yield constraint (`_extractUnified` returns 7
   facts, the pipeline persists 3), then complete the authZ / input-validation / idempotency guardrails.

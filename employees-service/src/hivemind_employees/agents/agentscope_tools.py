@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -83,6 +84,20 @@ _TURN_ARTIFACTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextV
 _TURN_PROVENANCE: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "hyper_turn_provenance", default=None
 )
+_PLACES_SEARCH_COUNT: "contextvars.ContextVar[int]" = contextvars.ContextVar(
+    "hq_places_search_count", default=0
+)
+_PLACES_SEARCH_TOTAL: "contextvars.ContextVar[int]" = contextvars.ContextVar(
+    "hq_places_search_total", default=0
+)
+
+
+def get_places_search_count() -> int:
+    return int(_PLACES_SEARCH_COUNT.get() or 0)
+
+
+def get_places_search_total() -> int:
+    return int(_PLACES_SEARCH_TOTAL.get() or 0)
 
 
 def set_turn_provenance(turn_id: Optional[str] = None, room_id: Optional[str] = None,
@@ -119,10 +134,31 @@ def _prospect_slug(v: str) -> str:
 
 
 def _save_prospect_memory(api_key, user_id, org_id, project_id, *, company, note,
-                          phone="", email="", website="", source="agent") -> dict:
+                          phone="", email="", website="", address="", fit_reason="",
+                          distinctive_signal="", outreach_angle="", source="agent") -> dict:
     """Persist a prospect/lead as an org-scoped memory (tag 'prospect') carrying a PERSONAL NOTE.
     The whole company's rooms see it via list_prospects → reuse over re-discovery. The memory's
     createdAt records WHEN the lead was added. Returns the created memory or an {error} dict."""
+    # DISABLED BY DEFAULT — prospects are CRM records, not memories.
+    #
+    # This wrote one memory per lead ("PROSPECT: <co> PHONE: … EMAIL: … WEBSITE: …")
+    # with every intelligence step switched off in the body below: smartIngest
+    # False, skipProcessing, skip_relationship_classification,
+    # skip_contradiction_detection, defer_entity_linking. They were never processed
+    # as memories at all — they used the memory table as a lead store.
+    #
+    # Measured: 119 written into one org in a single day, 0% anchored to evidence,
+    # the largest unanchored source in the corpus. They pollute semantic recall — a
+    # question about company strategy competes against a lead's phone number — and
+    # being unanchored they cannot be cited, verified, or re-extracted.
+    #
+    # Override with HYPER_PROSPECTS_TO_MEMORY=true. The durable fix is a real leads
+    # table with list_prospects reading from it.
+    if str(os.getenv("HYPER_PROSPECTS_TO_MEMORY", "false")).lower() != "true":
+        return {"skipped": "prospect_memory_writes_disabled",
+                "reason": "prospects are CRM records, not memories; "
+                          "set HYPER_PROSPECTS_TO_MEMORY=true to override",
+                "company": str(company or "").strip()[:120]}
     company = str(company or "").strip()
     note = str(note or "").strip()
     if not company or not note:
@@ -137,6 +173,14 @@ def _save_prospect_memory(api_key, user_id, org_id, project_id, *, company, note
         lines.append(f"EMAIL: {email}")
     if website:
         lines.append(f"WEBSITE: {website}")
+    if address:
+        lines.append(f"ADDRESS: {address}")
+    if fit_reason:
+        lines.append(f"FIT_REASON: {fit_reason}")
+    if distinctive_signal:
+        lines.append(f"DISTINCTIVE_SIGNAL: {distinctive_signal}")
+    if outreach_angle:
+        lines.append(f"OUTREACH_ANGLE: {outreach_angle}")
     lines.append(f"NOTE: {note}")
     tags = ["prospect", "lead", f"company:{_prospect_slug(company)}"]
     if phone:
@@ -145,10 +189,17 @@ def _save_prospect_memory(api_key, user_id, org_id, project_id, *, company, note
         tags.append("has-email")
     body = {
         "title": f"Prospect: {company}"[:120], "content": "\n".join(lines), "tags": tags,
-        "sync": True, "memory_type": "fact", "source_platform": "hyperagents-prospect",
+        "sync": True, "smartIngest": False, "skipProcessing": True,
+        "skipPredictCalibrate": True, "skipAdvisoryLock": True,
+        "skip_relationship_classification": True, "skip_contradiction_detection": True,
+        "defer_entity_linking": True,
+        "memory_type": "fact", "source_platform": "hyperagents-prospect",
         "source_metadata": {"source_type": "prospect", "source_platform": "hyperagents-prospect",
                             "prospect_source": source, "company": company,
-                            "phone": phone or None, "email": email or None, "website": website or None},
+                            "phone": phone or None, "email": email or None, "website": website or None,
+                            "address": address or None, "fit_reason": fit_reason or None,
+                            "distinctive_signal": distinctive_signal or None,
+                            "outreach_angle": outreach_angle or None},
     }
     if project_id:
         body["project_id"] = project_id
@@ -1248,6 +1299,61 @@ def build_hivemind_toolkit(
     # tagged 'prospect'). Every room sees the same book, so agents REUSE leads instead of
     # re-discovering/re-generating (expensive Places calls). Each lead carries a PERSONAL NOTE
     # captured when it was added (the memory's createdAt records WHEN). ALWAYS registered.
+    def places_search(query: str, limit: int = 20) -> ToolResponse:
+        """Discover real local businesses for a location-grounded outreach assignment.
+        Use only after checking list_prospects. Query format must be '<category> in <city>'.
+        Results come from Google Places and are saved into the shared lead book."""
+        clean = re.sub(r"\s+", " ", str(query or "").strip())[:180]
+        key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY") or ""
+        if not key:
+            return _tool_response({"status": "blocked", "reason": "google_maps_unavailable"})
+        if len(clean.split()) < 2:
+            return _tool_response({"status": "blocked", "reason": "query_requires_category_and_location"})
+        _PLACES_SEARCH_COUNT.set(get_places_search_count() + 1)
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
+                response = c.post(
+                    "https://places.googleapis.com/v1/places:searchText",
+                    headers={
+                        "Content-Type": "application/json", "X-Goog-Api-Key": key,
+                        "X-Goog-FieldMask": "places.displayName,places.internationalPhoneNumber,places.websiteUri,places.formattedAddress",
+                    },
+                    json={"textQuery": clean, "maxResultCount": min(max(int(limit or 20), 1), 20)},
+                )
+                response.raise_for_status()
+                places = (response.json() or {}).get("places") or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[places_search] failed: %s", exc)
+            return _tool_response({"status": "blocked", "reason": str(exc)[:180]})
+        rows = []
+        for place in places:
+            name = str((place.get("displayName") or {}).get("text") or "").strip()
+            if not name:
+                continue
+            row = {"company": name, "phone": str(place.get("internationalPhoneNumber") or ""),
+                   "website": str(place.get("websiteUri") or ""), "address": str(place.get("formattedAddress") or "")}
+            rows.append(row)
+        # Core writes a prospect synchronously. Persist a full Places page in
+        # parallel so one valid discovery step cannot monopolize HQ for minutes.
+        def persist(row: Dict[str, str]) -> dict:
+            contactability = "direct phone or website is available" if row.get("phone") or row.get("website") else "contact route still needs verification"
+            fit_reason = f"{row['company']} matches the requested '{clean}' segment; {contactability}."
+            outreach_angle = f"Open with the relevance of {row['company']} to the requested market, then validate its current need before proposing a solution."
+            return _save_prospect_memory(
+                api_key, user_id, org_id, project_id, company=row["company"],
+                note=f"Discovered via Google Places for '{clean}'. {fit_reason}",
+                phone=row["phone"], website=row["website"], address=row["address"],
+                fit_reason=fit_reason,
+                distinctive_signal=f"Verified listing at {row['address'] or 'the requested location'} with {'a direct contact route' if row.get('phone') or row.get('website') else 'contact enrichment pending'}.",
+                outreach_angle=outreach_angle, source="google-places",
+            )
+        if rows:
+            with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+                list(pool.map(persist, rows))
+        _PLACES_SEARCH_TOTAL.set(get_places_search_total() + len(rows))
+        return _tool_response({"status": "completed", "query": clean, "found": len(rows), "prospects": rows, "source": "Google Places"})
+    tk.register_tool_function(places_search)
+
     def list_prospects(query: str = "", limit: int = 30) -> ToolResponse:
         """See the company's EXISTING prospects/leads (with the note captured when each was added)
         BEFORE you discover or generate new ones — reuse what's already there, don't re-search.
@@ -1278,14 +1384,18 @@ def build_hivemind_toolkit(
                                "hint": "Reuse these before discovering new leads."})
     tk.register_tool_function(list_prospects)
 
-    def save_prospect(company: str, note: str, phone: str = "", email: str = "", website: str = "") -> ToolResponse:
+    def save_prospect(company: str, note: str, phone: str = "", email: str = "", website: str = "",
+                      address: str = "", fit_reason: str = "", distinctive_signal: str = "",
+                      outreach_angle: str = "") -> ToolResponse:
         """Add a prospect/lead to the company's shared lead book with a PERSONAL NOTE about why
         they matter right now — the reason/angle/signal, captured at THIS moment. Use when you
         identify a lead worth tracking so the whole company can reuse it later without re-searching.
         Args: company (required), note (why this lead matters — required), phone (E.164), email, website."""
         res = _save_prospect_memory(api_key, user_id, org_id, project_id,
                                     company=company, note=note, phone=phone, email=email,
-                                    website=website, source="agent")
+                                    website=website, address=address, fit_reason=fit_reason,
+                                    distinctive_signal=distinctive_signal,
+                                    outreach_angle=outreach_angle, source="agent")
         return _tool_response(res) if isinstance(res, dict) else _tool_response_text(str(res))
     tk.register_tool_function(save_prospect)
 

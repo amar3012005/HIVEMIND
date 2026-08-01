@@ -46,7 +46,7 @@ x-common-env: &common-env
 services:
   core:
     build: { context: .., dockerfile: Dockerfile.production }
-    image: hivemind/core-api:prod-20260731-kb-render
+    image: hivemind/core-api:prod-20260731-hq-email-loop-v1
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped
@@ -78,7 +78,7 @@ services:
 
   control-plane:
     build: { context: .., dockerfile: Dockerfile.control-plane }
-    image: hivemind/control-plane:prod-20260731-gmail-lead-watcher-v2
+    image: hivemind/control-plane:prod-20260801-room-checkpoints-v2
     container_name: hm-control
     env_file: [../.env, ../.env.firecrawl]
     restart: unless-stopped
@@ -99,7 +99,7 @@ services:
 
   employees:
     build: { context: ../employees-service }
-    image: hivemind/employees:prod-20260731-hq-runtime-compound-v3
+    image: hivemind/employees:prod-20260801-room-checkpoints-v1
     container_name: hm-employees
     env_file: [../.env]
     restart: unless-stopped
@@ -193,9 +193,27 @@ services:
     image: ghcr.io/docling-project/docling-serve:latest
     container_name: hm-docling
     restart: unless-stopped
-    mem_limit: 2g
-    memswap_limit: 3g
-    cpus: 1.0
+    mem_limit: 6g
+    memswap_limit: 6g
+    # 2 cores could not finish a 54-page enriched PDF inside 600s. Layout analysis
+    # + table structure + picture description are CPU-bound and parallelise; the
+    # host has 8 cores. Ingest is async so this buys quality, not user latency.
+    cpus: 4.0
+    environment:
+      # The /v1/chunk/hybrid/file call is SYNCHRONOUS and the server caps it at
+      # DOCLING_SERVE_MAX_SYNC_WAIT (default 120s), returning
+      # `504 Conversion is taking too long` — which surfaced as `chunkerError`
+      # while the convert itself was still running fine. Must exceed the client
+      # ceiling in docling-adapter.js (DOCLING_SMART_TIMEOUT_MS, 600s).
+      DOCLING_SERVE_MAX_SYNC_WAIT: "900"
+      # ONE worker, deliberately. A 54-page enriched conversion peaks near
+      # 3 GiB; two of them concurrently hit the 6g cap and the worker died
+      # mid-task, which the client then saw as a vanished task (3x 404).
+      # Ingest is queued and async, so serialising costs nothing a user sees
+      # while letting each document have the full memory budget.
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      # Let the layout/table models use the cores we just granted.
+      OMP_NUM_THREADS: "4"
     volumes:
       - docling-models:/opt/app-root/src/.cache
 

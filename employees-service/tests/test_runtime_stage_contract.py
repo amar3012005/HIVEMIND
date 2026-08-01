@@ -127,6 +127,7 @@ def test_runtime_stage_exposes_prior_artifacts_as_citable_evidence(monkeypatch):
 
     async def synth_call(messages, **_kwargs):
         captured["payload"] = json.loads(messages[1]["content"])
+        captured["system"] = messages[0]["content"]
         return {"content": json.dumps({
             "artifacts": [
                 {"key": "result_record", "data": {"name": "Alpha"},
@@ -143,4 +144,5 @@ def test_runtime_stage_exposes_prior_artifacts_as_citable_evidence(monkeypatch):
     assert "input:artifacts.request_record:1" in evidence_ids
     assert "input:artifacts.request_record:2" in evidence_ids
     assert "inputs" not in captured["payload"]["stage"]
+    assert "derive them from the cited input" in captured["system"]
     assert len(result["artifacts"]) == 2

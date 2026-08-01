@@ -2573,7 +2573,10 @@ class Director:
                 "Treat supplied input artifacts as authoritative evidence. When a completion check compares "
                 "output count with an input collection, return one supported output for every relevant input; "
                 "preserve its entity identity and cite that input evidence ID. Never substitute or invent an "
-                "entity that is absent from the supplied inputs. "
+                "entity that is absent from the supplied inputs. Analytical fields explicitly requested by the "
+                "stage objective are the Room's work product: derive them from the cited input and company "
+                "evidence instead of treating their prior absence as a blocker. This never permits inventing a "
+                "provider action, contact fact, metric, source, or durable identifier. "
                 "If the work is incomplete, return the supported artifacts and exact gaps; do not fabricate "
                 "fields merely to satisfy completion checks.")},
             {"role": "user", "content": json.dumps({

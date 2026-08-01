@@ -1,8 +1,8 @@
 # Knowledge Base
 
 **Group:** Your Brain · **Route:** `/hivemind/app/knowledge`
-**Status:** HARDENED ON INPUT, BLOCKED ON PARSE — 9 defects fixed and verified live;
-PDF figures + table structure still lost to two environment blockers
+**Status:** PARSE CHAIN COMPLETE — 16 defects fixed, deployed in a pinned image,
+canary 6/6. Tables now captured; figure descriptions + guardrails still open.
 
 ## Frontend
 - `pages/KnowledgeBase.jsx`
@@ -134,6 +134,29 @@ claims semantically near-identical.
 
 **Next step:** instrument that loop to log which claims return no memory and why,
 or run the canary against a `hybrid` org with no prior Solvis content.
+
+## Parse chain — FIXED end to end (2026-08-01)
+Four defects sat between "Docling ran" and "we used the result", each hiding the
+next. All shipped and verified on the real 54-page deck:
+1. `smart` defaulted false, so Tier-1 fast-pdf won and Docling never ran (9683f0767)
+2. a 404 poll (dead worker) was treated as transient → burned the full 600s timeout
+3. the chunker's 180s client timeout aborted while the parse SUCCEEDED
+4. the fallback keyed on `text` alone, discarding `chunks=81 parseError=none` (0a346fe1b)
+Plus infra (651c09415): docling 2g→6g (peaks 3.1 GiB, was OOM-restarting 9×),
+1→4 cpus, MAX_SYNC_WAIT 120→900, one worker.
+
+**And the cap.** `KB_CURATED_MEMORY_CAP=8` in `.env` overrode the dynamic cap
+(`ceil(candidates*0.7)`, floor 8, ceiling 30) for EVERY document — a 54-page deck
+and a one-page note both stopped at 8. Set to 0. New `[kb-curate]` log lines
+attribute loss to prefilter / cap / model so this cannot hide again (9aaded04d).
+
+| the same 54-page deck | before | after |
+|---|---|---|
+| tier | fast-pdf, 813ms | **docling, 81 chunks, no errors** |
+| word_count | 3348 | **3810** |
+| segments | 20 | **63** |
+| memories | 8-9 | **14** |
+| inverter table | 4 partial rows, 3 brands lost | **consolidated multi-brand claims** |
 
 ## What remains, in priority order
 Measured against a real 54-page German strategy deck (4.2 MB) and supermemory's

@@ -42,8 +42,8 @@ img_of() { case "$1" in
   core) echo core-api;; control-plane) echo control-plane;; employees) echo employees;;
   tara-deepgram) echo tara-deepgram;; fe) echo fe;; esac; }
 recreate_one() { case "$1" in
-  fe)  cd /root/hivemind-next; docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null ;;
-  *)   cd /root/hivemind;      docker compose -f "$HETZNER" --env-file "$ENV" up -d --no-deps --force-recreate "$1" >/dev/null ;;
+  fe)  cd /root/hivemind-next; NEXT_VERSION=latest docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null ;;
+  *)   cd /root/hivemind;      VERSION=latest docker compose -f "$HETZNER" --env-file "$ENV" up -d --no-deps --force-recreate "$1" >/dev/null ;;
 esac; }
 health_gate() { local c="$1"; for i in $(seq 1 45); do
   s=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo missing)
@@ -103,6 +103,11 @@ else
   chg services/tara-aaas services/tara-deepgram && SVCS+=(tara-deepgram)
   chg frontend/Da-vinci frontend/Da-vinci/Dockerfile frontend/Da-vinci/package.json frontend/Da-vinci/package-lock.json && SVCS+=(fe)
 fi
+if [ -n "${QUICK_DEPLOY_FORCE_SERVICES:-}" ]; then
+  for forced in ${QUICK_DEPLOY_FORCE_SERVICES//,/ }; do
+    case "$forced" in control-plane|core|employees|tara-deepgram|fe) SVCS+=("$forced");; *) echo "unknown forced service: $forced"; exit 1;; esac
+  done
+fi
 # de-dup
 SVCS=($(printf '%s\n' "${SVCS[@]}" | awk '!seen[$0]++'))
 if [ -n "${QUICK_DEPLOY_SKIP_SERVICES:-}" ]; then
@@ -152,8 +157,15 @@ fi
 # build → save ONE stable rollback (the outgoing live image) → run :latest
 for s in "${SVCS[@]}"; do
   i=$(img_of "$s"); tag=$([ "$s" = fe ] && echo "latest-single" || echo latest); stag=$([ "$s" = fe ] && echo "stable-single" || echo stable)
-  echo "== $s: save current :$tag → :$stag (rollback), build new :$tag"
-  docker image inspect "hivemind/$i:$tag" >/dev/null 2>&1 && docker tag "hivemind/$i:$tag" "hivemind/$i:$stag" || echo "  (no prior :$tag — first deploy, no rollback saved)"
+  echo "== $s: save running image → :$stag (rollback), build new :$tag"
+  current_image=$(docker inspect "${CONTAINER[$s]}" --format '{{.Image}}' 2>/dev/null || true)
+  if [ -n "$current_image" ] && docker image inspect "$current_image" >/dev/null 2>&1; then
+    docker tag "$current_image" "hivemind/$i:$stag"
+  elif docker image inspect "hivemind/$i:$tag" >/dev/null 2>&1; then
+    docker tag "hivemind/$i:$tag" "hivemind/$i:$stag"
+  else
+    echo "  (no prior image — first deploy, no rollback saved)"
+  fi
   cd "$REPO"            # build context must be the worktree
   build_one "$s"
   built_revision=$(docker image inspect "hivemind/$i:$tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')

@@ -4,7 +4,7 @@ name: hivemind-next
 # frontend network and does not own Core, Control Plane, or any data service.
 services:
   frontend:
-    image: hivemind/fe:prod-20260728-onboarding-291e5f7
+    image: hivemind/fe:prod-20260801-singulance-main-aef7082
     restart: unless-stopped
     ports:
       - "127.0.0.1:${NEXT_FRONTEND_PORT:-2388}:80"

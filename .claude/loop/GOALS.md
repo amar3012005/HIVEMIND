@@ -30,6 +30,15 @@ defects fixed + deployed + re-verified on the box, then commit → journal → `
 **Guardrails audited per feature:** tenant isolation · authZ (unauth + wrong-org) · input validation ·
 failure mode (never a success-shaped empty result) · idempotency · observability · reproducibility.
 
+**THREE GATES before any feature is `[x]` — see `CLAUDE.md`:**
+1. **E2E** — the PAGE is right for a real user on all 3 orgs, not just a green curl.
+2. **SECURITY REVIEW** — tenant isolation proved with two real keys + set intersection;
+   authZ incl. authenticated-but-WRONG-ORG; input validation; secrets; SSRF; quota
+   actually called. Unreviewed = NOT DONE, however well it works.
+3. **`left.md`** — anything unfinished goes in `.claude/features/<slug>.left.md` with
+   evidence, the honest reason, who it hurts, and the exact next step. Say it in chat
+   too. Silent partial completion is the one unforgivable failure.
+
 **HOW each goal is worked: `.claude/loop/FEATURE-LOOP.md` — read it first, every time.**
 FE → backend-to-storage → enterprise failure modes → measure with curl → fix by MODIFYING
 existing code → verify e2e in the browser → record → next. No patches, no duplicate paths.
@@ -79,8 +88,10 @@ Every feature below consumes this pipeline, so fixing it once fixes them all.
   leave it as a fallback.
 
 ## Your Brain
-- [ ] **Knowledge Base** — finish: close the extraction-yield constraint (`_extractUnified` returns 7
-  facts, the pipeline persists 3), then complete the authZ / input-validation / idempotency guardrails.
+- [~] **Knowledge Base** — parse+capture chain SHIPPED (16 defects, pinned image, canary 6/6;
+  deck: fast-pdf→docling 81 chunks, segs 20→63, mems 8→14, table consolidated).
+  **BLOCKED ON GATE 2** — no security review run. 7 open items with accountability in
+  `.claude/features/knowledge-base.left.md`; figure descriptions still produce 0.
 - [ ] **Memories** — audit `pages/Memories.jsx` (12 endpoints) end to end; scope/visibility filtering
   correct for all 3 orgs; delete + bulk paths idempotent.
 - [ ] **Talk to HIVE (chat)** — `/api/chat` guardrails; verify `scopes_found` annotation, citations

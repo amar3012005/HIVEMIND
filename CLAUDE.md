@@ -1,78 +1,77 @@
-## MCP Tools: code-review-graph
+# HIVEMIND — the operating loop
 
-**IMPORTANT: Project has knowledge graph. ALWAYS use
-code-review-graph MCP tools BEFORE Grep/Glob/Read for codebase exploration.** Graph faster, cheaper (fewer tokens), gives
-structural context (callers, dependents, test coverage) file
-scanning cannot.
+Full engineering context lives in `AGENTS.md`. This file is the **loop**: how work
+is sequenced, and what "done" means before anything moves forward.
 
-### When to use graph tools FIRST
+## The loop
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
+Work the queue in `.claude/loop/GOALS.md` **top to bottom, one feature at a time.**
+For each feature, run `.claude/loop/FEATURE-LOOP.md` (FE → backend-to-storage →
+enterprise failure modes → measure with curl → fix by MODIFYING existing code →
+verify e2e in the browser). Then, and only then:
 
-Fall back to Grep/Glob/Read **only** when graph not cover need.
+### Gate 1 — E2E, not "the API works"
+The feature is done when the **page** shows the right thing for a real user, on
+all three live orgs including the 0-memory one. A green curl is not e2e. A passing
+unit test is not e2e. Re-run the feature's reproduction command from a clean state
+and watch it pass.
 
-### Key Tools
+### Gate 2 — SECURITY REVIEW, every feature, no exceptions
+Before a feature is marked `[x]`, run a security review over what it touches.
+Minimum coverage, each answered **with evidence, not reasoning**:
+- **Tenant isolation** — prove with TWO real scoped keys and a set intersection
+  that org A cannot see org B's rows. Never by reading a `WHERE` clause.
+- **AuthZ** — unauthenticated, *authenticated-but-wrong-org*, and member-vs-admin.
+  The middle one is the one that actually leaks.
+- **Input validation** — 0 bytes, huge, wrong MIME, corrupt, encrypted. What is
+  the reject path, and does it tell the user something actionable?
+- **Secrets** — nothing server-side reaches a browser (the `x-tara-key` lesson).
+- **Injection / SSRF** — anywhere a URL, query, or path comes from a user or agent.
+- **Quota** — is the limit *called* on the consuming path, or merely defined?
 
-| Tool | Use when |
-|------|----------|
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of change |
-| `get_affected_flows` | Finding which execution paths impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
-| `refactor_tool` | Planning renames, finding dead code |
+A feature that has not been security-reviewed is **not done**, even if it works
+perfectly. Do not advance the queue.
 
-### Workflow
-
-1. Graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern="tests_for" to check coverage.
-
----
-
-## HIVEMIND Session Trail — bootstrap context on every new session
-
-This repo has persistent memory in HIVEMIND across sessions. **At the start of every new Claude Code session in this repo, run these as the FIRST tool calls:**
+### Gate 3 — LEFT.MD, the accountability gate
+If ANYTHING is left unfinished, write `.claude/features/<slug>.left.md` **before**
+moving on. Not a TODO list — an accountability record. Each entry states:
 
 ```
-hivemind_recall({ tags: ["session-b-master", "session-trail-2026-05-09", "master-index"], mode: "panorama", limit: 10 })
-hivemind_recall({ tags: ["session-progress"], mode: "insight", limit: 20 })
+## <what is not done>
+**Evidence:** the log line, query result, or measurement proving it is real
+**Why it was left:** the honest reason — blocked, out of context, needs owner
+                     approval, requires a capacity decision. "Ran out of context"
+                     is acceptable; vagueness is not.
+**Who it hurts:** the concrete production consequence for a real tenant
+**Next step:** the specific first action, precise enough to start cold
 ```
 
-The first call returns master trail-index memories listing every prior session's commits, decisions, and pending actions. The second call returns the most recent task-level memories (decisions, refactors, bug fixes, code ingests).
+Then say the same thing in the chat reply. **Silent partial completion is the one
+unforgivable failure** — it is exactly the shape of every defect this codebase has
+produced (a document logged `indexed` with zero memories; a fixture that measured
+dedup instead of capture; `200 []` from a broken dependency). Never let your own
+work take that shape.
 
-If a master-index memory is returned, follow up with:
+Only after Gates 1–3: commit, mark `[x]` in GOALS.md, and start the next feature
+**without asking**.
 
-```
-hivemind_traverse_graph({ memory_id: "<master-id>", depth: 3, relationship: "all" })
-```
+## Non-negotiables
 
-to walk the graph of related child memories.
-
-### Memory discipline (mandatory in this repo)
-
-- After any Edit/Write to a real file → `hivemind_ingest_code({ file_path, content, summary })` (auto-dedups against prior version)
-- On any architectural choice → `hivemind_log_decision({ title, decision, rationale, alternatives, affected_files })`
-- On any rename/move/split/merge/extract → `hivemind_track_refactor`
-- On any test write/update → `hivemind_test_coverage({ action: "save", ... })`
-- Before writing in a known-buggy area → `hivemind_recall_bugs({ context, file_path })`
-- Before modifying unfamiliar code → `hivemind_why_code({ query, file_path })`
-- At end of meaningful task → `hivemind_save_conversation({ title, messages, tags: ["session-progress"], platform: "claude" })`
-
-### Tag conventions
-
-Every memory MUST include:
-- `file:<path>` for code-related memories
-- `fn:<name>` when scoped to one function
-- `bug | fix | gotcha` for failure-mode memories
-- a session-trail tag like `session-trail-YYYY-MM-DD` for chronological clustering
-- a session identity tag like `session-b` if running in parallel with another session
-
-At the END of every session, ALWAYS save a master-index memory tagged `session-trail-<date>` + `master-index` summarising what was done, the commits, the pending actions, and the IDs of child memories. New sessions recall via that one tag and rehydrate everything.
+- **Modify existing code.** Nearly every real defect here has been a wrong default,
+  a dead branch, an unimplemented comment, or a `||` in the wrong order — not
+  missing code. Grep before writing; run `feature-recon` when unsure.
+- **No second path.** A parallel implementation is worse than the bug. Delete the
+  bypass, never leave it as a fallback.
+- **No patch on a patch.** A special case guarding a special case means the layer
+  below is wrong. Fix that instead.
+- **Measure, don't reason.** Constraints come from curl and SQL. When code and
+  memory disagree, the running code wins.
+- **Your own test is the first suspect.** Eleven "production bugs" in one session
+  were broken probes.
+- **Auth contract** (full version in `.claude/loop/GOALS.md`): core `:2026` takes a
+  scoped API key; control-plane `:2027` takes a session Bearer. `X-Org-Id` is CORS,
+  not auth. Get this wrong and every probe returns a convincing empty result.
+- **Deploy hygiene.** Build in `/root/hivemind-main`, run from `/root/hivemind`,
+  absolute paths, tag the rollback image FIRST. A `docker cp` is temporary — bake
+  it into an image before calling it shipped, or the next `compose up` erases it.
+- **Report failures with the output.** State plainly what is unverified.

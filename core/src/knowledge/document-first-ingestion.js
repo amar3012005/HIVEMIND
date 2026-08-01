@@ -1748,6 +1748,34 @@ Every item must include a non-empty content field and one or more valid support_
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
   async ingestKnowledgeDocument(opts) {
+    // IMAGES NEVER TAKE THE DOCUMENT PATH — enforced here, not left to callers.
+    //
+    // An image is not a document. There is no text to segment, so the evidence
+    // rows this path would create are chunks of a vision description pointing at
+    // themselves: self-referential provenance that adds rows without adding
+    // proof. services/image-ingest.js is the correct owner and is explicit that
+    // its description "becomes the ONE and ONLY memory of this image — nothing
+    // else is stored".
+    //
+    // The FE already routes images to uploadImage(), but this entry point is
+    // reachable directly over the API and would build a knowledge_document,
+    // knowledge_segments and memory_evidence_links for a PNG. That is how
+    // image-upload memories ended up 27 of 38 anchored to evidence they should
+    // never have had. Fail closed with an actionable message rather than
+    // silently producing the wrong shape.
+    const _ext = String(opts?.filename || '').split('.').pop()?.toLowerCase();
+    const _isImage = String(opts?.contentType || '').toLowerCase().startsWith('image/')
+      || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif', 'avif'].includes(_ext);
+    if (_isImage && String(process.env.KB_ALLOW_IMAGE_DOCUMENTS || '').toLowerCase() !== 'true') {
+      const err = new Error(
+        `"${opts?.filename || 'image'}" is an image and must be ingested via the image endpoint `
+        + '(/api/ingest/image), which stores exactly one memory and no evidence rows. '
+        + 'The document path would create segments and evidence links an image cannot support.');
+      err.code = 'IMAGE_NOT_A_DOCUMENT';
+      err.statusCode = 415;
+      this.logger?.warn?.(`[kb] rejected image on the document path: ${opts?.filename}`);
+      throw err;
+    }
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestKnowledgeDocument(opts)); // residency: org's store
     const metadata = opts?.metadata || {};
     const scopeKey = metadata.primary_team_id

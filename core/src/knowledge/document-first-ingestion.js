@@ -496,8 +496,8 @@ FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
 
 DO NOT EXTRACT — these are NOT facts, skip them entirely (a section that is ONLY these → "facts":[]):
 - Page furniture: headers, footers, page numbers, document/article/part numbers (e.g. "33567-3", "Art.-Nr. 30792", "Dokument-Nr."), "Technische Änderungen vorbehalten"/copyright/legal-disclaimer lines, and table-of-contents or chapter-number lines.
-- Contact/company blocks: postal addresses, phone/fax numbers, email addresses, company registration or legal-form lines (e.g. "SOLVIS GmbH, Grotrian-Steinweg-Straße 12, Telefon 0531 28904-0").
-- Raw tabular number dumps with no prose: a run of bare numbers, axis labels, or dimensions with no stated claim is NOT a fact (e.g. "0 0,5 1 1,5 2 2,5 ..."). Only extract a measurement when you can state it as a complete sentence naming WHAT the value is and for WHICH thing (e.g. "The SolvisBruno 10 kW has a fuel heat output of 3.1–10.7 kW") — otherwise skip it.
+- Contact/company blocks: postal addresses, phone/fax numbers, email addresses, company registration or legal-form lines (a company name followed by a street address and phone number is a contact block, not a claim).
+- Raw tabular number dumps with no prose: a run of bare numbers, axis labels, or dimensions with no stated claim is NOT a fact (e.g. "0 0,5 1 1,5 2 2,5 ..."). Only extract a measurement when you can state it as a complete sentence naming WHAT the value is and for WHICH thing (state the named thing and its measured quantity in one complete sentence) — otherwise skip it.
 - Garbled/unreadable text: if a passage is OCR garbage, mojibake, or non-language glyph soup (e.g. "ĞŝƐƚƵŶŐ ΀Ŭt΁"), SKIP it — never reconstruct or extract from it.
 
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
@@ -774,7 +774,7 @@ Output the JSON object and nothing else.`;
             if (/\bDIN\s?[A-Z]?\d|\bA[3-6]\b|\b\d{2,4}\s?(x|×)\s?\d{2,4}\b/i.test(s)) return true;                  // paper/format sizes
             if (/\b(regular|bold|italic|light|medium|thin|black|condensed|extended|oblique)\b/i.test(s) && /^[A-Z][a-z]+(\s[A-Z]?[a-z]+)*$/.test(s)) return true; // font faces
             if (/^https?:\/\//i.test(s) || /\bwww\./i.test(s)) return true;                                        // URLs
-            if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (SOLVIS_RG_4C)
+            if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (an all-caps token with underscores/slashes and no spaces)
             return false;
           };
           const rawEntityNames = (ex.entities || [])
@@ -880,15 +880,16 @@ Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
-BAD  "Der Sohn des Inhabers, der bereits im Unternehmen tätig ist"  — which company? about what?
-BAD  "Fehlende Elektro-Kompetenz (PV, Speicher, HEMS)"              — whose weakness?
-BAD  "Eine Frau ist im Unternehmen tätig"                            — unrecallable
-GOOD "Solvis SHK-Persona 'Nachfolger': der Sohn des Inhabers, bereits im Betrieb tätig, hat ein Studium abgeschlossen"
-GOOD "Schwäche des SHK-Handwerks: fehlende Elektro-Kompetenz in PV, Speicher und HEMS"
-If a claim's subject is only a bare role, pronoun, or unnamed person ("der Sohn", "eine Frau", "das Unternehmen", "sie"), you MUST prefix it with the concrete entity, persona name, or document topic it belongs to. A claim that cannot be given a subject is not durable — drop it.
+Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
+BAD   <bare role or kinship> + <attribute>        — the role is not a subject; whose?
+BAD   <attribute or deficiency> with no owner     — belongs to nobody, cannot be retrieved
+BAD   <pronoun> + <attribute>                     — the referent is lost once stored alone
+GOOD  <named entity, persona, or document topic> + <attribute, scope, numbers>
+If the subject of a claim is a bare role, kinship term, pronoun, or unnamed person or organisation, RESOLVE it: carry the named person, organisation, persona, product, or the document's own topic from the surrounding section INTO the claim text. Resolve pronouns to their referent. A claim you cannot give a concrete subject is not durable — drop it rather than emit it subjectless.
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (e.g. "…White Paper…20251106 (1).pdf"), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (e.g. "Art.-Nr. 27770"), fonts or typefaces (e.g. "Calibri Regular", "Antenna Medium"), colours (e.g. "Solvis-Grau"), paper/format sizes (e.g. "DIN A5"), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.`;
+Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
+FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.`;
     // Model fallback: if the primary extraction model fails (provider error,
     // finish=error, unparseable), fall through to a DIFFERENT family so a
     // section's facts are never lost to one model/provider hiccup. Configurable

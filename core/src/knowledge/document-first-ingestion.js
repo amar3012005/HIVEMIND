@@ -328,6 +328,25 @@ function extractJsonArray(text) {
 }
 
 
+// Path-safety for anything derived from a user-supplied filename. The upload
+// route accepts an arbitrary multipart filename, and while the file WRITER
+// already sanitises before touching disk (verified: "../../../etc/passwd"
+// landed as ".._.._.._etc_passwd" and /etc/passwd was untouched), the recorded
+// storageLocation kept the raw string:
+//     kb/<user>/<sha>/../../../etc/passwd
+// The write path was safe; the stored path was poisoned. Any later reader that
+// resolves storageLocation — download, re-extract, export — would traverse out
+// of the tenant directory. Sanitise at the point of RECORD so the stored value
+// can never disagree with what is on disk.
+function safePathSegment(name) {
+  return String(name || 'file')
+    .replace(/[\\/]/g, '_')      // path separators, both flavours
+    .replace(/\.\./g, '_')        // parent-directory hops
+    .replace(/^[.\s]+/, '')       // leading dots/space (hidden files, ". ." tricks)
+    .replace(/[\u0000-\u001f]/g, '') // control bytes incl. NUL truncation
+    .slice(0, 255) || 'file';
+}
+
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
     this.db = db;
@@ -1786,7 +1805,7 @@ Every item must include a non-empty content field and one or more valid support_
           contentType,
           sizeBytes: BigInt(fileBuffer.length),
           checksum,
-          storageLocation: `kb/${userId}/${checksum}/${filename}`,
+          storageLocation: `kb/${userId}/${checksum}/${safePathSegment(filename)}`,
           payload: { filename, uploadedAt: new Date().toISOString() },
           metadata
         },
@@ -2157,7 +2176,7 @@ Every item must include a non-empty content field and one or more valid support_
         contentType,
         sizeBytes: BigInt(fileBuffer.length),
         checksum,
-        storageLocation: `enterprise/${userId}/${checksum}/${filename}`,
+        storageLocation: `enterprise/${userId}/${checksum}/${safePathSegment(filename)}`,
         payload: { filename, schema, uploadedAt: new Date().toISOString() },
         metadata
       },

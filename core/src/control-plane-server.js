@@ -6802,6 +6802,27 @@ Write the persona now.`;
       return jsonResponse(res, { error: 'master key required' }, 403);
     }
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    // DISABLED BY DEFAULT — prospects are CRM records, not memories. This is the
+    // THIRD writer of the same rows: agentscope_tools was guarded in 3ab5356db and
+    // hivemind_client immediately after, but guarding two of three doors is
+    // guarding none — 115 prospect memories reappeared within hours of a 119-row
+    // cleanup, newest at 19:48, while the first guard sat live in the image.
+    //
+    // Every intelligence step is switched off on these writes (smartIngest false,
+    // skipProcessing, skip_relationship_classification, skip_contradiction_detection,
+    // defer_entity_linking) so they were never processed as memories: 0% anchored to
+    // evidence, using the memory table as a lead store, and competing with real
+    // memories in semantic recall. Observed live in /chat — "Prospect: Hannover Re"
+    // was cited as a source for a question about Solvis heat-pump documentation.
+    //
+    // One env flag governs all three writers.
+    if (String(process.env.HYPER_PROSPECTS_TO_MEMORY || '').toLowerCase() !== 'true') {
+      return jsonResponse(res, {
+        skipped: 'prospect_memory_writes_disabled',
+        reason: 'prospects are CRM records, not memories; set HYPER_PROSPECTS_TO_MEMORY=true to override',
+        written: 0,
+      }, 200);
+    }
     const body = await parseBody(req).catch(() => ({}));
     const orgId = String(body?.org_id || '');
     const userId = String(body?.user_id || '');
@@ -9827,7 +9848,9 @@ Write the persona now.`;
 
     // Outreach campaign runner — /v1/hyper-rooms/:id/outreach-campaigns +
     // /v1/outreach-campaigns/* (create/get/start/stop/patch/generate/execute).
-    if (pathname.includes('outreach-campaigns') || pathname === '/internal/hyper/outreach/propose') {
+    if (pathname.includes('outreach-campaigns')
+        || pathname === '/internal/hyper/outreach/propose'
+        || pathname === '/internal/hyper/outreach/calls/reconcile') {
       if (await outreachModule().handle(req, res, pathname)) return true;
     }
 

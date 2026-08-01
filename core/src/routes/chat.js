@@ -167,7 +167,19 @@ export async function buildChatRecallContext(ctx = {}) {
 
     memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
       const isFact = (m.tags || []).includes('extracted-fact');
-      const cap = idx < 3 ? 2400 : isFact ? 400 : 700;
+      // An image memory is ONE long visual-evidence description whose entity list
+      // is deliberately its LAST section — exactly what head-truncation discards.
+      // Observed live: asked what we know about HEIDELBERG from the Solvis docs,
+      // chat retrieved and CITED the right memory, then answered "none of them
+      // mention Heidelberg" — because "HEIDELBERG" sits at char 2428 of 5314 and
+      // the top-3 cap of 2400 cut 28 characters short of the word. Retrieval was
+      // correct; the context window truncated the answer away. Every improvement to
+      // image-description richness makes this worse, pushing entities further out.
+      const isImage = (m.tags || []).includes('kind:image')
+        || /^File: .*Visual evidence:/.test(String(m.content || '').slice(0, 200));
+      const cap = isImage
+        ? Number(process.env.CHAT_IMAGE_MEMORY_CHARS || 6000)
+        : (idx < 3 ? 2400 : isFact ? 400 : 700);
       return {
         id: m.id,
         title: m.title || (m.content || '').slice(0, 60),

@@ -1778,7 +1778,22 @@ if (process.env.DOCLING_URL) {
           (parseResult?.markdown || '').length,
         );
         const usableChunks = chunkResult?.chunks?.length || 0;
-        const parseFailed = Boolean(parseResult?.error) || (usableChars < 200 && usableChunks === 0);
+        // A parse ERROR is not a reason to fall back when the chunker still
+        // returned usable chunks. Parse and chunk run concurrently and each
+        // re-converts the document, so on a slow file the async convert can time
+        // out while the chunker completes — observed live:
+        //   parseError=Docling async polling timeout after 600000ms
+        //   chunks=42 chunkerError=none
+        // and 42 layout-aware Docling chunks were discarded in favour of fast-pdf's
+        // flattened text. My previous fix keyed on parseResult.error alone and so
+        // still lost them. Fall back only when there is genuinely nothing usable
+        // from EITHER call.
+        const parseFailed = usableChunks === 0
+          && (Boolean(parseResult?.error) || usableChars < 200);
+        if (parseResult?.error && usableChunks > 0) {
+          console.warn(`[docling-adapter] parse errored (${String(parseResult.error).slice(0, 80)}) but `
+            + `${usableChunks} chunks survived — using them instead of falling back for ${filename}`);
+        }
         if (parseFailed && ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');

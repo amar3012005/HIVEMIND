@@ -69,6 +69,24 @@ def test_room_authored_checkpoint_is_retained_for_hq_resume():
     assert result["checkpoint"]["disposition"] == "continue_room"
 
 
+def test_checkpoint_scalar_values_are_not_split_into_characters():
+    result = assemble_work_order_result(
+        {
+            "report_markdown": "A capability is still required.",
+            "deliverables": [{"kind": "prepared_records", "record_count": 2}],
+            "checkpoint": {
+                "stage": "prepare", "completed": "records persisted",
+                "next": "draft messages", "disposition": "wait_capability",
+                "reason": "Draft capability is required.", "requires": "message-drafting",
+            },
+        },
+        envelope=_envelope(), subtasks=[_subtask(passed=False)], metrics={"tool_calls_total": 1},
+    )
+
+    assert result["checkpoint"]["completed"] == ["records persisted"]
+    assert result["checkpoint"]["requires"] == ["message-drafting"]
+
+
 def test_completed_result_always_closes_checkpoint():
     result = assemble_work_order_result(
         {"report_markdown": "Done", "checkpoint": {"disposition": "continue_room"}},

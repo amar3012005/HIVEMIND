@@ -2450,7 +2450,11 @@ class Director:
             )
             verified_worker_records = sum(1 for row in worker_records if str(row.get("email") or "").strip())
             draft_target = draft_minimum or verified_worker_records
-            worker_max_tokens = max(1200, min(6000, draft_target * 650)) if draft_work else 1200
+            # JSON overhead plus two concise paragraphs regularly exceeds 650
+            # tokens per draft. Truncated JSON invalidates the entire batch, so
+            # budget for complete structured records instead of paying for a
+            # failed generation and returning zero accepted artifacts.
+            worker_max_tokens = max(1800, min(12000, draft_target * 1000 + 600)) if draft_work else 1200
             response = await self._groq([
                 {"role": "system", "content": _now_block() + f"You are {owner_name}, {lane}. {persona}"},
                 {"role": "user", "content": f"{prompt}\n\nVERIFIED RECORDS FOR THIS WORK PRODUCT:\n{json.dumps(worker_records, ensure_ascii=False)[:20000]}\n\nPRIOR SUBTASK OUTPUT:\n{prior}\n\nTOOL RESULTS:\n{json.dumps(tool_outputs, ensure_ascii=False)}\n\nEVIDENCE BOARD:\n{context}"},
@@ -2537,7 +2541,8 @@ class Director:
                             "assignment": order.get("objective") or envelope.get("objective"),
                         }, ensure_ascii=False)},
                     ], model=self.persona_model, temp=0.2, bucket="worker", force_text=True,
-                       json_object=True, max_tokens=max(1200, min(6000, len(missing_sources) * 650)))
+                       json_object=True,
+                       max_tokens=max(1800, min(12000, len(missing_sources) * 1000 + 600)))
                     parsed_followup = _first_json_object(str((followup or {}).get("content") or "")) or {}
                     for draft in (parsed_followup.get("email_drafts") or []):
                         accepted_draft = accept_draft(draft)

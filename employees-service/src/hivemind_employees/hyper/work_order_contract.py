@@ -50,6 +50,12 @@ def _actual_counts(authored: dict[str, Any], metrics: dict[str, Any]) -> dict[st
 
 def _checkpoint(authored: dict[str, Any], status: str) -> dict[str, Any]:
     value = authored.get("checkpoint") if isinstance(authored.get("checkpoint"), dict) else {}
+    completed_values = value.get("completed") or []
+    if not isinstance(completed_values, list):
+        completed_values = [completed_values]
+    required_values = value.get("requires") or []
+    if not isinstance(required_values, list):
+        required_values = [required_values]
     disposition = str(value.get("disposition") or "").strip().lower()
     if status == "completed":
         disposition = "complete"
@@ -57,11 +63,11 @@ def _checkpoint(authored: dict[str, Any], status: str) -> dict[str, Any]:
         disposition = "continue_room" if authored.get("deliverables") else "request_hq"
     return {
         "stage": str(value.get("stage") or "work_order").strip()[:120],
-        "completed": [str(item).strip()[:120] for item in (value.get("completed") or []) if str(item).strip()][:20],
+        "completed": [str(item).strip()[:120] for item in completed_values if str(item).strip()][:20],
         "next": str(value.get("next") or "").strip()[:240] or None,
         "disposition": disposition,
         "reason": str(value.get("reason") or "").strip()[:1000],
-        "requires": [str(item).strip()[:240] for item in (value.get("requires") or []) if str(item).strip()][:20],
+        "requires": [str(item).strip()[:240] for item in required_values if str(item).strip()][:20],
     }
 
 

@@ -1,0 +1,16 @@
+FROM hivemind/core-api:prod-20260731-hq-runtime-v2
+USER root
+COPY --chown=nodejs:nodejs core/prisma/schema.prisma /app/prisma/schema.prisma
+COPY --chown=nodejs:nodejs core/src/hq-runtime/repository.js /app/src/hq-runtime/repository.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/scheduler.js /app/src/hq-runtime/scheduler.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/schedule-store.js /app/src/hq-runtime/schedule-store.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/routes.js /app/src/hq-runtime/routes.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/instruction-loop.js /app/src/hq-runtime/instruction-loop.js
+COPY --chown=nodejs:nodejs core/src/growth/planner.js /app/src/growth/planner.js
+COPY --chown=nodejs:nodejs core/src/growth/operating-loop.js /app/src/growth/operating-loop.js
+RUN npx prisma generate --schema /app/prisma/schema.prisma \
+ && chown -R nodejs:nodejs /app/node_modules/.prisma /app/node_modules/@prisma \
+ && chmod -R u+rwX,g+rX /app/node_modules/.prisma /app/node_modules/@prisma
+USER nodejs

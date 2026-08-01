@@ -47,7 +47,7 @@ test('campaign list is hard-scoped to the authenticated organization', async () 
     const result = await executeCampaignTool('campaign_list', {}, {
       prisma, userId: 'user-1', orgId: 'org-server', ctx: {},
     });
-    assert.deepEqual(where, { orgId: 'org-server' });
+    assert.deepEqual(where, { orgId: 'org-server', status: { not: 'CANCELLED' } });
     assert.deepEqual(result, { campaigns: [] });
   } finally {
     if (oldEnabled === undefined) delete process.env.CAMPAIGNS_V2_ENABLED; else process.env.CAMPAIGNS_V2_ENABLED = oldEnabled;

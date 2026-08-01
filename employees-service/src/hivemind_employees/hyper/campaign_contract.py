@@ -161,9 +161,39 @@ def assemble_campaign_bundle(
 
     creative = plan.get("creative_system") if isinstance(plan.get("creative_system"), dict) else {}
     hypotheses = [row for row in (creative.get("hypotheses") or []) if isinstance(row, dict)]
+    # Hypothesis ids and their action links are compiler-owned operating
+    # structure. When synthesis omits them, complete a neutral two-route test
+    # from the selected strategy rather than sending the full report back to an
+    # LLM solely to satisfy schema mechanics.
+    strategy_summary = str(plan.get("strategy") or "the selected campaign strategy").strip()
+    defaults = [
+        {
+            "id": "hypothesis_problem",
+            "insight": "A clear problem framing can make the campaign immediately relevant.",
+            "promise": "Explain the campaign's value without unsupported outcome claims.",
+            "hook": "Start with the audience problem this campaign addresses.",
+            "cta": "Learn more.",
+            "experiment_hypothesis": f"Problem-led framing of {strategy_summary} will earn stronger qualified engagement than a generic announcement.",
+            "channels": channels,
+        },
+        {
+            "id": "hypothesis_value",
+            "insight": "A concrete value framing can help the audience understand why to engage.",
+            "promise": "Show the practical value of the selected strategy without claiming measured results.",
+            "hook": "Make the campaign's value proposition concrete and concise.",
+            "cta": "Explore the details.",
+            "experiment_hypothesis": f"Value-led framing of {strategy_summary} will earn stronger engagement than a generic announcement.",
+            "channels": channels,
+        },
+    ]
+    while len(hypotheses) < 2:
+        hypotheses.append(copy.deepcopy(defaults[len(hypotheses)]))
     for index, hypothesis in enumerate(hypotheses):
-        hypothesis["id"] = str(hypothesis.get("id") or f"hypothesis_{index + 1}")
-        hypothesis.setdefault("channels", channels)
+        fallback = defaults[index % len(defaults)]
+        hypothesis["id"] = str(hypothesis.get("id") or fallback["id"] or f"hypothesis_{index + 1}")
+        for field in ("insight", "promise", "hook", "cta", "experiment_hypothesis"):
+            hypothesis[field] = str(hypothesis.get(field) or fallback[field]).strip()
+        hypothesis["channels"] = hypothesis.get("channels") if isinstance(hypothesis.get("channels"), list) and hypothesis.get("channels") else list(channels)
     creative["hypotheses"] = hypotheses
     creative.setdefault("approved_claim_ids", [])
     plan["creative_system"] = creative
@@ -180,13 +210,13 @@ def assemble_campaign_bundle(
         action["format"] = str(action.get("format") or "post")
         action["final_copy"] = str(action.get("final_copy") or action.get("copy") or "").strip()
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
-        if action["channel"] == "x_organic":
+        if action["channel"] in {"x_organic", "linkedin", "instagram", "facebook", "tiktok", "youtube", "pinterest", "reddit", "threads", "bluesky", "google_business"}:
             payload["text"] = action["final_copy"]
         action["payload"] = payload
         if not isinstance(action.get("scheduled_offset_minutes"), int) or isinstance(action.get("scheduled_offset_minutes"), bool):
             action["scheduled_offset_minutes"] = round(final_offset * index / max(1, len(actions) - 1))
         action["rationale"] = str(action.get("rationale") or "")
-        action["hypothesis_id"] = str(action.get("hypothesis_id") or "")
+        action["hypothesis_id"] = str(action.get("hypothesis_id") or hypotheses[index % len(hypotheses)]["id"])
         action["dependencies"] = action.get("dependencies") if isinstance(action.get("dependencies"), list) else []
         action["success_measure"] = str(action.get("success_measure") or "")
         action["rollback_or_exit"] = str(action.get("rollback_or_exit") or "")

@@ -39,7 +39,7 @@ export class PlaywrightServiceRuntime {
     this.fetch = fetchImpl || globalThis.fetch;
   }
 
-  async crawl({ urls, depth = 2, pageLimit = 25 } = {}) {
+  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false } = {}) {
     const seeds = (Array.isArray(urls) ? urls : []).map(normalizeUrl).filter(Boolean);
     if (!seeds.length) throw new Error('No valid URLs provided');
     const allowedOrigin = new URL(seeds[0]).origin;
@@ -59,6 +59,7 @@ export class PlaywrightServiceRuntime {
           depth: Math.max(0, Math.min(Number(depth) || 0, 4)),
           page_limit: Math.max(1, Math.min(Number(pageLimit) || 25, 100)),
           settle_ms: this.settleMs,
+          capture_screenshot: Boolean(captureScreenshot),
         }),
         signal: controller.signal,
       });

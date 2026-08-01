@@ -305,7 +305,7 @@ export function amrBumpRecall(orgId, ids) {
 // REMOTE ORGS: was fire-and-forget (lost on agent-down). Now durable via outbox.
 // Ordering: seq guarantees this edge op lands AFTER the write op for the same memory.
 export function amrAddEdge(rel) {
-  if (process.env.MNEME_DEBUG_ROUTING) console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');
+  if (process.env.MNEME_DEBUG_ROUTING === '1') console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');
   if (!rel?.fromId || !rel?.toId) return;
   if (rel.orgId && orgIsRemote(rel.orgId)) {
     // Use fromId as the partition key so edge ops for a given memory are ordered

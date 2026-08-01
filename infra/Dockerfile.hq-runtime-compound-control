@@ -1,0 +1,7 @@
+FROM hivemind/control-plane:prod-20260731-hq-runtime-p8
+
+USER root
+COPY --chown=nodejs:nodejs core/src/hq-runtime/instruction-loop.js /app/src/hq-runtime/instruction-loop.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js
+USER nodejs

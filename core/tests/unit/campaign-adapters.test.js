@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { gmailAdapter } from '../../src/campaigns/adapters/gmail.js';
 import { taraAdapter } from '../../src/campaigns/adapters/tara.js';
 import { xOrganicAdapter } from '../../src/campaigns/adapters/x-organic.js';
+import { __test as zernioTest, createZernioSocialAdapter } from '../../src/campaigns/adapters/zernio-social.js';
+import { createZernioAdsAdapter } from '../../src/campaigns/adapters/zernio-ads.js';
+import { __test as zernioExecutionTest } from '../../src/campaigns/zernio-execution.js';
 import { assertCampaignAdapter } from '../../src/campaigns/adapters/contract.js';
 
 const campaign = { id: 'campaign-a', orgId: 'org-a', ownerUserId: 'user-a', roomId: 'room-a', name: 'Pilot', goal: 'Launch' };
@@ -38,6 +41,94 @@ test('X adapter normalizes owned Post metrics without exposing credentials', asy
   });
   assert.equal(requests.length, 2); assert.equal(metrics.impressions, 100); assert.equal(metrics.engagements, 15);
   assert.equal(metrics.engagement_rate, 0.15); assert.equal(metrics.followers, 42);
+});
+
+test('generic social adapter publishes through the organization-owned Zernio account', async () => {
+  const account = zernioExecutionTest.normalizeAccount({ _id: 'provider-linkedin-a', platform: 'linkedin', isActive: true, canPost: true }, 'org-a');
+  const linkedin = createZernioSocialAdapter('linkedin');
+  let request;
+  const result = await linkedin.execute({
+    prisma: { zernioOrgProfile: { async findUnique() { return { orgId: 'org-a', connectedAccounts: [account] }; } } },
+    action: action('linkedin', { text: 'Approved LinkedIn post' }),
+    approval: { ...approval, channels: [...approval.channels, 'linkedin'] },
+    providers: { async requestZernio(path, options) { request = { path, options }; return { post: { _id: 'post-a', status: 'published' } }; } },
+  });
+  assert.equal(request.path, '/posts');
+  assert.equal(request.options.requestId, 'action-linkedin');
+  assert.deepEqual(request.options.body.platforms, [{ platform: 'linkedin', accountId: 'provider-linkedin-a' }]);
+  assert.equal(result.externalId, 'post-a');
+  assert.equal(JSON.stringify(result).includes('provider-linkedin-a'), false);
+});
+
+test('generic social metrics expose only the stable campaign metric contract', () => {
+  assert.deepEqual(zernioTest.normalizedMetrics({
+    impressions: 100, engagements: 12, urlClicks: 5, likes: 4, replies: 2,
+    reposts: 1, accessToken: 'must-not-leak', accountId: 'provider-account',
+  }), {
+    impressions: 100, engagements: 12, clicks: 5, likes: 4, comments: 2,
+    shares: 1, follows: 0, engagement_rate: 0.12, click_through_rate: 0.05,
+  });
+});
+
+test('empty Zernio profile preserves native X execution and provider-bound metrics', async () => {
+  const fallbackCalls = [];
+  const fallback = {
+    async checkCapability() { fallbackCalls.push('capability'); return { connected: true }; },
+    validateAction() { return { valid: true }; },
+    async execute() { fallbackCalls.push('execute'); return { externalId: '12345', response: { provider: 'native_x' } }; },
+    async reconcile() { fallbackCalls.push('reconcile'); return { status: 'SUCCEEDED', externalId: '12345' }; },
+    async pause() { return { status: 'PAUSED' }; },
+    async captureBaseline() { fallbackCalls.push('baseline'); return { followers: 10 }; },
+    async syncMetrics() { fallbackCalls.push('metrics'); return { impressions: 20 }; },
+  };
+  const adapter = createZernioSocialAdapter('x_organic', { fallback });
+  const prisma = {
+    zernioOrgProfile: { async findUnique() { return { orgId: 'org-a', connectedAccounts: [] }; } },
+    campaignActionAttempt: { async findFirst() { return { response: { provider: 'native_x' } }; } },
+  };
+  const nativeAction = { ...action('x_organic', { text: 'Approved post' }), externalId: '12345' };
+  await adapter.checkCapability({ prisma, action: nativeAction });
+  await adapter.execute({ prisma, action: nativeAction, approval });
+  await adapter.reconcile({ prisma, action: nativeAction });
+  await adapter.captureBaseline({ prisma, campaign });
+  const metrics = await adapter.syncMetrics({ prisma, action: nativeAction });
+  assert.deepEqual(metrics, { impressions: 20 });
+  assert.deepEqual(fallbackCalls, ['capability', 'execute', 'reconcile', 'baseline', 'metrics']);
+});
+
+test('paid adapter resolves an advertiser account and creates one approval-bound ad idempotently', async () => {
+  const restoreKey = process.env.ZERNIO_API_KEY;
+  process.env.ZERNIO_API_KEY = 'server-only-test-key';
+  const account = zernioExecutionTest.normalizeAccount({ _id: 'provider-xads-a', platform: 'xads', isActive: true }, 'org-a');
+  const xAds = createZernioAdsAdapter('x_ads');
+  let createRequest;
+  const paidAction = {
+    ...action('x_ads', { text: 'A concise approved ad', goal: 'awareness', destination_url: 'https://example.com', targeting: { countries: ['FR'] } }),
+    campaign: { ...campaign, objective: 'AWARENESS', brief: { destination_url: 'https://example.com' } },
+  };
+  try {
+    const result = await xAds.execute({
+      prisma: {
+        zernioOrgProfile: { async findUnique() { return { orgId: 'org-a', connectedAccounts: [account] }; } },
+        campaignPlanVersion: { async findUnique() { return { bundle: { media_plan: { currency: 'EUR', channels: [{ channel: 'x_ads', budget_amount: 20 }] } } }; } },
+      },
+      action: paidAction,
+      approval: { ...approval, channels: [...approval.channels, 'x_ads'] },
+      providers: {
+        async fetch() { return { ok: true, status: 200, headers: { get: () => null }, async text() { return JSON.stringify({ accounts: [{ id: '18ce54d4x5t', name: 'Pilot', currency: 'EUR', selectable: true }] }); } }; },
+        async requestZernio(path, options) { createRequest = { path, options }; return { ad: { _id: 'ad-a', status: 'in_review' } }; },
+      },
+    });
+    assert.equal(createRequest.path, '/ads/create');
+    assert.equal(createRequest.options.idempotencyKey, 'action-x_ads');
+    assert.equal(createRequest.options.body.accountId, 'provider-xads-a');
+    assert.equal(createRequest.options.body.adAccountId, '18ce54d4x5t');
+    assert.equal(createRequest.options.body.budgetAmount, 20);
+    assert.equal(result.externalId, 'ad-a');
+    assert.equal(JSON.stringify(result).includes('provider-xads-a'), false);
+  } finally {
+    if (restoreKey === undefined) delete process.env.ZERNIO_API_KEY; else process.env.ZERNIO_API_KEY = restoreKey;
+  }
 });
 
 test('Gmail adapter writes the outbound ledger and deduplicates a repeated action', async () => {

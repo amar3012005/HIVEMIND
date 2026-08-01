@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { roomVerdict, workEnvelope, workOrderPrompt, workOrderTaskTag } from '../../src/hq-runtime/work-dispatcher.js';
-import { compileCompletionRequirements, fallbackRoomTag, specialistWorkObjective, verifySpecialistDelivery } from '../../src/hq-runtime/native-engine.js';
+import { specialistWorkObjective, verifySpecialistDelivery } from '../../src/hq-runtime/native-engine.js';
 
 test('a Room turn without a typed result is blocked, not completed', () => {
   assert.equal(roomVerdict({ ok: false, status: 'disabled' }).status, 'blocked');
@@ -70,14 +70,6 @@ test('partial typed result can never be coerced to completed by HTTP ok', () => 
   assert.deepEqual(verdict.gaps, ['No records persisted']);
 });
 
-test('dispatch fallback honors only an explicit owner or the general Room', () => {
-  const tag = fallbackRoomTag({
-    context: { room_tag: 'operations' },
-  }, ['seo', 'marketing', 'research', 'general']);
-  assert.equal(tag, 'general');
-  assert.equal(fallbackRoomTag({ context: { room_tag: 'operations' } }, ['operations', 'general']), 'operations');
-});
-
 test('HQ accepts a completed Room result without adding domain-specific checks', () => {
   const delivery = verifySpecialistDelivery({
     order: { acceptanceCriteria: ['Return the requested durable result'] },
@@ -135,14 +127,4 @@ test('work order prompt is a bounded plain-text Room request', () => {
   assert.match(prompt, /Company location for this assignment: Hannover, Germany/);
   assert.match(prompt, /Done when:\n- Persist verified prospects/);
   assert.doesNotMatch(prompt, /work_order_id|selected_skills|hq-work-order\.v2/);
-});
-
-test('HQ forwards only completion requirements authored in durable task data', () => {
-  const requirements = compileCompletionRequirements({
-    kind: 'arbitrary', context: { completion_requirements: [
-      { type: 'has_min_count', minimum: 3, select: 'records' },
-    ] },
-  });
-  assert.deepEqual(requirements, [{ type: 'has_min_count', minimum: 3, select: 'records' }]);
-  assert.equal(requirements[0].minimum, 3);
 });

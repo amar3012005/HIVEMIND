@@ -1,25 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boundedDelegationField, compileCompletionRequirements, resolveAuthorityDecision } from '../../src/hq-runtime/native-engine.js';
+import { readFile } from 'node:fs/promises';
+import { resolveAuthorityDecision } from '../../src/hq-runtime/native-engine.js';
 
-test('delegation fields fit the persisted varchar boundary', () => {
-  const criteria = Array.from({ length: 12 }, (_, index) => `criterion-${index}-${'x'.repeat(90)}`).join('; ');
-  assert.equal(boundedDelegationField(criteria).length, 500);
-});
-
-test('HQ does not infer completion requirements from a work kind', () => {
-  const requirements = compileCompletionRequirements({
-    kind: 'any_domain_label',
-    context: { target: { quantity: 20 } },
-  });
-  assert.deepEqual(requirements, []);
-});
-
-test('todo-authored completion requirements pass through unchanged', () => {
-  const requirements = compileCompletionRequirements({
-    kind: 'any_domain_label', context: { completion_requirements: [{ type: 'has_min_count', minimum: 4 }] },
-  });
-  assert.deepEqual(requirements, [{ type: 'has_min_count', minimum: 4 }]);
+test('HQ dispatch cannot bypass the checkpointed playbook executor', async () => {
+  const source = await readFile(new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8');
+  assert.equal(source.includes('hyperWorkOrder.create'), false);
+  assert.equal(source.includes('selectSpecialistRoomTag'), false);
+  assert.match(source, /No checkpointed lifecycle is installed for this work/);
 });
 
 test('authority decisions are resolved only from playbook data and organization policy', () => {

@@ -7,6 +7,18 @@ import { drainHqWorkOrders } from './work-dispatcher.js';
 import { createProductionEmailLifecycleService } from './langgraph/email-lifecycle-service.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
 
+function artifactCountSummary(artifacts = []) {
+  const counts = artifacts.reduce((result, artifact) => {
+    const key = String(artifact?.key || 'artifact');
+    result[key] = Number(result[key] || 0) + 1;
+    return result;
+  }, {});
+  return {
+    counts,
+    text: Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(', '),
+  };
+}
+
 export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, emailLifecycle = null, runtimePlaybooks = null }) {
   const store = new HqScheduleStore({ prisma, logger });
   const schedule = await store.leaseNext(leaseOwner);
@@ -99,7 +111,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
     onStageState: async ({ phase, run, stage, artifacts, verdict }) => {
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
-      const keys = [...new Set((artifacts || []).map((artifact) => artifact.key).filter(Boolean))];
+      const accepted = artifactCountSummary(artifacts);
       await appendHqEvent({
         prisma,
         runtimeId: trigger.runtime_id,
@@ -108,12 +120,12 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
         cycleId: trigger.cycle_id || null,
         eventType: phase === 'REJECTED' ? 'blocked' : phase === 'ACCEPTED' ? 'tool_result' : 'tool_started',
         title: phase === 'STARTED' ? `Room checkpoint started: ${stage.id}`
-          : phase === 'ACCEPTED' ? `Room checkpoint accepted: ${stage.id}`
+          : phase === 'ACCEPTED' ? `I read and accepted the Room output: ${stage.id}`
           : `Room checkpoint needs evidence: ${stage.id}`,
         summary: phase === 'STARTED'
           ? stage.objective
           : phase === 'ACCEPTED'
-            ? `The Room persisted ${(artifacts || []).length} accepted artifact(s)${keys.length ? ` across ${keys.join(', ')}` : ''}. Every declared predicate passed.`
+            ? `I read ${(artifacts || []).length} persisted output(s)${accepted.text ? `: ${accepted.text}` : ''}. Every declared predicate and provider verification passed, so this lifecycle can advance from ${stage.id}.`
             : `The checkpoint retained its current evidence but did not advance. Unmet predicates: ${(verdict?.unmet || []).map((item) => item.id || item.predicate || item.reason).join(', ') || 'unknown'}.`,
         details: {
           runtime_playbook_run_id: run.id,
@@ -122,7 +134,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           stage_id: stage.id,
           phase,
           artifact_refs: (artifacts || []).map((artifact) => artifact.id),
-          artifact_counts: Object.fromEntries(keys.map((key) => [key, (artifacts || []).filter((artifact) => artifact.key === key).length])),
+          artifact_counts: accepted.counts,
           verdict: verdict || null,
         },
         evidenceRefs: (artifacts || []).map((artifact) => artifact.id),

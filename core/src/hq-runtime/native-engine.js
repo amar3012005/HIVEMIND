@@ -145,7 +145,7 @@ export class NativeHqEngine {
       : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { narration_model: awakening.model, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
     await event(prisma, runtime, cycle, {
       eventType: 'context_loaded', title: 'I have the company in view',
-      summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected capability${context.capabilities.connected.length === 1 ? '' : 'ies'}. I will use only what is actually present.`,
+      summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected ${context.capabilities.connected.length === 1 ? 'capability' : 'capabilities'}. I will use only what is actually present.`,
       evidenceRefs: [context.evidence.baseline?.id, context.evidence.latest_growth_plan?.id].filter(Boolean),
     });
 
@@ -287,6 +287,14 @@ export class NativeHqEngine {
         return { transition: 'ESCALATE', reason: 'runtime_playbook_result_missing' };
       }
       const artifactRefs = run.artifacts.map((artifact) => artifact.artifactId);
+      const artifactCounts = run.artifacts.reduce((counts, artifact) => {
+        const key = String(artifact.artifactKey || 'artifact');
+        counts[key] = Number(counts[key] || 0) + 1;
+        return counts;
+      }, {});
+      const artifactSummary = Object.entries(artifactCounts)
+        .map(([key, count]) => `${count} ${key}`)
+        .join(', ');
       if (run.status === 'WAITING_AUTHORITY') {
         const playbook = this.runtimePlaybooks?.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
         const stage = playbook?.stages?.find((candidate) => candidate.id === run.currentStageId);
@@ -354,9 +362,9 @@ export class NativeHqEngine {
           eventType: completed ? 'decision' : 'blocked',
           title: completed ? `Completed: ${todo.title}` : `Playbook needs intervention: ${todo.title}`,
           summary: completed
-            ? `The versioned lifecycle reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). HQ accepted ${artifactRefs.length} durable artifact(s).`
+            ? `I read the completed lifecycle and accepted ${artifactRefs.length} durable output(s)${artifactSummary ? `: ${artifactSummary}` : ''}. It reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). This todo is complete; the next executable queue item can now start.`
             : 'The lifecycle stopped at a failed predicate or terminal safety condition. Exact unmet checks remain attached to the run.',
-          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, artifact_refs: artifactRefs, verdict: run.lastVerdict || {} },
+          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, artifact_refs: artifactRefs, artifact_counts: artifactCounts, verdict: run.lastVerdict || {} },
           evidenceRefs: artifactRefs,
         });
         await scheduleHqWake({
@@ -604,8 +612,8 @@ export class NativeHqEngine {
       }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
       const acknowledged = summarizeGrowthPlanResult(result);
       await event(prisma, runtime, cycle, {
-        eventType: 'tool_result', title: 'I have a governed operating plan',
-        summary: acknowledged.summary,
+        eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
+        summary: `${acknowledged.summary} The persisted queue is now the source of truth; I will dispatch its first executable item next.`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });

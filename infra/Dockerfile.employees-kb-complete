@@ -1,0 +1,7 @@
+# Overlay on the live employees image — carries the prospect-write disable
+# (agentscope_tools.py). Prospects are CRM records, not memories: 119 were
+# written into one org in a single day, 0% anchored, never vectorised, and
+# competing with real memories in semantic recall. See commit 3ab5356db.
+FROM hivemind/employees:prod-20260801-room-checkpoints-v1
+
+COPY employees-service/src/hivemind_employees/agents/agentscope_tools.py /app/src/hivemind_employees/agents/agentscope_tools.py

@@ -1321,9 +1321,25 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
    * searchable; this pass only decides what deserves durable-memory status.
    */
   async _curateDocumentClaims(candidates, { docTitle = '', maxMemories = 6 } = {}) {
-    const pool = (Array.isArray(candidates) ? candidates : [])
+    const incoming = Array.isArray(candidates) ? candidates : [];
+    // This prefilter silently discarded any candidate lacking source_quote, BEFORE
+    // the curator model ever saw it — so a claim the extractor found but did not
+    // quote was lost with no log line, and the loss was indistinguishable from the
+    // curator exercising judgement. Log the breakdown so "N candidates -> M
+    // memories" can be attributed rather than guessed at.
+    const pool = incoming
       .filter((candidate) => candidate?.segmentId && candidate?.f && candidate?.source_quote)
       .slice(0, 48);
+    const droppedNoQuote = incoming.filter((c) => c?.segmentId && c?.f && !c?.source_quote).length;
+    const droppedMalformed = incoming.length - pool.length - droppedNoQuote;
+    if (droppedNoQuote || droppedMalformed) {
+      console.warn(`[kb-curate] prefilter dropped ${droppedNoQuote + droppedMalformed} of `
+        + `${incoming.length} candidates (no_source_quote=${droppedNoQuote}, `
+        + `malformed=${droppedMalformed}) — these never reached the curator`);
+    }
+    if (incoming.length > 48) {
+      console.warn(`[kb-curate] pool truncated ${incoming.length} → 48 before curation`);
+    }
     if (!pool.length) return [];
 
     const cap = Math.max(1, Math.min(30, Number(maxMemories) || 6));
@@ -1376,6 +1392,16 @@ Every item must include a non-empty content field and one or more valid support_
       });
       const output = normalizeCuratedClaims(parsed.memories, pool, cap);
       const result = output.length ? output : fallback();
+      // Attribute the loss. "19 candidates → 9 memories" was previously one
+      // number with three possible causes — prefilter, the cap, or the model
+      // merging — and they need different fixes. Name which one bound.
+      const modelReturned = Array.isArray(parsed.memories) ? parsed.memories.length : 0;
+      if (result.length < pool.length) {
+        const bound = result.length >= cap ? 'cap'
+          : modelReturned < pool.length ? 'model-merged' : 'normalize';
+        console.log(`[kb-curate] pool=${pool.length} model_returned=${modelReturned} `
+          + `kept=${result.length} cap=${cap} bound_by=${bound}`);
+      }
       attachCoverageLedger(result, pool);
       return result;
     } catch (error) {

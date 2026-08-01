@@ -13,3 +13,5 @@ COPY core/src/knowledge/document-first-ingestion.js /app/src/knowledge/document-
 COPY core/src/knowledge/enterprise/docling-adapter.js /app/src/knowledge/enterprise/docling-adapter.js
 COPY core/src/routes/recall.js /app/src/routes/recall.js
 COPY core/src/routes/knowledge.js /app/src/routes/knowledge.js
+COPY core/src/knowledge/enterprise/fast-pdf-parser.js /app/src/knowledge/enterprise/fast-pdf-parser.js
+COPY core/src/memory/graph-engine.js /app/src/memory/graph-engine.js

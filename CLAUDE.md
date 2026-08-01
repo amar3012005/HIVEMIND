@@ -71,7 +71,32 @@ Only after Gates 1–3: commit, mark `[x]` in GOALS.md, and start the next featu
 - **Auth contract** (full version in `.claude/loop/GOALS.md`): core `:2026` takes a
   scoped API key; control-plane `:2027` takes a session Bearer. `X-Org-Id` is CORS,
   not auth. Get this wrong and every probe returns a convincing empty result.
-- **Deploy hygiene.** Build in `/root/hivemind-main`, run from `/root/hivemind`,
-  absolute paths, tag the rollback image FIRST. A `docker cp` is temporary — bake
-  it into an image before calling it shipped, or the next `compose up` erases it.
+## Deploy: only an immutable, named commit — never a working tree
+
+**This is the rule above all others in this file.** On 2026-08-01 production was
+found running code that existed in **no committed branch anywhere**: `driver.js`
+inside `hm-core` matched the **dirty working tree** of `/root/hivemind-main`
+(on `codex/tara-grok`, 46 uncommitted files) and did NOT match
+`origin/singulance-main`, which was simultaneously 7 commits ahead of what was
+live. That build could not be reproduced. Clean the tree and the running code is
+gone forever.
+
+- **`singulance-main` is the ONLY deployable ref.** Feature branches merge in via
+  PR. Nothing deploys from a feature branch, ever.
+- **Tag images by commit SHA** — `core-api:sha-9683f0767`, not
+  `core-api:prod-20260801-kb-v6`. Then "what is live?" is answerable instantly and
+  rollback is unambiguous. A date or label tag hides which code it contains.
+- **CI builds, not humans.** A build from a box's working tree cannot be
+  reproduced. CI builds from a clean checkout of a SHA.
+- **The deploy REFUSES a dirty tree**: `git status --porcelain` non-empty → hard
+  fail. That single check would have prevented the whole situation above.
+- **One environment, one ref.** Compose pins a SHA tag. Nobody `docker cp`s into a
+  running container — a `docker cp` is temporary BY DEFINITION, and twice on
+  2026-08-01 such fixes were silently reverted by another session's `compose up`.
+- **A matching tree is NOT a matching branch.** Before claiming "prod runs branch
+  X": check `git status --porcelain`, then compare the deployed SHA. Do not
+  conclude it from one file's md5 — that is exactly what misled this session into
+  calling a feature branch "the production branch".
+- Still true operationally: build in `/root/hivemind-main`, run from
+  `/root/hivemind`, absolute paths, tag the rollback image FIRST.
 - **Report failures with the output.** State plainly what is unverified.

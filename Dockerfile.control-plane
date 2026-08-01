@@ -29,6 +29,7 @@ RUN npm ci && npm cache clean --force
 # Copy source code
 COPY core/src ./src
 COPY core/config ./config
+COPY core/scripts ./scripts
 COPY employees-service/src/HQ-runtime ./hq-runtime
 
 # Generate Prisma client
@@ -64,6 +65,7 @@ USER nodejs
 # Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
+COPY --from=builder --chown=nodejs:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=nodejs:nodejs /app/hq-runtime ./hq-runtime
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./

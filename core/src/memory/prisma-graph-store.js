@@ -759,11 +759,36 @@ export class PrismaGraphStore {
   async hardDeleteMemories(ids) {
     ids = Array.from(new Set((ids || []).filter(Boolean)));
     if (ids.length === 0) return 0;
+    // RESIDENCY SEAM — the same one deleteMemory() has had at :732. Without it
+    // this method was a pure Prisma cascade, so for a remote/.amr org it deleted
+    // NOTHING, returned 0, and the caller reported success. The user saw the row
+    // vanish from the UI and the agent kept serving it forever.
+    //
+    // Worse for anyone verifying: a Postgres check "confirms" the delete, because
+    // SELECT returns [] — which reads as "deleted" but actually means "never
+    // stored here". That is the same trap that makes a Postgres count report 0
+    // memories for an .amr tenant that has hundreds.
+    //
+    // The FE defaults hard=true on every delete, so this is the path real users
+    // take, not an edge case. Mirrors the soft path exactly rather than inventing
+    // a second mechanism.
+    const _remoteHardOrg = currentOrg();
+    if (_remoteHardOrg && orgIsRemote(_remoteHardOrg)) {
+      let removed = 0;
+      for (const id of ids) {
+        try { await amrDelete(_remoteHardOrg, id); removed += 1; } catch (e) {
+          console.warn(`[hard-delete] amrDelete failed for ${id}: ${e.message}`);
+        }
+      }
+      return removed;
+    }
     await this.client.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
     await this.client.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
     await this.client.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
     await this.client.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-    await this.client.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }).catch(() => {});
+    // Audit records are immutable by database policy and do not hold a FK to a
+    // memory row. Keep the historic resource id rather than issuing a rejected
+    // UPDATE every time a memory is hard-deleted.
     const res = await this.client.memory.deleteMany({ where: { id: { in: ids } } });
     return res.count;
   }

@@ -6602,7 +6602,13 @@ exit \$RC
             let deletedMemories = 0;
             if (clusterIds.length) {
               if (hard && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
-                await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                // The return value was discarded and success reported regardless —
+                // so a backend that removed nothing still answered 200. Keep it and
+                // gate on BEHAVIOUR below rather than trusting any single store.
+                const _hardRemoved = await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                if (_hardRemoved === 0 && clusterIds.length > 0) {
+                  console.warn(`[delete] hardDeleteMemories removed 0 of ${clusterIds.length} for org=${mOrg}`);
+                }
                 try {
                   const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
                   const qColl = (process.env.QDRANT_PER_TENANT === 'true' && mOrg) ? `org_${mOrg}` : 'HIVEMIND_PERSONAL';
@@ -6615,7 +6621,33 @@ exit \$RC
               } else {
                 for (const cid of clusterIds) { try { await persistentMemoryStore.deleteMemory(cid); } catch { /* continue */ } }
               }
-              deletedMemories = clusterIds.length;
+              // BEHAVIOUR-BASED HONESTY GATE. This used to report
+              // clusterIds.length unconditionally — the count of what we ASKED to
+              // delete, not what was deleted. Combined with hardDeleteMemories
+              // silently removing nothing for a remote org, the API answered
+              // "deleted 5" while all 5 were still being served by the agent.
+              //
+              // Re-read instead of trusting any store's return value, so a future
+              // backend that fails to delete surfaces here rather than lying.
+              let _stillPresent = 0;
+              for (const cid of clusterIds) {
+                try {
+                  const still = await persistentMemoryStore.getMemory?.(cid);
+                  if (still && !still.deletedAt) _stillPresent += 1;
+                } catch { /* absent → treat as deleted, which is the goal */ }
+              }
+              deletedMemories = clusterIds.length - _stillPresent;
+              if (_stillPresent > 0) {
+                console.error(`[delete] INCOMPLETE: ${_stillPresent}/${clusterIds.length} memories survived `
+                  + `hard=${hard} org=${mOrg} — reporting failure rather than a false success`);
+                return jsonResponse(res, {
+                  error: 'delete_incomplete',
+                  message: `${_stillPresent} of ${clusterIds.length} memories could not be deleted. `
+                    + 'Nothing was reported as removed that still exists.',
+                  requested: clusterIds.length,
+                  deleted: deletedMemories,
+                }, 500);
+              }
             }
             let meetingDeleted = false;
             if (scope === 'both') {

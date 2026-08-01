@@ -171,6 +171,7 @@ const { ZitadelOidcClient } = await import('./control-plane/zitadel.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
+const { startGmailWatcherScheduler } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
 
 // Derive a one-line title for a Tavily research report. Prefer the first
 // non-empty H1/H2 in the markdown; fall back to the original input
@@ -1445,7 +1446,7 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType, smart = false, picture_descriptions = false } = {}) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions = false } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
@@ -1453,6 +1454,29 @@ if (process.env.DOCLING_URL) {
       try {
         fs.writeFileSync(tempPath, fileBuffer);
         const ext = (filename || '').split('.').pop()?.toLowerCase();
+        // `smart = false` was the destructure default and the KB upload never
+        // passes the flag, so EVERY document took the non-smart path. Concretely,
+        // the Tier-1 guard below reads `if (!smart && ...)`: fast pdf-parse ran
+        // first, succeeded on any PDF with a text layer, and returned — so Docling
+        // was never invoked for a text-native document, no matter how much layout
+        // it carried. Measured on a real 54-page deck: `tier=fast-pdf ms=757`,
+        // its 7-row inverter matrix flattened to loose text, every figure gone.
+        //
+        // fast-pdf is the right FALLBACK, not the right default. Layout-bearing
+        // formats now default to smart, which routes them to Docling for table
+        // structure + picture descriptions; fast-pdf still catches the case where
+        // Docling errors or times out. Set smart:false explicitly to force speed.
+        // NOTE: the opt-out is the env var, NOT a false argument. Every layer on
+        // the upload path coerces this to a strict boolean — the route computes
+        // `smartFlag = value === 'true'`, then document-first-ingestion passes
+        // `smart: metadata?.smart === true` — so an absent form field arrives here
+        // as an explicit `false`, indistinguishable from a deliberate opt-out.
+        // Guarding on `smartOpt !== false` therefore disabled the default for
+        // every real upload (verified: still `tier=fast-pdf ms=800`).
+        const LAYOUT_EXTS = new Set(['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt']);
+        const smart = smartOpt === true
+          || (LAYOUT_EXTS.has(ext)
+              && String(process.env.KB_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
         const tParse = Date.now();
 
         // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──
@@ -5722,8 +5746,8 @@ exit \$RC
         // and charged 1 minute here as the admission floor; the real duration is
         // derived from meetings.duration_sec, so this gate only has to stop an
         // org that is already at the ceiling.
-        if (planEnforcer && orgId) {
-          const minCheck = await planEnforcer.checkLimit(orgId, 'meetingMinutes', 1);
+        if (planEnforcer && _mOrgId) {
+          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 1);
           if (!minCheck.allowed) {
             return jsonResponse(res, planLimitBody(minCheck, 'meetingMinutes'), minCheck.status || 402);
           }
@@ -14356,6 +14380,20 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/gmail/watcher/run':
+          if (req.method === 'POST') {
+            try {
+              const { reconcileGmailWatchForTenant } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
+              const result = await reconcileGmailWatchForTenant({
+                prisma, userId, orgId, reason: 'api', register: body.mode === 'register',
+              });
+              return jsonResponse(res, { ok: true, result });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, err.message === 'gmail_watcher_connection_not_found' ? 400 : 500);
+            }
+          }
+          break;
+
         case '/api/connectors/gmail/pubsub-webhook':
           // Pub/Sub push target. Google sends a JSON payload with the base64
           // Gmail notification + an OIDC token in Authorization header.
@@ -14380,45 +14418,29 @@ exit \$RC
                 return jsonResponse(res, { ack: true, reason: 'malformed' });
               }
 
-              // Find the user whose Gmail account matches this notification
+              const { handleGmailPushNotification } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
+              const watcher = await handleGmailPushNotification({
+                prisma, emailAddress: decoded.emailAddress, historyId: decoded.historyId,
+              });
+
+              // Preserve the existing memory-ingest path. The watcher handles
+              // operational replies; SyncEngine remains the source of truth for
+              // Gmail memories and contact extraction.
               const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
               const cs = new ConnectorStore(prisma);
               const conn = await cs.findByEmail?.('gmail', decoded.emailAddress);
-              if (!conn) {
-                console.warn(`[gmail-pubsub] No connection for ${decoded.emailAddress}`);
-                return jsonResponse(res, { ack: true, reason: 'no-connection' });
+              if (conn) {
+                const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+                const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion: () => documentFirstIngestion });
+                const accessToken = decryptToken(conn.access_token_encrypted);
+                engine.runSync({
+                  adapter: new GmailAdapter(), userId: conn.userId, orgId: conn.orgId, provider: 'gmail',
+                  cursor: conn.metadata?.cursor || decoded.historyId, incremental: true, accessToken,
+                  context: { user_id: conn.userId, org_id: conn.orgId, user_account_ref: decoded.emailAddress, target_scope: conn.target_scope || 'personal', gmail_thread_mode: conn.metadata?.gmail_thread_mode || 'thread' },
+                }).catch((syncError) => console.error(`[gmail-pubsub] sync failed for ${decoded.emailAddress}:`, syncError.message));
               }
-
-              // Trigger incremental sync from stored historyId → notification's historyId.
-              // SyncEngine handles the heavy lifting (fetch threads, normalize, ingest).
-              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
-              const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
-              const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion: () => documentFirstIngestion });
-
-              const cursor = conn.metadata?.cursor || decoded.historyId;
-              const accessToken = decryptToken(conn.access_token_encrypted);
-
-              // Run async — Pub/Sub waits up to 10s for ack, don't block
-              engine.runSync({
-                adapter,
-                userId: conn.userId,
-                orgId: conn.orgId,
-                provider: 'gmail',
-                cursor,
-                incremental: true,
-                accessToken,
-                context: {
-                  user_id: conn.userId,
-                  org_id: conn.orgId,
-                  user_account_ref: decoded.emailAddress,
-                  target_scope: conn.target_scope || 'personal',
-                  gmail_thread_mode: conn.metadata?.gmail_thread_mode || 'thread',
-                },
-              }).catch(err => console.error(`[gmail-pubsub] sync failed for ${decoded.emailAddress}:`, err.message));
-
-              // Ack immediately so Pub/Sub doesn't retry
-              return jsonResponse(res, { ack: true, triggered_sync: true });
+              return jsonResponse(res, { ...watcher, memory_sync_triggered: Boolean(conn) });
             } catch (err) {
               console.error('[gmail-pubsub] webhook error:', err.message);
               // Return 2xx anyway — retries cause duplicates
@@ -23012,6 +23034,8 @@ if (shouldStartHttpServer()) {
     }, _syncEveryMs).unref();
     console.log(`[connector-sync] durable-sync worker mounted (every ${_syncEveryMs}ms)`);
   }
+
+  startGmailWatcherScheduler({ prisma });
 
   // Embedding reconciler (drift guard). Every persisted memory MUST land in its
   // org's Qdrant collection, but ~16 save paths write to PG and only some embed

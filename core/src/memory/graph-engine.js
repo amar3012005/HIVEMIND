@@ -1453,7 +1453,20 @@ export class MemoryGraphEngine {
             // both authored by same user). Skip the edge. The dedicated
             // entity_co_mention_llm path will still create Mentions
             // edges for memories with REAL shared non-common entities.
-            console.log(`[graph-engine] Updates DROPPED (conf=${updateConf} < 0.85): ${baseMemory.id.slice(0,8)} → ${updatesTargetId?.slice(0,8)}`);
+            // This is the catch-all for the guard at ~1431, which requires BOTH
+            // conf >= 0.85 AND entityOverlapOk. The message used to hardcode
+            // "conf=X < 0.85" as the reason, so an edge dropped purely for lack of
+            // entity overlap printed the self-contradictory
+            //   "Updates DROPPED (conf=0.92 < 0.85)"
+            // — observed live during a 39-document batch. A log that states a false
+            // reason is worse than no log: it sends whoever reads it to tune a
+            // threshold that was never the cause. Name the predicate that actually
+            // failed.
+            const _why = Number(updateConf) < 0.85
+              ? `conf=${updateConf} < 0.85`
+              : (!entityOverlapOk ? `no shared non-common entity (conf=${updateConf} passed)`
+                                  : `guard failed (conf=${updateConf}, overlap=ok)`);
+            console.log(`[graph-engine] Updates DROPPED (${_why}): ${baseMemory.id.slice(0,8)} → ${updatesTargetId?.slice(0,8)}`);
           }
         } else if (effectiveRelationshipType === 'Extends') {
           const extendsTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;

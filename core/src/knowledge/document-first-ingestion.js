@@ -3269,12 +3269,22 @@ Every item must include a non-empty content field and one or more valid support_
         // stream a human already reads. Rate, not absolute count, so a genuinely
         // short document never trips it.
         try {
-          // Derived from the segments actually stored, NOT from a wordCount
-          // variable — that identifier is not in scope here, and the catch below
-          // would have swallowed the ReferenceError forever, leaving a warning
-          // that could never fire. Which is precisely the class of silent failure
-          // this block exists to prevent.
-          const _srcWords = (segments || []).reduce((n, sg) => n + Number(sg?.wordCount || 0), 0);
+          // THIRD attempt at this line, so it is worth stating what failed.
+          //   v1 read `wordCount` — not in scope; the catch below swallowed the
+          //      ReferenceError and the warning could never fire.
+          //   v2 summed `segments[].wordCount` — `segments` IS in scope (2150) but
+          //      its rows do not carry wordCount, so the sum was always 0 and the
+          //      `_srcWords >= 500` guard never passed. Silent again.
+          // Verified inert against a real 12,245-word document that yielded 10
+          // memories (0.8/1k, floor 2/1k) and printed nothing.
+          // Now measured from the parse output itself, which is the same text the
+          // segments were cut from and is always populated on this path — plus a
+          // segment-content fallback so a thin/empty parseResult cannot re-mute it.
+          const _parseText = String(parseResult?.text || parseResult?.markdown || '');
+          const _segChars = (segments || []).reduce((n, sg) => n + String(sg?.content || '').length, 0);
+          const _srcWords = _parseText.trim()
+            ? _parseText.split(/\s+/).filter(Boolean).length
+            : Math.round(_segChars / 6);
           const _per1k = _srcWords > 0 ? (uFacts.length / (_srcWords / 1000)) : 0;
           const _floor = Number(process.env.KB_THIN_EXTRACTION_PER_1K || 2);
           if (_srcWords >= 500 && _per1k < _floor) {

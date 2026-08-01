@@ -1473,10 +1473,31 @@ if (process.env.DOCLING_URL) {
         // as an explicit `false`, indistinguishable from a deliberate opt-out.
         // Guarding on `smartOpt !== false` therefore disabled the default for
         // every real upload (verified: still `tier=fast-pdf ms=800`).
-        const LAYOUT_EXTS = new Set(['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt']);
+        // PER-FORMAT PROFILES, not one bucket. Collapsing every layout format into
+        // a single LAYOUT_EXTS set and running the full enrichment stack on all of
+        // them was wrong, and PPTX proved it in production: "Nutzen und Vorteile des
+        // Leo.pptx" spent 479s, returned chunks=0 with `chunker error: fetch failed`,
+        // recorded a nonsense word_count of 463,080, and produced ZERO memories.
+        // A spreadsheet has no figures to describe and no OCR to run — it has cells.
+        // A deck is mostly images with sparse text. Ask each format only for what it
+        // actually has.
+        //   ocr    — raster text needs recognising (scans; slide images)
+        //   tables — cell structure matters (PDF, XLSX)
+        //   pics   — figures carry meaning worth describing (PDF, PPTX)
+        const FORMAT_PROFILES = {
+          pdf:  { smart: true,  ocr: true,  tables: true,  pics: true  },
+          docx: { smart: true,  ocr: false, tables: true,  pics: false }, // text layer; best yield in prod (21 mem/1k)
+          doc:  { smart: true,  ocr: false, tables: true,  pics: false },
+          xlsx: { smart: true,  ocr: false, tables: true,  pics: false }, // cells, never prose or OCR
+          xls:  { smart: true,  ocr: false, tables: true,  pics: false },
+          pptx: { smart: true,  ocr: true,  tables: false, pics: true  }, // slides are images; no doc-wide table pass
+          ppt:  { smart: true,  ocr: true,  tables: false, pics: true  },
+        };
+        const profile = FORMAT_PROFILES[ext] || null;
         const smart = smartOpt === true
-          || (LAYOUT_EXTS.has(ext)
+          || (!!profile?.smart
               && String(process.env.KB_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
+        const LAYOUT_EXTS = new Set(Object.keys(FORMAT_PROFILES));
         // Exactly the same defect as `smart` above, one identifier along:
         // `picture_descriptions = false` in this destructure, and the upload route
         // never passes it — so do_picture_description was NEVER sent to Docling and
@@ -1488,8 +1509,11 @@ if (process.env.DOCLING_URL) {
         // Opt out via env, NOT a false argument — the upload path coerces to a
         // strict boolean, so an absent field is indistinguishable from a deliberate
         // false (the mistake that made my first `smart` fix a no-op).
+        // Now driven by the profile: only formats whose figures actually carry
+        // meaning ask for descriptions. XLSX/DOCX no longer pay for a vision pass
+        // they have nothing to gain from.
         const picture_descriptions = picDescOpt === true
-          || (LAYOUT_EXTS.has(ext)
+          || (!!profile?.pics
               && String(process.env.KB_PICTURE_DESC ?? 'true').toLowerCase() !== 'false');
         const tParse = Date.now();
 
@@ -1634,7 +1658,19 @@ if (process.env.DOCLING_URL) {
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
-            if (fast.isImageHeavy && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+            // FIGURE-RICH decks join this tier. They have a text layer, so they were
+            // never image-heavy and always fell through to Docling — where figures
+            // are dropped. Vision reads chart and diagram content a text extractor
+            // cannot see at any setting, and it is fast and already proven here
+            // (3-10s on real branding PDFs). KB_FIGURE_RICH_TO_VISION=false reverts.
+            const _visionWanted = fast.isImageHeavy
+              || (fast.isFigureRich
+                  && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false');
+            if (_visionWanted && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+              if (fast.isFigureRich && !fast.isImageHeavy) {
+                console.log(`[docling-adapter] figure-rich ${filename} (${Math.round(fast.avgPerPage)} chars/page over `
+                  + `${fast.pages}p) → vision for figure content`);
+              }
               const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {

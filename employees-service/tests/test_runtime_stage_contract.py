@@ -103,3 +103,43 @@ def test_runtime_stage_retains_actual_tool_payload_for_artifact_compilation(monk
     monkeypatch.setattr(director, "_exec", execute_tool)
     asyncio.run(director._gather_one("sample_tool", {"query": "bounded"}))
     assert any("TOOL_RESULT[sample_tool]" in row and "durable-1" in row for row in director.blackboard)
+
+
+def test_runtime_stage_exposes_prior_artifacts_as_citable_evidence(monkeypatch):
+    envelope = {
+        "contract": "runtime-stage.v1",
+        "run_id": "run-4",
+        "stage_id": "transform",
+        "objective": "Transform every supplied record.",
+        "inputs": {
+            "artifacts.request_record": [
+                {"id": "request-1", "key": "request_record", "data": {"name": "Alpha"}},
+                {"id": "request-2", "key": "request_record", "data": {"name": "Beta"}},
+            ]
+        },
+        "expected_artifacts": ["result_record"],
+        "completion_checks": [{
+            "predicate": "count_matches", "select": "result_record", "target_select": "request_record"
+        }],
+    }
+    director = _director(envelope)
+    captured = {}
+
+    async def synth_call(messages, **_kwargs):
+        captured["payload"] = json.loads(messages[1]["content"])
+        return {"content": json.dumps({
+            "artifacts": [
+                {"key": "result_record", "data": {"name": "Alpha"},
+                 "source_refs": ["input:artifacts.request_record:1"]},
+                {"key": "result_record", "data": {"name": "Beta"},
+                 "source_refs": ["input:artifacts.request_record:2"]},
+            ],
+            "gaps": [],
+        })}
+
+    monkeypatch.setattr(director, "_groq", synth_call)
+    result = asyncio.run(director._synthesize_runtime_stage_result())
+    evidence_ids = {row["id"] for row in captured["payload"]["evidence"]}
+    assert "input:artifacts.request_record:1" in evidence_ids
+    assert "input:artifacts.request_record:2" in evidence_ids
+    assert len(result["artifacts"]) == 2

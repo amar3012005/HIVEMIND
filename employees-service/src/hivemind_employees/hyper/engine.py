@@ -2542,6 +2542,15 @@ class Director:
         envelope = self.runtime_stage or {}
         expected = [str(value) for value in (envelope.get("expected_artifacts") or []) if str(value).strip()]
         evidence: List[Dict[str, str]] = []
+        inputs = envelope.get("inputs") if isinstance(envelope.get("inputs"), dict) else {}
+        for input_ref, input_value in inputs.items():
+            values = input_value if isinstance(input_value, list) else [input_value]
+            for index, value in enumerate(values, start=1):
+                if value is None:
+                    continue
+                evidence_id = f"input:{input_ref}:{index}"
+                content = json.dumps(value, ensure_ascii=False, default=str)
+                evidence.append({"id": evidence_id, "content": content[:5000]})
         for index, value in enumerate(self.blackboard[-30:], start=1):
             text = str(value or "").strip()
             if text:
@@ -2560,6 +2569,10 @@ class Director:
                 "data, source_refs, external_ref. key must be one of expected_artifacts. source_refs may only "
                 "contain evidence IDs supplied below. Never claim a provider write, persistence, publication, "
                 "or completed external action unless the evidence explicitly contains its durable reference. "
+                "Treat supplied input artifacts as authoritative evidence. When a completion check compares "
+                "output count with an input collection, return one supported output for every relevant input; "
+                "preserve its entity identity and cite that input evidence ID. Never substitute or invent an "
+                "entity that is absent from the supplied inputs. "
                 "If the work is incomplete, return the supported artifacts and exact gaps; do not fabricate "
                 "fields merely to satisfy completion checks.")},
             {"role": "user", "content": json.dumps({
@@ -2568,7 +2581,7 @@ class Director:
                 "evidence": evidence,
             }, ensure_ascii=False)[:30000]},
         ], model=self.synth_model, temp=0.1, bucket="synth", force_text=True,
-           json_object=True, uncapped=True, max_tokens=2600)
+           json_object=True, uncapped=True, max_tokens=8000)
         parsed = _first_json_object(str((response or {}).get("content") or "")) or {}
         allowed_refs = {row["id"] for row in evidence}
         artifacts: List[Dict[str, Any]] = []

@@ -38,6 +38,7 @@
         { "predicate": "all_have_nonempty_field", "select": "qualified_record", "path": "data.fit_rationale" },
         { "predicate": "all_have_nonempty_field", "select": "qualified_record", "path": "data.outreach_angle" },
         { "predicate": "is_source_backed", "select": "qualified_record", "source_path": "source_refs", "value": 1 },
+        { "predicate": "all_reference_existing", "select": "qualified_record", "path": "data.organization_key", "target_select": "candidate_record", "target_path": "data.organization_key" },
         { "predicate": "unique_by", "select": "qualified_record", "path": "data.organization_key" }
       ],
       "transitions": [{ "default": true, "to_stage": "retain_records" }],

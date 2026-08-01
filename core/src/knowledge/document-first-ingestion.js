@@ -874,7 +874,9 @@ Output the JSON object and nothing else.`;
     // (0.65) + the curator keep the extra candidates from becoming noise.
     const factCap = Math.max(1, Math.min(Number(maxFacts) || 1,
       compact ? 3 : Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10)));
-    const sys = `Extract only high-value durable workspace memory from the SECTION. Return ONLY valid JSON:
+    const sys = `Extract only high-value durable workspace memory from the SECTION.
+LANGUAGE: write "t" and "f" in the SAME language the SECTION is written in. Do NOT translate. A German section yields German claims, a French section French. The tenant must be able to quote their own memories back to their own stakeholders, and recall in the source language degrades when claims are silently translated. Only "memory_type" and JSON keys stay English.
+Return ONLY valid JSON:
 {"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
 
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
@@ -3187,10 +3189,41 @@ Every item must include a non-empty content field and one or more valid support_
         // (keep the most complete, union the dupes' tags into it, delete the rest).
         // Runs BEFORE entity-linking so edges attach only to survivors. Default
         // ON; KB_CONSOLIDATE=0 disables. Best-effort: on failure facts ship as-is.
+        // Deterministic exact-duplicate pass BEFORE the LLM consolidator. An
+        // identical claim should never need a model to notice it, and relying on
+        // one meant real duplicates shipped: a 54-page deck stored "Home Energy
+        // Management Systems (HEMS) like E3DC Hauskraftwerk / One, Fenecon Home 10,
+        // and Huawei's EMMA-A02…" TWICE in a single run while KB_CONSOLIDATE=1 and
+        // the consolidator logged nothing in three hours of ingests. Source decks
+        // legitimately repeat pages verbatim, so identical windows extract
+        // identical claims; comparing normalised text catches that for free and
+        // leaves the LLM to do what it is actually good at — near-duplicates that
+        // differ in wording.
+        if (uFacts.length >= 2) {
+          const seenClaim = new Map();
+          const exactDupes = [];
+          for (const f of uFacts) {
+            const norm = String(f?.f || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]/gu, '').trim();
+            if (!norm) continue;
+            if (seenClaim.has(norm)) { exactDupes.push(f); continue; }
+            seenClaim.set(norm, f);
+          }
+          if (exactDupes.length) {
+            const drop = new Set(exactDupes);
+            for (let i = uFacts.length - 1; i >= 0; i--) if (drop.has(uFacts[i])) uFacts.splice(i, 1);
+            this.logger.info?.(`[kb-unified] dropped ${exactDupes.length} EXACT duplicate claim(s) `
+              + `for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+          }
+        }
         if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
           try {
+            const before = uFacts.length;
             const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
-            if (removed) this.logger.info?.(`[kb-unified] consolidated ${removed} cross-window duplicate facts for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
+            // Log unconditionally. This previously logged only when removed > 0, so
+            // a consolidator that silently caught NOTHING was indistinguishable from
+            // one that was never called — which is exactly the state it was in.
+            this.logger.info?.(`[kb-unified] consolidate doc ${String(documentId).slice(0, 8)}: `
+              + `${before} facts → removed ${removed || 0} → ${uFacts.length} kept`);
           } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         }
         if (uFacts.length) {
@@ -3229,6 +3262,27 @@ Every item must include a non-empty content field and one or more valid support_
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
         const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
         this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${extractedCandidates.length} candidates → ${uFacts.length} curated memories + parent=${uDocParent ? 'y' : 'n'}`);
+        // OBSERVABILITY: a silently THIN extraction was previously invisible without
+        // a hand-written SQL query — a 54-page deck yielding 8 memories logged
+        // exactly like a one-page note yielding 8, and the corpus quietly degraded.
+        // Warn when yield falls below the expected rate so it shows up in the log
+        // stream a human already reads. Rate, not absolute count, so a genuinely
+        // short document never trips it.
+        try {
+          // Derived from the segments actually stored, NOT from a wordCount
+          // variable — that identifier is not in scope here, and the catch below
+          // would have swallowed the ReferenceError forever, leaving a warning
+          // that could never fire. Which is precisely the class of silent failure
+          // this block exists to prevent.
+          const _srcWords = (segments || []).reduce((n, sg) => n + Number(sg?.wordCount || 0), 0);
+          const _per1k = _srcWords > 0 ? (uFacts.length / (_srcWords / 1000)) : 0;
+          const _floor = Number(process.env.KB_THIN_EXTRACTION_PER_1K || 2);
+          if (_srcWords >= 500 && _per1k < _floor) {
+            this.logger.warn?.(`[kb-unified] THIN EXTRACTION doc ${String(documentId).slice(0, 8)}: `
+              + `${uFacts.length} memories from ${_srcWords} words (${_per1k.toFixed(1)}/1k, floor ${_floor}/1k) — `
+              + `check parse tier, segment count, and the curator cap`);
+          }
+        } catch { /* observability must never break ingest */ }
         return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: curated._coverage || null };
       }
 

@@ -342,6 +342,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
         await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
         const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
+        const playbookService = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
         const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations, workflowApprovals, playbookRuns] = await Promise.all([
           prisma.hyperWorkOrder.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
           prisma.hqSchedule.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
@@ -353,10 +354,36 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           lifecycle?.listPendingApprovals?.({ organizationId: orgId }).catch(() => []) || [],
           prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
             where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 50,
-            include: { checkpoints: { orderBy: { sequence: 'desc' }, take: 1 } },
+            include: {
+              artifacts: { orderBy: { createdAt: 'asc' } },
+              checkpoints: { orderBy: { sequence: 'desc' }, take: 1 },
+            },
           }).catch(() => []) : Promise.resolve([]),
         ]);
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), workflow_approvals: workflowApprovals, playbook_runs: playbookRuns });
+        const todoById = new Map(todos.map((todo) => [todo.id, todo]));
+        const playbookApprovals = playbookRuns.filter((run) => run.status === 'WAITING_AUTHORITY').map((run) => {
+          const playbook = playbookService?.registry?.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+          const stage = playbook?.stages?.find((candidate) => candidate.id === run.currentStageId);
+          if (!stage?.authority_gate || !stage?.authority_policy_key) return null;
+          const messages = run.artifacts.filter((artifact) => artifact.artifactKey === 'message_record').map((artifact) => ({
+            id: artifact.artifactId,
+            lead_ref: artifact.data?.lead_ref || null,
+            to: artifact.data?.recipient || null,
+            subject: artifact.data?.subject || null,
+            body: artifact.data?.body || null,
+          }));
+          const todo = todoById.get(String(run.trigger?.todo_id || ''));
+          return {
+            run_id: run.id,
+            todo_id: todo?.id || null,
+            title: todo?.title || playbook?.name || 'External messages are ready',
+            gate: stage.authority_gate,
+            policy_key: stage.authority_policy_key,
+            preference: runtime.authorityPolicy?.[stage.authority_policy_key] || 'unconfigured',
+            messages,
+          };
+        }).filter(Boolean);
+        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), workflow_approvals: workflowApprovals, playbook_approvals: playbookApprovals, playbook_runs: playbookRuns });
       }
 
       if (pathname === '/v1/hq/playbooks/runs' && req.method === 'GET') {
@@ -399,9 +426,41 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const body = await parseBody(req).catch(() => ({}));
         const gate = String(body.gate || '').trim().slice(0, 120);
         if (!gate) return jsonResponse(res, { error: 'runtime_playbook_authority_gate_required' }, 400);
-        await service.grantAuthority(playbookAuthorityMatch[1], orgId, gate, { grantedBy: userId, payload: body.payload || {} });
+        const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: playbookAuthorityMatch[1], orgId } });
+        if (!run || run.status !== 'WAITING_AUTHORITY') return jsonResponse(res, { error: 'runtime_playbook_authority_not_waiting' }, 409);
+        const playbook = service.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+        const stage = playbook.stages.find((candidate) => candidate.id === run.currentStageId);
+        if (!stage || stage.authority_gate !== gate || !stage.authority_policy_key) {
+          return jsonResponse(res, { error: 'runtime_playbook_authority_stage_mismatch' }, 409);
+        }
+        const preference = body.preference == null ? null : String(body.preference).toLowerCase();
+        if (preference && !['auto', 'manual'].includes(preference)) {
+          return jsonResponse(res, { error: 'runtime_playbook_authority_preference_invalid' }, 400);
+        }
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        if (preference) {
+          const policyValue = preference === 'auto' ? 'auto' : 'approval_required';
+          await prisma.hqRuntime.updateMany({
+            where: { id: runtime.id, orgId, epoch: runtime.epoch },
+            data: { authorityPolicy: { ...(runtime.authorityPolicy || {}), [stage.authority_policy_key]: policyValue }, version: { increment: 1 } },
+          });
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'verification',
+            title: preference === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review retained',
+            summary: preference === 'auto'
+              ? 'This organization authorized future checkpoints governed by this exact outbound-message policy. Other external writes, spending, deletion, and policy changes remain separately governed.'
+              : 'Every future outbound-message checkpoint will wait for an explicit Approve and send decision.',
+            details: { policy_key: stage.authority_policy_key, preference: policyValue, run_id: run.id },
+          });
+        }
+        const approve = body.approve !== false;
+        if (approve) {
+          await service.grantAuthority(run.id, orgId, gate, { grantedBy: userId, payload: { ...(body.payload || {}), preference: preference || null } });
+        }
         Promise.resolve(wakeScheduler?.()).catch(() => {});
-        return jsonResponse(res, { ok: true }, 202);
+        return jsonResponse(res, { ok: true, approved: approve, preference: preference || null }, approve ? 202 : 200);
       }
 
       const playbookEventMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/events$/i);

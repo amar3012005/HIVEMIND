@@ -30,12 +30,19 @@ export async function projectCurrentFirstLife({ prisma, orgId }) {
   const [todos, runtime] = await Promise.all([
     prisma.hqTodo.findMany({
       where: { orgId, status: { notIn: ['CANCELLED'] } },
-      orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ createdAt: 'desc' }, { priority: 'asc' }, { position: 'asc' }],
       take: 100,
     }),
-    prisma.hqRuntime.findUnique({ where: { orgId }, select: { authorityPolicy: true } }),
+    prisma.hqRuntime.findUnique({ where: { orgId }, select: { id: true, epoch: true, authorityPolicy: true } }),
   ]);
-  const proposals = todos.filter((todo) => asObject(todo.context).first_life_policy_id === policy.policy_id);
+  if (!runtime) return null;
+  const proposals = todos.filter((todo) => {
+    const context = asObject(todo.context);
+    return todo.runtimeId === runtime.id
+      && context.first_life_policy_id === policy.policy_id
+      && Number(context.first_life_policy_version) === Number(policy.version)
+      && String(context.runtime_epoch || '') === String(runtime.epoch || '');
+  });
   if (!proposals.length) return null;
   const firstLifeId = asObject(proposals[0].context).activation_sprint_id;
   const scoped = proposals.filter((todo) => asObject(todo.context).activation_sprint_id === firstLifeId);
@@ -85,8 +92,10 @@ export async function projectCurrentFirstLife({ prisma, orgId }) {
       && asObject(todo.context).execution_slot_released !== true;
   }).length;
   const activeInternal = items.filter((item) => item.effect_class === 'internal' && activeStatuses.has(item.status)).length;
-  const preference = resolveAuthorityPreference(runtime?.authorityPolicy, null);
-  const awaitingPolicy = policy.require_initial_policy_choice && preference === 'unconfigured';
+  const started = scoped.some((todo) => asObject(todo.context).first_life_started === true)
+    || items.some((item) => item.status !== 'PROPOSED');
+  const reviewedLater = scoped.some((todo) => asObject(todo.context).first_life_reviewed_later === true);
+  const awaitingStart = policy.require_initial_start_decision && !started;
   const proposed = items.filter((item) => item.status === 'PROPOSED');
   const needsAttention = items.some((item) => item.status === 'NEEDS_ATTENTION');
   const operating = items.some((item) => ['RUNNING', 'MONITORING', 'WAITING_FOR_AUTHORITY', 'WAITING_FOR_CONNECTOR'].includes(item.status));
@@ -94,7 +103,7 @@ export async function projectCurrentFirstLife({ prisma, orgId }) {
   return {
     id: firstLifeId,
     policy: { id: policy.policy_id, version: policy.version },
-    status: awaitingPolicy ? 'AWAITING_POLICY'
+    status: awaitingStart ? (reviewedLater ? 'REVIEW_LATER' : 'AWAITING_START')
       : operating ? 'OPERATING'
         : proposed.length ? 'READY' : needsAttention ? 'NEEDS_ATTENTION' : 'COMPLETED',
     recommended_todo_id: items.find((item) => item.recommended)?.todo_id || items[0]?.todo_id || null,
@@ -108,12 +117,12 @@ export async function projectCurrentFirstLife({ prisma, orgId }) {
       external: Number(policy.external_execution_limit || 1),
       internal: Number(policy.internal_execution_limit || 1),
     },
-    waiting_reason: awaitingPolicy ? 'initial_policy_choice' : null,
+    waiting_reason: awaitingStart ? (reviewedLater ? 'user_deferred_start' : 'initial_start_decision') : null,
     items,
   };
 }
 
-export async function activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger, recordExternalDefault = null }) {
+export async function activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger }) {
   const policy = await loadFirstLifePolicy();
   if (!policy.expansion_triggers.includes(expansionTrigger)) return { promoted: [], reason: 'trigger_not_allowed' };
   return prisma.$transaction(async (tx) => {
@@ -125,44 +134,47 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       runtime.id, runtime.orgId, runtime.epoch,
     );
     if (!locked.length) throw new Error('first_life_runtime_epoch_conflict');
-    let authorityPolicy = asObject(locked[0].authority_policy);
-    if (recordExternalDefault != null) {
-      if (!['manual', 'auto'].includes(recordExternalDefault)) throw new Error('first_life_external_default_invalid');
-      authorityPolicy = {
-        ...authorityPolicy,
-        external_default: recordExternalDefault,
-        gate_overrides: asObject(authorityPolicy.gate_overrides),
-      };
-      const updated = await tx.hqRuntime.updateMany({
-        where: { id: runtime.id, orgId: runtime.orgId, epoch: runtime.epoch },
-        data: { authorityPolicy, version: { increment: 1 } },
-      });
-      if (updated.count !== 1) throw new Error('first_life_runtime_epoch_conflict');
-    }
+    const authorityPolicy = asObject(locked[0].authority_policy);
     const policyConfigured = resolveAuthorityPreference(authorityPolicy, null) !== 'unconfigured';
-    if (expansionTrigger === 'organization_policy' && !policyConfigured) {
-      return { promoted: [], reason: 'initial_policy_required' };
-    }
 
     const todos = await tx.hqTodo.findMany({
       where: { runtimeId: runtime.id, orgId: runtime.orgId, status: { notIn: ['CANCELLED'] } },
       orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }],
     });
-    const firstLifeProposals = todos.filter((todo) => asObject(todo.context).first_life_policy_id === policy.policy_id);
+    const todoIds = todos.map((todo) => todo.id);
+    const runs = todoIds.length ? await tx.runtimePlaybookRun.findMany({
+      where: { orgId: runtime.orgId },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, status: true, waitingFor: true, trigger: true },
+    }) : [];
+    const runByTodo = new Map();
+    for (const run of runs) {
+      const todoId = String(asObject(run.trigger).todo_id || '');
+      if (todoIds.includes(todoId) && !runByTodo.has(todoId)) runByTodo.set(todoId, run);
+    }
+    const firstLifeProposals = todos.filter((todo) => {
+      const context = asObject(todo.context);
+      return context.first_life_policy_id === policy.policy_id
+        && Number(context.first_life_policy_version) === Number(policy.version)
+        && String(context.runtime_epoch || '') === String(runtime.epoch || '');
+    });
     const directProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'user_instruction');
-    const proposals = expansionTrigger === 'organization_policy'
+    const proposals = expansionTrigger === 'user_start'
       ? firstLifeProposals
       : policyConfigured ? [...directProposals, ...firstLifeProposals] : directProposals;
     const ownershipStatuses = new Set([
       'READY', 'RUNNING', 'WAITING_FOR_CONNECTOR', 'WAITING_FOR_AUTHORITY', 'MONITORING',
     ]);
-    const active = todos.filter((todo) => ownershipStatuses.has(String(todo.status || '').toUpperCase()));
+    const active = todos.map((todo) => ({
+      ...todo,
+      lifecycleStatus: projectedStatus(todo, runByTodo.get(todo.id) || null),
+    })).filter((todo) => ownershipStatuses.has(todo.lifecycleStatus));
     if (expansionTrigger === 'verified_monitoring_checkpoint') {
       for (const todo of active.filter((row) => effectClass(row) === 'external'
-        && String(row.status || '').toUpperCase() === 'MONITORING'
+        && row.lifecycleStatus === 'MONITORING'
         && asObject(row.context).execution_slot_released !== true)) {
         const changed = await tx.hqTodo.updateMany({
-          where: { id: todo.id, runtimeId: runtime.id, status: 'MONITORING' },
+          where: { id: todo.id, runtimeId: runtime.id, status: { notIn: ['CANCELLED', 'COMPLETED'] } },
           data: { context: { ...asObject(todo.context), execution_slot_released: true, execution_slot_release_trigger: expansionTrigger } },
         });
         if (changed.count === 1) todo.context = { ...asObject(todo.context), execution_slot_released: true };
@@ -192,7 +204,7 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
     select(recommended);
     if (recommended && effectClass(recommended) === 'external' && authorityPolicy.internal_autonomy !== false) {
       select(ordered.find((todo) => effectClass(todo) === 'internal'));
-    } else if (expansionTrigger !== 'organization_policy') {
+    } else if (expansionTrigger !== 'user_start') {
       select(ordered.find((todo) => effectClass(todo) === 'external'));
       select(ordered.find((todo) => effectClass(todo) === 'internal'));
     }
@@ -201,7 +213,9 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
     for (const todo of selected) {
       const changed = await tx.hqTodo.updateMany({
         where: { id: todo.id, runtimeId: runtime.id, status: 'PROPOSED' },
-        data: { status: 'READY', blockedReason: null },
+        data: { status: 'READY', blockedReason: null, context: {
+          ...asObject(todo.context), first_life_started: true, first_life_start_trigger: expansionTrigger,
+        } },
       });
       if (changed.count === 1) promoted.push({ id: todo.id, title: todo.title, effect_class: effectClass(todo) });
     }

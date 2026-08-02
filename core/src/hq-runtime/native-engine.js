@@ -10,25 +10,27 @@ import { resolveAuthorityPreference } from './contracts.js';
 
 const DAY = 86400000;
 
-const metric = (value) => Number(value || 0).toLocaleString('en-US');
+const hasMetric = (source, key) => Object.prototype.hasOwnProperty.call(source || {}, key)
+  && source[key] !== null && source[key] !== undefined && Number.isFinite(Number(source[key]));
+const metric = (value) => Number(value).toLocaleString('en-US');
 
 export function summarizeBaselineResult(baseline = {}) {
   const social = baseline.social_presence && typeof baseline.social_presence === 'object' ? baseline.social_presence : {};
   const followers = Array.isArray(social.followers) ? social.followers : [];
   const followerSummary = followers.map((row) => {
     const platform = String(row?.platform || 'channel').toLowerCase() === 'twitter' ? 'X' : String(row?.platform || 'channel').replace(/^./, (value) => value.toUpperCase());
-    return `${platform}: ${metric(row?.currentFollowers ?? row?.current_followers)} followers`;
+    const value = row?.currentFollowers ?? row?.current_followers;
+    return value == null ? `${platform}: followers not observed` : `${platform}: ${metric(value)} followers`;
   });
   const totals = social.totals && typeof social.totals === 'object' ? social.totals : {};
-  const activity = [
-    `${metric(totals.impressions)} impressions`, `${metric(totals.reach)} reach`,
-    `${metric(totals.likes)} likes`, `${metric(totals.clicks)} clicks`,
-  ];
-  const pages = Number(baseline.website?.mapped_pages || 0);
+  const activity = [['impressions', 'impressions'], ['reach', 'reach'], ['likes', 'likes'], ['clicks', 'clicks']]
+    .map(([key, label]) => hasMetric(totals, key) ? `${metric(totals[key])} ${label}` : `${label} not observed`);
+  const pagesObserved = hasMetric(baseline.website, 'mapped_pages');
+  const pages = pagesObserved ? Number(baseline.website.mapped_pages) : null;
   const gaps = Array.isArray(baseline.data_gaps) ? baseline.data_gaps.filter(Boolean) : [];
   return {
-    summary: `I found ${pages} website page(s). ${followerSummary.length ? `${followerSummary.join('; ')}. ` : 'No follower totals were returned. '}${activity.join(', ')} across the observed window.${gaps.length ? ` I retained ${gaps.length} evidence gap(s) for planning.` : ''}`,
-    details: { website_pages: pages, followers: followers.map((row) => ({ platform: row.platform, username: row.username, current_followers: Number(row.currentFollowers ?? row.current_followers ?? 0), growth: Number(row.growth || 0), growth_percentage: Number(row.growthPercentage ?? row.growth_percentage ?? 0) })), totals, evidence_gaps: gaps },
+    summary: `${pagesObserved ? `I observed ${pages} website page(s).` : 'Website pages were not observed.'} ${followerSummary.length ? `${followerSummary.join('; ')}. ` : 'Follower totals were not observed. '}${activity.join(', ')} across the observed window.${gaps.length ? ` I retained ${gaps.length} evidence gap(s) for planning.` : ''}`,
+    details: { website_pages: pages, followers: followers.map((row) => ({ platform: row.platform, username: row.username, current_followers: row.currentFollowers ?? row.current_followers ?? null, growth: row.growth ?? null, growth_percentage: row.growthPercentage ?? row.growth_percentage ?? null })), totals, evidence_gaps: gaps },
   };
 }
 
@@ -301,7 +303,7 @@ export class NativeHqEngine {
     }
 
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
-    if (activationSprint?.status === 'AWAITING_POLICY') {
+    if (activationSprint?.status === 'AWAITING_START') {
       const alreadyRequested = await prisma.hqRuntimeEvent.findFirst({
         where: {
           runtimeId: runtime.id,
@@ -310,9 +312,9 @@ export class NativeHqEngine {
         },
       }).catch(() => null);
       if (!alreadyRequested) await event(prisma, runtime, cycle, {
-        eventType: 'approval_required',
-        title: 'The first operating plan is ready for your policy',
-        summary: 'I have committed evidence-backed proposals but will not delegate them until you choose Manual review or Auto. This choice sets the default for future exact external gates; it grants no action by itself.',
+        eventType: 'decision_required',
+        title: 'The first operating plan is ready',
+        summary: 'I have committed evidence-backed proposals but will not delegate them until you start the recommendation. External authority remains undecided until a real immutable action reaches its gate.',
         details: {
           activation_sprint_id: activationSprint.id,
           policy: activationSprint.policy || null,
@@ -320,7 +322,7 @@ export class NativeHqEngine {
         },
       });
       await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
-      return { transition: 'WAIT_FOR_AUTHORITY_POLICY', activation_sprint_id: activationSprint.id };
+      return { transition: 'WAIT_FOR_FIRST_LIFE_START', activation_sprint_id: activationSprint.id };
     }
 
     let queueContinuationScheduled = false;
@@ -710,20 +712,33 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: 'I am ranking the company constraints', summary: `${selectedSkill.description} I will compare the complete company state, preserve material unknowns, and order only the work justified by evidence and the operating requirements.`, skillRef: selectedSkill.id, details: { model_policy: selectedSkill.model_policy, selected_model: selectedModel } });
       await event(prisma, runtime, cycle, { eventType: 'tool_started', title: 'I am building the first Growth Operating Plan', summary: 'I will assess the complete baseline, rank multiple constraints, define the first bounded stage, and commit an ordered specialist todo queue before dispatching any work.', toolRef: 'growth_plan_run', details: { toolkit: growthToolkit.id, model: selectedModel, mode: 'initial_full' } });
       const planningRequirements = appliedInstructions.map((item) => item.instruction.body).filter(Boolean);
-      const result = await this.toolkits.invoke('growth_plan', 'run', {
-        mode: 'initial_full', objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
-        model: selectedModel,
-        onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
+      let result;
+      try {
+        result = await this.toolkits.invoke('growth_plan', 'run', {
+          mode: 'initial_full', objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
+          model: selectedModel,
+          onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
+            eventType: 'observation',
+            title: stage === 'context' ? 'I loaded the evidence for this decision' : stage === 'planning' ? 'I am comparing the company as a whole' : stage === 'governance' ? 'I am checking whether this plan can actually operate' : 'I am committing the chosen next move',
+            summary: detail,
+            details: { growth_plan_stage: stage },
+          }),
+        }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
+      } catch (error) {
+        if (!String(error?.message || error).includes('first_life_evidenced_proposals_required')) throw error;
+        await event(prisma, runtime, cycle, {
           eventType: 'observation',
-          title: stage === 'context' ? 'I loaded the evidence for this decision' : stage === 'planning' ? 'I am comparing the company as a whole' : stage === 'governance' ? 'I am checking whether this plan can actually operate' : 'I am committing the chosen next move',
-          summary: detail,
-          details: { growth_plan_stage: stage },
-        }),
-      }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
+          title: 'The first operating plan needs more evidence',
+          summary: 'The current evidence does not support enough independent proposals to form a truthful first operating plan. I retained the baseline and will resume planning when a connector, source, or user instruction adds material evidence.',
+          details: { waiting_reason: 'planning_evidence', error: 'first_life_evidenced_proposals_required' },
+        });
+        await move('WAITING', { blockedReason: 'planning_evidence', currentCycleId: null, nextWakeAt: null });
+        return { transition: 'WAIT_FOR_PLANNING_EVIDENCE', reason: 'planning_evidence' };
+      }
       const acknowledged = summarizeGrowthPlanResult(result);
       await event(prisma, runtime, cycle, {
         eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
-        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. I will not delegate them until the first operating policy is recorded.`,
+        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. I will not delegate them until you start the recommendation.`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
@@ -735,13 +750,13 @@ export class NativeHqEngine {
       });
       await event(prisma, runtime, cycle, {
         eventType: 'todo_created', title: 'I committed the first operating proposals',
-        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. These remain proposed until the first operating policy is recorded.`,
+        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. These remain proposed until you start the recommendation.`,
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       await scheduleHqWake({
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-        idempotencyKey: `initial-plan-policy:${result.artifact_id}`,
-        triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id, reason: 'initial_policy_choice' },
+        idempotencyKey: `initial-plan-start:${result.artifact_id}`,
+        triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id, reason: 'initial_start_decision' },
       });
       initialPolicyCommitted = true;
     } else if (focusedOutcome) {

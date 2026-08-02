@@ -7,6 +7,8 @@ function todo(id, status, rank, effect, recommended = false) {
     id, runtimeId: 'runtime-1', orgId: 'org-1', status, priority: rank, position: rank,
     context: {
       first_life_policy_id: 'runtime.first-life-policy',
+      first_life_policy_version: 2,
+      runtime_epoch: 'epoch-1',
       recommendation_rank: rank,
       effect_class: effect,
       recommended,
@@ -22,19 +24,23 @@ function prismaFor(rows, authorityPolicy = { external_default: 'manual', interna
       hqTodo: {
         findMany: async () => rows,
         updateMany: async ({ where, data }) => {
-          const row = rows.find((item) => item.id === where.id && item.status === where.status);
+          const row = rows.find((item) => item.id === where.id && (
+            typeof where.status === 'string' ? item.status === where.status
+              : !where.status?.notIn?.includes(item.status)
+          ));
           if (!row) return { count: 0 };
           Object.assign(row, data);
           return { count: 1 };
         },
       },
+      runtimePlaybookRun: { findMany: async () => [] },
     }),
   };
 }
 
 const runtime = { id: 'runtime-1', orgId: 'org-1', epoch: 'epoch-1' };
 
-test('first policy choice promotes the recommendation and at most one independent internal proposal', async () => {
+test('first start promotes the recommendation and at most one independent internal proposal', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),
     todo('internal-1', 'PROPOSED', 2, 'internal'),
@@ -42,7 +48,7 @@ test('first policy choice promotes the recommendation and at most one independen
     todo('internal-2', 'PROPOSED', 4, 'internal'),
   ];
   const result = await activateEligibleFirstLifeWork({
-    prisma: prismaFor(rows), runtime, expansionTrigger: 'organization_policy',
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'user_start',
   });
   assert.deepEqual(result.promoted.map((item) => item.id), ['external-1', 'internal-1']);
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'READY', 'PROPOSED', 'PROPOSED']);
@@ -75,13 +81,13 @@ test('only a verified monitoring checkpoint can release monitoring capacity', as
   assert.deepEqual(result.promoted.map((item) => item.id), ['next']);
 });
 
-test('policy recording grants no proposal while the external default is unconfigured', async () => {
+test('organization policy cannot pregrant an unconfigured first-life proposal', async () => {
   const rows = [todo('external-1', 'PROPOSED', 1, 'external', true)];
   const result = await activateEligibleFirstLifeWork({
     prisma: prismaFor(rows, { external_default: 'unconfigured' }), runtime,
     expansionTrigger: 'organization_policy',
   });
-  assert.equal(result.reason, 'initial_policy_required');
+  assert.equal(result.reason, 'no_eligible_capacity');
   assert.equal(rows[0].status, 'PROPOSED');
 });
 
@@ -112,8 +118,8 @@ test('a direct external instruction preempts ordering but not an occupied extern
 test('repeated evaluator wakes cannot promote the same proposal twice', async () => {
   const rows = [todo('internal-1', 'PROPOSED', 1, 'internal', true)];
   const prisma = prismaFor(rows);
-  const first = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'organization_policy' });
-  const second = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'organization_policy' });
+  const first = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'user_start' });
+  const second = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'user_start' });
   assert.equal(first.promoted.length, 1);
   assert.equal(second.promoted.length, 0);
 });
@@ -128,12 +134,12 @@ test('first-life projection exposes evidence and requested outcomes without disp
   rows[0].context.requested_terminal_outcome = 'verified_outcome';
   const prisma = {
     hqTodo: { findMany: async () => rows },
-    hqRuntime: { findUnique: async () => ({ authorityPolicy: { external_default: 'unconfigured' } }) },
+    hqRuntime: { findUnique: async () => ({ id: 'runtime-1', epoch: 'epoch-1', authorityPolicy: { external_default: 'unconfigured' } }) },
     runtimePlaybookRun: { findMany: async () => [] },
   };
 
   const result = await projectCurrentFirstLife({ prisma, orgId: 'org-1' });
-  assert.equal(result.status, 'AWAITING_POLICY');
+  assert.equal(result.status, 'AWAITING_START');
   assert.equal(result.response_locale, 'de-DE');
   assert.equal(result.proposal_count, 1);
   assert.equal(result.proposed_count, 1);

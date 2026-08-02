@@ -22,7 +22,7 @@ export async function projectCurrentActivationSprint({ prisma, orgId }) {
       .filter((item) => item.execution?.status === 'WAITING_AUTHORITY')
       .map((item) => item.execution.execution_id),
     authority_policy_keys: [],
-    pending_authority_policy_keys: firstLife.status === 'AWAITING_POLICY' ? ['external_default'] : [],
+    pending_authority_policy_keys: [],
   };
   const [todos, runtime] = await Promise.all([
     prisma.hqTodo.findMany({

@@ -32,6 +32,14 @@ test('baseline acknowledgement names concrete platform and performance metrics',
   assert.match(result.summary, /4,101 impressions/);
 });
 
+test('baseline acknowledgement never presents absent metrics as measured zero', () => {
+  const result = summarizeBaselineResult({ website: {}, social_presence: { totals: {} } });
+  assert.match(result.summary, /Website pages were not observed/);
+  assert.match(result.summary, /impressions not observed/);
+  assert.equal(result.details.website_pages, null);
+  assert.doesNotMatch(result.summary, /0 impressions|0 website page/);
+});
+
 test('growth plan acknowledgement names constraints and ordered specialist work', () => {
   const result = summarizeGrowthPlanResult({ plan: {
     constraints: [{ type: 'reach' }, { type: 'pipeline' }],

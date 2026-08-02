@@ -9,6 +9,7 @@ import { RuntimeRoomDirector } from './room-director.js';
 import { createProductionRuntimeAdapterRegistry } from './adapters/index.js';
 
 const fixtureDirectory = new URL('./fixtures/', import.meta.url);
+const executionPolicyUrl = new URL('./fixtures/runtime-execution-policy.v1.json', import.meta.url);
 
 async function productionFixturePaths() {
   const manifest = JSON.parse(await readFile(new URL('registry.json', fixtureDirectory), 'utf8'));
@@ -55,8 +56,25 @@ export class RuntimePlaybookService {
     } catch (error) {
       logger.warn?.('[runtime-playbooks] persisted registry unavailable:', error.message);
     }
+    const nonterminalRuns = await prisma.runtimePlaybookRun.findMany({
+      where: { status: { notIn: ['COMPLETED', 'TERMINATED'] } },
+      select: { id: true, scopeKey: true, playbookId: true, playbookVersion: true, status: true },
+      take: 10000,
+    });
+    const unresolved = [];
+    for (const run of nonterminalRuns) {
+      try {
+        registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+      } catch {
+        unresolved.push(`${run.id}:${run.scopeKey}:${run.playbookId}:v${run.playbookVersion}:${run.status}`);
+      }
+    }
+    if (unresolved.length) {
+      throw new Error(`runtime_playbook_nonterminal_definitions_missing:${unresolved.join(',')}`);
+    }
     const selector = new DirectorPlaybookSelector({ registry, ...(completionFetch ? { completionFetch } : {}) });
     const adapterRegistry = adapters || createProductionRuntimeAdapterRegistry({ prisma });
+    const executionPolicy = JSON.parse(await readFile(executionPolicyUrl, 'utf8'));
     const executor = new GenericStageExecutor({
       registry,
       predicates: new PredicateEngine(),
@@ -65,6 +83,7 @@ export class RuntimePlaybookService {
       selector,
       adapters: adapterRegistry,
       onStageState,
+      executionPolicy,
     });
     return new RuntimePlaybookService({ prisma, registry, selector, executor, logger, onRunState });
   }
@@ -137,6 +156,10 @@ export class RuntimePlaybookService {
         return { id: row.id, orgId: row.orgId, status: 'FAILED', error: error.message };
       }
     }));
+  }
+
+  async monitorDeadlines() {
+    return this.executor.monitorDeadlines();
   }
 }
 

@@ -816,7 +816,7 @@ export class NativeHqEngine {
     const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
     const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
     const sleepReason = initialPolicyCommitted
-      ? 'I have retained the evidenced proposals without dispatching them. Choose Manual or Auto as the default for future exact external gates; this policy choice will not grant or execute any action.'
+      ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
       : queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability
@@ -831,8 +831,8 @@ export class NativeHqEngine {
         ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
       : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
     if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
-    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialPolicyCommitted ? 'initial_policy_choice' : null });
-    const waitingTitle = initialPolicyCommitted ? 'I am waiting for the first operating policy'
+    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialPolicyCommitted ? 'initial_start_decision' : null });
+    const waitingTitle = initialPolicyCommitted ? 'The first operating plan is ready'
       : queueContinuationScheduled ? 'The queue is still moving'
       : openCapability ? 'I am waiting for access'
       : waitingForResponse ? 'I am monitoring for replies'

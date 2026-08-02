@@ -38,8 +38,6 @@ export async function createGrowthGoal({ prisma, orgId, userId, title, objective
   return goal;
 }
 
-const CONSTRAINTS = new Set(['positioning', 'reach', 'conversion', 'qualified_pipeline', 'retention', 'measurement']);
-
 const compact = (value) => JSON.stringify(value, null, 2);
 
 function boundedSocialPresence(social = {}) {
@@ -167,8 +165,8 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
   if (!contract || contract.contract_version !== 'growth-plan.v2') throw new Error('Invalid growth plan contract version');
   const constraints = Array.isArray(contract.constraints) ? contract.constraints : [];
   const primary = constraints.find((item) => item?.id === contract.primary_constraint_id);
-  const constraint = String(primary?.type || '').toLowerCase();
-  if (!CONSTRAINTS.has(constraint)) throw new Error('Growth plan must choose one supported constraint');
+  const constraint = String(primary?.type || '').trim().toLowerCase().replace(/[\s-]+/g, '_').slice(0, 120);
+  if (!/^[a-z][a-z0-9_:]*$/.test(constraint)) throw new Error('Growth plan must choose one stable constraint identifier');
   const queue = Array.isArray(contract.operating_queue) ? contract.operating_queue : [];
   if (!queue.length) throw new Error('Growth plan must contain an operating queue');
   const stage = contract.stage || {};

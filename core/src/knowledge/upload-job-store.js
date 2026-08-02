@@ -68,8 +68,16 @@ export class KnowledgeUploadJobStore {
   }
 
   async findDuplicate({ orgId, scopeKey, checksum }) {
+    // scopeKey is REQUIRED by the upload path (a file may legitimately exist in
+    // two scopes) but OPTIONAL for the pre-check, where the client only knows the
+    // bytes. Passing null previously produced an invalid Prisma invocation, so
+    // omit the key entirely rather than filtering on null — that widens the match
+    // to "anywhere in this org", which is exactly what a pre-check should answer.
+    // orgId is never omitted: the tenant boundary is not negotiable here.
+    const where = { orgId, checksum };
+    if (scopeKey !== null && scopeKey !== undefined) where.scopeKey = scopeKey;
     return this.prisma.knowledgeIngestJob.findFirst({
-      where: { orgId, scopeKey, checksum }, orderBy: { createdAt: 'desc' },
+      where, orderBy: { createdAt: 'desc' },
     });
   }
 

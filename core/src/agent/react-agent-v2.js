@@ -2605,9 +2605,36 @@ export async function runReactAgentV2({
       ];
     })();
 
+    // ── HOW WAS THIS ANSWERED? ───────────────────────────────────────────────
+    // "The 5 most relevant memories say two" and "there are exactly two" are
+    // different claims, and the response could not tell them apart. An answer
+    // built from a top-K SAMPLE looked identical to one built from a complete
+    // SCAN — which is exactly how a sampled count gets read as a fact.
+    //
+    // Derived from the steps ACTUALLY executed this turn, never from intent
+    // guessing, so it reports what happened rather than what was planned.
+    const _toolsUsed = [...new Set((steps || [])
+      .map((s) => s?.tool || s?.name)
+      .filter((n) => typeof n === 'string' && n))];
+    const _counted = _toolsUsed.includes('hivemind_count_where')
+      || _toolsUsed.includes('hivemind_aggregate_entities');
+    const _answerMode = _counted ? 'counted'
+      : _toolsUsed.some((n) => ['hivemind_timeline', 'hivemind_at', 'hivemind_diff'].includes(n)) ? 'temporal'
+      : _toolsUsed.some((n) => ['hivemind_traverse_graph', 'hivemind_relation_between'].includes(n)) ? 'graph'
+      : 'sampled';
+
     return {
       project_choice: recallProjectChoice,
       scopes_found: scopesFound,
+      // How this answer was obtained. 'sampled' = top-K similarity, so any number
+      // in the prose is indicative, not exhaustive. 'counted' = a real aggregate.
+      answer_mode: _answerMode,
+      answer_basis: {
+        mode: _answerMode,
+        exhaustive: _counted,
+        sampled_sources: Array.isArray(publicSources) ? publicSources.length : 0,
+        tools_used: _toolsUsed,
+      },
       // When a save was deferred for project choice, don't claim it was saved —
       // prompt the user to pick (the FE renders project buttons below).
       response: finalResponse,

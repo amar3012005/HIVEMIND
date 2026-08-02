@@ -138,6 +138,7 @@ model UserOrganization {
   role          String       @default("member") @db.VarChar(50)
   roles         String[]     @default([]) @map("roles")
   isActive      Boolean      @default(true) @map("is_active")
+  cognitionPersonalOptIn Boolean @default(false) @map("cognition_personal_opt_in")
   deactivatedAt DateTime?    @map("deactivated_at") @db.Timestamptz(6)
   invitedAt     DateTime?    @default(now()) @map("invited_at") @db.Timestamptz(6)
   joinedAt      DateTime?    @map("joined_at") @db.Timestamptz(6)
@@ -167,13 +168,37 @@ model OrgInvite {
   lastSentAt DateTime?    @map("last_sent_at") @db.Timestamptz(6)
   sendCount  Int          @default(1) @map("send_count")
   createdBy  String       @map("created_by") @db.Uuid
+  idempotencyKey String?  @map("idempotency_key") @db.VarChar(200)
   createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([email])
   @@index([expiresAt])
+  @@unique([orgId, createdBy, idempotencyKey])
   @@map("org_invites")
+}
+
+/// Tenant-scoped operational notifications for Workspace Admin. This is a
+/// focused event inbox, not a general messaging system.
+model WorkspaceNotification {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String    @map("org_id") @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  type         String    @db.VarChar(80)
+  title        String    @db.VarChar(180)
+  body         String?
+  resourceType String?   @map("resource_type") @db.VarChar(80)
+  resourceId   String?   @map("resource_id") @db.VarChar(128)
+  data         Json      @default("{}")
+  dedupeKey    String?   @map("dedupe_key") @db.VarChar(200)
+  readAt       DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([orgId, userId, readAt])
+  @@unique([orgId, userId, dedupeKey])
+  @@map("workspace_notifications")
 }
 
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).

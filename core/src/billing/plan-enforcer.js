@@ -273,29 +273,28 @@ export class PlanEnforcer {
     if (type === 'meetingMinutes') {
       const limit = limits.meetingMinutesPerMonth;
       if (!limit || limit === -1) return { allowed: true };
-      let usedMinutes = 0;
+      let usedSeconds = 0;
       try {
         const rows = await this.prisma.$queryRawUnsafe(
           `SELECT COALESCE(SUM("duration_sec"), 0) AS secs
              FROM hivemind.meetings
             WHERE "org_id" = $1::uuid
+              AND "deleted_at" IS NULL
               AND "created_at" >= date_trunc('month', CURRENT_DATE)`,
           orgId,
         );
-        usedMinutes = Math.ceil(Number(rows?.[0]?.secs || 0) / 60);
+        usedSeconds = Math.max(0, Number(rows?.[0]?.secs || 0));
       } catch (err) {
-        // Fail OPEN on a metering read error. Refusing to transcribe because a
-        // usage query failed punishes the customer for our outage; the monthly
-        // ceiling will still catch them on the next successful read.
         console.warn('[plan-enforcer] meeting minutes read failed:', err.message);
-        return { allowed: true };
+        return { allowed: false, reason: 'Meeting usage verification is temporarily unavailable.', plan: planDef.id, status: 503 };
       }
-      if (usedMinutes + amount > limit) {
+      if (usedSeconds >= limit * 60 || usedSeconds + Math.max(0, Number(amount) || 0) * 60 > limit * 60) {
         return {
           allowed: false,
           reason: `Meeting notes limit reached (${planDef.name} plan: ${limit} minutes/month)`,
           limit,
-          current: usedMinutes,
+          current: Math.ceil(usedSeconds / 60),
+          currentSeconds: usedSeconds,
           plan: planDef.id,
           period: 'month',
         };
@@ -508,6 +507,19 @@ export class PlanEnforcer {
       catch { memoriesUsed = 0; }
     }
 
+    let meetingSecondsUsed = 0;
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT COALESCE(SUM("duration_sec"), 0) AS secs
+           FROM hivemind.meetings
+          WHERE "org_id" = $1::uuid
+            AND "deleted_at" IS NULL
+            AND "created_at" >= date_trunc('month', CURRENT_DATE)`,
+        orgId,
+      );
+      meetingSecondsUsed = Math.max(0, Number(rows?.[0]?.secs || 0));
+    } catch { /* display zero; admission still performs its own authoritative check */ }
+
     const summary = {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
@@ -522,6 +534,11 @@ export class PlanEnforcer {
       tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 },
       taraSeconds: { used: Number(dbUsage.taraSeconds) || 0, limit: limits.taraTalkSecondsPerMonth ?? -1 },
       hyperAgentRuns: { used: Number(dbUsage.hyperAgentRuns) || 0, limit: limits.hyperAgentRunsPerMonth ?? -1 },
+      meetingMinutes: {
+        used: Math.ceil(meetingSecondsUsed / 60),
+        usedSeconds: meetingSecondsUsed,
+        limit: limits.meetingMinutesPerMonth ?? -1,
+      },
       connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
       hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
       users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
@@ -546,7 +563,7 @@ export class PlanEnforcer {
     };
 
     const reminders = [];
-    const monthlyResources = ['tokens', 'searches', 'kbPages', 'memories', 'deepResearch', 'taraSeconds', 'hyperAgentRuns'];
+    const monthlyResources = ['tokens', 'searches', 'kbPages', 'memories', 'deepResearch', 'taraSeconds', 'hyperAgentRuns', 'meetingMinutes'];
     for (const resource of monthlyResources) {
       const reminder = buildReminder(resource, summary[resource].used, summary[resource].limit, resource === 'memories' ? 'total' : 'monthly');
       if (reminder) reminders.push(reminder);

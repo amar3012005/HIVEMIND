@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -22,6 +22,10 @@ import { transcribeAudio } from './llm/stt-route.js';
 import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
+import { KnowledgeUploadService } from './knowledge/upload-service.js';
+import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
+import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
+import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
 import {
   getRuntimeRole,
@@ -33,6 +37,8 @@ import {
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
+import { isOrganizationAdmin } from './workspace/access-policy.js';
+import { createWorkspaceNotification } from './workspace/notifications.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
@@ -103,6 +109,17 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
+
+// Cognition is an organization-administration surface. Keep its route gates on
+// the same active-membership and canonical-role interpretation as Workspace
+// Admin; legacy one-off role checks caused settings and status to disagree.
+async function canManageCognition(prismaClient, { orgId, userId, principal }) {
+  if (principal?.master) return true;
+  const membership = await prismaClient?.userOrganization.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+  }).catch(() => null);
+  return !!(membership?.isActive && isOrganizationAdmin(membership));
+}
 
 function loadLocalEnv(envPath) {
   if (!fs.existsSync(envPath)) {
@@ -583,6 +600,8 @@ let syncScheduler = null;
 // Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
 let documentFirstIngestion = null;
 let kbIngestQueue = null;
+let knowledgeUploadJobStore = null;
+let knowledgeUploadService = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -1907,16 +1926,51 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // pipeline above — worker calls documentFirstIngestion unchanged.
     try {
       const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
+      knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, logger: console });
       kbIngestQueue = new KbIngestQueue({
         documentFirstIngestion,
         ingestTracker,
-        recordUsage: (orgId, result) => {
-          if (planEnforcer && orgId) {
-            planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(result.pages) || 1));
-            planEnforcer.recordUsage(orgId, 'uploads', 1);
+        jobStore: knowledgeUploadJobStore,
+        validateJob: async ({ trackerJobId, userId, orgId, metadata }) => {
+          const durable = await knowledgeUploadJobStore.findOwned(trackerJobId, { orgId, userId });
+          if (!durable || durable.status === 'cancelled') throw Object.assign(new Error('Upload authorization is no longer valid.'), { code: 'UPLOAD_NOT_AUTHORIZED' });
+          const scope = await authorizeKnowledgeScope({
+            prisma, userId, orgId, targetScope: durable.scopeType,
+            projectIds: durable.scopeType === 'project' ? [durable.scopeId] : [],
+            primaryTeamId: durable.scopeType === 'team' ? durable.scopeId : null,
+          });
+          if (!scope.ok) throw Object.assign(new Error('Upload scope is no longer accessible.'), { code: 'UPLOAD_SCOPE_REVOKED' });
+          const org = await prisma.organization.findFirst({ where: { id: orgId }, select: { memoryStorageMode: true } });
+          if (!org || org.memoryStorageMode !== durable.storageMode || !isMemoryStorageReady(orgId, durable.storageMode)) {
+            throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
           }
         },
+        processUpload: async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
+          if (metadata.media_kind !== 'image') {
+            return documentFirstIngestion.ingestSource({
+              userId, orgId, source: { type: 'kb', filename },
+              file: { buffer: fileBuffer, contentType, filename }, metadata, onProgress,
+            });
+          }
+          onProgress({ stage: 'extracting', progress: 25 });
+          const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
+          const { payload } = await buildImageMemoryPayload({
+            imageBuffer: fileBuffer, mimeType: contentType, hint: metadata.hint,
+            userId, orgId, projectId: metadata.project_ids?.[0] || null, filename,
+          });
+          const saved = await ingestCanonicalPayload(payload, { sourceType: 'api', platform: 'knowledge_upload', mode: 'atomic' });
+          const ids = saved?.memoryIds?.length ? saved.memoryIds : [saved?.memoryId].filter(Boolean);
+          return {
+            documentId: saved?.documentId || ids[0] || null, promotedMemoryIds: ids,
+            promotedCount: Math.max(1, ids.length), segmentCount: saved?.segmentCount || 0,
+            candidateCount: Math.max(1, ids.length), pages: 1,
+          };
+        },
         logger: console,
+      });
+      knowledgeUploadService = new KnowledgeUploadService({
+        prisma, queue: kbIngestQueue, jobStore: knowledgeUploadJobStore,
+        planEnforcer, storageReady: isMemoryStorageReady,
       });
       process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
     } catch (err) {
@@ -5816,6 +5870,45 @@ exit \$RC
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
+      if (pathname.startsWith('/api/meetings')) {
+        const meetingMembership = await prisma?.userOrganization.findUnique({
+          where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
+          select: { isActive: true },
+        }).catch(() => null);
+        if (!meetingMembership?.isActive) return jsonResponse(res, { error: 'not_found' }, 404);
+      }
+      let _mProjectIds = null;
+      const meetingProjectIds = async () => {
+        if (_mProjectIds) return _mProjectIds;
+        const memberships = await prisma?.projectMember.findMany({
+          where: { userId: _mUserId, project: { orgId: _mOrgId, archivedAt: null } },
+          select: { projectId: true },
+        }).catch(() => []);
+        _mProjectIds = (memberships || []).map((row) => row.projectId);
+        return _mProjectIds;
+      };
+      const meetingRecordAccessible = async (meeting) => {
+        if (!meeting || (meeting.org_id && meeting.org_id !== _mOrgId)) return false;
+        if (meeting.user_id === _mUserId || meeting.scope == null || meeting.scope === 'organization' || meeting.scope === 'team') return true;
+        const participants = Array.isArray(meeting.participants) ? meeting.participants : [];
+        if (participants.some((participant) => (
+          (typeof participant === 'string' ? participant : participant?.id) === _mUserId
+        ))) return true;
+        return meeting.scope === 'project' && (await meetingProjectIds()).includes(meeting.project_id);
+      };
+      const remoteMeetingForCaller = async (id) => {
+        const meeting = await amrMeetingGet(_mOrgId, id);
+        return (await meetingRecordAccessible(meeting)) ? meeting : null;
+      };
+      const centralMeetingForCaller = async (id) => {
+        if (!prisma) return null;
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, user_id, org_id, project_id, participants, scope
+             FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+          id, _mOrgId,
+        ).catch(() => []);
+        return (await meetingRecordAccessible(rows?.[0])) ? rows[0] : null;
+      };
       if (pathname.startsWith('/api/tara/')) {
         const membership = await prisma?.userOrganization.findUnique({
           where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
@@ -5848,30 +5941,102 @@ exit \$RC
       // amrMeeting*/amrTaraCall instead of Prisma/raw-SQL. Central/managed orgs are BYTE-UNCHANGED.
 
       // ── AI Meeting Notes ──────────────────────────────────────────────
+      if (pathname === '/api/meetings/usage' && req.method === 'GET') {
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        return jsonResponse(res, {
+          plan: usage.plan,
+          used_seconds: usedSeconds,
+          limit_seconds: limitSeconds,
+          remaining_seconds: limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds),
+          reset_at: new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1)).toISOString(),
+        });
+      }
+
+      if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
+        if (body?.consent !== true) {
+          return jsonResponse(res, {
+            error: 'recording_consent_required',
+            message: 'Confirm recording consent before starting a meeting.',
+          }, 400);
+        }
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        const remainingSeconds = limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds);
+        if (remainingSeconds === 0) {
+          return jsonResponse(res, planLimitBody({
+            allowed: false, current: Math.ceil(usedSeconds / 60), limit: meter.limit,
+            plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
+          }, 'meetingMinutes'), 402);
+        }
+        return jsonResponse(res, {
+          session_id: crypto.randomUUID(),
+          remaining_seconds: remainingSeconds,
+          consent_recorded: true,
+        }, 201);
+      }
+
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
       // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
       if (pathname === '/api/meetings/transcribe' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'stt_unavailable' }, 503);
         // Meeting-notes minutes are a plan limit (see src/billing/plans.js —
         // meetingMinutesPerMonth). Checked BEFORE we burn a transcription call,
         // and charged 1 minute here as the admission floor; the real duration is
         // derived from meetings.duration_sec, so this gate only has to stop an
         // org that is already at the ceiling.
         if (planEnforcer && _mOrgId) {
-          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 1);
+          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 0);
           if (!minCheck.allowed) {
             return jsonResponse(res, planLimitBody(minCheck, 'meetingMinutes'), minCheck.status || 402);
           }
         }
         try {
+          if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
           const chunks = [];
-          for await (const c of req) chunks.push(c);
+          const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
+          const maxBytes = maxMb * 1024 * 1024;
+          let receivedBytes = 0;
+          for await (const c of req) {
+            receivedBytes += c.length;
+            if (receivedBytes > maxBytes) {
+              return jsonResponse(res, {
+                error: 'audio_too_large',
+                message: `This recording segment exceeds the ${maxMb} MB transcription limit.`,
+              }, 413);
+            }
+            chunks.push(c);
+          }
           const audio = Buffer.concat(chunks);
           if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
           // Groq Whisper hard file cap (25 MB free / 100 MB dev tier). Catch it
           // HERE with a clear message instead of letting Groq 413 surface as an
           // opaque "whisper model issue" — a long meeting is the #1 cause.
-          const maxMb = Number(process.env.GROQ_WHISPER_MAX_MB || 24);
           if (audio.length > maxMb * 1024 * 1024) {
             return jsonResponse(res, {
               error: 'audio_too_large',
@@ -5942,7 +6107,6 @@ exit \$RC
 
       // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
       if (pathname === '/api/meetings/insights' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
         // Prefer the speaker-attributed transcript (from /transcribe speakerTranscript)
         // when the caller sends it → action items/quotes get attributed to speakers;
         // falls back to the plain transcript. Both carry SPEAKER_xx labels the prompt maps.
@@ -6090,7 +6254,10 @@ exit \$RC
         if (orgIsRemote(mOrg)) {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
           const rows = await amrMeetingList(mOrg, { limit });
-          return jsonResponse(res, { meetings: rows || [] });
+          if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const visible = [];
+          for (const meeting of rows) if (await meetingRecordAccessible(meeting)) visible.push(meeting);
+          return jsonResponse(res, { meetings: visible });
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
@@ -6130,18 +6297,87 @@ exit \$RC
       if (pathname === '/api/meetings' && req.method === 'POST') {
         const mUser = _mUserId;
         const mOrg = _mOrgId;
-        const ins = body.insights || {};
+        // A finalized meeting is tenant-owned.  Do not let an incomplete scoped
+        // principal fall through to a database NOT NULL error: the recorder has
+        // already persisted its transcript segments by session_id and needs a
+        // recoverable response, not an opaque 500.
+        const sessionId = typeof body.session_id === 'string'
+          && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
+          ? body.session_id
+          : null;
+        if (!mUser || !mOrg) {
+          console.warn('[meetings] rejected save without tenant principal', {
+            has_user_id: Boolean(mUser),
+            has_org_id: Boolean(mOrg),
+            session_id: sessionId,
+          });
+          return jsonResponse(res, {
+            error: 'no_active_organization',
+            recoverable: Boolean(sessionId),
+            session_id: sessionId,
+          }, 400);
+        }
+        const ins = {
+          ...(body.insights && typeof body.insights === 'object' && !Array.isArray(body.insights) ? body.insights : {}),
+          recording_consent: body.consent === true,
+        };
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
-        const transcript = (body.transcript || '').toString();
+        let transcript = (body.transcript || '').toString();
+        // A client may retry finalization after a network or database failure
+        // without retaining the assembled transcript in the tab. Rebuild it
+        // only from the caller's own durably persisted segments.
+        if (!transcript.trim() && sessionId && !orgIsRemote(mOrg) && prisma) {
+          try {
+            const segments = await prisma.$queryRawUnsafe(
+              `SELECT text FROM hivemind.meeting_segments
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                ORDER BY idx ASC`,
+              sessionId, mOrg, mUser,
+            );
+            transcript = (segments || []).map((segment) => segment.text).filter(Boolean).join('\n').trim();
+          } catch (error) {
+            console.warn('[meetings] segment recovery failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              error: error?.message || String(error),
+            });
+          }
+        }
+        // Finalization retries are expected after a lost response. A session
+        // whose transcript segments already point at a meeting returns that
+        // meeting instead of creating another row or charging its duration twice.
+        if (sessionId && !orgIsRemote(mOrg) && prisma) {
+          const existing = await prisma.$queryRawUnsafe(
+            `SELECT meeting_id FROM hivemind.meeting_segments
+              WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                AND meeting_id IS NOT NULL LIMIT 1`,
+            sessionId, mOrg, mUser,
+          ).catch(() => []);
+          if (existing?.[0]?.meeting_id) {
+            return jsonResponse(res, { ok: true, id: existing[0].meeting_id, existing: true }, 200);
+          }
+        }
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
         const SCOPES = ['personal', 'project', 'team', 'organization'];
         const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
+        if (mScope === 'project') {
+          const projectId = typeof body.project_id === 'string' ? body.project_id : '';
+          const projectAccess = projectId ? await prisma?.projectMember.findFirst({
+            where: {
+              projectId,
+              userId: mUser,
+              project: { orgId: mOrg, archivedAt: null },
+            },
+            select: { projectId: true },
+          }).catch(() => null) : null;
+          if (!projectAccess) return jsonResponse(res, { error: 'not_found' }, 404);
+        }
         // Remote (self-host) orgs: write to agent instead of central Postgres.
         if (orgIsRemote(mOrg)) {
           try {
             const meeting = {
               user_id: mUser, project_id: body.project_id || null, title,
+              session_id: sessionId,
               summary: ins.summary || null, transcript,
               language: body.language || null,
               duration_sec: Number.isFinite(body.duration_sec) ? body.duration_sec : null,
@@ -6159,12 +6395,30 @@ exit \$RC
               scope: mScope,
             };
             const result = await amrMeetingWrite(mOrg, meeting);
-            if (!result?.ok) return jsonResponse(res, { error: 'meetings_save_error' }, 500);
+            if (!result?.ok) {
+              console.error('[meetings] remote save failed', {
+                org_id: mOrg,
+                user_id: mUser,
+                session_id: sessionId,
+                transcript_chars: transcript.length,
+                result: result?.error || result?.message || 'unknown',
+              });
+              return jsonResponse(res, {
+                error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              }, 500);
+            }
             const _newId = result.id;
             if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
             return jsonResponse(res, { ok: true, id: result.id, created_at: result.created_at }, 201);
           } catch (e) {
-            return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            console.error('[meetings] remote save failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              transcript_chars: transcript.length, error: e?.message || String(e),
+            });
+            return jsonResponse(res, {
+              error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+            }, 500);
           }
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
@@ -6197,14 +6451,22 @@ exit \$RC
           // to this finalized meeting row, so the crash-recovery cache is tied to it.
           if (_newId && body.session_id && /^[0-9a-fA-F-]{36}$/.test(String(body.session_id))) {
             await prisma.$executeRawUnsafe(
-              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid WHERE session_id=$2::uuid AND meeting_id IS NULL`,
-              _newId, body.session_id,
+              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid
+                WHERE session_id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND meeting_id IS NULL`,
+              _newId, body.session_id, mOrg, mUser,
             ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
           }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          console.error('[meetings] postgres save failed', {
+            org_id: mOrg, user_id: mUser, session_id: sessionId,
+            transcript_chars: transcript.length, error: e?.message || String(e),
+          });
+          return jsonResponse(res, {
+            error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+            message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+          }, 500);
         }
       }
 
@@ -6214,14 +6476,23 @@ exit \$RC
       // in-browser — never persisted central. Idempotent upsert on (session_id, idx).
       if (pathname === '/api/meetings/segments' && req.method === 'POST') {
         const mUser = _mUserId, mOrg = _mOrgId;
-        if (orgIsRemote(mOrg)) return jsonResponse(res, { ok: true, skipped: 'remote' });
-        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         const sid = (body.session_id || '').toString();
         const idx = Number(body.idx);
         const text = (body.text || '').toString();
         if (!/^[0-9a-fA-F-]{36}$/.test(sid) || !Number.isInteger(idx) || idx < 0 || !text.trim()) {
           return jsonResponse(res, { error: 'bad_segment' }, 400);
         }
+        if (orgIsRemote(mOrg)) {
+          const stored = await amrMeetingSegmentWrite(mOrg, {
+            session_id: sid, user_id: mUser, idx, text,
+            speakers: body.speakers || null,
+            start_ms: Number.isFinite(body.start_ms) ? body.start_ms : null,
+            end_ms: Number.isFinite(body.end_ms) ? body.end_ms : null,
+          });
+          if (!stored?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          return jsonResponse(res, { ok: true });
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
           await prisma.$executeRawUnsafe(
             `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
@@ -6265,16 +6536,20 @@ exit \$RC
       {
         const mSeg = pathname.match(/^\/api\/meetings\/session\/([0-9a-fA-F-]{36})\/segments$/);
         if (mSeg && req.method === 'GET') {
-          const mOrg = _mOrgId;
-          if (orgIsRemote(mOrg)) return jsonResponse(res, { segments: [], skipped: 'remote' });
+          const mOrg = _mOrgId, mUser = _mUserId;
+          if (orgIsRemote(mOrg)) {
+            const rows = await amrMeetingSegmentList(mOrg, { session_id: mSeg[1], user_id: mUser });
+            if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            return jsonResponse(res, { segments: rows, stitched: rows.map((row) => row.text).join('\n').trim() });
+          }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id, extraction, extraction_status
                  FROM hivemind.meeting_segments
-                WHERE session_id=$1::uuid AND org_id=$2::uuid
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
                 ORDER BY idx ASC`,
-              mSeg[1], mOrg,
+              mSeg[1], mOrg, mUser,
             );
             return jsonResponse(res, { segments: rows || [], stitched: (rows || []).map((r) => r.text).join('\n').trim() });
           } catch (e) {
@@ -6354,15 +6629,32 @@ exit \$RC
       // "who owes what, by when" register. Central only (remote = agent follow-up).
       if (pathname === '/api/meetings/obligations' && req.method === 'GET') {
         const mOrg = _mOrgId;
-        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { obligations: [], counts: {} });
+        const mUser = _mUserId;
+        if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { obligations: [], counts: {} });
         try {
-          const rows = await prisma.$queryRawUnsafe(
+          const projectIds = await meetingProjectIds();
+          let rows;
+          if (orgIsRemote(mOrg)) {
+            const remoteRows = await amrMeetingList(mOrg, { limit: 200 });
+            if (!remoteRows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            rows = [];
+            for (const meeting of remoteRows) {
+              if (await meetingRecordAccessible(meeting) && Array.isArray(meeting.action_items) && meeting.action_items.length) rows.push(meeting);
+            }
+          } else rows = await prisma.$queryRawUnsafe(
             `SELECT id, title, created_at, action_items
                FROM hivemind.meetings
               WHERE org_id=$1::uuid AND deleted_at IS NULL
                 AND action_items IS NOT NULL AND jsonb_array_length(action_items) > 0
+                AND (
+                     user_id=$2::uuid
+                  OR participants @> $3::jsonb
+                  OR scope IS NULL
+                  OR scope IN ('organization','team')
+                  OR (scope='project' AND project_id=ANY($4::uuid[]))
+                )
               ORDER BY created_at DESC LIMIT 200`,
-            mOrg,
+            mOrg, mUser, JSON.stringify([{ id: mUser }]), projectIds,
           );
           const today = new Date().toISOString().slice(0, 10);
           const obligations = [];
@@ -6440,7 +6732,7 @@ exit \$RC
           const mUser = _mUserId;
           // Remote (self-host) orgs: fetch from agent.
           if (orgIsRemote(mOrg)) {
-            const meeting = await amrMeetingGet(mOrg, mGet[1]);
+            const meeting = await remoteMeetingForCaller(mGet[1]);
             if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
             return jsonResponse(res, { meeting: { ...meeting, intelligence: meeting.intelligence || null, intelligence_status: meeting.intelligence_status || 'none', intelligence_generated_at: null } });
           }
@@ -6494,10 +6786,11 @@ exit \$RC
           // Remote (self-host) orgs: fetch from agent. Memory cluster preview is skipped
           // (memories already live on the agent; the delete flow still works correctly).
           if (orgIsRemote(mOrg)) {
-            const meeting = await amrMeetingGet(mOrg, mPrev[1]);
+            const meeting = await remoteMeetingForCaller(mPrev[1]);
             if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
-            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: (meeting.user_id === mUser) || !!isAdmin, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
+            if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: true, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
           }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
@@ -6508,6 +6801,7 @@ exit \$RC
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            if (m.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
             let memories = [];
             if (m.source_memory_id) {
               memories = await prisma.$queryRawUnsafe(
@@ -6520,7 +6814,7 @@ exit \$RC
             }
             return jsonResponse(res, {
               meeting: { id: m.id, title: m.title },
-              can_delete: (m.user_id === mUser) || !!isAdmin,
+              can_delete: true,
               ingested: !!m.source_memory_id,
               memory_count: memories.length,
               memories: memories.map((x) => ({ id: x.id, title: x.title })),
@@ -6553,14 +6847,25 @@ exit \$RC
               const meeting = await amrMeetingGet(mOrg, id);
               if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
               const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
-              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner' }, 403);
+              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+              let deletedMemories = 0;
+              const tagged = await remoteList(mOrg, { tags: [`meeting:${id}`] }, null, 1000).catch(() => null);
+              const memoryIds = new Set((tagged?.memories || []).map((memory) => memory.id).filter(Boolean));
+              if (meeting.source_memory_id) memoryIds.add(meeting.source_memory_id);
+              for (const memoryId of memoryIds) {
+                const removed = await amrDelete(mOrg, memoryId, hard);
+                if (!removed) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+                deletedMemories += 1;
+              }
               if (scope === 'both') {
-                await amrMeetingDelete(mOrg, id, hard);
+                const removed = await amrMeetingDelete(mOrg, id, hard);
+                if (!removed?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
               } else {
                 // memories-only → clear the cluster link, keep the row.
-                await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+                const patched = await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+                if (!patched?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
               }
-              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: 0, meeting_deleted: scope === 'both' });
+              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: deletedMemories, meeting_deleted: scope === 'both' });
             } catch (e) {
               return jsonResponse(res, { error: 'meeting_delete_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
             }
@@ -6575,9 +6880,7 @@ exit \$RC
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
             if (m.user_id !== mUser && !isAdmin) {
-              let owner = null;
-              try { const u = await prisma.user.findUnique({ where: { id: m.user_id }, select: { displayName: true, email: true } }); if (u) owner = { name: u.displayName || null, email: u.email || null }; } catch { /* best-effort */ }
-              return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner', owner }, 403);
+              return jsonResponse(res, { error: 'not_found' }, 404);
             }
             // Collect the meeting's memory set. Canonical ingest tags EVERY
             // meeting memory (distilled facts + transcript-evidence) with
@@ -6651,6 +6954,10 @@ exit \$RC
             }
             let meetingDeleted = false;
             if (scope === 'both') {
+              await prisma.$queryRawUnsafe(
+                `DELETE FROM hivemind.meeting_segments WHERE meeting_id=$1::uuid AND org_id=$2::uuid`,
+                id, mOrg,
+              );
               if (hard) await prisma.$queryRawUnsafe(`DELETE FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               else await prisma.$queryRawUnsafe(`UPDATE meetings SET deleted_at = now() WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               meetingDeleted = true;
@@ -6676,6 +6983,12 @@ exit \$RC
           const mOrg = _mOrgId;
           const mUser = _mUserId;
           if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(mIntel[1])) return jsonResponse(res, { error: 'not_found' }, 404);
+          } else {
+            const meeting = await centralMeetingForCaller(mIntel[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+          }
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -6838,6 +7151,7 @@ exit \$RC
           if (!Object.keys(patchFields).length) return jsonResponse(res, { error: 'no_fields' }, 400);
           // Remote (self-host) orgs: patch on agent.
           if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
             try {
               const r = await amrMeetingPatch(mOrg, id, patchFields);
               if (!r?.ok) return jsonResponse(res, { error: 'not_found' }, 404);
@@ -6847,6 +7161,7 @@ exit \$RC
             }
           }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
           const sets = [];
           const vals = [];
           let i = 1;
@@ -7054,9 +7369,10 @@ exit \$RC
           try {
             let m;
             if (orgIsRemote(mOrg)) {
-              m = await amrMeetingGet(mOrg, id);
+              m = await remoteMeetingForCaller(id);
             } else {
               if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+              if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
               const rows = await prisma.$queryRawUnsafe(
                 `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
                         action_items, decisions, key_points, questions, topics, insights,
@@ -10408,7 +10724,7 @@ exit \$RC
           // rather than 403 so the FE PlanLimitModal offers the upgrade inline
           // instead of the user hitting an opaque "forbidden".
           if (!orgPlan.features.cognitiveDreaming
-              && (pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
+              && (pathname.startsWith('/api/cognition') || pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
               && req.method !== 'GET') {
             return jsonResponse(res, {
               error: 'Cognitive layer (dreaming) requires the Scale plan or higher',
@@ -11083,6 +11399,12 @@ exit \$RC
 
         case '/api/ingest/image':
           if (req.method === 'POST') {
+            res.setHeader('Deprecation', 'true');
+            res.setHeader('Link', '</api/knowledge/upload>; rel="successor-version"');
+            return handleKnowledgeUploadRoute({
+              req, res, userId, orgId, readBoundedBuffer, MULTIPART_MAX_BYTES,
+              parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService,
+            });
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
@@ -11305,12 +11627,21 @@ exit \$RC
           }
           break;
 
+        case '/api/knowledge/upload-capabilities':
+          if (req.method === 'GET') return jsonResponse(res, knowledgeUploadCapabilities());
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');
             const docId = url.searchParams.get('document_id');
             if (!jobId && !docId) {
               return jsonResponse(res, { error: 'job_id or document_id is required' }, 400);
+            }
+            if (jobId && knowledgeUploadJobStore) {
+              const durable = await knowledgeUploadJobStore.findOwned(jobId, { orgId, userId });
+              if (!durable) return jsonResponse(res, { error: 'Job not found' }, 404);
+              return jsonResponse(res, KnowledgeUploadJobStore.response(durable));
             }
             // Live in-memory progress (per-stage counts) while the job runs.
             if (jobId) {
@@ -12052,19 +12383,21 @@ exit \$RC
           }
 
         case '/api/cognition/status':
-          // Read-only — any authenticated caller can see loop health.
+          // Workspace administration only. Status never includes another
+          // tenant's runtime state or existence.
           // In-memory _status carries current-process state; cognition_status
           // table carries per-org persistent history that survives restart.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const { getCognitionStatus } = await import('./memory/cognition-loop.js');
             const st = getCognitionStatus();
-            // Per-org rows: caller's own org first, then top-5 by recent tick.
-            let perOrg = [];
+            let callerOrg = null;
             if (prisma?.cognitionStatus) {
               try {
-                const rows = await prisma.cognitionStatus.findMany({
-                  orderBy: { lastTickAt: 'desc' },
-                  take: 20,
+                callerOrg = await prisma.cognitionStatus.findUnique({
+                  where: { orgId },
                   select: {
                     orgId: true,
                     lastTickAt: true,
@@ -12079,13 +12412,10 @@ exit \$RC
                     lastErrorAt: true,
                   },
                 });
-                perOrg = rows;
               } catch (dbErr) {
                 console.warn('[/api/cognition/status] db read failed:', dbErr.message);
               }
             }
-            // Caller's org-specific row pulled to top of payload.
-            const callerOrg = perOrg.find(r => r.orgId === orgId) || null;
             return jsonResponse(res, {
               enabled: COGNITION_LOOP_ENABLED,
               interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
@@ -12096,15 +12426,17 @@ exit \$RC
               model: process.env.SYNTHESIS_MODEL || 'cerebras/gpt-oss-120b',
               ...st,
               caller_org: callerOrg,
-              per_org_recent: perOrg,
             });
           } catch (err) {
-            return jsonResponse(res, { error: err.message }, 500);
+            return jsonResponse(res, { error: 'Unable to load cognition status' }, 500);
           }
 
         case '/api/cognition/recent':
           // Last N synthesis + summary memories the loop produced. Read-only.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10)));
             // Remote (self-host) orgs have NO central rows — list synthesis/summary memories from the agent.
             if (orgId && orgIsRemote(orgId)) {
@@ -12159,17 +12491,8 @@ exit \$RC
           // stop the loop without a redeploy. Admin/master only.
           if (req.method !== 'POST') break;
           {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin','owner','org_admin','org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { stopped: true, was_running: false });
@@ -12191,17 +12514,11 @@ exit \$RC
           // dead in Postgres (superseded/soft-deleted) past the grace window.
           if (req.method !== 'POST') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!cognitionLoop || typeof cognitionLoop.dreamRetentionForOrg !== 'function') {
               return jsonResponse(res, { error: 'cognition loop unavailable' }, 503);
-            }
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([...(m?.role ? [m.role] : []), ...(Array.isArray(m?.roles) ? m.roles : [])]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
             const result = await cognitionLoop.dreamRetentionForOrg(orgId, { apply: body?.apply === true });
             return jsonResponse(res, result);
@@ -12214,6 +12531,9 @@ exit \$RC
           // Audit history of dream runs for the caller's org (single-line stack).
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { runs: [] });
             const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10)));
             const runs = await prisma.cognitionRun.findMany({
@@ -12247,6 +12567,9 @@ exit \$RC
           // The dreams a specific run produced (show-past-dreams). ?run_id=<uuid>
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { dreams: [] });
             const runId = url.searchParams.get('run_id');
             if (!runId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return jsonResponse(res, { error: 'valid run_id required' }, 400);
@@ -12283,17 +12606,8 @@ exit \$RC
           // hard-deletes the dreams that run produced (cascades to vectors).
           if (req.method !== 'POST' && req.method !== 'DELETE') break;
           try {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!prisma?.cognitionRun) return jsonResponse(res, { error: 'cognition runs unavailable' }, 503);
             const runId = url.searchParams.get('run_id') || body?.run_id;
@@ -12328,25 +12642,8 @@ exit \$RC
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
           try {
-            const membership = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const roles = new Set([
-              ...(membership?.role ? [membership.role] : []),
-              ...(Array.isArray(membership?.roles) ? membership.roles : []),
-            ]);
-            // Accept both legacy short forms (admin/owner) and the canonical
-            // long forms our invite + RBAC layer issues (org_owner/org_admin).
-            // Same bug pattern fixed in invites commit a9c61dd — keep these
-            // gates in sync until we centralise role parsing.
-            const ADMIN_ROLES = ['admin', 'owner', 'org_admin', 'org_owner'];
-            const isAdmin = ADMIN_ROLES.some(r => roles.has(r));
-            if (!isAdmin && !principal.master) {
-              return jsonResponse(res, {
-                error: 'admin/owner role required',
-                role_seen: Array.from(roles),
-              }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);
@@ -12383,6 +12680,12 @@ exit \$RC
               const raced = await Promise.race([runPromise, softTimeout]);
               if (softTimer) clearTimeout(softTimer);
               if (raced === '__timeout') {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_started',
+                  title: 'Cognitive Layer is running',
+                  body: 'Your organization synthesis is continuing in the background.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-running:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, {
                   triggered: true,
                   async: true,
@@ -12391,8 +12694,18 @@ exit \$RC
                 }, 202);
               }
               if (raced && raced.__error) {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_failed', title: 'Cognitive Layer needs attention',
+                  body: 'The run could not complete. You can retry it from Workspace Admin.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-failed:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, { error: raced.__error }, 500);
               }
+              void createWorkspaceNotification(prisma, {
+                orgId, userId, type: 'cognition.run_completed', title: 'Cognitive Layer completed',
+                body: `Created ${raced?.synth ?? 0} synthesis item(s) from permitted workspace memory.`,
+                resourceType: 'cognition_run', dedupeKey: `cognition-completed:${orgId}:${Date.now()}`,
+              }).catch(() => null);
               return jsonResponse(res, {
                 triggered: true,
                 async: false,
@@ -12419,6 +12732,9 @@ exit \$RC
           // deleted. Read-only; org-scoped to the caller.
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const memoryId = url.searchParams.get('memory_id');
             if (!memoryId) return jsonResponse(res, { error: 'memory_id required' }, 400);
             const maxDepth = Math.min(parseInt(url.searchParams.get('depth'), 10) || 3, 6);
@@ -15567,27 +15883,23 @@ exit \$RC
                 return jsonResponse(res, { error: 'No file uploaded' }, 400);
               }
 
-              // Validate size
-              if (filePart.data.length > 100 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
+              const filename = safeUploadFilename(filePart.filename);
+              const checked = validateKnowledgeFile({ filename, contentType: filePart.contentType, bytes: filePart.data.length, buffer: filePart.data });
+              if (!checked.ok || checked.kind !== 'document') {
+                const invalid = uploadError(checked.ok ? 'UNSUPPORTED_FILE_TYPE' : checked.code, { limits: checked.limits });
+                return jsonResponse(res, invalid.body, invalid.status);
               }
-
-              // Validate file type (add xlsx/xls to existing types)
-              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv', 'xlsx', 'xls'];
-              if (!allowedExts.includes(ext)) {
-                return jsonResponse(res, { error: `Unsupported: ${ext}. Allowed: PDF, DOCX, TXT, MD, CSV, XLSX, XLS` }, 415);
-              }
+              const ext = checked.ext;
 
               const uploadId = crypto.randomUUID();
               // Write to temp storage immediately instead of keeping raw buffer in RAM.
               const fs = await import('fs');
               const path = await import('path');
               const os = await import('os');
-              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise');
-              fs.mkdirSync(tempDir, { recursive: true });
-              const tempPath = path.join(tempDir, `${uploadId}_${filePart.filename}`);
-              fs.writeFileSync(tempPath, filePart.data);
+              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise', orgId, userId);
+              fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+              const tempPath = path.join(tempDir, `${uploadId}_${filename}`);
+              fs.writeFileSync(tempPath, filePart.data, { mode: 0o600 });
 
               let parsedText = '';
               let sheets = null;
@@ -15596,7 +15908,7 @@ exit \$RC
               // Try Docling sidecar for rich parsing (non-blocking — fallback on failure)
               try {
                 const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
-                doclingOutput = await parseWithDocling(tempPath, filePart.filename, { smart: true });
+                doclingOutput = await parseWithDocling(tempPath, filename, { smart: true });
                 if (doclingOutput.error) {
                   console.warn(`[enterprise] Docling fallback: ${doclingOutput.error}`);
                   doclingOutput = null;
@@ -15623,7 +15935,7 @@ exit \$RC
                   const parsed = await parseFile(
                     filePart.data,
                     filePart.contentType || `text/${ext}`,
-                    filePart.filename
+                    filename
                   );
                   parsedText = typeof parsed?.text === 'string'
                     ? parsed.text
@@ -15647,7 +15959,7 @@ exit \$RC
                 const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'spreadsheet';
                 detected = { type: topType, confidence: sheetDetections[0]?.confidence || 0.5, reasoning: 'Excel workbook — per-sheet detection' };
               } else {
-                detected = await detectDocumentType(parsedText, { filename: filePart.filename });
+                detected = await detectDocumentType(parsedText, { filename });
               }
 
               // Store in pending uploads map (10 min TTL)
@@ -15657,33 +15969,36 @@ exit \$RC
                 setInterval(() => {
                   const now = Date.now();
                   for (const [id, entry] of global._enterprisePendingUploads) {
-                    if (now - entry.createdAt > 10 * 60 * 1000) global._enterprisePendingUploads.delete(id);
+                    if (entry.expiresAt <= now) {
+                      try { fs.unlinkSync(entry.tempPath); } catch { /* best effort */ }
+                      global._enterprisePendingUploads.delete(id);
+                    }
                   }
                 }, 60_000).unref();
               }
 
               global._enterprisePendingUploads.set(uploadId, {
                 tempPath,
-                filename: filePart.filename,
+                filename,
                 mimeType: filePart.contentType || `application/${ext}`,
                 ext,
-                sheets,
-                parsedText,
                 detectedType: detected.type,
                 confidence: detected.confidence,
-                doclingOutput,
-                buffer: filePart.data, // Phase 1: preserve buffer for document-first path
+                orgId,
+                userId,
+                checksum: crypto.createHash('sha256').update(filePart.data).digest('hex'),
                 createdAt: Date.now(),
+                expiresAt: Date.now() + 10 * 60 * 1000,
               });
 
-              console.log(`[enterprise] Detect id=${uploadId} file=${filePart.filename} type=${detected.type} confidence=${detected.confidence}`);
+              console.log(`[enterprise] Detect id=${uploadId} file=${filename} type=${detected.type} confidence=${detected.confidence}`);
 
               return jsonResponse(res, {
                 upload_id: uploadId,
                 detected_type: detected.type,
                 confidence: detected.confidence,
                 reasoning: detected.reasoning,
-                filename: filePart.filename,
+                filename,
                 size_bytes: filePart.data.length,
                 sheets: sheetDetections || null,
                 model: getDefaultModel(),
@@ -15710,12 +16025,9 @@ exit \$RC
             if (!confirmed_type) return jsonResponse(res, { error: 'confirmed_type is required' }, 400);
 
             const pending = global._enterprisePendingUploads?.get(upload_id);
-            if (!pending) {
+            if (!pending || pending.orgId !== orgId || pending.userId !== userId || pending.expiresAt <= Date.now()) {
               return jsonResponse(res, { error: 'Upload not found or expired. Please re-upload.' }, 404);
             }
-
-            // Remove from pending
-            global._enterprisePendingUploads.delete(upload_id);
 
             const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
             const visibility = targetScope === 'organization' ? 'organization' : 'private';
@@ -15725,6 +16037,30 @@ exit \$RC
               ...(Array.isArray(body.project_ids) ? body.project_ids : []),
             ]);
             const primaryTeamId = body.primary_team_id || null;
+
+            if (!knowledgeUploadService) return jsonResponse(res, { error: 'canonical_ingest_unavailable' }, 503);
+            try {
+              const fs = await import('fs');
+              const fileBuffer = fs.readFileSync(pending.tempPath);
+              const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+              if (checksum !== pending.checksum) throw new Error('Preview artifact checksum mismatch.');
+              const admitted = await knowledgeUploadService.admit({
+                userId, orgId,
+                file: { filename: pending.filename, contentType: pending.mimeType, data: fileBuffer },
+                targetScope: targetScope || 'personal', projectIds, primaryTeamId,
+                metadata: {
+                  tags: userTags, smart: true, enterprise: true, confirmed_type,
+                  visibility, scope: targetScope || 'personal', project,
+                },
+              });
+              if (!admitted.ok) return jsonResponse(res, admitted.body, admitted.status);
+              global._enterprisePendingUploads.delete(upload_id);
+              try { fs.unlinkSync(pending.tempPath); } catch { /* best effort */ }
+              return jsonResponse(res, { upload_id, ...KnowledgeUploadJobStore.response(admitted.job) }, 202);
+            } catch (error) {
+              console.error('[enterprise] canonical admission failed:', error.message);
+              return jsonResponse(res, { error: 'canonical_ingest_failed' }, 500);
+            }
 
             // ─── Phase 1: Document-First Enterprise Ingestion (feature-flagged) ───
             if (documentFirstIngestion && pending.buffer) {
@@ -15996,6 +16332,11 @@ exit \$RC
           // True multi-file multipart endpoint. Accepts N file parts +
           // shared tags/project. Concurrency-limited fanout (default 3).
           if (req.method !== 'POST') break;
+          return jsonResponse(res, {
+            error: 'bulk_endpoint_retired',
+            message: 'Submit each file to /api/knowledge/upload. Every accepted file receives its own durable job.',
+            endpoint: '/api/knowledge/upload',
+          }, 410);
           if (!persistentMemoryEngine || !documentFirstIngestion) {
             return jsonResponse(res, { error: 'Bulk ingest requires Phase1' }, 503);
           }
@@ -16156,14 +16497,7 @@ exit \$RC
               normalizeScopeIds,
               buildAccessContext,
               jsonResponse,
-              kbIngestQueue,
-              ingestTracker,
-              buildRoutedIngestPayloads,
-              smartIngestRouter,
-              persistentMemoryStore,
-              qdrantClient,
-              getQdrantClient,
-              recallPersistedMemories,
+              knowledgeUploadService,
             });
           }
           break;
@@ -18237,7 +18571,6 @@ exit \$RC
                 scope: body.scope || undefined,
                 primary_team_id: body.primary_team_id || null,
                 project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
-                __bypass_membership: body.__bypass_membership === true ? true : undefined,
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,
@@ -22274,6 +22607,23 @@ exit \$RC
                 isAggregateQuery = chatRecall.isAggregateQuery;
                 isRecencyQuery = chatRecall.isRecencyQuery;
                 msgTrimmed = chatRecall.msgTrimmed;
+                // COUNT INTENT -> tell the model, in the context it actually reads,
+                // that the sampled memories below cannot answer this question and
+                // which tool can. Without this the model sees N plausible memories
+                // and infers a count from them — the exact failure the refusal
+                // "I cannot determine the exact count from top-K recall" was
+                // avoiding, but with no alternative offered.
+                //
+                // A directive rather than an auto-call: the orchestrator still owns
+                // the decision, and a question that merely LOOKS countable
+                // ("how much do we care about X") is not forced down a scan path.
+                if (chatRecall.isCountQuery) {
+                  injectionText = `${injectionText || ''}\n\n[COUNTING REQUIRED] This question asks HOW MANY / ALL. `
+                    + 'The memories above are the most SIMILAR ones, not every matching one — a count read off them '
+                    + 'would be a guess. Call hivemind_count_where with the appropriate filter to get an exact count, '
+                    + 'or hivemind_aggregate_entities when counting entities under a parent. If neither can answer '
+                    + 'completely, say the count is unavailable rather than estimating from the sample.';
+                }
               }
 
               // Inject persistent user profile (sanitized — drop any user-profile

@@ -76,7 +76,6 @@ export function compactCompanyOperatingContext(company = {}) {
     },
   };
 }
-
 export function verifySpecialistDelivery({ order, result, resultOutput }) {
   const status = String(result?.status || '').toLowerCase();
   const summary = String(result?.summary || '').trim();

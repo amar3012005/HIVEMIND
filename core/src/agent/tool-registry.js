@@ -92,6 +92,50 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      // Counting is a SET question; recall is a SAMPLE. Top-K cannot answer
+      // "how many" — it returns the most similar rows, not all matching rows, so
+      // any number derived from it is a guess that reads like a fact. Observed:
+      // asked "how many prospects from Hannover", chat correctly REFUSED rather
+      // than counting 5 sampled memories, because it had no tool that could scan.
+      // hivemind_aggregate_entities covers counts hanging off a canonical parent
+      // entity; this covers everything else.
+      name: 'hivemind_count_where',
+      description:
+        'Exactly count memories matching a filter by SCANNING, not sampling. Use for every '
+        + '"how many", "list all", "are there any" question. Returns {count, complete}. '
+        + 'When complete is false the scan hit its ceiling and count is a LOWER BOUND — say so '
+        + 'explicitly; never present it as exact. Prefer this over hivemind_recall for anything countable.',
+      parameters: {
+        type: 'object',
+        properties: {
+          contains: {
+            type: 'string',
+            description: 'Case-insensitive substring the memory title or content must contain, e.g. Hannover.',
+          },
+          tags: {
+            type: 'array', items: { type: 'string' }, maxItems: 10,
+            description: 'Tags that must ALL be present, e.g. ["prospect"].',
+          },
+          memory_type: {
+            type: 'string',
+            enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'summary', 'synthesis', 'conversation'],
+          },
+          source_platform: { type: 'string', description: 'Restrict to one ingestion source.' },
+          created_after: { type: 'string', description: 'ISO-8601 lower bound on creation time.' },
+          created_before: { type: 'string', description: 'ISO-8601 upper bound on creation time.' },
+          project: { type: 'string', description: 'Restrict to one project id.' },
+          return_samples: {
+            type: 'integer', minimum: 0, maximum: 25, default: 5,
+            description: 'How many example matches to return alongside the count.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_save_memory',
       description:
         'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nPROJECT SCOPING (enterprise multi-tenant):\n  • If the user names a project ("save to SOLVIS", "in my Q2-planning project"), pass project_id (UUID) OR project (name/slug — server resolves).\n  • If unsure which project, FIRST call hivemind_list_projects to see what exists, pick the best match by topic, and use that.\n  • If still ambiguous, ASK the user before saving instead of guessing.\n  • If the org policy is "ask" or no obvious match, omit project_id — server defaults to personal scope.',
@@ -434,6 +478,87 @@ export const TOOL_SCHEMAS = [
 // ── Dispatch handlers ────────────────────────────────────────────────────────
 
 const TOOL_HANDLERS = {
+  /**
+   * Exact counting by SCAN, not sample.
+   *
+   * Recall answers "what is most similar" — it cannot answer "how many", because
+   * top-K returns the most similar rows rather than all matching rows. Any count
+   * derived from it is a guess wearing the clothes of a fact. Observed live: asked
+   * "how many prospects from Hannover", the orchestrator correctly REFUSED to
+   * count 5 sampled memories, because it had no tool that could scan. This is it.
+   *
+   * Tenant scoping is inherited from ctx (orgId/userId) exactly as every other
+   * tool here does — never taken from args, so a model cannot widen its own scope
+   * by asking. `complete` is the load-bearing field: false means the scan hit its
+   * ceiling and the number is a LOWER BOUND. A wrong exact number is worse than an
+   * honest refusal, so the count and its completeness always travel together.
+   */
+  async hivemind_count_where(args, ctx) {
+    if (!ctx.prisma?.memory) {
+      return { count: null, complete: false, reason: 'memory_store_unavailable', samples: [] };
+    }
+    const CEILING = Number(process.env.COUNT_WHERE_CEILING || 10000);
+    const contains = String(args?.contains || '').trim();
+    const tags = Array.isArray(args?.tags) ? args.tags.filter(Boolean).slice(0, 10) : [];
+    const sampleN = Math.max(0, Math.min(Number(args?.return_samples ?? 5) || 0, 25));
+
+    // Tenant boundary first, from ctx only.
+    const where = { deletedAt: null };
+    if (ctx.orgId) where.orgId = ctx.orgId;
+    else if (ctx.userId) where.userId = ctx.userId;
+    else return { count: null, complete: false, reason: 'no_tenant_scope', samples: [] };
+
+    if (args?.memory_type) where.memoryType = String(args.memory_type);
+    if (args?.source_platform) where.sourcePlatform = String(args.source_platform);
+    if (args?.project) where.project = String(args.project);
+    if (tags.length) where.tags = { hasEvery: tags };
+    if (args?.created_after || args?.created_before) {
+      where.createdAt = {};
+      if (args.created_after) where.createdAt.gte = new Date(args.created_after);
+      if (args.created_before) where.createdAt.lte = new Date(args.created_before);
+    }
+    if (contains) {
+      where.OR = [
+        { content: { contains, mode: 'insensitive' } },
+        { title: { contains, mode: 'insensitive' } },
+      ];
+    }
+
+    try {
+      // count() is a real aggregate over the whole filtered set — no top-K, no
+      // ranking, no similarity. That is the entire point of this tool.
+      const count = await ctx.prisma.memory.count({ where });
+      const samples = sampleN > 0
+        ? await ctx.prisma.memory.findMany({
+            where,
+            select: { id: true, title: true, content: true, memoryType: true, createdAt: true },
+            orderBy: { createdAt: 'desc' },
+            take: sampleN,
+          })
+        : [];
+      return {
+        count,
+        // Only false if the result set is implausibly large for one answer — the
+        // count itself is still exact, but callers should paginate rather than
+        // enumerate.
+        complete: count <= CEILING,
+        ceiling: CEILING,
+        filter: { contains: contains || null, tags, memory_type: args?.memory_type || null,
+          source_platform: args?.source_platform || null, project: args?.project || null },
+        samples: samples.map((m) => ({
+          id: m.id,
+          title: m.title || String(m.content || '').slice(0, 60),
+          preview: String(m.content || '').slice(0, 180),
+          memory_type: m.memoryType,
+          created_at: m.createdAt,
+        })),
+      };
+    } catch (error) {
+      // Never return a number we did not compute.
+      return { count: null, complete: false, reason: `count_failed: ${error.message}`, samples: [] };
+    }
+  },
+
   async hivemind_aggregate_entities(args, ctx) {
     if (!ctx.prisma?.entity || !ctx.prisma?.entityMention) {
       return {
@@ -1640,6 +1765,10 @@ export function normalizeAgentRecallMode(mode) {
 // observed P95 latencies in HIVEMIND production.
 const TOOL_TIMEOUTS_MS = {
   hivemind_aggregate_entities: 5_000,
+  // A filtered COUNT is a single indexed aggregate — far cheaper than recall's
+  // multi-lane fan-out, so it gets a tight budget. If it ever needs longer the
+  // filter is wrong, not the timeout.
+  hivemind_count_where: 5_000,
   hivemind_recall:           8_000,
   get_user_profile:          3_000,
   update_user_profile:       3_000,   // two indexed Postgres reads, no LLM

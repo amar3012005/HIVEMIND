@@ -206,10 +206,21 @@ async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limi
     : {};
   // Pilot orgs may opt in to scanning personal memories too (cognition-pilot.js);
   // default stays organization-only so the cron is a no-op on personal data.
+  let personalUserIds = [];
+  if (includePersonal) {
+    personalUserIds = await client.$queryRawUnsafe(
+      `SELECT user_id FROM hivemind.user_organizations
+        WHERE org_id = $1::uuid AND is_active = true AND cognition_personal_opt_in = true`,
+      orgId,
+    ).then((rows) => rows.map((row) => row.user_id)).catch(() => []);
+  }
   const where = {
     orgId,
     deletedAt: null,
-    visibility: includePersonal ? { in: ['organization', 'private'] } : 'organization',
+    OR: [
+      { visibility: 'organization' },
+      ...(personalUserIds.length ? [{ visibility: 'private', userId: { in: personalUserIds } }] : []),
+    ],
     // Skip Faraday's own outputs + cognitive-layer memories — scanning them
     // creates a feedback loop where reflections get hypothesised about and
     // Turing relates governance memories to other governance memories.

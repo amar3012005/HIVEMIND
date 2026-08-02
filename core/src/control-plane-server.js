@@ -66,6 +66,8 @@ import {
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
+import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
+import { createWorkspaceNotification } from './workspace/notifications.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1727,16 +1729,16 @@ function canManageOrg(role) {
 }
 
 async function requireOrgAdmin(req, res, userId, orgId) {
-  const membership = await getOrgMembership(userId, orgId);
+  const membership = await getActiveOrganizationMembership(prisma, { userId, orgId });
   if (!membership) {
-    jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    jsonResponse(res, { error: 'Resource not found' }, 404);
     return null;
   }
   // Prefer new roles[] array; fall back to legacy single role column
   const roles = effectiveRoles(membership);
-  const allowed = hasPermission(roles, 'org', 'manage') || canManageOrg(membership.role);
+  const allowed = isOrganizationAdmin(membership) || canManageOrg(membership.role);
   if (!allowed) {
-    jsonResponse(res, { error: 'Forbidden' }, 403);
+    jsonResponse(res, { error: 'Resource not found' }, 404);
     return null;
   }
   // Attach effective roles to the membership object for callers that need it
@@ -3800,20 +3802,39 @@ const server = http.createServer(async (req, res) => {
 
     const inviteEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null;
     const expiresAt   = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
-
-    const invite = await prisma.orgInvite.create({
-      data: {
-        orgId,
-        email: inviteEmail,
-        role: legacyRoleReverse,
-        roles: inviteRoles,
-        teamIds,
-        projectIds,
-        token,
-        expiresAt,
-        createdBy: current.session.userId,
-      },
-    });
+    const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
+      ? req.headers['idempotency-key'].trim().slice(0, 200)
+      : null;
+    let invite = idempotencyKey
+      ? await prisma.orgInvite.findFirst({ where: { orgId, createdBy: current.session.userId, idempotencyKey } })
+      : null;
+    let reusedInvite = Boolean(invite);
+    if (!invite) {
+      try {
+        invite = await prisma.orgInvite.create({
+          data: {
+            orgId,
+            email: inviteEmail,
+            role: legacyRoleReverse,
+            roles: inviteRoles,
+            teamIds,
+            projectIds,
+            token,
+            expiresAt,
+            createdBy: current.session.userId,
+            idempotencyKey,
+          },
+        });
+      } catch (err) {
+        // Parallel clicks with the same idempotency key race at the database
+        // boundary. Resolve the winner instead of returning a false failure.
+        if (idempotencyKey && err?.code === 'P2002') {
+          invite = await prisma.orgInvite.findFirst({ where: { orgId, createdBy: current.session.userId, idempotencyKey } });
+          reusedInvite = Boolean(invite);
+        }
+        if (!invite) throw err;
+      }
+    }
 
     // Build the FE-facing join URL. Use HIVEMIND_FRONTEND_URL when set so the
     // recipient lands on the React app, not the control-plane API host.
@@ -3826,7 +3847,7 @@ const server = http.createServer(async (req, res) => {
     // provider configured in prod → every invite showed "Email dispatch
     // failed: no provider configured".
     let emailReport = { attempted: false };
-    if (inviteEmail) {
+    if (inviteEmail && !reusedInvite) {
       try {
         const inviter = await prisma.user.findUnique({
           where: { id: current.session.userId },
@@ -3874,8 +3895,28 @@ const server = http.createServer(async (req, res) => {
       } catch { /* best-effort — default new_user */ }
     }
 
+    if (!reusedInvite) {
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: 'invite.created',
+        eventCategory: 'auth',
+        action: 'create',
+        resourceType: 'org_invite',
+        resourceId: invite.id,
+        newValue: { email: invite.email, roles: invite.roles, team_ids: invite.teamIds, project_ids: invite.projectIds },
+        ..._reqMeta(req),
+      });
+      await createWorkspaceNotification(prisma, {
+        orgId, userId: current.session.userId, type: 'invite.created',
+        title: `Invitation created${inviteEmail ? ` for ${inviteEmail}` : ''}`,
+        body: 'The invitation is pending acceptance.', resourceType: 'org_invite', resourceId: invite.id,
+        dedupeKey: `invite-created:${invite.id}`,
+      }).catch(() => null);
+    }
     return jsonResponse(res, {
       success: true,
+      idempotent_replay: reusedInvite,
       invite: {
         id: invite.id,
         email: invite.email,
@@ -4283,6 +4324,15 @@ const server = http.createServer(async (req, res) => {
       newValue: { roles: inviteRoles, team_ids: teamIds },
       ..._reqMeta(req),
     });
+    await createWorkspaceNotification(prisma, {
+      orgId: invite.orgId,
+      userId: current.session.userId,
+      type: 'invite.accepted',
+      title: `Welcome to ${invite.org?.name || 'the workspace'}`,
+      body: isProjectScopedInvite ? 'Your project access is ready.' : 'Your workspace access is ready.',
+      resourceType: 'org_invite', resourceId: invite.id,
+      dedupeKey: `invite-accepted:${invite.id}`,
+    }).catch(() => null);
 
     await sessionStore.destroySession(current.sessionId);
     const sessionId = await sessionStore.createSession({
@@ -5566,6 +5616,72 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Workspace state is one authoritative quota snapshot for the admin UI.
+  if (pathname === '/v1/workspace/summary' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const membership = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!membership) return;
+    try {
+      const orgId = current.session.orgId;
+      const now = new Date();
+      const [{ plan }, seats, projects, teams, pendingInvites] = await Promise.all([
+        getEffectivePlan(prisma, orgId),
+        prisma.userOrganization.count({ where: { orgId, isActive: true } }),
+        prisma.project.count({ where: { orgId, archivedAt: null } }),
+        prisma.team.count({ where: { orgId, archivedAt: null } }),
+        prisma.orgInvite.count({ where: { orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
+      ]);
+      const limit = (key, used) => {
+        const max = plan.limits?.[key] ?? -1;
+        return { used, limit: max, remaining: max < 0 ? null : Math.max(0, max - used), warning: max > 0 && used / max >= 0.8 };
+      };
+      return jsonResponse(res, {
+        plan: { id: plan.id, name: plan.name, period_end: membership.org?.currentPeriodEnd || null },
+        seats: limit('maxUsers', seats),
+        projects: limit('maxProjects', projects),
+        teams: { used: teams },
+        invitations: { pending: pendingInvites },
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: 'Workspace summary unavailable' }, 503);
+    }
+  }
+
+  if (pathname === '/v1/workspace/notifications' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
+    const unreadOnly = url.searchParams.get('unread') === 'true';
+    try {
+      const where = { orgId: current.session.orgId, userId: current.session.userId, ...(unreadOnly ? { readAt: null } : {}) };
+      const [items, unread] = await Promise.all([
+        prisma.workspaceNotification.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit }),
+        prisma.workspaceNotification.count({ where: { orgId: current.session.orgId, userId: current.session.userId, readAt: null } }),
+      ]);
+      return jsonResponse(res, { items, unread });
+    } catch {
+      return jsonResponse(res, { error: 'Notifications unavailable' }, 503);
+    }
+  }
+
+  const notificationReadMatch = pathname.match(/^\/v1\/workspace\/notifications\/([0-9a-f-]{36})\/read$/);
+  if (notificationReadMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    const result = await prisma.workspaceNotification.updateMany({
+      where: { id: notificationReadMatch[1], orgId: current.session.orgId, userId: current.session.userId, readAt: null },
+      data: { readAt: new Date() },
+    }).catch(() => ({ count: 0 }));
+    return jsonResponse(res, { success: true, updated: result.count });
+  }
+
   // GET /v1/teams — list teams current user belongs to in current org
   if (pathname === '/v1/teams' && req.method === 'GET') {
     const current = await requireSession(req, res);
@@ -5732,6 +5848,7 @@ const server = http.createServer(async (req, res) => {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
+        await requireSameOrganizationMember(prisma, { orgId, userId: body.user_id });
         const m = await ts.store.addTeamMember({
           teamId,
           userId: body.user_id,
@@ -5745,6 +5862,13 @@ const server = http.createServer(async (req, res) => {
           newValue: { team_id: teamId, user_id: body.user_id, role: body.role || 'member' },
           ..._reqMeta(req),
         });
+        await createWorkspaceNotification(prisma, {
+          orgId, userId: body.user_id, type: 'team.member_added',
+          title: `Added to ${team.name}`,
+          body: 'You can now access this team and its shared work.',
+          resourceType: 'team', resourceId: teamId,
+          dedupeKey: `team-member:${teamId}:${body.user_id}`,
+        }).catch(() => null);
         return jsonResponse(res, { member: m }, 201);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -6009,6 +6133,7 @@ const server = http.createServer(async (req, res) => {
         if (!PROJECT_ROLES.includes(role)) {
           return jsonResponse(res, { error: `role must be one of ${PROJECT_ROLES.join('|')}` }, 400);
         }
+        await requireSameOrganizationMember(prisma, { orgId, userId: body.user_id });
         const m = await ts.store.addProjectMember({
           projectId,
           userId: body.user_id,
@@ -6026,6 +6151,13 @@ const server = http.createServer(async (req, res) => {
           newValue: { role, member_user_id: body.user_id },
           ..._reqMeta(req),
         });
+        await createWorkspaceNotification(prisma, {
+          orgId, userId: body.user_id, type: 'project.member_added',
+          title: `Added to ${project.name}`,
+          body: 'You can now access this project and its shared memories.',
+          resourceType: 'project', resourceId: projectId,
+          dedupeKey: `project-member:${projectId}:${body.user_id}`,
+        }).catch(() => null);
         return jsonResponse(res, { member: m }, 201);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -6855,6 +6987,14 @@ Write the persona now.`;
     // memories in semantic recall. Observed live in /chat — "Prospect: Hannover Re"
     // was cited as a source for a question about Solvis heat-pump documentation.
     //
+    // One env flag governs all three writers.
+    if (String(process.env.HYPER_PROSPECTS_TO_MEMORY || '').toLowerCase() !== 'true') {
+      return jsonResponse(res, {
+        skipped: 'prospect_memory_writes_disabled',
+        reason: 'prospects are CRM records, not memories; set HYPER_PROSPECTS_TO_MEMORY=true to override',
+        written: 0,
+      }, 200);
+    }
     const body = await parseBody(req).catch(() => ({}));
     const orgId = String(body?.org_id || '');
     const userId = String(body?.user_id || '');
@@ -11645,11 +11785,15 @@ Write the persona now.`;
     let rawBody = undefined;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (isMultipart) {
-        const chunks = [];
-        for await (const chunk of req) {
-          chunks.push(chunk);
+        try {
+          const maxMultipartBytes = Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
+          rawBody = (await parseBodyWithRaw(req, maxMultipartBytes)).raw;
+        } catch (error) {
+          return jsonResponse(res, {
+            error: error.code || 'payload_too_large',
+            message: error.status === 413 ? 'Upload exceeds the maximum request size.' : error.message,
+          }, error.status || 400);
         }
-        rawBody = Buffer.concat(chunks);
       } else {
         body = await parseBody(req);
       }

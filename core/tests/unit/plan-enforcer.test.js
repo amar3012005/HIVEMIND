@@ -5,10 +5,10 @@ import { getPlan } from '../../src/billing/plans.js';
 
 const ORG_ID = '11111111-1111-4111-8111-111111111111';
 
-function makeEnforcer({ plan = getPlan('free'), usage = {}, daily = {}, memoryCount = 0 } = {}) {
+function makeEnforcer({ plan = getPlan('free'), usage = {}, daily = {}, memoryCount = 0, meetingSeconds = 0 } = {}) {
   const prisma = {
     memory: { count: async () => memoryCount },
-    $queryRawUnsafe: async () => [{ c: 0 }],
+    $queryRawUnsafe: async (query) => String(query).includes('SUM("duration_sec")') ? [{ secs: meetingSeconds }] : [{ c: 0 }],
     platformIntegration: { count: async () => 0 },
     hyperRoom: { count: async () => 0 },
     userOrganization: { count: async () => 1 },
@@ -70,6 +70,24 @@ describe('PlanEnforcer B2C limits', () => {
     });
     assert.equal((await enforcer.checkLimit(ORG_ID, 'uploads', 1)).allowed, true);
     assert.equal(Object.hasOwn(await enforcer.getUsageSummary(ORG_ID), 'uploads'), false);
+  });
+
+  it('reports meeting usage from durable duration seconds', async () => {
+    const summary = await makeEnforcer({ meetingSeconds: 3_601 }).getUsageSummary(ORG_ID);
+    assert.deepEqual(summary.meetingMinutes, { used: 61, usedSeconds: 3_601, limit: 30 });
+  });
+
+  it('blocks meeting transcription at the exact second boundary', async () => {
+    const result = await makeEnforcer({ meetingSeconds: 30 * 60 }).checkLimit(ORG_ID, 'meetingMinutes', 0);
+    assert.equal(result.allowed, false);
+    assert.equal(result.currentSeconds, 30 * 60);
+  });
+
+  it('uses the subscription meeting-minute limits as one ground truth', () => {
+    assert.equal(getPlan('free').limits.meetingMinutesPerMonth, 30);
+    assert.equal(getPlan('pro').limits.meetingMinutesPerMonth, 100);
+    assert.equal(getPlan('scale').limits.meetingMinutesPerMonth, 500);
+    assert.equal(getPlan('enterprise').limits.meetingMinutesPerMonth, -1);
   });
 
   it('enforces entitlement-overridden limits', async () => {

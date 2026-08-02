@@ -12,6 +12,9 @@ function todo(id, status, rank, effect, recommended = false) {
       recommendation_rank: rank,
       effect_class: effect,
       recommended,
+      planned_playbook_id: 'test.lifecycle',
+      planned_playbook_version: 1,
+      requested_action: 'execute',
     },
   };
 }
@@ -52,6 +55,19 @@ test('first start promotes the recommendation and at most one independent intern
   });
   assert.deepEqual(result.promoted.map((item) => item.id), ['external-1', 'internal-1']);
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'READY', 'PROPOSED', 'PROPOSED']);
+});
+
+test('first start leaves an unbound proposal dormant instead of guessing a lifecycle', async () => {
+  const external = todo('external-1', 'PROPOSED', 1, 'external', true);
+  const internal = todo('internal-1', 'PROPOSED', 2, 'internal');
+  delete internal.context.planned_playbook_id;
+  delete internal.context.planned_playbook_version;
+  delete internal.context.requested_action;
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor([external, internal]), runtime, expansionTrigger: 'user_start',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['external-1']);
+  assert.equal(internal.status, 'PROPOSED');
 });
 
 test('waiting authority and capability retain external ownership', async () => {

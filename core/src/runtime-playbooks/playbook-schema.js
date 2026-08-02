@@ -133,6 +133,7 @@ export const runtimePlaybookSchema = {
               types: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 160 } },
               correlation_path: { type: 'string', minLength: 1, maxLength: 240 },
               timeout_after_seconds: { type: 'integer', minimum: 60, maximum: 31536000 },
+              releases_execution_slot: { type: 'boolean' },
             },
           },
           transitions: { type: 'array', minItems: 1, items: transitionSchema },

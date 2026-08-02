@@ -1732,6 +1732,7 @@ model KnowledgeDocument {
   entityMentions     EntityMention[]
   memoryLinks        MemoryEvidenceLink[]
 
+  tables             DocumentTable[]
   @@unique([userId, orgId, sourcePlatform, sourceId])
   @@index([userId, orgId])
   @@index([documentType])
@@ -1791,6 +1792,50 @@ model KnowledgeSegment {
   @@index([vectorStored])
   @@index([createdAt(sort: Desc)])
   @@map("knowledge_segments")
+}
+
+/// A spreadsheet is ROWS, not prose. The KB pipeline turns one into claims —
+/// readable and recallable, but you can no longer count, filter or sum it, and a
+/// question like "which channel indexes highest for Persona 3" becomes a guess.
+///
+/// Docling already returns {sheet, headers, rows}; document-first-ingestion
+/// carried it and then dropped it on the floor. These two tables persist that
+/// grid ALONGSIDE the summary claims, so tabular questions get an exact SQL
+/// answer while semantic recall still works.
+///
+/// org_id is on BOTH tables, not just the parent: a row must be unreachable
+/// without a tenant filter even if a query forgets to join.
+model DocumentTable {
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId   String              @map("document_id") @db.Uuid
+  orgId        String              @map("org_id") @db.Uuid
+  userId       String?             @map("user_id") @db.Uuid
+  sheet        String?             @db.VarChar(255)
+  tableIndex   Int                 @default(0) @map("table_index")
+  headers      String[]            @default([])
+  rowCount     Int                 @default(0) @map("row_count")
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  rows         DocumentTableRow[]
+  document     KnowledgeDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, tableIndex])
+  @@index([orgId])
+  @@index([documentId])
+  @@map("document_tables")
+}
+
+model DocumentTableRow {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tableId   String        @map("table_id") @db.Uuid
+  orgId     String        @map("org_id") @db.Uuid
+  rowIndex  Int           @map("row_index")
+  cells     Json
+  table     DocumentTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@unique([tableId, rowIndex])
+  @@index([orgId])
+  @@index([tableId])
+  @@map("document_table_rows")
 }
 
 /// Durable control-plane record for every Knowledge Base upload. Content stays

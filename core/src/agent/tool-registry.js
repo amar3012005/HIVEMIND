@@ -99,6 +99,29 @@ export const TOOL_SCHEMAS = [
       // than counting 5 sampled memories, because it had no tool that could scan.
       // hivemind_aggregate_entities covers counts hanging off a canonical parent
       // entity; this covers everything else.
+      // Spreadsheets are ROWS. Similarity over prose cannot answer "which is
+      // highest" or "what is the value for X" — the grid has to stay queryable.
+      name: 'hivemind_query_table',
+      description:
+        'Query a spreadsheet/table from an uploaded document EXACTLY — filter rows, read cells, '
+        + 'count matches. Use for any question about a value IN a table ("which channel indexes '
+        + 'highest", "what is the budget for X", "how many rows where city=Hannover"). '
+        + 'Returns real rows, not a similarity match. Prefer this over hivemind_recall for tabular data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          document_title: { type: 'string', description: 'Filename or partial title, e.g. Mediennutzung.' },
+          contains: { type: 'string', description: 'Return only rows containing this text in any cell.' },
+          column: { type: 'string', description: 'Restrict `contains` to one column (header name).' },
+          limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_count_where',
       description:
         'Exactly count memories matching a filter by SCANNING, not sampling. Use for every '
@@ -493,6 +516,53 @@ const TOOL_HANDLERS = {
    * ceiling and the number is a LOWER BOUND. A wrong exact number is worse than an
    * honest refusal, so the count and its completeness always travel together.
    */
+  /**
+   * Exact tabular read. Tenant scope from ctx, never args — same rule as every
+   * other tool here. Returns rows the caller can quote, not a ranked guess.
+   */
+  async hivemind_query_table(args, ctx) {
+    if (!ctx.prisma?.documentTable) {
+      return { rows: [], reason: 'table_store_unavailable' };
+    }
+    if (!ctx.orgId) return { rows: [], reason: 'no_tenant_scope' };
+    const limit = Math.max(1, Math.min(Number(args?.limit) || 50, 200));
+    try {
+      const tables = await ctx.prisma.documentTable.findMany({
+        where: {
+          orgId: ctx.orgId,
+          ...(args?.document_title
+            ? { document: { title: { contains: String(args.document_title), mode: 'insensitive' } } }
+            : {}),
+        },
+        select: { id: true, sheet: true, headers: true, rowCount: true, documentId: true },
+        take: 10,
+      });
+      if (!tables.length) return { rows: [], tables: [], reason: 'no_matching_table' };
+      const rows = await ctx.prisma.documentTableRow.findMany({
+        where: { orgId: ctx.orgId, tableId: { in: tables.map((t) => t.id) } },
+        orderBy: { rowIndex: 'asc' },
+        take: limit * 4,
+      });
+      const needle = String(args?.contains || '').trim().toLowerCase();
+      const col = String(args?.column || '').trim();
+      const matched = needle
+        ? rows.filter((r) => {
+            const cells = r.cells || {};
+            const vals = col ? [cells[col]] : Object.values(cells);
+            return vals.some((v) => String(v ?? '').toLowerCase().includes(needle));
+          })
+        : rows;
+      return {
+        tables: tables.map((t) => ({ sheet: t.sheet, headers: t.headers, row_count: t.rowCount })),
+        matched_rows: matched.length,
+        complete: matched.length <= limit,
+        rows: matched.slice(0, limit).map((r) => r.cells),
+      };
+    } catch (error) {
+      return { rows: [], reason: `table_query_failed: ${error.message}` };
+    }
+  },
+
   async hivemind_count_where(args, ctx) {
     if (!ctx.prisma?.memory) {
       return { count: null, complete: false, reason: 'memory_store_unavailable', samples: [] };
@@ -1769,6 +1839,7 @@ const TOOL_TIMEOUTS_MS = {
   // multi-lane fan-out, so it gets a tight budget. If it ever needs longer the
   // filter is wrong, not the timeout.
   hivemind_count_where: 5_000,
+  hivemind_query_table: 5_000,
   hivemind_recall:           8_000,
   get_user_profile:          3_000,
   update_user_profile:       3_000,   // two indexed Postgres reads, no LLM

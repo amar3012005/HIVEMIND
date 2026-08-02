@@ -2119,6 +2119,59 @@ Every item must include a non-empty content field and one or more valid support_
     const _msSeg = Date.now() - _tSeg;
     emit('embedded', 70, { segments: segments.length, embed_ms: _msEmbed });
 
+    // ── PERSIST THE GRID (P3) ────────────────────────────────────────────────
+    // A spreadsheet's questions are "how many", "which is highest", "what is the
+    // value for X" — none answerable by similarity over prose. The parser already
+    // returns {sheet, headers, rows}; the pipeline carried it and dropped it, so
+    // Solvis-Mediennutzung.xlsx became 11 readable claims that cannot be counted,
+    // filtered or summed. Keep the grid ALONGSIDE the claims: semantic recall is
+    // unchanged, and tabular questions get an exact SQL answer.
+    //
+    // Best-effort — a table-persist failure must never fail an ingest that
+    // otherwise succeeded.
+    try {
+      const _tables = Array.isArray(parseResult?.tables) ? parseResult.tables : [];
+      if (_tables.length && !orgIsRemote(orgId) && this.db?.documentTable) {
+        let _rowsTotal = 0;
+        for (let ti = 0; ti < _tables.length; ti++) {
+          const t = _tables[ti] || {};
+          const headers = (Array.isArray(t.headers) ? t.headers : []).map((h) => String(h ?? '').slice(0, 300));
+          const rows = Array.isArray(t.rows) ? t.rows : [];
+          if (!rows.length) continue;
+          const created = await this.db.documentTable.upsert({
+            where: { documentId_tableIndex: { documentId: knowledgeDoc.id, tableIndex: ti } },
+            create: {
+              documentId: knowledgeDoc.id, orgId, userId,
+              sheet: t.sheet ? String(t.sheet).slice(0, 255) : null,
+              tableIndex: ti, headers, rowCount: rows.length,
+            },
+            update: { headers, rowCount: rows.length },
+          });
+          // cells keyed by header where available, else positional — so a query can
+          // say cells->>'city' rather than guessing a column offset.
+          await this.db.documentTableRow.createMany({
+            skipDuplicates: true,
+            data: rows.slice(0, 20000).map((r, ri) => {
+              const arr = Array.isArray(r) ? r : [r];
+              const cells = {};
+              arr.forEach((v, ci) => {
+                const key = headers[ci] && String(headers[ci]).trim() ? String(headers[ci]).trim() : `col_${ci}`;
+                cells[key] = v === null || v === undefined ? null : String(v).slice(0, 2000);
+              });
+              return { tableId: created.id, orgId, rowIndex: ri, cells };
+            }),
+          });
+          _rowsTotal += rows.length;
+        }
+        if (_rowsTotal) {
+          console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: persisted `
+            + `${_tables.length} table(s), ${_rowsTotal} rows — now exactly queryable`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[kb-tables] persist skipped (ingest unaffected): ${e.message}`);
+    }
+
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();

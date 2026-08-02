@@ -7,8 +7,33 @@ export class KnowledgeUploadJobStore {
     this.logger = logger;
   }
 
+
+  /**
+   * The prisma export is a CONTEXT PROXY, not a client. When the underlying
+   * client is not yet bound its handler returns `undefined` for any model
+   * (db/prisma.js: `if (!c) return undefined`), so `prisma.knowledgeIngestJob`
+   * silently becomes undefined and `.updateMany(...)` throws
+   *   "Cannot read properties of undefined (reading 'updateMany')"
+   *
+   * That is timing-dependent, which is why byte-identical source worked in one
+   * build and killed three uploads into the DLQ in another (Solvis Personas_SHK,
+   * Solvis_Branding_Projekt_Skizze, Solvis_Gemeinwohlbilanz — each dead after 3
+   * attempts, 2026-08-02). Nothing about the ingest logic was wrong; the model
+   * handle simply was not there yet.
+   *
+   * Resolve the model at CALL time and fail with a message that names the real
+   * cause instead of a stray TypeError.
+   */
+  _model() {
+    const m = this.prisma?.knowledgeIngestJob;
+    if (!m || typeof m.updateMany !== 'function') {
+      throw new Error('knowledgeIngestJob unavailable — prisma client not bound yet (retryable)');
+    }
+    return m;
+  }
+
   async create(input) {
-    return this.prisma.knowledgeIngestJob.create({ data: input });
+    return this._model().create({ data: input });
   }
 
   /**
@@ -33,7 +58,7 @@ export class KnowledgeUploadJobStore {
   async reapStale({ queuedMaxMin = 90, processingMaxMin = 45 } = {}) {
     const cutoff = (mins) => new Date(Date.now() - mins * 60_000);
     try {
-      const { count } = await this.prisma.knowledgeIngestJob.updateMany({
+      const { count } = await this._model().updateMany({
         where: {
           OR: [
             { status: 'queued', createdAt: { lt: cutoff(queuedMaxMin) } },
@@ -62,7 +87,7 @@ export class KnowledgeUploadJobStore {
 
   async findOwned(jobId, { orgId, userId = null }) {
     if (!jobId || !orgId) return null;
-    return this.prisma.knowledgeIngestJob.findFirst({ where: {
+    return this._model().findFirst({ where: {
       id: jobId, orgId, ...(userId ? { userId } : {}),
     } });
   }
@@ -76,24 +101,24 @@ export class KnowledgeUploadJobStore {
     // orgId is never omitted: the tenant boundary is not negotiable here.
     const where = { orgId, checksum };
     if (scopeKey !== null && scopeKey !== undefined) where.scopeKey = scopeKey;
-    return this.prisma.knowledgeIngestJob.findFirst({
+    return this._model().findFirst({
       where, orderBy: { createdAt: 'desc' },
     });
   }
 
   async updateOwned(jobId, orgId, data) {
-    return this.prisma.knowledgeIngestJob.updateMany({ where: { id: jobId, orgId }, data });
+    return this._model().updateMany({ where: { id: jobId, orgId }, data });
   }
 
   async progress(jobId, orgId, stage, progress, extra = {}) {
-    await this.prisma.knowledgeIngestJob.updateMany({
+    await this._model().updateMany({
       where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } },
       data: { stage, progress: Math.max(0, Math.min(100, Number(progress) || 0)), ...extra },
     });
   }
 
   async fail(jobId, orgId, error) {
-    await this.prisma.knowledgeIngestJob.updateMany({
+    await this._model().updateMany({
       where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } }, data: {
       status: 'failed', stage: 'failed', progress: 100,
       errorCode: error?.code || 'INGEST_FAILED', errorMessage: String(error?.message || error || 'Ingestion failed').slice(0, 2000),
@@ -102,7 +127,7 @@ export class KnowledgeUploadJobStore {
   }
 
   async complete(jobId, orgId, userId, result) {
-    const updated = await this.prisma.knowledgeIngestJob.updateMany({
+    const updated = await this._model().updateMany({
       where: { id: jobId, orgId, userId, status: { notIn: [...TERMINAL] } },
       data: {
         status: 'ready', stage: 'ready', progress: 100, documentId: result.documentId || null,

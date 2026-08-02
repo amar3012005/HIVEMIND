@@ -118,6 +118,23 @@ async def save_prospect_emulated(*, company: str, note: str, user_id: Optional[s
     via master+emulation headers. The company-wide lead book list_prospects reads. Idempotent-ish
     (memory claim-key dedup). Returns the created memory JSON (or {} on any failure — never raises
     into a turn)."""
+    # DISABLED BY DEFAULT — prospects are CRM records, not memories. This is the
+    # SECOND of two writers; agentscope_tools._save_prospect_memory was guarded in
+    # 3ab5356db but this one was missed, so prospect dumping continued unabated:
+    # 115 rows reappeared within hours of a 119-row cleanup, newest 19:48, while the
+    # other guard sat live in the deployed image. Guarding one door is guarding none.
+    #
+    # Same reasoning as the other site: every intelligence step is switched off
+    # below (smartIngest False, skipProcessing, skip_relationship_classification,
+    # skip_contradiction_detection, defer_entity_linking), so these were never
+    # processed as memories — they used the memory table as a lead store, 0%
+    # anchored, and they compete with real memories in semantic recall. Observed in
+    # a live /chat answer: "Prospect: Hannover Re" cited as a source for a question
+    # about Solvis heat-pump documentation.
+    #
+    # Same env flag as the other writer so one switch controls both.
+    if str(os.getenv("HYPER_PROSPECTS_TO_MEMORY", "false")).lower() != "true":
+        return {}
     company = str(company or "").strip()
     note = str(note or "").strip()
     if not company or not note:

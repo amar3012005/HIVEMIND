@@ -23,6 +23,33 @@ export async function buildChatRecallContext(ctx = {}) {
   const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
   const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
 
+  // ── COUNT INTENT — the question class the regexes above cannot see ──────────
+  //
+  // "How many prospects do we have from Hannover" matches NONE of the patterns
+  // above, so it took the default top-K path — and top-K is a sample, not a set.
+  // Even when isAggregateQuery fires it only widens max_memories 10 -> 15; "list
+  // all" gets 15 samples instead of 10. Still a sample.
+  //
+  // Language-agnostic on purpose. The existing patterns are English-only, which is
+  // the same defect class as the de,en OCR default and the English-only extraction
+  // prompt — both of which silently degraded every non-English tenant. A German
+  // user asking "wie viele" deserves the same routing as an English one, so the
+  // markers below cover the major Latin-script languages this product ships to.
+  //
+  // Detection only — it sets a flag. The orchestrator decides whether to call
+  // hivemind_count_where; nothing here bypasses recall.
+  const COUNT_MARKERS = [
+    /\bhow many\b/i, /\bhow much\b/i, /\btotal (number|count)\b/i, /\bcount of\b/i,
+    /\bnumber of\b/i, /\bare there any\b/i, /\blist all\b/i, /\bevery single\b/i,
+    /\bwie viele?\b/i, /\banzahl\b/i, /\bgesamtzahl\b/i,          // de
+    /\bcombien\b/i, /\bnombre (de|d')\b/i,                        // fr
+    /\bcu[áa]nt[oa]s\b/i, /\bn[úu]mero de\b/i,                    // es
+    /\bquant[ie]\b/i, /\bnumero di\b/i,                           // it
+    /\bhoeveel\b/i, /\baantal\b/i,                                // nl
+    /\bquant[oa]s\b/i,                                            // pt
+  ];
+  const isCountQuery = COUNT_MARKERS.some((re) => re.test(msgTrimmed));
+
   let memories = [];
   let injectionText = '';
 
@@ -34,6 +61,7 @@ export async function buildChatRecallContext(ctx = {}) {
       isMetaQuery,
       isAggregateQuery,
       isRecencyQuery,
+      isCountQuery,
       msgTrimmed,
     };
   }
@@ -167,11 +195,38 @@ export async function buildChatRecallContext(ctx = {}) {
 
     memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
       const isFact = (m.tags || []).includes('extracted-fact');
-      const cap = idx < 3 ? 2400 : isFact ? 400 : 700;
+      // WHAT RANKS TOP IS PASSED WHOLE. The pipeline searches wide then ranks
+      // narrow through RRF, MMR, collapse and a Cohere cross-encoder — and then
+      // this line used to throw away the tail of whatever won. Observed live: asked
+      // about HEIDELBERG, chat retrieved and CITED the right memory, then answered
+      // "none of them mention Heidelberg" because the token sits at char 2428 of
+      // 5314 and the top-3 cap was 2400. Twenty-eight characters.
+      //
+      // Truncating the winner is never right. Everything upstream exists to decide
+      // what deserves the model's attention; discarding part of the answer after
+      // that decision wastes the whole pipeline. Top results now pass in full up to
+      // a generous ceiling.
+      const TOP_FULL = Number(process.env.CHAT_TOP_MEMORY_CHARS || 8000);
+      const cap = idx < 3 ? TOP_FULL : (isFact ? 400 : 700);
+      // For the lower ranks a cap is still needed for context budget — but cut from
+      // the MIDDLE, never the tail. Structured content puts its most identifying
+      // material last (an image description's entity list, a document's conclusion,
+      // a table's final rows). Head-only truncation reliably destroys exactly the
+      // part that answers "what is this about". Keep both ends and mark the elision
+      // so the model knows it is reading an excerpt rather than a complete record.
+      const _clip = (text, limit) => {
+        const s = String(text || '');
+        if (s.length <= limit) return s;
+        const head = Math.floor(limit * 0.6);
+        const tail = limit - head - 24;
+        return tail > 0
+          ? `${s.slice(0, head)}\n…[trimmed]…\n${s.slice(-tail)}`
+          : s.slice(0, limit);
+      };
       return {
         id: m.id,
         title: m.title || (m.content || '').slice(0, 60),
-        content: (m.content || '').slice(0, cap),
+        content: _clip(m.content, cap),
         parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, idx < 3 ? 1200 : 500) : undefined,
         score: m.score || 0,
         tags: m.tags || [],
@@ -212,7 +267,17 @@ export async function buildChatRecallContext(ctx = {}) {
             memories.push({
               id: cm.id,
               title: cm.title || (cm.content || '').slice(0, 60),
-              content: (cm.content || '').slice(0, 1200),
+              // Graph-expanded neighbours: same middle-elision rule as the main
+              // set. Head-only truncation here discarded the tail of a memory that
+              // the graph explicitly said was relevant to the top hit.
+              content: (() => {
+                const s = String(cm.content || '');
+                const limit = Number(process.env.CHAT_GRAPH_MEMORY_CHARS || 1600);
+                if (s.length <= limit) return s;
+                const head = Math.floor(limit * 0.6);
+                const tail = limit - head - 24;
+                return tail > 0 ? `${s.slice(0, head)}\n…[trimmed]…\n${s.slice(-tail)}` : s.slice(0, limit);
+              })(),
               score: 0.5,
               tags: cm.tags || [],
               memory_type: cm.memoryType,
@@ -230,5 +295,5 @@ export async function buildChatRecallContext(ctx = {}) {
     console.warn('[chat] Recall failed:', recallErr.message);
   }
 
-  return { memories, injectionText, isMetaQuery, isAggregateQuery, isRecencyQuery, isQuestion, msgTrimmed };
+  return { memories, injectionText, isMetaQuery, isAggregateQuery, isRecencyQuery, isCountQuery, isQuestion, msgTrimmed };
 }

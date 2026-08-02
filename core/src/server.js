@@ -8062,6 +8062,19 @@ exit \$RC
                 }
               } catch (e2) { console.warn('[tara/insights]', e2.message); }
             }
+            // Resume the exact Outreach call sequence after the durable call and
+            // insight rows exist. This is a best-effort event edge; the control
+            // plane drain also reconciles active calls, so a transient network
+            // failure cannot strand the campaign or cause a duplicate dial.
+            fetch(`${process.env.HIVEMIND_CP_URL || 'http://control-plane:3000'}/internal/hyper/outreach/calls/reconcile`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': MASTER_API_KEY,
+              },
+              body: JSON.stringify({ org_id: tOrg, session_id: String(body.session_id) }),
+              signal: AbortSignal.timeout(8000),
+            }).catch((error) => console.warn('[tara/outreach-reconcile]', error.message));
             return jsonResponse(res, { ok: true, duration_ms: durationMs, turns: turns.length });
           } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
         }
@@ -17955,6 +17968,51 @@ exit \$RC
                 await deletePoints(collection, memoryIds);
                 await deletePoints(collection, segmentIds);
               }
+              // FULL CLEAR MUST LEAVE NOTHING STALE. Deleting by known ID only
+              // removes vectors whose Postgres row still existed to be listed. Any
+              // point orphaned earlier — by a partial delete, a crash mid-pipeline,
+              // or a previous clear that missed it — survives forever and then
+              // POISONS recall: vector search returns orphan ids, hydration against
+              // Postgres finds nothing, every result drops, and fresh memories get
+              // crowded out of top-K by the dead ones.
+              //
+              // Measured on 2026-08-02 after a Settings "Clear All Memories" on org
+              // 1380251c: Postgres held 8 memories and 0 segments while Qdrant still
+              // had 1180 points (148 evidence + 52 memory per 200 sampled). Recall
+              // reported persisted-hybrid — the lane was healthy — and returned 0
+              // hits for content that existed. It looked exactly like a broken
+              // retriever.
+              //
+              // So on a FULL clear (no project filter) sweep the whole tenant by
+              // FILTER, which is authoritative regardless of what Postgres knew.
+              // Project-scoped clears keep the id-only path: other projects' vectors
+              // must survive.
+              let orphansSwept = 0;
+              if (!project && qdrantUrl && orgId) {
+                for (const collection of collections) {
+                  try {
+                    const resp = await fetch(
+                      `${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`,
+                      {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                        // Per-tenant collections carry only this org, but filter on
+                        // org_id anyway so a shared collection can never lose
+                        // another tenant's rows.
+                        body: JSON.stringify({
+                          filter: { must: [{ key: 'org_id', match: { value: orgId } }] },
+                        }),
+                      },
+                    );
+                    if (resp.ok) orphansSwept += 1;
+                    else if (resp.status !== 404) {
+                      console.warn(`[delete-all] filter sweep ${collection} → ${resp.status}`);
+                    }
+                  } catch (e) {
+                    console.warn(`[delete-all] filter sweep ${collection} failed: ${e.message}`);
+                  }
+                }
+              }
 
               if (memoryIds.length) {
                 const idArr = `ARRAY[${memoryIds.map((id) => `'${id}'`).join(',')}]::uuid[]`;
@@ -17988,13 +18046,38 @@ exit \$RC
 
               invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
+              // `remaining: 0` was hardcoded — asserted, never checked. On a full
+              // clear, verify it: count what actually survives in Postgres AND report
+              // the live Qdrant point count, so a clear can never claim an erasure it
+              // did not perform. This is the same behaviour-over-assertion rule the
+              // hard-delete honesty gate uses.
+              let verifiedRemaining = 0;
+              let vectorsRemaining = null;
+              if (!project) {
+                try {
+                  verifiedRemaining = await prisma.memory.count({ where: ownerWhere });
+                } catch { verifiedRemaining = 0; }
+                if (qdrantUrl && orgId && process.env.QDRANT_PER_TENANT === 'true') {
+                  try {
+                    const cr = await fetch(`${qdrantUrl}/collections/org_${orgId}`,
+                      { headers: qdrantKey ? { 'api-key': qdrantKey } : {} });
+                    if (cr.ok) vectorsRemaining = (await cr.json())?.result?.points_count ?? null;
+                  } catch { /* reporting only — never fail the clear on this */ }
+                }
+                if (verifiedRemaining > 0 || (vectorsRemaining ?? 0) > 0) {
+                  console.warn(`[delete-all] INCOMPLETE org=${orgId}: ${verifiedRemaining} memories and `
+                    + `${vectorsRemaining} vectors still present after clear`);
+                }
+              }
               return jsonResponse(res, {
                 success: true,
                 organization_wide: allUsers,
                 deleted: memoryIds.length,
                 deleted_documents: documentIds.length,
                 deleted_segments: segmentIds.length,
-                remaining: 0,
+                remaining: verifiedRemaining,
+                vectors_remaining: vectorsRemaining,
+                collections_swept: orphansSwept,
               });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
@@ -22520,6 +22603,23 @@ exit \$RC
                 isAggregateQuery = chatRecall.isAggregateQuery;
                 isRecencyQuery = chatRecall.isRecencyQuery;
                 msgTrimmed = chatRecall.msgTrimmed;
+                // COUNT INTENT -> tell the model, in the context it actually reads,
+                // that the sampled memories below cannot answer this question and
+                // which tool can. Without this the model sees N plausible memories
+                // and infers a count from them — the exact failure the refusal
+                // "I cannot determine the exact count from top-K recall" was
+                // avoiding, but with no alternative offered.
+                //
+                // A directive rather than an auto-call: the orchestrator still owns
+                // the decision, and a question that merely LOOKS countable
+                // ("how much do we care about X") is not forced down a scan path.
+                if (chatRecall.isCountQuery) {
+                  injectionText = `${injectionText || ''}\n\n[COUNTING REQUIRED] This question asks HOW MANY / ALL. `
+                    + 'The memories above are the most SIMILAR ones, not every matching one — a count read off them '
+                    + 'would be a guess. Call hivemind_count_where with the appropriate filter to get an exact count, '
+                    + 'or hivemind_aggregate_entities when counting entities under a parent. If neither can answer '
+                    + 'completely, say the count is unavailable rather than estimating from the sample.';
+                }
               }
 
               // Inject persistent user profile (sanitized — drop any user-profile

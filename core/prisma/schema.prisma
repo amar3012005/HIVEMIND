@@ -1874,7 +1874,10 @@ model WebIntelJob {
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
 
-  @@unique([orgId, userId, idempotencyKey])
+  // PostgreSQL enforces idempotency only when a caller supplied a key. The
+  // partial unique index lives in the manual migration so anonymous browser
+  // requests can coexist without a synthetic key.
+  @@index([orgId, userId, idempotencyKey])
   @@index([orgId, userId, updatedAt(sort: Desc)])
   @@index([orgId, status, updatedAt])
   @@map("web_intel_jobs")
@@ -2209,6 +2212,8 @@ model ApiKey {
   userId             String        @map("user_id") @db.Uuid
   orgId              String?       @map("org_id") @db.Uuid
   name               String        @map("name") @db.VarChar(255)
+  keyKind            String        @default("personal") @map("key_kind") @db.VarChar(16)
+  createdByUserId    String?       @map("created_by_user_id") @db.Uuid
   keyHash            String        @unique @map("key_hash") @db.VarChar(255)
   keyPrefix          String        @map("key_prefix") @db.VarChar(20)
   expiresAt          DateTime?     @map("expires_at") @db.Timestamptz(6)
@@ -2233,6 +2238,7 @@ model ApiKey {
   @@index([keyPrefix], map: "idx_api_keys_key_prefix")
   @@index([orgId], map: "idx_api_keys_org")
   @@index([userId], map: "idx_api_keys_user")
+  @@index([orgId, keyKind], map: "idx_api_keys_org_kind")
   @@map("api_keys")
 }
 

@@ -356,7 +356,6 @@ const OAUTH_CLIENTS_FILE_PATH = path.join(DATA_DIR, 'oauth-clients.json');
 
 // Web Intelligence
 const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
-const webJobStore = new WebJobStore(WEB_JOBS_FILE);
 const browserRuntime = new BrowserRuntime();
 const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 50);
 const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 100);
@@ -367,10 +366,29 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+// Production Web Intelligence must use durable tenant-scoped state. The
+// constructor retains a file fallback only for local development with no DB.
+const webJobStore = new WebJobStore({ prisma, filePath: WEB_JOBS_FILE });
 const usageTracker = prisma ? new UsageTracker(prisma) : null;
 if (usageTracker) setUsageTracker(usageTracker); // expose to deep chokepoints via meter* helpers
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
+
+// One durable settlement marker prevents a completed/retried/polled Web job
+// from being billed twice. Provider receipts remain on the job attempt manifest;
+// this marker owns the customer-facing plan counter.
+async function settleWebIntelUsage({ orgId, userId, jobId, planMetric }) {
+  if (!orgId || !userId || !jobId || !planMetric) return false;
+  const settled = await webJobStore.settleUsage({
+    orgId,
+    userId,
+    jobId,
+    metric: `plan:${planMetric}`,
+    metadata: { plan_metric: planMetric },
+  });
+  if (settled.settled && planEnforcer) planEnforcer.recordUsage(orgId, planMetric, 1);
+  return settled.settled;
+}
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   scheduleRecurringMaintenanceJob({
@@ -16536,12 +16554,12 @@ exit \$RC
                 }
               }
 
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
               }
               // Monthly limit check
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               if (limits.monthly.search.exceeded) {
                 return jsonResponse(res, { error: 'Monthly search quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.search.hard, used: limits.monthly.search.used }, 429);
               }
@@ -16582,10 +16600,7 @@ exit \$RC
                     duration_ms: result.duration_ms,
                   });
 
-                  // Record web intel usage
-                  if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
-                  }
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-search] job ${job.id} failed:`, err.message);
@@ -16618,7 +16633,7 @@ exit \$RC
                 }
               }
               // Reuse the search quota (research counts as a heavier search).
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily research quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
               }
@@ -16760,9 +16775,7 @@ exit \$RC
                     }],
                   });
 
-                  if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'deepResearch', 1);
-                  }
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'deepResearch' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-research] job ${job.id} failed:`, err.message);
@@ -16844,7 +16857,7 @@ exit \$RC
               if (!domainCheck.allowed) {
                 return jsonResponse(res, { error: 'URL blocked by policy', code: 'domain_blocked', reason: domainCheck.reason }, 403);
               }
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
               }
@@ -16882,7 +16895,7 @@ exit \$RC
                     duration_ms: Date.now() - started,
                     pages_processed: audit.coverage.pages_scanned,
                   });
-                  if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[seo-audit] job ${job.id} failed:`, err.message);
@@ -16913,12 +16926,12 @@ exit \$RC
                 }
               }
 
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
               }
               // Monthly limit check
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               if (limits.monthly.crawl.exceeded) {
                 return jsonResponse(res, { error: 'Monthly crawl quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.crawl.hard, used: limits.monthly.crawl.used }, 429);
               }
@@ -16977,6 +16990,7 @@ exit \$RC
                     duration_ms: result.duration_ms,
                     pages_processed: pagesProcessed,
                   });
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-crawl] job ${job.id} failed:`, err.message);
@@ -17005,7 +17019,7 @@ exit \$RC
         case '/api/web/usage':
           if (req.method === 'GET') {
             try {
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               const now = new Date();
               const resetAt = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
               return jsonResponse(res, {
@@ -17068,10 +17082,7 @@ exit \$RC
                   } else {
                     await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'seo_audit' ? (items[0]?.coverage?.pages_scanned || 0) : newJob.type === 'crawl' ? count : undefined });
 
-                    // Record web intel usage
-                    if (planEnforcer && orgId) {
-                      planEnforcer.recordUsage(orgId, 'webIntel', 1);
-                    }
+                    await settleWebIntelUsage({ orgId, userId, jobId: newJob.id, planMetric: newJob.type === 'research' ? 'deepResearch' : 'webIntel' });
                   }
                 } catch (err) {
                   await webJobStore.update(newJob.id, { status: 'failed', error: err.message });
@@ -17161,7 +17172,7 @@ exit \$RC
         case '/api/web/usage/monthly':
           if (req.method === 'GET') {
             try {
-              const monthly = await webJobStore.getMonthlyUsage(userId);
+              const monthly = await webJobStore.getMonthlyUsage({ userId, orgId });
               return jsonResponse(res, monthly);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
@@ -17187,7 +17198,7 @@ exit \$RC
         case '/api/web/limits':
           if (req.method === 'GET') {
             try {
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               return jsonResponse(res, limits);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);

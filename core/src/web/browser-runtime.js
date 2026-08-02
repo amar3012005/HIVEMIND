@@ -18,6 +18,76 @@ import { constants as fsConstants } from 'fs';
 import { getTavilyClient } from './tavily-client.js';
 import { PlaywrightServiceRuntime } from './playwright-service-runtime.js';
 
+const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
+
+class FirecrawlRuntime {
+  constructor({ apiKey = process.env.FIRECRAWL_API_KEY } = {}) {
+    this.name = 'firecrawl';
+    this.apiKey = apiKey;
+  }
+
+  isAvailable() { return Boolean(this.apiKey); }
+
+  async _request(path, body, timeoutMs = 60_000) {
+    if (!this.isAvailable()) throw new Error('Firecrawl API not configured');
+    const response = await fetch(`${FIRECRAWL_BASE_URL}${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success === false) {
+      const error = new Error(payload?.error || `Firecrawl ${path} failed (${response.status})`);
+      error.status = response.status;
+      error.isRateLimit = response.status === 429;
+      error.isAuthError = response.status === 401 || response.status === 403;
+      throw error;
+    }
+    return payload;
+  }
+
+  async search({ query, domains, limit = 10 }) {
+    const started = Date.now();
+    const payload = await this._request('/search', {
+      query,
+      limit: Math.max(1, Math.min(Number(limit) || 10, 20)),
+      ...(Array.isArray(domains) && domains.length ? { sources: [{ type: 'web', domains: domains.slice(0, 20) }] } : {}),
+    });
+    const rows = payload?.data?.web || payload?.data || [];
+    return {
+      results: (Array.isArray(rows) ? rows : []).map((row) => ({ title: row.title || row.url, url: row.url, snippet: row.description || row.markdown || '', score: row.score })),
+      runtime_used: this.name,
+      duration_ms: Date.now() - started,
+      credits_used: payload?.creditsUsed || null,
+      errors: [],
+    };
+  }
+
+  async crawl({ urls, depth = 1, pageLimit = 50 }) {
+    const started = Date.now();
+    if (!Array.isArray(urls) || urls.length !== 1) throw new Error('Firecrawl crawl requires one seed URL');
+    // Firecrawl v2 returns completed data synchronously for small bounded crawls;
+    // larger async jobs intentionally fall through to the rendered runtime rather
+    // than leaving an untracked provider job outside the canonical job record.
+    const payload = await this._request('/crawl', {
+      url: urls[0],
+      limit: Math.max(1, Math.min(Number(pageLimit) || 50, 100)),
+      maxDepth: Math.max(0, Math.min(Number(depth) || 1, 3)),
+      formats: ['markdown'],
+    }, 90_000);
+    const rows = payload?.data || payload?.data?.data;
+    if (!Array.isArray(rows)) throw new Error('Firecrawl crawl returned an asynchronous job; rendered fallback selected');
+    return {
+      pages: rows.map((row) => ({ url: row?.metadata?.sourceURL || row?.metadata?.url || row.url, title: row?.metadata?.title || row.title || row.url, content: row.markdown || row.content || '', text: row.markdown || row.content || '' })),
+      runtime_used: this.name,
+      duration_ms: Date.now() - started,
+      credits_used: payload?.creditsUsed || null,
+      errors: [],
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Reliability primitives
 // ---------------------------------------------------------------------------
@@ -1315,6 +1385,7 @@ class FetchFallbackRuntime {
 export class BrowserRuntime {
   constructor() {
     this.primary = new TavilyRuntime();
+    this.firecrawl = new FirecrawlRuntime();
     this.lightpanda = new LightpandaRuntime();
     this.playwrightService = new PlaywrightServiceRuntime();
     this.fallback = new FetchFallbackRuntime();
@@ -1355,8 +1426,15 @@ export class BrowserRuntime {
       }
     }
 
-    // Tavily unavailable or failed — try Lightpanda
+    // Tavily is preferred for search; Firecrawl is the evidence-quality
+    // fallback before a browser-assisted approximation.
     if (fallbackApplied || this._tavilyUnavailable) {
+      try {
+        result = await withJobTimeout(this.firecrawl.search({ query, domains, limit }));
+        return { ...result, fallback_applied: true, runtime_used: 'firecrawl', duration_ms: Date.now() - start };
+      } catch (firecrawlErr) {
+        // Firecrawl is optional. Continue to browser-assisted retrieval.
+      }
       try {
         result = await withJobTimeout(this.lightpanda.search({ query, domains, limit }));
         telemetry.lightpandaSuccesses = (telemetry.lightpandaSuccesses || 0) + 1;
@@ -1417,32 +1495,33 @@ export class BrowserRuntime {
     const start = Date.now();
     telemetry.totalJobs += 1;
     let fallbackApplied = false;
-    let runtimeUsed = this.primary.name;
+    let runtimeUsed = 'firecrawl';
     let result;
 
-    // Try Tavily first (primary)
-    if (!this._tavilyUnavailable) {
+    // Crawl/extract is Firecrawl-first. Tavily remains a useful fallback for
+    // smaller extraction jobs; rendered Lightpanda and safe fetch complete the chain.
+    if (this.firecrawl.isAvailable()) {
       try {
-        result = await withJobTimeout(this.primary.crawl({ urls, depth, pageLimit, include, exclude }));
-        telemetry.tavilySuccesses = (telemetry.tavilySuccesses || 0) + 1;
+        result = await withJobTimeout(this.firecrawl.crawl({ urls, depth, pageLimit, include, exclude }));
         return {
           ...result,
           fallback_applied: false,
           duration_ms: Date.now() - start,
         };
-      } catch (primaryErr) {
-        if (primaryErr.isAuthError || primaryErr.message.includes('not configured')) {
-          this._tavilyUnavailable = true;
-          console.warn('[BrowserRuntime] Tavily unavailable, falling back to Lightpanda');
-        } else {
-          fallbackApplied = true;
-          runtimeUsed = 'lightpanda';
-        }
+      } catch {
+        fallbackApplied = true;
+        runtimeUsed = 'tavily';
       }
     }
 
-    // Tavily unavailable or failed — try Lightpanda
-    if (fallbackApplied || this._tavilyUnavailable) {
+    if (fallbackApplied || !this.firecrawl.isAvailable()) {
+      try {
+        result = await withJobTimeout(this.primary.crawl({ urls, depth, pageLimit, include, exclude }));
+        telemetry.tavilySuccesses = (telemetry.tavilySuccesses || 0) + 1;
+        return { ...result, fallback_applied: true, runtime_used: 'tavily', duration_ms: Date.now() - start };
+      } catch {
+        runtimeUsed = 'lightpanda';
+      }
       try {
         result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit, include, exclude }));
         telemetry.lightpandaSuccesses = (telemetry.lightpandaSuccesses || 0) + 1;

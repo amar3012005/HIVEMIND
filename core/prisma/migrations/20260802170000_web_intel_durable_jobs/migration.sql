@@ -15,3 +15,10 @@ CREATE TABLE IF NOT EXISTS hivemind.web_intel_usage_settlements (
   created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (job_id, metric)
 );
 CREATE INDEX IF NOT EXISTS web_intel_usage_settlements_org_user_idx ON hivemind.web_intel_usage_settlements (org_id, user_id, created_at DESC);
+
+-- API key ownership upgrade. Existing keys remain personal and retain their
+-- declared scopes; service keys are explicit and organization-admin governed.
+ALTER TABLE hivemind.api_keys ADD COLUMN IF NOT EXISTS key_kind varchar(16) NOT NULL DEFAULT 'personal';
+ALTER TABLE hivemind.api_keys ADD COLUMN IF NOT EXISTS created_by_user_id uuid;
+UPDATE hivemind.api_keys SET created_by_user_id = user_id WHERE created_by_user_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_api_keys_org_kind ON hivemind.api_keys (org_id, key_kind);

@@ -272,6 +272,8 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           evidence_refs: proposalEvidenceRefs,
           requested_action: item.requested_action || null,
           requested_terminal_outcome: item.requested_terminal_outcome || null,
+          planned_playbook_id: item.playbook_id || null,
+          planned_playbook_version: Number.isInteger(Number(item.playbook_version)) ? Number(item.playbook_version) : null,
           external_action_requested: item.effect_class === 'external',
           authority_mode: 'PREPARE',
           ignored_capability_suggestions: Array.isArray(item.ignored_capability_suggestions) ? item.ignored_capability_suggestions : [],

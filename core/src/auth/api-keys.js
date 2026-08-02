@@ -5,6 +5,7 @@ export const ENTITLEMENT_SCOPES = [
   'memory:write',
   'mcp',
   'web_search',
+  'web_research',
   'web_crawl',
   'web_admin',
 ];
@@ -26,9 +27,11 @@ export function generateRawApiKey() {
 export async function createPersistedApiKey(prisma, {
   userId,
   orgId = null,
+  keyKind = 'personal',
+  createdByUserId = userId,
   name,
   description = null,
-  scopes = ['memory:read', 'memory:write', 'mcp', 'web_search', 'web_crawl', 'web_admin'],
+  scopes = ['memory:read'],
   projectId = null,
   teamId = null,
   expiresAt = null,
@@ -39,6 +42,10 @@ export async function createPersistedApiKey(prisma, {
   if (!prisma) {
     throw new Error('Prisma client unavailable');
   }
+  if (!['personal', 'service'].includes(keyKind)) throw new Error('Invalid API key kind');
+  const allowedScopes = new Set(ENTITLEMENT_SCOPES);
+  const normalizedScopes = [...new Set((Array.isArray(scopes) ? scopes : []).filter((scope) => allowedScopes.has(scope)))];
+  if (!normalizedScopes.length) throw new Error('At least one valid API key scope is required');
 
   const rawKey = generateRawApiKey();
   const keyPrefix = rawKey.slice(0, 12);
@@ -49,10 +56,12 @@ export async function createPersistedApiKey(prisma, {
       userId,
       orgId,
       name: name || 'HIVE-MIND API Key',
+      keyKind,
+      createdByUserId,
       keyHash,
       keyPrefix,
       description,
-      scopes,
+      scopes: normalizedScopes,
       projectId,
       teamId,
       expiresAt,
@@ -107,15 +116,15 @@ export async function authenticatePersistedApiKey(prisma, apiKey) {
   return record;
 }
 
-export async function listPersistedApiKeys(prisma, userId, orgId = null) {
+export async function listPersistedApiKeys(prisma, userId, orgId = null, { includeServiceKeys = false } = {}) {
   if (!prisma) {
     return [];
   }
 
   return prisma.apiKey.findMany({
     where: {
-      userId,
       ...(orgId ? { orgId } : {}),
+      ...(includeServiceKeys ? { OR: [{ userId }, { keyKind: 'service' }] } : { userId }),
       revokedAt: null
     },
     orderBy: {
@@ -124,7 +133,7 @@ export async function listPersistedApiKeys(prisma, userId, orgId = null) {
   });
 }
 
-export async function revokePersistedApiKey(prisma, keyId, userId) {
+export async function revokePersistedApiKey(prisma, keyId, userId, { orgId = null, allowServiceKey = false } = {}) {
   if (!prisma) {
     throw new Error('Prisma client unavailable');
   }
@@ -132,7 +141,7 @@ export async function revokePersistedApiKey(prisma, keyId, userId) {
   const existing = await prisma.apiKey.findFirst({
     where: {
       id: keyId,
-      userId,
+      ...(allowServiceKey ? { OR: [{ userId }, { keyKind: 'service', ...(orgId ? { orgId } : {}) }] } : { userId }),
       revokedAt: null
     }
   });
@@ -163,6 +172,7 @@ export async function revokePersistedApiKey(prisma, keyId, userId) {
  * @returns {object} Augmented principal
  */
 export async function resolveKeyAccess(prisma, keyRecord, accessContext = null) {
+  const isServiceKey = keyRecord.keyKind === 'service';
   const principal = {
     keyId: keyRecord.id,
     userId: keyRecord.userId,
@@ -173,6 +183,7 @@ export async function resolveKeyAccess(prisma, keyRecord, accessContext = null) 
     projectIds: [],
     teamIds: [],
     effectiveScopes: keyRecord.scopes || [],
+    isServiceKey,
   };
 
   // If key is scoped to a specific project/team, use those directly
@@ -184,12 +195,20 @@ export async function resolveKeyAccess(prisma, keyRecord, accessContext = null) 
   }
 
   // If access context is provided, intersect with live memberships
-  if (accessContext) {
+  if (accessContext && !isServiceKey) {
     // If key has no project scope, inherit all accessible projects
     if (!keyRecord.projectId && !keyRecord.teamId) {
       principal.projectIds = accessContext.projectIds || [];
       principal.teamIds = accessContext.teamIds || [];
     }
+  }
+
+  // Organization service keys never inherit the creating member's personal
+  // memory visibility. They may operate only on explicit project/team scopes
+  // or organization-scoped capability routes guarded by their allow-list.
+  if (isServiceKey && !keyRecord.projectId && !keyRecord.teamId) {
+    principal.projectIds = [];
+    principal.teamIds = [];
   }
 
   return principal;

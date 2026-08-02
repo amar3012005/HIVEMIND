@@ -469,27 +469,23 @@ export function generateHostedServer(userId, orgId, apiKey) {
 function generateToolsManifest(userId, orgId, options = {}) {
   const scopes = Array.isArray(options.scopes) ? options.scopes : [];
   const scopeSet = new Set(scopes);
-  // Full HIVEMIND-native toolset is exposed to every authenticated MCP client by
-  // default. The previous scope-gating silently hid 23 of 34 tools: the OAuth→
-  // internal scope map (server.js) emits names ('mcp', 'memory:read', 'web:search')
-  // that NEVER matched the gate's expected names ('coding', 'web_search',
-  // 'web_crawl', 'slack:act'), so every OAuth / Claude connection fell through to
-  // only the 10 always-on core tools — regardless of what the user consented to.
-  // These tools read/write HIVEMIND's OWN graph or server-side-keyed services
-  // (same trust level as the always-on memory tools), so they are on by default.
-  // Power users / restricted integrations can opt a group OUT with a negative
-  // scope: '!coding', '!web', '!slack'. '*' or an empty scope list = everything.
-  const hasAll = scopeSet.has('*') || scopes.length === 0;
+  // Web capabilities are explicit allow-list scopes. They spend platform
+  // provider credits and can persist public findings, so an absent or empty
+  // scope set must never be interpreted as blanket access.
+  const hasAll = scopeSet.has('*');
   const hasCoding = hasAll || !scopeSet.has('!coding');
-  const hasWebSearch = hasAll || !scopeSet.has('!web');
-  const hasWebCrawl = hasWebSearch;
-  const hasAnyWeb = hasWebSearch || hasWebCrawl;
+  const hasWebSearch = hasAll || scopeSet.has('web_search');
+  const hasWebResearch = hasAll || scopeSet.has('web_research');
+  const hasWebCrawl = hasAll || scopeSet.has('web_crawl');
+  const hasAnyWeb = hasWebSearch || hasWebResearch || hasWebCrawl;
   // Write gate for the "Default Access" (read-only) OAuth tier. The token's
   // stored scopes are the INTERNAL scopes (server.js createOAuthAccessToken
   // persists internalScopes): Full Access carries 'memory:write', the read-only
   // tier does not. When write is not granted, mutating tools are filtered out of
   // the manifest so a read-only consent is actually enforced, not just cosmetic.
-  const canWrite = hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
+  // Core HIVEMIND memory tools retain their established default-access
+  // behavior. Only provider-spending Web capabilities require explicit scope.
+  const canWrite = scopes.length === 0 || hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
 
   const tools = [
     {
@@ -1273,39 +1269,19 @@ NOT for a point-in-time snapshot across many memories — use hivemind_at; NOT f
     );
   }
 
-  // ── Web Intelligence tools (scope-gated) ──────────────────
-  if (hasWebSearch) {
-    tools.push({
-      name: 'hivemind_web_search',
-      description: `Search the live web and return structured results (async). Use ONLY for facts that are external to the org and require up-to-date public information: today's news, current prices of public goods, competitor pages, recent events after your knowledge cutoff.
-HARD RULE: NEVER use for facts about the user, their org, their people, their projects, or their decisions — those live in HIVEMIND; use hivemind_recall instead. NOT for crawling a specific URL — use hivemind_web_crawl; NOT for checking job progress — use hivemind_web_job_status. Returns a job_id; poll with hivemind_web_job_status every 3-5s. Save useful findings back to HIVEMIND via hivemind_save_memory with source URL in tags.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query' },
-          domains: { type: 'array', items: { type: 'string' }, description: 'Optional domain allowlist' },
-          limit: { type: 'number', description: 'Max results (default: 10)' }
-        },
-        required: ['query']
-      }
-    });
-  }
-  if (hasWebCrawl) {
-    tools.push({
-      name: 'hivemind_web_crawl',
-      description: `Crawl one or more specific URLs and extract page content (async). Use when you have exact URLs to read — documentation pages, public product pages, linked references.
-NOT for keyword-based web search — use hivemind_web_search; NOT for org/user/project facts — use hivemind_recall. HARD RULE: never crawl internal/private URLs or substitute web crawl for HIVEMIND recall. Returns a job_id; poll with hivemind_web_job_status. depth controls link-following (max 3); page_limit caps total pages (max 50). Save extracted content back to HIVEMIND when it's valuable for future sessions.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          urls: { type: 'array', items: { type: 'string' }, description: 'Seed URLs to crawl' },
-          depth: { type: 'number', description: 'Crawl depth (default: 1, max: 3)' },
-          page_limit: { type: 'number', description: 'Max pages (default: 10, max: 50)' }
-        },
-        required: ['urls']
-      }
-    });
-  }
+  // ── Web Intelligence tools (explicit scope-gated) ─────────
+  if (hasWebSearch) tools.push({
+    name: 'hivemind_web_search', description: 'Search the live public web asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, domains: { type: 'array', items: { type: 'string' } }, limit: { type: 'number' } }, required: ['query'] },
+  });
+  if (hasWebResearch) tools.push({
+    name: 'hivemind_web_research', description: 'Run bounded, cited public-web research asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { input: { type: 'string' }, model: { type: 'string' }, citation_format: { type: 'string', enum: ['numbered', 'markdown'] } }, required: ['input'] },
+  });
+  if (hasWebCrawl) tools.push({
+    name: 'hivemind_web_crawl', description: 'Crawl public URLs and extract page content asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } }, depth: { type: 'number' }, page_limit: { type: 'number' } }, required: ['urls'] },
+  });
   if (hasAnyWeb) {
     tools.push({
       name: 'hivemind_web_job_status',
@@ -1319,6 +1295,8 @@ Use after submitting a web job — call every 3-5 seconds until status is "done"
         required: ['job_id']
       }
     });
+    tools.push({ name: 'hivemind_web_retry_job', description: 'Retry one failed tenant-scoped Web Intelligence job.', inputSchema: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] } });
+    tools.push({ name: 'hivemind_web_save_result', description: 'Save a completed Web Intelligence result into HIVEMIND.', inputSchema: { type: 'object', properties: { job_id: { type: 'string' }, result_index: { type: 'number' }, title: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['job_id'] } });
     tools.push({
       name: 'hivemind_web_usage',
       description: `Return current web intelligence quota and usage (searches used, crawl pages consumed, limits remaining). Use before submitting large web jobs to avoid hitting quota mid-task, or when a web job is rejected with a quota error. No parameters required.`,
@@ -3112,6 +3090,15 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         return formatToolContent(res);
       }
 
+      case 'hivemind_web_research': {
+        const res = await apiClient.post('/api/web/research/jobs', {
+          input: args.input,
+          model: args.model || 'auto',
+          citation_format: args.citation_format || 'numbered',
+        });
+        return formatToolContent(res);
+      }
+
       case 'hivemind_web_crawl': {
         const res = await apiClient.post('/api/web/crawl/jobs', {
           urls: args.urls,
@@ -3128,6 +3115,20 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
 
       case 'hivemind_web_usage': {
         const res = await apiClient.get('/api/web/usage');
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_retry_job': {
+        const res = await apiClient.post(`/api/web/jobs/${args.job_id}/retry`, {});
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_save_result': {
+        const res = await apiClient.post(`/api/web/jobs/${args.job_id}/save-to-memory`, {
+          resultIndex: args.result_index,
+          title: args.title,
+          tags: args.tags,
+        });
         return formatToolContent(res);
       }
 

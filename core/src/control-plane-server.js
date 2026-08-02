@@ -4868,11 +4868,15 @@ const server = http.createServer(async (req, res) => {
     const current = await requireSession(req, res);
     if (!current) return;
 
-    const keys = await listPersistedApiKeys(prisma, current.session.userId, current.session.orgId || null);
+    const orgId = current.session.orgId || null;
+    const membership = orgId ? await getActiveOrganizationMembership(prisma, { userId: current.session.userId, orgId }) : null;
+    const includeServiceKeys = Boolean(membership && (isOrganizationAdmin(membership) || canManageOrg(membership.role)));
+    const keys = await listPersistedApiKeys(prisma, current.session.userId, orgId, { includeServiceKeys });
     return jsonResponse(res, {
       keys: keys.map(key => ({
         id: key.id,
         name: key.name,
+        key_kind: key.keyKind || 'personal',
         key_prefix: key.keyPrefix,
         scopes: key.scopes,
         expires_at: key.expiresAt,
@@ -4887,12 +4891,22 @@ const server = http.createServer(async (req, res) => {
     if (!current) return;
     const body = await parseBody(req);
 
+    const requestedKind = body.key_kind === 'service' ? 'service' : 'personal';
+    const orgId = current.session.orgId || null;
+    if (requestedKind === 'service') {
+      if (!orgId) return jsonResponse(res, { error: 'Organization service keys require an active organization' }, 400);
+      const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+      if (!membership) return;
+    }
+    const requestedScopes = Array.isArray(body.scopes) ? body.scopes : ['memory:read'];
     const { rawKey, record } = await createPersistedApiKey(prisma, {
       userId: current.session.userId,
-      orgId: current.session.orgId || null,
+      orgId,
+      keyKind: requestedKind,
+      createdByUserId: current.session.userId,
       name: body.name || 'Primary API Key',
       description: body.description || null,
-      scopes: Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ['memory:read', 'memory:write', 'mcp', 'coding'],
+      scopes: requestedScopes,
       expiresAt: body.expires_at ? new Date(body.expires_at) : null,
       rateLimitPerMinute: body.rate_limit_per_minute || 60,
       createdByIp: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null,
@@ -4905,6 +4919,7 @@ const server = http.createServer(async (req, res) => {
       key: {
         id: record.id,
         name: record.name,
+        key_kind: record.keyKind,
         key_prefix: record.keyPrefix,
         scopes: record.scopes,
         created_at: record.createdAt
@@ -5022,7 +5037,10 @@ const server = http.createServer(async (req, res) => {
   if (revokeMatch && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
-    const revoked = await revokePersistedApiKey(prisma, revokeMatch[1], current.session.userId);
+    const orgId = current.session.orgId || null;
+    const membership = orgId ? await getActiveOrganizationMembership(prisma, { userId: current.session.userId, orgId }) : null;
+    const allowServiceKey = Boolean(membership && (isOrganizationAdmin(membership) || canManageOrg(membership.role)));
+    const revoked = await revokePersistedApiKey(prisma, revokeMatch[1], current.session.userId, { orgId, allowServiceKey });
     if (!revoked) {
       return jsonResponse(res, { error: 'API key not found' }, 404);
     }

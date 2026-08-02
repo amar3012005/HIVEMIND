@@ -1850,6 +1850,55 @@ model KnowledgeUsageSettlement {
   @@map("knowledge_usage_settlements")
 }
 
+/// Durable, tenant-scoped Web Intelligence orchestration. Provider payloads are
+/// retained only as a bounded result manifest; credentials never enter this row.
+model WebIntelJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  type              String    @db.VarChar(24)
+  status            String    @default("queued") @db.VarChar(24)
+  request           Json      @default("{}")
+  result            Json?     
+  progress          Json      @default("[]")
+  providerAttempts  Json      @default("[]") @map("provider_attempts")
+  idempotencyKey    String?   @map("idempotency_key") @db.VarChar(128)
+  runtimeUsed       String?   @map("runtime_used") @db.VarChar(64)
+  fallbackApplied   Boolean   @default(false) @map("fallback_applied")
+  durationMs        Int?      @map("duration_ms")
+  pagesProcessed    Int       @default(0) @map("pages_processed")
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  retriedFromId     String?   @map("retried_from_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  // PostgreSQL enforces idempotency only when a caller supplied a key. The
+  // partial unique index lives in the manual migration so anonymous browser
+  // requests can coexist without a synthetic key.
+  @@index([orgId, userId, idempotencyKey])
+  @@index([orgId, userId, updatedAt(sort: Desc)])
+  @@index([orgId, status, updatedAt])
+  @@map("web_intel_jobs")
+}
+
+/// Exactly-once customer and provider accounting marker for a Web Intel job.
+model WebIntelUsageSettlement {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  jobId     String   @map("job_id") @db.Uuid
+  metric    String   @db.VarChar(40)
+  amount    BigInt   @default(1)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, metric])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@map("web_intel_usage_settlements")
+}
+
 /// Named entities — people, orgs, projects, topics, locations, dates
 model Entity {
   id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -2163,6 +2212,8 @@ model ApiKey {
   userId             String        @map("user_id") @db.Uuid
   orgId              String?       @map("org_id") @db.Uuid
   name               String        @map("name") @db.VarChar(255)
+  keyKind            String        @default("personal") @map("key_kind") @db.VarChar(16)
+  createdByUserId    String?       @map("created_by_user_id") @db.Uuid
   keyHash            String        @unique @map("key_hash") @db.VarChar(255)
   keyPrefix          String        @map("key_prefix") @db.VarChar(20)
   expiresAt          DateTime?     @map("expires_at") @db.Timestamptz(6)
@@ -2187,6 +2238,7 @@ model ApiKey {
   @@index([keyPrefix], map: "idx_api_keys_key_prefix")
   @@index([orgId], map: "idx_api_keys_org")
   @@index([userId], map: "idx_api_keys_user")
+  @@index([orgId, keyKind], map: "idx_api_keys_org_kind")
   @@map("api_keys")
 }
 

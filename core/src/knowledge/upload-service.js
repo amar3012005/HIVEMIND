@@ -47,8 +47,21 @@ export class KnowledgeUploadService {
 
     const checksum = crypto.createHash('sha256').update(file.data).digest('hex');
     let job = await this.jobStore.findDuplicate({ orgId, scopeKey: scope.scopeKey, checksum });
+    // A file already ingested successfully is NOT a failure — it is the best
+    // possible outcome. The FE branches on `duplicate` (KnowledgeBase.jsx checks
+    // `err.response.status === 409 && err.response.data.duplicate`) to render
+    // "already in this scope" with an Upload-anyway action. This body never set
+    // that flag, so every previously-ingested file rendered as a red **Failed**
+    // row. Observed on a real batch: B&B_Solvis_Kick-Off.docx, Brandind Skizze
+    // (1).pdf, BundB-Solvis-Budget.pdf and Dachmarke (1).pdf all showed "Failed"
+    // while holding 10, 2, 18 and 7 memories respectively.
+    // `message` is included because the FE prefers it over the raw error code.
     if (job?.status === 'ready') return { ok: false, status: 409, body: {
-      error: 'duplicate_document', status: 'existing', job_id: job.id,
+      error: 'duplicate_document',
+      duplicate: true,
+      message: 'Already in your knowledge base — this exact file was ingested before.',
+      existing_title: job.filename || null,
+      status: 'existing', job_id: job.id,
       existing_document_id: job.documentId, actions: ['view_existing', 'reprocess'],
     } };
     if (job && job.userId !== userId) {

@@ -3,7 +3,10 @@ import { Agent, fetch as undiciFetch } from 'undici';
 const DEFAULT_CONNECTIONS = Math.max(1, Number(process.env.HQ_RUNTIME_HTTP_CONNECTIONS || 8));
 const DEFAULT_KEEP_ALIVE_MS = Math.max(1_000, Number(process.env.HQ_RUNTIME_HTTP_KEEP_ALIVE_MS || 60_000));
 const DEFAULT_KEEP_ALIVE_MAX_MS = Math.max(DEFAULT_KEEP_ALIVE_MS, Number(process.env.HQ_RUNTIME_HTTP_KEEP_ALIVE_MAX_MS || 300_000));
-const DEFAULT_HEADERS_TIMEOUT_MS = Math.max(1_000, Number(process.env.HQ_RUNTIME_HTTP_HEADERS_TIMEOUT_MS || 30_000));
+// Room turns are synchronous and can legitimately spend minutes planning before
+// the sidecar writes its first response header. Health warmups still use their
+// own short AbortSignal; the pooled execution transport must cover the full turn.
+const DEFAULT_HEADERS_TIMEOUT_MS = Math.max(1_000, Number(process.env.HQ_RUNTIME_HTTP_HEADERS_TIMEOUT_MS || 600_000));
 const DEFAULT_BODY_TIMEOUT_MS = Math.max(DEFAULT_HEADERS_TIMEOUT_MS, Number(process.env.HQ_RUNTIME_HTTP_BODY_TIMEOUT_MS || 600_000));
 const DEFAULT_IDLE_WARMUP_MS = Math.max(10_000, Number(process.env.HQ_RUNTIME_HTTP_IDLE_WARMUP_MS || 300_000));
 

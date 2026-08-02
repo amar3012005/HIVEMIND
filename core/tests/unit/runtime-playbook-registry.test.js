@@ -418,6 +418,29 @@ test('Director may decline every registered playbook instead of forcing a bad fi
   assert.equal(calls.length, 1, 'selection must still use the Director when one playbook is registered');
 });
 
+test('Director sees the complete catalog when the planner suggests a different Room owner', async () => {
+  const fixture = await loadFixture();
+  fixture.metadata = { ...(fixture.metadata || {}), owner_room_tag: 'operator-room' };
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  let suppliedCatalog = [];
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async (_model, request) => {
+      suppliedCatalog = JSON.parse(request.body).messages[1].content;
+      return {
+        ok: true,
+        async json() { return { choices: [{ message: { content: '{"playbook_id":null,"version":null,"reason":"no lifecycle fit"}' } }] }; },
+      };
+    },
+  });
+  await selector.select({
+    objective: 'Evaluate the requested outcome.',
+    context: { request: { owner_room_tag: 'advisory-room' } },
+  });
+  assert.equal(suppliedCatalog.includes(fixture.playbook_id), true);
+});
+
 test('Director binds only playbook-declared inputs without keyword parsing in the engine', async () => {
   const registry = new RuntimePlaybookRegistry();
   await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);

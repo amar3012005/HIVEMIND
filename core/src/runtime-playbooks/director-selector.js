@@ -80,11 +80,10 @@ export class DirectorPlaybookSelector {
   }
 
   async select({ objective, context = {}, scopeKey = 'global' } = {}) {
-    const requestedOwner = String(asObject(asObject(context).request).owner_room_tag || '').trim().toLowerCase();
-    const active = this.registry.descriptors({ scopeKey }).filter((entry) => (
-      entry.status === 'ACTIVE'
-      && (!requestedOwner || String(entry.metadata?.owner_room_tag || '').trim().toLowerCase() === requestedOwner)
-    ));
+    // The planner's requested owner is advisory context, not a routing key. The
+    // Director must see every active lifecycle and choose by semantic contract;
+    // the selected playbook's metadata owns the eventual Room assignment.
+    const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
     // New assignments always use the newest active version. Existing runs remain
     // pinned to their immutable version through RuntimePlaybookRun.
     const catalog = [...active.reduce((latest, entry) => {

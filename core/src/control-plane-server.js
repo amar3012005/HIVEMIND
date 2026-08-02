@@ -11528,11 +11528,15 @@ Write the persona now.`;
     let rawBody = undefined;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (isMultipart) {
-        const chunks = [];
-        for await (const chunk of req) {
-          chunks.push(chunk);
+        try {
+          const maxMultipartBytes = Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
+          rawBody = (await parseBodyWithRaw(req, maxMultipartBytes)).raw;
+        } catch (error) {
+          return jsonResponse(res, {
+            error: error.code || 'payload_too_large',
+            message: error.status === 413 ? 'Upload exceeds the maximum request size.' : error.message,
+          }, error.status || 400);
         }
-        rawBody = Buffer.concat(chunks);
       } else {
         body = await parseBody(req);
       }

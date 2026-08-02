@@ -45,6 +45,10 @@ const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 
+export function durableQueueJobId(trackerJobId, processingVersion = 1) {
+  return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
+}
+
 function tryLoadBullMQ() {
   try {
     const bullmq = require_('bullmq');
@@ -100,10 +104,14 @@ export class KbIngestQueue {
    * @param {function} [deps.recordUsage]         (orgId, result) => void — plan-quota accounting post-success
    * @param {object} [deps.logger]
    */
-  constructor({ documentFirstIngestion, ingestTracker, recordUsage = null, logger = console }) {
+  constructor({ documentFirstIngestion, ingestTracker, recordUsage = null, jobStore = null,
+    validateJob = null, processUpload = null, logger = console }) {
     this.dfi = documentFirstIngestion;
     this.tracker = ingestTracker;
     this.recordUsage = recordUsage;
+    this.jobStore = jobStore;
+    this.validateJob = validateJob;
+    this.processUpload = processUpload;
     this.logger = logger;
     this.queue = null;
     this.worker = null;
@@ -240,13 +248,18 @@ export class KbIngestQueue {
     return mode.split(',').map(s => s.trim()).filter(Boolean).includes(orgId);
   }
 
+  async isAvailable() {
+    await this._ready;
+    return !!this.queue;
+  }
+
   /** Persist raw bytes durably; returns the stored path. */
   persistFile({ orgId, checksum, filename, fileBuffer }) {
     const dir = path.join(KB_STORE_DIR, orgId, checksum);
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const safe = filename.replace(/[/\\]/g, '_');
     const p = path.join(dir, safe);
-    if (!fs.existsSync(p)) fs.writeFileSync(p, fileBuffer);
+    if (!fs.existsSync(p)) fs.writeFileSync(p, fileBuffer, { mode: 0o600 });
     return p;
   }
 
@@ -254,7 +267,7 @@ export class KbIngestQueue {
    * Enqueue an upload. Returns { job_id } or { backpressure: true } (caller → 429).
    * Caller has already validated auth/quota and computed the checksum.
    */
-  async enqueue({ userId, orgId, filename, contentType, checksum, filePath, metadata }) {
+  async enqueue({ userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId = null, processingVersion = 1 }) {
     await this._ready;
     if (!this.queue) throw new Error('kb-queue unavailable');
 
@@ -268,7 +281,7 @@ export class KbIngestQueue {
       }
     } catch { /* counts best-effort — never block enqueue on stats */ }
 
-    const trackerJobId = `kbq_${checksum.slice(0, 12)}_${Date.now().toString(36)}`;
+    trackerJobId ||= `kbq_${checksum.slice(0, 12)}_${Date.now().toString(36)}`;
     try { this.tracker?.createJob(trackerJobId, { userId, orgId, filename, kind: 'knowledge_upload', queued: true }); } catch { /* noop */ }
     this._setStatus(trackerJobId, { status: 'queued', filename, progress: 0 });
 
@@ -282,9 +295,9 @@ export class KbIngestQueue {
     // stale completed id, `add` was IGNORED, the worker never ran, and the
     // status mirror stuck at 'queued' forever (FE "Processing" hang).
     const job = await this.queue.add('ingest', {
-      userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId,
+      userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId, processingVersion,
     }, {
-      jobId: trackerJobId,
+      jobId: durableQueueJobId(trackerJobId, processingVersion),
       attempts: ATTEMPTS,
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 1000,
@@ -309,23 +322,28 @@ export class KbIngestQueue {
     this._orgPending.set(orgId, Math.max(0, (this._orgPending.get(orgId) || 1) - 1));
 
     try {
+      if (this.validateJob) await this.validateJob({ trackerJobId, userId, orgId, metadata });
+      await this.jobStore?.progress(trackerJobId, orgId, 'processing', 5, { attempt: job.attemptsMade + 1 });
       const fileBuffer = fs.readFileSync(filePath); // durable bytes
       // Canonical front door: file uploads normalize into the IngestEnvelope
       // (source.type='kb'); ingestSource routes document+file → the same
       // ingestKnowledgeDocument pipeline, adding uniform provenance.
-      const work = this.dfi.ingestSource({
-        userId, orgId,
-        source: { type: 'kb', filename },
-        file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
-        metadata: metadata || {},
-        onProgress: (p) => {
+      const onProgress = (p) => {
           try {
             const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
             this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
           } catch { /* noop */ }
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename });
-        },
-      });
+          this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0).catch(() => {});
+        };
+      const work = this.processUpload
+        ? this.processUpload({ userId, orgId, filename, contentType, fileBuffer, metadata: metadata || {}, onProgress })
+        : this.dfi.ingestSource({
+            userId, orgId,
+            source: { type: 'kb', filename },
+            file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
+            metadata: metadata || {}, onProgress,
+          });
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
       // upserts + segment reuse), so an abandoned attempt is safe to retry.
       const result = await Promise.race([
@@ -356,6 +374,9 @@ export class KbIngestQueue {
         this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
         this._counters.failed = (this._counters.failed || 0) + 1;
         this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} doc=${result?.documentId || 'none'} — ${reason}`);
+        const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
+        await this.jobStore?.fail(trackerJobId, orgId, failed);
+        try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
         return { documentId: result?.documentId || null, segmentCount: result?.segmentCount || 0, promotedCount: 0, error: reason };
       }
       try {
@@ -365,11 +386,20 @@ export class KbIngestQueue {
           metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null },
         });
       } catch { /* noop */ }
-      try { this.recordUsage?.(orgId, result); } catch { /* quota accounting best-effort */ }
+      if (this.jobStore) await this.jobStore.complete(trackerJobId, orgId, userId, result);
+      else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
       this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null, filename });
       this._counters.processed++;
       this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}`);
+      try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
+    } catch (error) {
+      const finalAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || ATTEMPTS);
+      if (finalAttempt) {
+        await this.jobStore?.fail(trackerJobId, orgId, error);
+        try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
+      }
+      throw error;
     } finally {
       const r = this._orgRunning.get(orgId) || 1;
       if (r <= 1) this._orgRunning.delete(orgId); else this._orgRunning.set(orgId, r - 1);

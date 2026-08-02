@@ -1768,6 +1768,63 @@ model KnowledgeSegment {
   @@map("knowledge_segments")
 }
 
+/// Durable control-plane record for every Knowledge Base upload. Content stays
+/// in the tenant's selected storage backend; this row contains orchestration,
+/// authorization and billing metadata only.
+model KnowledgeIngestJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  scopeType         String    @map("scope_type") @db.VarChar(24)
+  scopeId           String?   @map("scope_id") @db.Uuid
+  scopeKey          String    @map("scope_key") @db.VarChar(160)
+  storageMode       String    @map("storage_mode") @db.VarChar(32)
+  filename          String    @db.VarChar(500)
+  contentType       String?   @map("content_type") @db.VarChar(160)
+  mediaKind         String    @map("media_kind") @db.VarChar(24)
+  checksum          String    @db.VarChar(64)
+  status            String    @default("queued") @db.VarChar(32)
+  stage             String    @default("accepted") @db.VarChar(48)
+  progress          Int       @default(0)
+  processingVersion Int       @default(1) @map("processing_version")
+  attempt           Int       @default(0)
+  queueJobId        String?   @map("queue_job_id") @db.VarChar(160)
+  documentId        String?   @map("document_id") @db.Uuid
+  memoryIds         String[]  @default([]) @map("memory_ids") @db.Uuid
+  pageCount         Int?      @map("page_count")
+  segmentCount      Int?      @map("segment_count")
+  candidateCount    Int?      @map("candidate_count")
+  promotedCount     Int?      @map("promoted_count")
+  usageSettledAt    DateTime? @map("usage_settled_at") @db.Timestamptz(6)
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([orgId, status, updatedAt])
+  @@index([orgId, scopeKey, checksum])
+  @@index([queueJobId])
+  @@map("knowledge_ingest_jobs")
+}
+
+/// Exactly-once settlement markers for billable Knowledge Base metrics.
+model KnowledgeUsageSettlement {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  jobId     String   @map("job_id") @db.Uuid
+  metric    String   @db.VarChar(32)
+  amount    BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, metric])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@map("knowledge_usage_settlements")
+}
+
 /// Named entities — people, orgs, projects, topics, locations, dates
 model Entity {
   id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

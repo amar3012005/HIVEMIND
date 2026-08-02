@@ -189,7 +189,17 @@ export class EntityExtractor {
           model: this.model,
           json_mode: true,
           temperature: 0.1,
-          max_tokens: 800,
+          // 800 was self-defeating. The system prompt demands "extract EVERY
+          // distinct named entity, be THOROUGH not minimal" — and the cap then
+          // truncated the JSON mid-array, so JSON.parse failed and the whole
+          // extraction returned []. The MORE entities the model found, the more
+          // certain it produced NOTHING.
+          // Measured on a real 7.2 KB image description naming E3/DC, SOLVIS,
+          // clever-PV, SPINE, HEIDELBERG plus photovoltaics/HEMS/battery storage:
+          //   completion=836 finish=error  (attempt 1)
+          //   completion=800 finish=error  (attempt 2)  -> 0 candidates
+          // ~25 entities of ~40 JSON tokens each needs well over 1k.
+          max_tokens: Number(process.env.ENTITY_EXTRACT_MAX_TOKENS || 4000),
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: input },
@@ -212,6 +222,25 @@ export class EntityExtractor {
       const m = typeof raw === 'string' ? raw.match(/\{[\s\S]*\}/) : null;
       if (m) {
         try { parsed = JSON.parse(m[0]); } catch { parsed = null; }
+      }
+      // SECOND salvage — recover a TRUNCATED array. The block match above needs a
+      // closing brace, so a response cut off mid-array matched nothing and every
+      // entity the model DID emit was thrown away. All-or-nothing on a truncated
+      // response is the worst possible failure here: entity extraction feeds the
+      // graph, and a dropped entity is a relationship that can never form.
+      // Rebuild by taking whole `{...}` objects up to the truncation point.
+      if (!parsed && typeof raw === 'string') {
+        const objs = raw.match(/\{\s*"name"[\s\S]*?\}/g) || [];
+        if (objs.length) {
+          const salvaged = [];
+          for (const o of objs) {
+            try { salvaged.push(JSON.parse(o)); } catch { /* skip the partial tail */ }
+          }
+          if (salvaged.length) {
+            this.logger?.warn?.(`[entity-extractor] response truncated — salvaged ${salvaged.length} entities`);
+            parsed = { entities: salvaged };
+          }
+        }
       }
       if (!parsed) return [];
     }

@@ -8,10 +8,17 @@
 # It does NOT: push git, apply migrations (run those consciously first), or ff canon
 # (do that after YOU accept). Fails loudly at the first broken gate.
 set -euo pipefail
+
+# Every production release entry point uses the same host-wide lock. This
+# prevents concurrent sessions from moving Compose pins or mutable aliases.
+RELEASE_LOCK=/run/lock/singulance-production-release.lock
+exec 9>"$RELEASE_LOCK"
+flock -n 9 || { echo "FATAL: another SINGULANCE production release is active"; exit 1; }
+
 SHA="${1:?usage: release-singulance.sh <parent-sha> [services...]}"; shift || true
 SERVICES=("${@:-fe}")
-RID="prod-$(date +%Y%m%d)-${SHA:0:8}"
-REPO=/root/hivemind-next ENV=/root/hivemind/.env NEXTENV=/root/hivemind-next/.env.embedding-canary-runtime
+RID="prod-$(date +%Y%m%d)-${SHA:0:12}"
+REPO=/root/hivemind-main ENV=/root/hivemind/.env NEXTENV=/root/hivemind-next/.env.embedding-canary-runtime
 cd "$REPO"; git fetch origin --quiet
 git fetch origin +refs/heads/singulance-main:refs/remotes/origin/singulance-main --quiet
 # Gate 1 — no stale-branch releases: the commit must descend from canon.
@@ -23,12 +30,23 @@ echo "== release $RID (previous: $OLD) services: ${SERVICES[*]}"
 git worktree add --detach "/root/builds/$RID" "$SHA"
 cd "/root/builds/$RID"; git submodule update --init frontend/Da-vinci
 [ -z "$(git status --short)" ] || { echo "FATAL: build worktree dirty"; exit 1; }
+[ "$(git rev-parse HEAD)" = "$SHA" ] || { echo "FATAL: build SHA drifted"; exit 1; }
+[ -z "$(git -C frontend/Da-vinci status --short)" ] || { echo "FATAL: frontend submodule dirty"; exit 1; }
 # Rollback tags for everything currently pinned.
 TS=$(date +%Y%m%d-%H%M%S)
 for img in employees control-plane core-api tara-deepgram; do
   docker tag "hivemind/$img:$OLD" "hivemind/$img:rollback-$TS" 2>/dev/null || true; done
 docker tag "hivemind/fe:$OLD-single" "hivemind/fe:rollback-$TS-single" 2>/dev/null || true
 echo "rollback tags: rollback-$TS"
+# Preserve exactly one conventional rollback alias for each service being
+# replaced. Immutable rollback-$TS remains useful for this release's audit.
+for s in "${SERVICES[@]}"; do case "$s" in
+  core)          docker inspect hm-core --format '{{.Image}}' | xargs -r docker tag hivemind/core-api:stable ;;
+  control-plane) docker inspect hm-control --format '{{.Image}}' | xargs -r docker tag hivemind/control-plane:stable ;;
+  employees)     docker inspect hm-employees --format '{{.Image}}' | xargs -r docker tag hivemind/employees:stable ;;
+  tara-deepgram) docker inspect tara-deepgram --format '{{.Image}}' | xargs -r docker tag hivemind/tara-deepgram:stable ;;
+  fe)            docker inspect hivemind-next-frontend-1 --format '{{.Image}}' | xargs -r docker tag hivemind/fe:stable ;;
+esac; done
 # Build only what changed; retag the rest under the new RID.
 for s in "${SERVICES[@]}"; do case "$s" in
   core)          docker build -t "hivemind/core-api:$RID" -f Dockerfile.production . ;;
@@ -45,6 +63,7 @@ docker image inspect "hivemind/fe:$RID-single" >/dev/null 2>&1 || docker tag "hi
 cp "$ENV" "$ENV.bak-$RID"; cp "$NEXTENV" "$NEXTENV.bak-$RID"
 sed -i "s/^VERSION=.*/VERSION=$RID/" "$ENV"; sed -i "s/^NEXT_VERSION=.*/NEXT_VERSION=$RID/" "$NEXTENV"
 recreate() { # svc composefile project envfile container profile
+  docker compose ${6:+--profile $6} ${2:+-f $2} ${3:+-p $3} --env-file "$4" config -q
   docker compose ${6:+--profile $6} ${2:+-f $2} ${3:+-p $3} --env-file "$4" up -d --no-deps --force-recreate "$1" >/dev/null
   for i in $(seq 1 45); do S=$(docker inspect "$5" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null); [ "$S" = healthy ] && break; sleep 4; done
   echo "$1 → ${S:-unknown}"; [ "${S:-}" = healthy ] || { echo "FATAL: $1 unhealthy — restore $ENV.bak-$RID + rollback-$TS"; exit 1; }
@@ -56,9 +75,18 @@ for s in "${SERVICES[@]}"; do case "$s" in
   employees)     recreate employees infra/docker-compose.hetzner.yml "" "$ENV" hm-employees ;;
   tara-deepgram) recreate tara-deepgram infra/docker-compose.hetzner.yml "" "$ENV" tara-deepgram ;;
   fe) cd /root/hivemind-next
+      docker compose -p hivemind-next -f infra/docker-compose.next.yml --env-file "$NEXTENV" --profile single config -q
       docker compose -p hivemind-next -f infra/docker-compose.next.yml --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null
       sleep 4; docker ps --format '{{.Image}}' | grep -q "fe:$RID-single" && echo "frontend → running $RID" || { echo FATAL: frontend not on $RID; exit 1; }
       cd /root/hivemind ;;
+esac; done
+# Mutable discovery aliases move only after all named-service health gates pass.
+for s in "${SERVICES[@]}"; do case "$s" in
+  core)          docker tag "hivemind/core-api:$RID" hivemind/core-api:current; docker tag "hivemind/core-api:$RID" hivemind/core-api:latest ;;
+  control-plane) docker tag "hivemind/control-plane:$RID" hivemind/control-plane:current; docker tag "hivemind/control-plane:$RID" hivemind/control-plane:latest ;;
+  employees)     docker tag "hivemind/employees:$RID" hivemind/employees:current; docker tag "hivemind/employees:$RID" hivemind/employees:latest ;;
+  tara-deepgram) docker tag "hivemind/tara-deepgram:$RID" hivemind/tara-deepgram:current; docker tag "hivemind/tara-deepgram:$RID" hivemind/tara-deepgram:latest ;;
+  fe)            docker tag "hivemind/fe:$RID-single" hivemind/fe:current; docker tag "hivemind/fe:$RID-single" hivemind/fe:latest ;;
 esac; done
 # Acceptance smoke.
 for u in https://singulancelabs.com https://next.singulancelabs.com/hivemind https://api.singulancelabs.com/health https://core.singulancelabs.com/health; do

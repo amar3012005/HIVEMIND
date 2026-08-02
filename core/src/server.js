@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -22,6 +22,10 @@ import { transcribeAudio } from './llm/stt-route.js';
 import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
+import { KnowledgeUploadService } from './knowledge/upload-service.js';
+import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
+import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
+import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
 import {
   getRuntimeRole,
@@ -583,6 +587,8 @@ let syncScheduler = null;
 // Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
 let documentFirstIngestion = null;
 let kbIngestQueue = null;
+let knowledgeUploadJobStore = null;
+let knowledgeUploadService = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -1907,16 +1913,51 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // pipeline above — worker calls documentFirstIngestion unchanged.
     try {
       const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
+      knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, logger: console });
       kbIngestQueue = new KbIngestQueue({
         documentFirstIngestion,
         ingestTracker,
-        recordUsage: (orgId, result) => {
-          if (planEnforcer && orgId) {
-            planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(result.pages) || 1));
-            planEnforcer.recordUsage(orgId, 'uploads', 1);
+        jobStore: knowledgeUploadJobStore,
+        validateJob: async ({ trackerJobId, userId, orgId, metadata }) => {
+          const durable = await knowledgeUploadJobStore.findOwned(trackerJobId, { orgId, userId });
+          if (!durable || durable.status === 'cancelled') throw Object.assign(new Error('Upload authorization is no longer valid.'), { code: 'UPLOAD_NOT_AUTHORIZED' });
+          const scope = await authorizeKnowledgeScope({
+            prisma, userId, orgId, targetScope: durable.scopeType,
+            projectIds: durable.scopeType === 'project' ? [durable.scopeId] : [],
+            primaryTeamId: durable.scopeType === 'team' ? durable.scopeId : null,
+          });
+          if (!scope.ok) throw Object.assign(new Error('Upload scope is no longer accessible.'), { code: 'UPLOAD_SCOPE_REVOKED' });
+          const org = await prisma.organization.findFirst({ where: { id: orgId }, select: { memoryStorageMode: true } });
+          if (!org || org.memoryStorageMode !== durable.storageMode || !isMemoryStorageReady(orgId, durable.storageMode)) {
+            throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
           }
         },
+        processUpload: async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
+          if (metadata.media_kind !== 'image') {
+            return documentFirstIngestion.ingestSource({
+              userId, orgId, source: { type: 'kb', filename },
+              file: { buffer: fileBuffer, contentType, filename }, metadata, onProgress,
+            });
+          }
+          onProgress({ stage: 'extracting', progress: 25 });
+          const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
+          const { payload } = await buildImageMemoryPayload({
+            imageBuffer: fileBuffer, mimeType: contentType, hint: metadata.hint,
+            userId, orgId, projectId: metadata.project_ids?.[0] || null, filename,
+          });
+          const saved = await ingestCanonicalPayload(payload, { sourceType: 'api', platform: 'knowledge_upload', mode: 'atomic' });
+          const ids = saved?.memoryIds?.length ? saved.memoryIds : [saved?.memoryId].filter(Boolean);
+          return {
+            documentId: saved?.documentId || ids[0] || null, promotedMemoryIds: ids,
+            promotedCount: Math.max(1, ids.length), segmentCount: saved?.segmentCount || 0,
+            candidateCount: Math.max(1, ids.length), pages: 1,
+          };
+        },
         logger: console,
+      });
+      knowledgeUploadService = new KnowledgeUploadService({
+        prisma, queue: kbIngestQueue, jobStore: knowledgeUploadJobStore,
+        planEnforcer, storageReady: isMemoryStorageReady,
       });
       process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
     } catch (err) {
@@ -11070,6 +11111,12 @@ exit \$RC
 
         case '/api/ingest/image':
           if (req.method === 'POST') {
+            res.setHeader('Deprecation', 'true');
+            res.setHeader('Link', '</api/knowledge/upload>; rel="successor-version"');
+            return handleKnowledgeUploadRoute({
+              req, res, userId, orgId, readBoundedBuffer, MULTIPART_MAX_BYTES,
+              parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService,
+            });
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
@@ -11292,12 +11339,21 @@ exit \$RC
           }
           break;
 
+        case '/api/knowledge/upload-capabilities':
+          if (req.method === 'GET') return jsonResponse(res, knowledgeUploadCapabilities());
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');
             const docId = url.searchParams.get('document_id');
             if (!jobId && !docId) {
               return jsonResponse(res, { error: 'job_id or document_id is required' }, 400);
+            }
+            if (jobId && knowledgeUploadJobStore) {
+              const durable = await knowledgeUploadJobStore.findOwned(jobId, { orgId, userId });
+              if (!durable) return jsonResponse(res, { error: 'Job not found' }, 404);
+              return jsonResponse(res, KnowledgeUploadJobStore.response(durable));
             }
             // Live in-memory progress (per-stage counts) while the job runs.
             if (jobId) {
@@ -15554,27 +15610,23 @@ exit \$RC
                 return jsonResponse(res, { error: 'No file uploaded' }, 400);
               }
 
-              // Validate size
-              if (filePart.data.length > 100 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
+              const filename = safeUploadFilename(filePart.filename);
+              const checked = validateKnowledgeFile({ filename, contentType: filePart.contentType, bytes: filePart.data.length, buffer: filePart.data });
+              if (!checked.ok || checked.kind !== 'document') {
+                const invalid = uploadError(checked.ok ? 'UNSUPPORTED_FILE_TYPE' : checked.code, { limits: checked.limits });
+                return jsonResponse(res, invalid.body, invalid.status);
               }
-
-              // Validate file type (add xlsx/xls to existing types)
-              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv', 'xlsx', 'xls'];
-              if (!allowedExts.includes(ext)) {
-                return jsonResponse(res, { error: `Unsupported: ${ext}. Allowed: PDF, DOCX, TXT, MD, CSV, XLSX, XLS` }, 415);
-              }
+              const ext = checked.ext;
 
               const uploadId = crypto.randomUUID();
               // Write to temp storage immediately instead of keeping raw buffer in RAM.
               const fs = await import('fs');
               const path = await import('path');
               const os = await import('os');
-              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise');
-              fs.mkdirSync(tempDir, { recursive: true });
-              const tempPath = path.join(tempDir, `${uploadId}_${filePart.filename}`);
-              fs.writeFileSync(tempPath, filePart.data);
+              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise', orgId, userId);
+              fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+              const tempPath = path.join(tempDir, `${uploadId}_${filename}`);
+              fs.writeFileSync(tempPath, filePart.data, { mode: 0o600 });
 
               let parsedText = '';
               let sheets = null;
@@ -15583,7 +15635,7 @@ exit \$RC
               // Try Docling sidecar for rich parsing (non-blocking — fallback on failure)
               try {
                 const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
-                doclingOutput = await parseWithDocling(tempPath, filePart.filename, { smart: true });
+                doclingOutput = await parseWithDocling(tempPath, filename, { smart: true });
                 if (doclingOutput.error) {
                   console.warn(`[enterprise] Docling fallback: ${doclingOutput.error}`);
                   doclingOutput = null;
@@ -15610,7 +15662,7 @@ exit \$RC
                   const parsed = await parseFile(
                     filePart.data,
                     filePart.contentType || `text/${ext}`,
-                    filePart.filename
+                    filename
                   );
                   parsedText = typeof parsed?.text === 'string'
                     ? parsed.text
@@ -15634,7 +15686,7 @@ exit \$RC
                 const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'spreadsheet';
                 detected = { type: topType, confidence: sheetDetections[0]?.confidence || 0.5, reasoning: 'Excel workbook — per-sheet detection' };
               } else {
-                detected = await detectDocumentType(parsedText, { filename: filePart.filename });
+                detected = await detectDocumentType(parsedText, { filename });
               }
 
               // Store in pending uploads map (10 min TTL)
@@ -15644,33 +15696,36 @@ exit \$RC
                 setInterval(() => {
                   const now = Date.now();
                   for (const [id, entry] of global._enterprisePendingUploads) {
-                    if (now - entry.createdAt > 10 * 60 * 1000) global._enterprisePendingUploads.delete(id);
+                    if (entry.expiresAt <= now) {
+                      try { fs.unlinkSync(entry.tempPath); } catch { /* best effort */ }
+                      global._enterprisePendingUploads.delete(id);
+                    }
                   }
                 }, 60_000).unref();
               }
 
               global._enterprisePendingUploads.set(uploadId, {
                 tempPath,
-                filename: filePart.filename,
+                filename,
                 mimeType: filePart.contentType || `application/${ext}`,
                 ext,
-                sheets,
-                parsedText,
                 detectedType: detected.type,
                 confidence: detected.confidence,
-                doclingOutput,
-                buffer: filePart.data, // Phase 1: preserve buffer for document-first path
+                orgId,
+                userId,
+                checksum: crypto.createHash('sha256').update(filePart.data).digest('hex'),
                 createdAt: Date.now(),
+                expiresAt: Date.now() + 10 * 60 * 1000,
               });
 
-              console.log(`[enterprise] Detect id=${uploadId} file=${filePart.filename} type=${detected.type} confidence=${detected.confidence}`);
+              console.log(`[enterprise] Detect id=${uploadId} file=${filename} type=${detected.type} confidence=${detected.confidence}`);
 
               return jsonResponse(res, {
                 upload_id: uploadId,
                 detected_type: detected.type,
                 confidence: detected.confidence,
                 reasoning: detected.reasoning,
-                filename: filePart.filename,
+                filename,
                 size_bytes: filePart.data.length,
                 sheets: sheetDetections || null,
                 model: getDefaultModel(),
@@ -15697,12 +15752,9 @@ exit \$RC
             if (!confirmed_type) return jsonResponse(res, { error: 'confirmed_type is required' }, 400);
 
             const pending = global._enterprisePendingUploads?.get(upload_id);
-            if (!pending) {
+            if (!pending || pending.orgId !== orgId || pending.userId !== userId || pending.expiresAt <= Date.now()) {
               return jsonResponse(res, { error: 'Upload not found or expired. Please re-upload.' }, 404);
             }
-
-            // Remove from pending
-            global._enterprisePendingUploads.delete(upload_id);
 
             const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
             const visibility = targetScope === 'organization' ? 'organization' : 'private';
@@ -15712,6 +15764,30 @@ exit \$RC
               ...(Array.isArray(body.project_ids) ? body.project_ids : []),
             ]);
             const primaryTeamId = body.primary_team_id || null;
+
+            if (!knowledgeUploadService) return jsonResponse(res, { error: 'canonical_ingest_unavailable' }, 503);
+            try {
+              const fs = await import('fs');
+              const fileBuffer = fs.readFileSync(pending.tempPath);
+              const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+              if (checksum !== pending.checksum) throw new Error('Preview artifact checksum mismatch.');
+              const admitted = await knowledgeUploadService.admit({
+                userId, orgId,
+                file: { filename: pending.filename, contentType: pending.mimeType, data: fileBuffer },
+                targetScope: targetScope || 'personal', projectIds, primaryTeamId,
+                metadata: {
+                  tags: userTags, smart: true, enterprise: true, confirmed_type,
+                  visibility, scope: targetScope || 'personal', project,
+                },
+              });
+              if (!admitted.ok) return jsonResponse(res, admitted.body, admitted.status);
+              global._enterprisePendingUploads.delete(upload_id);
+              try { fs.unlinkSync(pending.tempPath); } catch { /* best effort */ }
+              return jsonResponse(res, { upload_id, ...KnowledgeUploadJobStore.response(admitted.job) }, 202);
+            } catch (error) {
+              console.error('[enterprise] canonical admission failed:', error.message);
+              return jsonResponse(res, { error: 'canonical_ingest_failed' }, 500);
+            }
 
             // ─── Phase 1: Document-First Enterprise Ingestion (feature-flagged) ───
             if (documentFirstIngestion && pending.buffer) {
@@ -15983,6 +16059,11 @@ exit \$RC
           // True multi-file multipart endpoint. Accepts N file parts +
           // shared tags/project. Concurrency-limited fanout (default 3).
           if (req.method !== 'POST') break;
+          return jsonResponse(res, {
+            error: 'bulk_endpoint_retired',
+            message: 'Submit each file to /api/knowledge/upload. Every accepted file receives its own durable job.',
+            endpoint: '/api/knowledge/upload',
+          }, 410);
           if (!persistentMemoryEngine || !documentFirstIngestion) {
             return jsonResponse(res, { error: 'Bulk ingest requires Phase1' }, 503);
           }
@@ -16143,14 +16224,7 @@ exit \$RC
               normalizeScopeIds,
               buildAccessContext,
               jsonResponse,
-              kbIngestQueue,
-              ingestTracker,
-              buildRoutedIngestPayloads,
-              smartIngestRouter,
-              persistentMemoryStore,
-              qdrantClient,
-              getQdrantClient,
-              recallPersistedMemories,
+              knowledgeUploadService,
             });
           }
           break;

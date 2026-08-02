@@ -144,6 +144,16 @@ export function orgStore(orgId) {
   }
 }
 
+// Admission must fail closed for an org whose selected memory plane is not
+// reachable. Callers use this before accepting durable work; it intentionally
+// does not downgrade an .amr tenant to central Postgres.
+export function isMemoryStorageReady(orgId, storageMode = 'hybrid') {
+  if (storageMode === 'hybrid') return true;
+  if (storageMode === 'byod_amr') return orgIsRemote(orgId);
+  if (storageMode === 'amr_embedded') return orgIsRemote(orgId) || !!orgStore(orgId);
+  return false;
+}
+
 // every live .amr-org adapter — used by FK-child routing (an op with no orgId routes to whichever
 // adapter already holds the referenced memory/segment). For an explicit org list we open each; for
 // '*' we only consider already-open shards (don't force-open every org on each call).

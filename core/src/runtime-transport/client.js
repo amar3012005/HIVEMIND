@@ -60,6 +60,12 @@ function stateFor(origin) {
     }),
     lastUsedAt: 0,
     warmup: null,
+    requests: 0,
+    reused: 0,
+    completed: 0,
+    failed: 0,
+    totalLatencyMs: 0,
+    maxLatencyMs: 0,
   };
   origins.set(origin, state);
   return state;
@@ -68,8 +74,24 @@ function stateFor(origin) {
 async function rawFetch(url, options = {}) {
   const target = new URL(url);
   const state = stateFor(target.origin);
+  const startedAt = Date.now();
+  if (state.requests > 0) state.reused += 1;
+  state.requests += 1;
   state.lastUsedAt = Date.now();
-  return undiciFetch(target, { ...options, dispatcher: state.dispatcher });
+  try {
+    const response = await undiciFetch(target, { ...options, dispatcher: state.dispatcher });
+    const latency = Date.now() - startedAt;
+    state.completed += 1;
+    state.totalLatencyMs += latency;
+    state.maxLatencyMs = Math.max(state.maxLatencyMs, latency);
+    return response;
+  } catch (error) {
+    const latency = Date.now() - startedAt;
+    state.failed += 1;
+    state.totalLatencyMs += latency;
+    state.maxLatencyMs = Math.max(state.maxLatencyMs, latency);
+    throw error;
+  }
 }
 
 export async function warmRuntimeOrigin(baseUrl = employeesSidecarUrl(), { force = false } = {}) {
@@ -147,6 +169,12 @@ export function runtimeTransportStats() {
     origin,
     last_used_at: state.lastUsedAt || null,
     connections: DEFAULT_CONNECTIONS,
+    requests: state.requests,
+    reused_requests: state.reused,
+    completed_requests: state.completed,
+    failed_requests: state.failed,
+    average_latency_ms: state.requests ? Math.round(state.totalLatencyMs / state.requests) : 0,
+    maximum_latency_ms: state.maxLatencyMs,
   }));
 }
 

@@ -1,0 +1,6 @@
+{
+  "policy_id": "runtime.execution-policy",
+  "version": 1,
+  "soft_progress_after_seconds": 120,
+  "hard_execution_after_seconds": 900
+}

@@ -55,6 +55,7 @@ import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/pl
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
 import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
+import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
   shouldRunRecurringMaintenanceJobs,
@@ -2674,11 +2675,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/health') {
+    const runtimeSchedulerExpected = Boolean(prisma && shouldRunRecurringMaintenanceJobs());
+    const runtimeSchedulerReady = !runtimeSchedulerExpected || Boolean(hqScheduler?.runtimePlaybooks);
     return jsonResponse(res, {
-      ok: true,
+      ok: runtimeSchedulerReady,
       service: 'hivemind-control-plane',
-      core_api_base_url: CONFIG.coreApiBaseUrl
-    });
+      core_api_base_url: CONFIG.coreApiBaseUrl,
+      hq_runtime: {
+        scheduler_expected: runtimeSchedulerExpected,
+        scheduler_ready: Boolean(hqScheduler),
+        playbooks_ready: Boolean(hqScheduler?.runtimePlaybooks),
+        transport: runtimeTransportStats(),
+      },
+    }, runtimeSchedulerReady ? 200 : 503);
   }
 
   // ─── Self-host (BYOD) enrollment ─────────────────────────────

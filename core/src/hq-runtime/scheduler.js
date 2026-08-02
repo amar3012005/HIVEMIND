@@ -23,6 +23,14 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
   const store = new HqScheduleStore({ prisma, logger });
   const schedule = await store.leaseNext(leaseOwner);
   if (!schedule) return null;
+  const cycleStartedAt = Date.now();
+  const observed = (status, extra = {}) => logger.info?.('[hq-runtime] cycle transport metric', {
+    schedule_id: schedule.id,
+    trigger_type: schedule.trigger_type,
+    status,
+    latency_ms: Date.now() - cycleStartedAt,
+    ...extra,
+  });
   let cycle = null;
   try {
     const runtime = await getHqRuntime({ prisma, orgId: schedule.org_id });
@@ -38,6 +46,7 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
       }
       const result = await runtimePlaybooks.resumeEvent(runId, runtime.orgId, providerEvent);
       await store.complete(schedule.id);
+      observed('COMPLETED', { runtime_playbook_event: true });
       return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
     }
     cycle = await createHqCycle({
@@ -77,8 +86,10 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
       data: { status: 'COMPLETED', decision, completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null },
     });
     await store.complete(schedule.id);
+    observed('COMPLETED', { cycle_id: cycle.id });
     return { scheduleId: schedule.id, cycleId: cycle.id, status: 'COMPLETED', decision };
   } catch (error) {
+    observed('FAILED', { cycle_id: cycle?.id || null, error: String(error?.message || error).slice(0, 300) });
     logger.error('[hq-runtime] cycle failed:', error.message);
     if (cycle) {
       await prisma.hqCycle.update({
@@ -191,9 +202,9 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           concurrency: Number(process.env.HQ_WORKER_CONCURRENCY || 2),
           leaseOwner,
         }),
-        runtimePlaybooks?.drainActive({
+        runtimePlaybooks?.monitorDeadlines().then(() => runtimePlaybooks.drainActive({
           limit: Number(process.env.RUNTIME_PLAYBOOK_WORKER_CONCURRENCY || 2),
-        }),
+        })),
       ]);
     } finally { workersRunning = false; }
   };

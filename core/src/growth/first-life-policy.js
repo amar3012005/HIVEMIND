@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-const policyUrl = new URL('./fixtures/first-life-policy.v1.json', import.meta.url);
+const policyUrl = new URL('./fixtures/first-life-policy.v2.json', import.meta.url);
 let cachedPolicy = null;
 
 export async function loadFirstLifePolicy() {

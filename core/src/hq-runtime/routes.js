@@ -164,6 +164,70 @@ function runtimeQueue({ todos, stages, delegations }) {
     .sort((left, right) => left.priority - right.priority || left.position - right.position || new Date(left.updated_at) - new Date(right.updated_at));
 }
 
+function projectAgentRuntimeTasks({ todos, playbookRuns }) {
+  const runByTodo = new Map();
+  for (const run of playbookRuns) {
+    const todoId = String(run.trigger?.todo_id || '');
+    if (todoId && !runByTodo.has(todoId)) runByTodo.set(todoId, run);
+  }
+  return todos.map((todo) => {
+    const run = runByTodo.get(String(todo.id)) || null;
+    const snapshot = run ? projectRuntimePlaybookSnapshot(run) : null;
+    const context = todo.context && typeof todo.context === 'object' ? todo.context : {};
+    const status = run ? playbookQueueStatus(run) : queueStatus(todo.status);
+    const waiting = snapshot?.waiting_for || null;
+    const waitingSummary = waiting?.reason || waiting?.capability || waiting?.types?.join(', ') || null;
+    return {
+      id: todo.id,
+      execution_id: run?.id || null,
+      title: todo.title,
+      objective: todo.objective,
+      status,
+      owner: context.room_tag || todo.kind || null,
+      lifecycle_stage: snapshot?.current_stage || null,
+      blocker: todo.blockedReason || (status === 'WAITING_FOR_CONNECTOR' || status === 'WAITING_FOR_AUTHORITY' ? waitingSummary : null),
+      next_action: snapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
+      checkpoint_sequence: snapshot?.checkpoint_sequence || 0,
+      checkpoint_at: run?.updatedAt || todo.updatedAt,
+      recommendation_rank: Number(context.recommendation_rank || todo.position + 1),
+      recommended: context.recommended === true,
+      effect_class: context.effect_class || (context.external_action_requested === true ? 'external' : 'internal'),
+      evidence_refs: Array.isArray(context.evidence_refs) ? context.evidence_refs : [],
+    };
+  }).sort((left, right) => left.recommendation_rank - right.recommendation_rank
+    || new Date(right.checkpoint_at) - new Date(left.checkpoint_at));
+}
+
+function projectGrowthBrief(baselineArtifact, planArtifact) {
+  if (!baselineArtifact && !planArtifact) return null;
+  const baseline = baselineArtifact?.payload || {};
+  const plan = planArtifact?.payload?.plan || {};
+  const constraints = Array.isArray(plan.constraints) ? plan.constraints : [];
+  const primary = constraints.find((item) => String(item?.id || '') === String(plan.primary_constraint_id || '')) || constraints[0] || null;
+  const queue = Array.isArray(plan.operating_queue) ? plan.operating_queue : [];
+  const recommendation = queue.find((item) => String(item?.id || '') === String(plan.stage?.queue_item_id || '')) || queue[0] || null;
+  const evidenceRefs = Array.isArray(primary?.evidence_refs) ? primary.evidence_refs : [];
+  return {
+    baseline_id: baselineArtifact?.id || null,
+    plan_id: planArtifact?.id || null,
+    current_position: baseline.company?.positioning || baseline.company?.offer || baseline.company?.description || null,
+    primary_constraint: primary ? {
+      id: primary.id || null,
+      type: primary.type || null,
+      statement: primary.statement || primary.description || null,
+    } : null,
+    evidence_refs: evidenceRefs,
+    confidence: primary?.confidence || plan.hypotheses?.[0]?.confidence || null,
+    recommended_motion: recommendation ? {
+      todo_source_id: recommendation.id || null,
+      title: recommendation.title || null,
+      objective: recommendation.objective || null,
+      room: recommendation.room_tag || recommendation.kind || null,
+    } : null,
+    captured_at: baselineArtifact?.createdAt || planArtifact?.createdAt || null,
+  };
+}
+
 export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, emailLifecycle = null, runtimePlaybooks = null, logger = console }) {
   return async function handleHqRuntimeRoute(req, res, url) {
     const pathname = url.pathname;
@@ -420,7 +484,10 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           closed = true;
           clearInterval(poll);
           clearInterval(heartbeat);
-          if (error) logger.warn('[hq-runtime] event stream closed with an error:', {
+          const expected = ['ABORT_ERR', 'ECONNRESET'].includes(String(error?.code || '').toUpperCase())
+            || ['AbortError'].includes(String(error?.name || ''))
+            || /aborted|socket hang up/i.test(String(error?.message || ''));
+          if (error && !expected) logger.warn('[hq-runtime] event stream closed with an error:', {
             runtime_id: runtime.id, org_id: orgId, cursor: String(cursor), reason, message: error.message,
           });
         };
@@ -435,14 +502,12 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
         await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
         const playbookService = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
-        const [workOrders, schedules, todos, capabilityRequests, instructions, stages, delegations, playbookRuns] = await Promise.all([
+        const [workOrders, schedules, todos, capabilityRequests, instructions, playbookRuns, baselineArtifact, planArtifacts] = await Promise.all([
           prisma.hyperWorkOrder.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
           prisma.hqSchedule.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
-          prisma.hqTodo.findMany({ where: { orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
+          prisma.hqTodo.findMany({ where: { orgId, runtimeId: runtime.id, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
           prisma.hqCapabilityRequest.findMany({ where: { orgId, status: 'REQUIRED' }, orderBy: { createdAt: 'asc' }, take: 20 }),
           prisma.hqInstruction.findMany({ where: { orgId }, orderBy: { createdAt: 'desc' }, take: 20 }),
-          prisma.growthStage.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 }),
-          prisma.growthDelegation.findMany({ where: { orgId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, orderBy: { updatedAt: 'desc' }, take: 30 }),
           prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
             where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 50,
             include: {
@@ -451,6 +516,8 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
               authorities: { orderBy: { grantedAt: 'asc' } },
             },
           }).catch(() => []) : Promise.resolve([]),
+          prisma.sourceArtifact.findFirst({ where: { orgId, sourcePlatform: 'growth_baseline', artifactType: 'api_response' }, orderBy: { createdAt: 'desc' } }),
+          prisma.sourceArtifact.findMany({ where: { orgId, sourcePlatform: 'growth_plan', artifactType: 'api_response' }, orderBy: { createdAt: 'desc' }, take: 12 }),
         ]);
         const todoById = new Map(todos.map((todo) => [todo.id, todo]));
         const campaignsByRun = new Map((playbookRuns.length ? await prisma.campaign.findMany({
@@ -500,24 +567,23 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             } : null,
           };
         }).filter(Boolean);
-        const baseQueue = runtimeQueue({ todos, stages, delegations });
-        const runByTodo = new Map(playbookRuns.map((run) => [String(run.trigger?.todo_id || ''), run]).filter(([todoId]) => todoId));
-        const projectedQueue = baseQueue.map((item) => {
-          if (item.source !== 'todo') return item;
-          const run = runByTodo.get(String(item.source_id));
-          if (!run) return item;
-          return {
-            ...item,
-            execution_id: run.id,
-            status: playbookQueueStatus(run),
-            lifecycle_stage: run.currentStageId,
-            terminal_state: run.terminalState || null,
-            waiting_for: run.waitingFor || null,
-          };
-        });
         const activationSprint = await projectCurrentActivationSprint({ prisma, orgId });
         const firstLife = activationSprint?.policy?.id === 'runtime.first-life-policy' ? activationSprint : null;
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: projectedQueue, playbook_approvals: playbookApprovals, playbook_runs: playbookRuns, playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)), playbook_projection_warnings: playbookProjectionWarnings, first_life: firstLife, activation_sprint: activationSprint });
+        const currentPlanArtifact = planArtifacts.find((artifact) => {
+          const baselineId = artifact.payload?.plan?.baseline_ref?.resource_id || artifact.metadata?.baseline_id || null;
+          return !baselineArtifact?.id || baselineId === baselineArtifact.id;
+        }) || null;
+        const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns });
+        return jsonResponse(res, {
+          work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions,
+          agent_runtime_tasks: agentRuntimeTasks,
+          runtime_queue: agentRuntimeTasks,
+          growth_brief: projectGrowthBrief(baselineArtifact, currentPlanArtifact),
+          playbook_approvals: playbookApprovals, playbook_runs: playbookRuns,
+          playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),
+          playbook_projection_warnings: playbookProjectionWarnings,
+          first_life: firstLife, activation_sprint: activationSprint,
+        });
       }
 
       if ((pathname === '/v1/hq/first-life/current' || pathname === '/v1/hq/activation-sprints/current') && req.method === 'GET') {
@@ -526,50 +592,66 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, { first_life: firstLife, sprint });
       }
 
-      const firstLifePolicyMatch = pathname.match(/^\/v1\/hq\/first-life\/([^/]+)\/policy$/);
-      const activationReviewMatch = firstLifePolicyMatch
+      const firstLifeStartMatch = pathname.match(/^\/v1\/hq\/first-life\/([^/]+)\/(?:start|policy)$/);
+      const activationReviewMatch = firstLifeStartMatch
         || pathname.match(/^\/v1\/hq\/activation-sprints\/([^/]+)\/review$/);
       if (activationReviewMatch && req.method === 'POST') {
         const body = await parseBody(req).catch(() => ({}));
         const preference = String(body.preference || 'manual').toLowerCase();
-        if (!['manual', 'auto'].includes(preference)) return jsonResponse(res, { error: 'activation_sprint_preference_invalid' }, 400);
         const sprint = await projectCurrentActivationSprint({ prisma, orgId });
         if (!sprint || sprint.id !== decodeURIComponent(activationReviewMatch[1])) return jsonResponse(res, { error: 'activation_sprint_not_found' }, 404);
-        if (firstLifePolicyMatch && sprint.policy?.id !== 'runtime.first-life-policy') {
+        if (firstLifeStartMatch && sprint.policy?.id !== 'runtime.first-life-policy') {
           return jsonResponse(res, { error: 'first_life_not_found' }, 404);
         }
         const runtime = await getHqRuntime({ prisma, orgId });
         if (sprint.policy?.id === 'runtime.first-life-policy') {
-          if (sprint.status !== 'AWAITING_POLICY') return jsonResponse(res, { error: 'first_life_policy_already_recorded' }, 409);
-          const authorityPolicy = normalizeAuthorityPolicy({ ...(runtime.authorityPolicy || {}), external_default: preference });
+          const decision = String(body.decision || (body.start === false ? 'review_later' : 'start')).toLowerCase();
+          if (!['start', 'review_later'].includes(decision)) return jsonResponse(res, { error: 'first_life_decision_invalid' }, 400);
+          if (!['AWAITING_START', 'REVIEW_LATER'].includes(sprint.status)) return jsonResponse(res, { error: 'first_life_start_already_recorded' }, 409);
+          if (decision === 'review_later') {
+            await prisma.$transaction((tx) => Promise.all((sprint.items || []).map(async (item) => {
+              const todo = await tx.hqTodo.findFirst({ where: { id: item.todo_id, orgId }, select: { id: true, context: true } });
+              if (!todo) return null;
+              return tx.hqTodo.update({
+                where: { id: todo.id },
+                data: { context: { ...(todo.context || {}), first_life_reviewed_later: true } },
+              });
+            })));
+            await appendHqEvent({
+              prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+              eventType: 'observation', title: 'The first operating plan remains proposed',
+              summary: 'No Room or provider work has started. The evidence-backed proposals remain available when you are ready.',
+              details: { first_life_id: sprint.id, decision },
+            });
+            return jsonResponse(res, { ok: true, first_life_id: sprint.id, decision, promoted: [] }, 202);
+          }
           const activation = await activateEligibleFirstLifeWork({
             prisma,
             runtime,
-            expansionTrigger: 'organization_policy',
-            recordExternalDefault: preference,
+            expansionTrigger: 'user_start',
           });
           await appendHqEvent({
             prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
-            eventType: 'verification',
-            title: 'First operating policy recorded',
-            summary: `${preference === 'auto' ? 'Auto' : 'Manual review'} is now the default for future exact external gates. This decision granted no action. ${activation.promoted.length} proposal(s) became eligible for playbook selection.`,
-            details: { first_life_id: sprint.id, preference, promoted: activation.promoted },
+            eventType: 'verification', title: 'Recommended work started',
+            summary: `${activation.promoted.length} bounded proposal(s) became eligible for playbook selection. External authority remains unconfigured until an exact immutable action reaches its gate.`,
+            details: { first_life_id: sprint.id, decision, promoted: activation.promoted },
           });
           for (const promoted of activation.promoted) await appendHqEvent({
             prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
             eventType: 'todo_created',
             title: `Promoted from the operating plan: ${promoted.title}`,
             summary: 'The proposal is now eligible for semantic playbook selection within the recorded concurrency policy.',
-            details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'organization_policy' },
+            details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'user_start' },
           });
           if (activation.promoted.length) await requestWake({
-            prisma, runtime: { ...runtime, authorityPolicy }, triggerType: 'queue_advance',
+            prisma, runtime, triggerType: 'queue_advance',
             payload: { first_life_id: sprint.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
-            key: `first-life-policy:${sprint.id}:${preference}`,
+            key: `first-life-start:${sprint.id}`,
           });
           Promise.resolve(wakeScheduler?.()).catch(() => {});
-          return jsonResponse(res, { ok: true, first_life_id: sprint.id, preference, promoted: activation.promoted }, 202);
+          return jsonResponse(res, { ok: true, first_life_id: sprint.id, decision, promoted: activation.promoted }, 202);
         }
+        if (!['manual', 'auto'].includes(preference)) return jsonResponse(res, { error: 'activation_sprint_preference_invalid' }, 400);
         const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
         if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
         const preflight = sprint.status === 'AWAITING_POLICY';

@@ -148,7 +148,7 @@ async function notifyStage(listener, payload) {
 }
 
 export class GenericStageExecutor {
-  constructor({ registry, predicates, store, director, selector = null, adapters = null, onStageState = null, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
+  constructor({ registry, predicates, store, director, selector = null, adapters = null, onStageState = null, executionPolicy = {}, workerId = `runtime-${randomUUID()}`, maxSteps = 100 } = {}) {
     if (!registry || !predicates || !store || !director?.execute) {
       throw new Error('runtime_executor_dependencies_required');
     }
@@ -159,6 +159,7 @@ export class GenericStageExecutor {
     this.selector = selector;
     this.adapters = adapters;
     this.onStageState = onStageState;
+    this.executionPolicy = asObject(executionPolicy);
     this.workerId = workerId;
     this.maxSteps = maxSteps;
   }
@@ -189,6 +190,53 @@ export class GenericStageExecutor {
 
   async grantAuthority(runId, orgId, gate, grant = {}) {
     return this.store.grantAuthority(runId, orgId, gate, grant);
+  }
+
+  async monitorDeadlines() {
+    const rows = await this.store.prisma.runtimePlaybookRun.findMany({
+      where: { status: 'ACTIVE' }, orderBy: { updatedAt: 'asc' }, take: 200,
+    });
+    const now = Date.now();
+    const changed = [];
+    for (const row of rows) {
+      let playbook;
+      try {
+        playbook = this.registry.get(row.playbookId, row.playbookVersion, { scopeKey: row.scopeKey });
+      } catch {
+        continue;
+      }
+      const stage = playbook.stages.find((candidate) => candidate.id === row.currentStageId);
+      const deadlinePolicy = {
+        ...this.executionPolicy,
+        ...asObject(playbook.execution_policy),
+        ...asObject(stage?.deadlines),
+      };
+      const softMs = Math.max(60_000, Number(deadlinePolicy.soft_progress_after_seconds || 0) * 1000);
+      const hardMs = Math.max(softMs, Number(deadlinePolicy.hard_execution_after_seconds || 0) * 1000);
+      if (!Number.isFinite(softMs) || !Number.isFinite(hardMs)) continue;
+      const context = asObject(row.context);
+      const deadlines = asObject(context.runtime_deadlines);
+      const current = asObject(deadlines[row.currentStageId]);
+      if (!current.started_at) continue;
+      const elapsed = now - new Date(current.started_at).getTime();
+      if (elapsed >= softMs && !current.soft_emitted_at) {
+        const next = { ...current, soft_emitted_at: new Date(now).toISOString() };
+        await this.store.updateRun(row.id, row.orgId, { context: { ...context, runtime_deadlines: { ...deadlines, [row.currentStageId]: next } } });
+        await this.store.appendCheckpoint(row.id, row.orgId, { stageId: row.currentStageId, phase: 'SOFT_DEADLINE', status: 'ACTIVE', state: { elapsed_ms: elapsed, policy: deadlinePolicy.policy_id, policy_version: deadlinePolicy.version } });
+        changed.push({ run_id: row.id, stage_id: row.currentStageId, deadline: 'soft' });
+      }
+      if (elapsed >= hardMs && !current.hard_emitted_at) {
+        const latest = await this.store.loadRun(row.id, row.orgId);
+        const latestContext = asObject(latest.context);
+        const latestDeadlines = asObject(latestContext.runtime_deadlines);
+        const next = { ...asObject(latestDeadlines[row.currentStageId]), hard_emitted_at: new Date(now).toISOString() };
+        const verdict = { passed: false, unmet: [{ predicate: 'execution_deadline', reason: 'hard_execution_deadline_exceeded' }] };
+        await this.store.updateRun(row.id, row.orgId, { context: { ...latestContext, runtime_deadlines: { ...latestDeadlines, [row.currentStageId]: next } }, lastVerdict: verdict });
+        await this.store.appendCheckpoint(row.id, row.orgId, { stageId: row.currentStageId, phase: 'HARD_DEADLINE', status: 'NEEDS_INTERVENTION', state: { elapsed_ms: elapsed, reconcile_before_retry: true, policy: deadlinePolicy.policy_id, policy_version: deadlinePolicy.version }, verdict });
+        changed.push({ run_id: row.id, stage_id: row.currentStageId, deadline: 'hard' });
+      }
+    }
+    return changed;
   }
 
   async run(runId, { orgId, event = null } = {}) {
@@ -234,6 +282,21 @@ export class GenericStageExecutor {
 
         const stage = playbook.stages.find((candidate) => candidate.id === run.currentStageId);
         if (!stage) throw new Error(`runtime_stage_not_found:${run.currentStageId}`);
+
+        if (asObject(asObject(run.context).runtime_deadlines)[stage.id]?.hard_emitted_at) {
+          const verdict = { passed: false, unmet: [{ predicate: 'execution_deadline', reason: 'hard_execution_deadline_exceeded_before_reentry' }] };
+          await this.store.updateRun(runId, orgId, { status: 'NEEDS_INTERVENTION', lastVerdict: verdict });
+          return this.store.loadRun(runId, orgId);
+        }
+
+        const deadlineContext = asObject(run.context);
+        const deadlineStates = asObject(deadlineContext.runtime_deadlines);
+        if (!asObject(deadlineStates[stage.id]).started_at) {
+          run = await this.store.updateRun(runId, orgId, { context: {
+            ...deadlineContext,
+            runtime_deadlines: { ...deadlineStates, [stage.id]: { started_at: new Date().toISOString() } },
+          } });
+        }
 
         if (run.status === 'WAITING_AUTHORITY') {
           if (!authorityGranted(run, stage)) return run;
@@ -329,6 +392,11 @@ export class GenericStageExecutor {
         const produced = normalizeDirectorArtifacts(result);
         const persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced);
         run = await this.store.loadRun(runId, orgId);
+        if (asObject(asObject(run.context).runtime_deadlines)[stage.id]?.hard_emitted_at) {
+          const verdict = { passed: false, unmet: [{ predicate: 'execution_deadline', reason: 'hard_execution_deadline_exceeded_after_reconciliation' }] };
+          await this.store.updateRun(runId, orgId, { status: 'NEEDS_INTERVENTION', lastVerdict: verdict });
+          return this.store.loadRun(runId, orgId);
+        }
         const grouped = artifactMap(run.artifacts);
         const predicateVerdict = this.predicates.validateChecks(stage.completion_checks, grouped, { run, stage });
         const verificationResults = [];

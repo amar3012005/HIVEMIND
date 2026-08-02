@@ -44,7 +44,8 @@ export function applyFirstLifePolicy(plan, context, policy) {
     first_life_policy_id: policy.policy_id,
     first_life_policy_version: policy.version,
     recommendation_rank: index + 1,
-    effect_class: item.external_action_requested === true ? 'external' : 'internal',
+    effect_class: item.effect_class,
+    external_action_requested: item.effect_class === 'external',
     activation_sprint_id: id,
     activation_slot: String(item.id) === recommendedId ? 'recommended' : 'adaptive',
   }));

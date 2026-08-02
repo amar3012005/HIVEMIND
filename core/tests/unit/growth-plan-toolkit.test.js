@@ -106,6 +106,8 @@ test('first-life policy preserves varied company proposals without injecting a d
       operating_queue: titles.map((title, index) => ({
         id: `q${index}`, constraint_id: `c${index}`, title,
         objective: `${title}.`, room_tag: `room-${index}`,
+        effect_class: index === 0 ? 'external' : 'internal',
+        effect_basis: index === 0 ? 'The terminal outcome changes external state.' : 'Persisted internal evidence is terminal.',
         external_action_requested: index === 0,
       })),
     };
@@ -127,9 +129,9 @@ test('first-life policy removes unsupported proposals and never pads the queue',
     ],
     stage: { queue_item_id: 'q1' },
     operating_queue: [
-      { id: 'q1', constraint_id: 'c1', title: 'First', external_action_requested: true },
-      { id: 'q2', constraint_id: 'c2', title: 'Second', external_action_requested: false },
-      { id: 'q3', constraint_id: 'c3', title: 'Unsupported', external_action_requested: false },
+      { id: 'q1', constraint_id: 'c1', title: 'First', effect_class: 'external', effect_basis: 'External state changes.', external_action_requested: true },
+      { id: 'q2', constraint_id: 'c2', title: 'Second', effect_class: 'internal', effect_basis: 'Internal evidence is terminal.', external_action_requested: false },
+      { id: 'q3', constraint_id: 'c3', title: 'Unsupported', effect_class: 'internal', effect_basis: 'Internal evidence is terminal.', external_action_requested: false },
     ],
   };
   const result = applyFirstLifePolicy(plan, { baseline: { resource_id: 'baseline-1' } }, policy);

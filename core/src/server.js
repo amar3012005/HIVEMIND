@@ -11649,6 +11649,55 @@ exit \$RC
           if (req.method === 'GET') return jsonResponse(res, knowledgeUploadCapabilities());
           break;
 
+        // Cheap duplicate pre-check BEFORE the bytes go over the wire.
+        //
+        // Today the FE must upload the entire file to learn it is a duplicate —
+        // on a 8.3 MB deck that is a full transfer spent to be told "already have
+        // it", and on a 27-file batch it is most of the upload time. The client
+        // can hash locally (crypto.subtle.digest) and ask here first.
+        //
+        // Deliberately does NOT accept file bytes: it takes only a checksum, so it
+        // is O(1) and cannot be used to smuggle content past validation. Scoped by
+        // the caller's org exactly like findDuplicate on the upload path, so it can
+        // never reveal whether ANOTHER tenant holds that checksum.
+        case '/api/knowledge/upload/precheck':
+          if (req.method === 'POST') {
+            if (!knowledgeUploadJobStore) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const checksum = String(body?.checksum || '').trim().toLowerCase();
+            if (!/^[a-f0-9]{64}$/.test(checksum)) {
+              return jsonResponse(res, { error: 'checksum must be a hex sha256 of the file bytes' }, 400);
+            }
+            const scopeKey = String(body?.scope_key || body?.scopeKey || '').trim() || null;
+            try {
+              const existing = await knowledgeUploadJobStore.findDuplicate({ orgId, scopeKey, checksum });
+              if (existing?.status === 'ready') {
+                return jsonResponse(res, {
+                  duplicate: true,
+                  status: 'existing',
+                  message: 'Already in your knowledge base — skip the upload or force a re-ingest.',
+                  job_id: existing.id,
+                  existing_document_id: existing.documentId || null,
+                  existing_title: existing.filename || null,
+                  promoted_count: existing.promotedCount ?? null,
+                });
+              }
+              // In flight for this tenant — uploading again would just queue a
+              // second copy behind the first.
+              if (existing && !['failed', 'dead', 'cancelled'].includes(existing.status)) {
+                return jsonResponse(res, {
+                  duplicate: false, in_progress: true, status: existing.status,
+                  stage: existing.stage || null, job_id: existing.id,
+                  message: 'This file is already being processed.',
+                });
+              }
+              return jsonResponse(res, { duplicate: false, in_progress: false });
+            } catch (e) {
+              // Never block an upload because the pre-check failed — fail open.
+              return jsonResponse(res, { duplicate: false, in_progress: false, precheck_error: e.message });
+            }
+          }
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');

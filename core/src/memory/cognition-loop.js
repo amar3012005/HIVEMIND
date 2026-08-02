@@ -33,7 +33,7 @@ import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
-import { crossProjectEnabledForOrg } from '../resident/cognition-pilot.js';
+import { crossProjectEnabledForOrg, includePersonalForOrg } from '../resident/cognition-pilot.js';
 import { withGovernanceLock } from '../resident/advisory-lock.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
@@ -832,6 +832,18 @@ export class CognitionLoop {
     // Cross-project scope (workspace setting): when OFF, bridges/narratives may not
     // connect clusters that span different projects (dreams stay project-local).
     const crossProject = await crossProjectEnabledForOrg(this.prisma, orgId).catch(() => false);
+    // Private memories are never eligible merely because an administrator
+    // enabled organization cognition. The member must independently opt in.
+    // If the additive column is not available during a rolling upgrade, fail
+    // closed and synthesize shared material only.
+    let personalUserIds = [];
+    if (await includePersonalForOrg(this.prisma, orgId).catch(() => false)) {
+      personalUserIds = await this.prisma.$queryRawUnsafe(
+        `SELECT user_id FROM hivemind.user_organizations
+          WHERE org_id = $1::uuid AND is_active = true AND cognition_personal_opt_in = true`,
+        orgId,
+      ).then((rows) => rows.map((row) => row.user_id)).catch(() => []);
+    }
 
     // Window clamped to the org's cognition_enabled_at anchor — synthesis only
     // ever sees post-enable memory (no backfill). Scheduled runs pass a wide
@@ -878,6 +890,10 @@ export class CognitionLoop {
           createdAt:  { gte: since },
           deletedAt:  null,
           memoryType: { in: ['fact', 'decision'] },
+          OR: [
+            { visibility: 'organization' },
+            ...(personalUserIds.length ? [{ visibility: 'private', userId: { in: personalUserIds } }] : []),
+          ],
           // Exclude the governance swarm's OWN output. Reflections + every synthesis
           // tier carry a non-null cognitive_layer_role; without this filter the
           // agents' internal-audit/reflection memories dominate clustering and the

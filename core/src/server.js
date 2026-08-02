@@ -37,6 +37,8 @@ import {
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
+import { isOrganizationAdmin } from './workspace/access-policy.js';
+import { createWorkspaceNotification } from './workspace/notifications.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
@@ -107,6 +109,17 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
+
+// Cognition is an organization-administration surface. Keep its route gates on
+// the same active-membership and canonical-role interpretation as Workspace
+// Admin; legacy one-off role checks caused settings and status to disagree.
+async function canManageCognition(prismaClient, { orgId, userId, principal }) {
+  if (principal?.master) return true;
+  const membership = await prismaClient?.userOrganization.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+  }).catch(() => null);
+  return !!(membership?.isActive && isOrganizationAdmin(membership));
+}
 
 function loadLocalEnv(envPath) {
   if (!fs.existsSync(envPath)) {
@@ -10711,7 +10724,7 @@ exit \$RC
           // rather than 403 so the FE PlanLimitModal offers the upgrade inline
           // instead of the user hitting an opaque "forbidden".
           if (!orgPlan.features.cognitiveDreaming
-              && (pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
+              && (pathname.startsWith('/api/cognition') || pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
               && req.method !== 'GET') {
             return jsonResponse(res, {
               error: 'Cognitive layer (dreaming) requires the Scale plan or higher',
@@ -12370,19 +12383,21 @@ exit \$RC
           }
 
         case '/api/cognition/status':
-          // Read-only — any authenticated caller can see loop health.
+          // Workspace administration only. Status never includes another
+          // tenant's runtime state or existence.
           // In-memory _status carries current-process state; cognition_status
           // table carries per-org persistent history that survives restart.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const { getCognitionStatus } = await import('./memory/cognition-loop.js');
             const st = getCognitionStatus();
-            // Per-org rows: caller's own org first, then top-5 by recent tick.
-            let perOrg = [];
+            let callerOrg = null;
             if (prisma?.cognitionStatus) {
               try {
-                const rows = await prisma.cognitionStatus.findMany({
-                  orderBy: { lastTickAt: 'desc' },
-                  take: 20,
+                callerOrg = await prisma.cognitionStatus.findUnique({
+                  where: { orgId },
                   select: {
                     orgId: true,
                     lastTickAt: true,
@@ -12397,13 +12412,10 @@ exit \$RC
                     lastErrorAt: true,
                   },
                 });
-                perOrg = rows;
               } catch (dbErr) {
                 console.warn('[/api/cognition/status] db read failed:', dbErr.message);
               }
             }
-            // Caller's org-specific row pulled to top of payload.
-            const callerOrg = perOrg.find(r => r.orgId === orgId) || null;
             return jsonResponse(res, {
               enabled: COGNITION_LOOP_ENABLED,
               interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
@@ -12414,15 +12426,17 @@ exit \$RC
               model: process.env.SYNTHESIS_MODEL || 'cerebras/gpt-oss-120b',
               ...st,
               caller_org: callerOrg,
-              per_org_recent: perOrg,
             });
           } catch (err) {
-            return jsonResponse(res, { error: err.message }, 500);
+            return jsonResponse(res, { error: 'Unable to load cognition status' }, 500);
           }
 
         case '/api/cognition/recent':
           // Last N synthesis + summary memories the loop produced. Read-only.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10)));
             // Remote (self-host) orgs have NO central rows — list synthesis/summary memories from the agent.
             if (orgId && orgIsRemote(orgId)) {
@@ -12477,17 +12491,8 @@ exit \$RC
           // stop the loop without a redeploy. Admin/master only.
           if (req.method !== 'POST') break;
           {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin','owner','org_admin','org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { stopped: true, was_running: false });
@@ -12509,17 +12514,11 @@ exit \$RC
           // dead in Postgres (superseded/soft-deleted) past the grace window.
           if (req.method !== 'POST') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!cognitionLoop || typeof cognitionLoop.dreamRetentionForOrg !== 'function') {
               return jsonResponse(res, { error: 'cognition loop unavailable' }, 503);
-            }
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([...(m?.role ? [m.role] : []), ...(Array.isArray(m?.roles) ? m.roles : [])]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
             const result = await cognitionLoop.dreamRetentionForOrg(orgId, { apply: body?.apply === true });
             return jsonResponse(res, result);
@@ -12532,6 +12531,9 @@ exit \$RC
           // Audit history of dream runs for the caller's org (single-line stack).
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { runs: [] });
             const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10)));
             const runs = await prisma.cognitionRun.findMany({
@@ -12565,6 +12567,9 @@ exit \$RC
           // The dreams a specific run produced (show-past-dreams). ?run_id=<uuid>
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { dreams: [] });
             const runId = url.searchParams.get('run_id');
             if (!runId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return jsonResponse(res, { error: 'valid run_id required' }, 400);
@@ -12601,17 +12606,8 @@ exit \$RC
           // hard-deletes the dreams that run produced (cascades to vectors).
           if (req.method !== 'POST' && req.method !== 'DELETE') break;
           try {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!prisma?.cognitionRun) return jsonResponse(res, { error: 'cognition runs unavailable' }, 503);
             const runId = url.searchParams.get('run_id') || body?.run_id;
@@ -12646,25 +12642,8 @@ exit \$RC
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
           try {
-            const membership = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const roles = new Set([
-              ...(membership?.role ? [membership.role] : []),
-              ...(Array.isArray(membership?.roles) ? membership.roles : []),
-            ]);
-            // Accept both legacy short forms (admin/owner) and the canonical
-            // long forms our invite + RBAC layer issues (org_owner/org_admin).
-            // Same bug pattern fixed in invites commit a9c61dd — keep these
-            // gates in sync until we centralise role parsing.
-            const ADMIN_ROLES = ['admin', 'owner', 'org_admin', 'org_owner'];
-            const isAdmin = ADMIN_ROLES.some(r => roles.has(r));
-            if (!isAdmin && !principal.master) {
-              return jsonResponse(res, {
-                error: 'admin/owner role required',
-                role_seen: Array.from(roles),
-              }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);
@@ -12701,6 +12680,12 @@ exit \$RC
               const raced = await Promise.race([runPromise, softTimeout]);
               if (softTimer) clearTimeout(softTimer);
               if (raced === '__timeout') {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_started',
+                  title: 'Cognitive Layer is running',
+                  body: 'Your organization synthesis is continuing in the background.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-running:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, {
                   triggered: true,
                   async: true,
@@ -12709,8 +12694,18 @@ exit \$RC
                 }, 202);
               }
               if (raced && raced.__error) {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_failed', title: 'Cognitive Layer needs attention',
+                  body: 'The run could not complete. You can retry it from Workspace Admin.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-failed:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, { error: raced.__error }, 500);
               }
+              void createWorkspaceNotification(prisma, {
+                orgId, userId, type: 'cognition.run_completed', title: 'Cognitive Layer completed',
+                body: `Created ${raced?.synth ?? 0} synthesis item(s) from permitted workspace memory.`,
+                resourceType: 'cognition_run', dedupeKey: `cognition-completed:${orgId}:${Date.now()}`,
+              }).catch(() => null);
               return jsonResponse(res, {
                 triggered: true,
                 async: false,
@@ -12737,6 +12732,9 @@ exit \$RC
           // deleted. Read-only; org-scoped to the caller.
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const memoryId = url.searchParams.get('memory_id');
             if (!memoryId) return jsonResponse(res, { error: 'memory_id required' }, 400);
             const maxDepth = Math.min(parseInt(url.searchParams.get('depth'), 10) || 3, 6);

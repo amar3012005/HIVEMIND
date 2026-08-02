@@ -112,3 +112,7 @@ def test_campaign_turn_uses_one_orchestration_round(monkeypatch):
 
     assert api_hyper_rooms._goalkeeper_rounds_for_room("campaign") == 1
     assert api_hyper_rooms._goalkeeper_rounds_for_room("general") == 5
+    assert api_hyper_rooms._goalkeeper_rounds_for_room("outreach", work_order=True) == 1
+    assert api_hyper_rooms._is_hq_work_order_context('{"contract":"hq-work-order.v2"}') is True
+    assert api_hyper_rooms._is_hq_work_order_context('{"contract":"hq-work-order.v1"}') is True
+    assert api_hyper_rooms._is_hq_work_order_context('{"contract":"campaign-plan.v2"}') is False

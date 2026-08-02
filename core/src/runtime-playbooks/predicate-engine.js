@@ -74,6 +74,15 @@ const predicates = {
     return getPath(selected.at(-1), check.path) === check.value;
   },
   field_not_equals: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => value !== check.value),
+  field_contains_value: ({ artifacts, check }) => {
+    const expected = String(check.value ?? '').trim().toLocaleLowerCase();
+    if (!expected) return check.allow_missing_value === true;
+    return compareSelected(
+      artifacts,
+      check,
+      (value) => typeof value === 'string' && value.toLocaleLowerCase().includes(expected),
+    );
+  },
   field_in: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => asArray(check.values).includes(value)),
   status_in: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => asArray(check.values).includes(value)),
   field_gte: ({ artifacts, check }) => compareSelected(artifacts, check, (value) => Number.isFinite(value) && value >= check.value),
@@ -134,6 +143,7 @@ const requiredArguments = {
   field_equals: ['select', 'path', 'value'],
   latest_field_equals: ['select', 'path', 'value'],
   field_not_equals: ['select', 'path', 'value'],
+  field_contains_value: ['select', 'path', 'value'],
   field_in: ['select', 'path', 'values'],
   status_in: ['select', 'path', 'values'],
   field_gte: ['select', 'path', 'value'],

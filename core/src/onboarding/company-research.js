@@ -1,3 +1,5 @@
+import { PlaywrightServiceRuntime } from '../web/playwright-service-runtime.js';
+
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
 const SOCIAL_PLATFORMS = [
   ['linkedin', /(^|\.)linkedin\.com$/i, /^\/(?:company|showcase)\/[^/]+/i],
@@ -168,6 +170,57 @@ async function firecrawlGet(path, { apiKey, timeoutMs = 65000 } = {}) {
   return payload;
 }
 
+/**
+ * Read a bounded set of public pages without treating the result as account
+ * analytics. This is used by short operating workflows that need observable
+ * profile/content evidence, while platform metrics remain connector-owned.
+ */
+export async function scrapePublicPages(urls, {
+  apiKey = process.env.FIRECRAWL_API_KEY,
+  maxPages = 5,
+} = {}) {
+  const targets = [...new Set((Array.isArray(urls) ? urls : [])
+    .map((value) => cleanString(value, 1000))
+    .filter((value) => /^https:\/\//i.test(value)))]
+    .slice(0, Math.max(1, Math.min(8, Number(maxPages) || 5)));
+  if (!apiKey || !targets.length) return [];
+
+  const rows = await Promise.all(targets.map(async (url) => {
+    try {
+      const payload = await firecrawlRequest('/scrape', {
+        url,
+        formats: ['markdown', 'links'],
+        onlyMainContent: true,
+        removeBase64Images: true,
+        blockAds: true,
+        waitFor: 0,
+        timeout: 20_000,
+        maxAge: 86_400_000,
+      }, { apiKey, timeoutMs: 25_000 });
+      const data = payload?.data || payload || {};
+      return {
+        url: cleanString(data?.metadata?.sourceURL || data?.metadata?.url || url, 1000),
+        title: cleanString(data?.metadata?.title, 300),
+        description: cleanString(data?.metadata?.description, 500),
+        content: compactText(data?.markdown || data?.content, 5000),
+        status: 'observed',
+        provider: 'firecrawl',
+      };
+    } catch (error) {
+      return {
+        url,
+        title: '',
+        description: '',
+        content: '',
+        status: 'unavailable',
+        provider: 'firecrawl',
+        reason: String(error?.message || 'public_page_unavailable').slice(0, 300),
+      };
+    }
+  }));
+  return rows;
+}
+
 function normalizedSocialProfile(rawUrl) {
   let url;
   try { url = new URL(rawUrl); } catch { return null; }
@@ -296,6 +349,18 @@ export async function captureWebsiteScreenshot(websiteUrl, {
     }, { apiKey, timeoutMs: 30000 });
     return cleanString((payload?.data || payload)?.screenshot, 2000000) || null;
   } catch {
+    return null;
+  }
+}
+
+export async function captureWebsiteScreenshotWithPlaywright(websiteUrl) {
+  if (!websiteUrl) return null;
+  try {
+    const runtime = new PlaywrightServiceRuntime({ timeoutMs: 30_000, settleMs: 700 });
+    const result = await runtime.crawl({ urls: [websiteUrl], depth: 0, pageLimit: 1, captureScreenshot: true });
+    return compactText(result.pages?.[0]?.screenshot, 7_000_000) || null;
+  } catch (error) {
+    console.warn('[hyper-onboarding] Playwright screenshot skipped:', error.message);
     return null;
   }
 }

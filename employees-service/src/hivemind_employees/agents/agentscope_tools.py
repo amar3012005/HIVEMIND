@@ -1275,13 +1275,15 @@ def build_hivemind_toolkit(
     # propose_call — the agent's decision to place a TARA outbound CALL. ALWAYS available:
     # it is safe by construction (only QUEUES a call contract for the user's popup approval;
     # flag-gated on the control side + first-contact HITL — it NEVER dials on its own).
-    def propose_call(company: str, phone: str, why: str = "") -> ToolResponse:
+    def propose_call(company: str, phone: str, why: str = "", lead_id: str = "",
+                     personal_notes: str = "") -> ToolResponse:
         """Propose an outbound phone CALL to a prospect when a live voice call is the right next
         move (a warm lead, a meeting opportunity, a time-sensitive follow-up) — NOT for routine
         info. This does NOT dial: it queues a call CONTRACT (goal + conversation strategy +
         auto-selected voice & language) that POPS UP for the user's one-click approval; TARA calls
         only after they approve. Args: company (who to call), phone (E.164, e.g. '+49151234567'),
-        why (one line: why a call beats an email)."""
+        why (the exact outcome or special instruction for this call), lead_id (the durable
+        Your Leads identifier when available), personal_notes (verified lead-specific context)."""
         prov = _TURN_PROVENANCE.get() or {}
         cb = str(prov.get("callback_url") or "")
         room_id = prov.get("room_id")
@@ -1300,7 +1302,12 @@ def build_hivemind_toolkit(
                     f"{base}/internal/hyper/outreach/propose",
                     headers={"X-API-Key": mk, "Content-Type": "application/json"},
                     json={"room_id": room_id, "turn_id": turn_id, "channel": "call",
-                          "callback_url": cb, "prospect": {"company": company, "phone": ph}},
+                          "callback_url": cb, "prospect": {
+                              "company": company or ph, "phone": ph,
+                              "lead_id": lead_id or None,
+                              "notes": personal_notes or None,
+                              "special_instruction": why or None,
+                          }},
                 )
             if r.status_code == 403:
                 return _tool_response_text("Call proposals are disabled for this deployment.")

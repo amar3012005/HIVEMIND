@@ -1,0 +1,4 @@
+FROM caddy:latest
+COPY --from=hivemind/fe-build:first-life-phase2-v1 /app/build /srv
+RUN printf ':80 {\n  root * /srv\n  encode gzip\n  @service_worker path /sw.js\n  header @service_worker Cache-Control "no-cache, no-store, must-revalidate"\n  try_files {path} /index.html\n  file_server\n}\n' > /etc/caddy/Caddyfile
+EXPOSE 80

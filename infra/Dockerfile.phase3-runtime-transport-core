@@ -1,0 +1,10 @@
+FROM hivemind/core-api:sha-cf7c56955
+USER root
+COPY --chown=nodejs:nodejs core/package.json /app/package.json
+COPY --chown=nodejs:nodejs core/package-lock.json /app/package-lock.json
+COPY --chown=nodejs:nodejs core/src/runtime-transport/client.js /app/src/runtime-transport/client.js
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/room-director.js /app/src/runtime-playbooks/room-director.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/scheduler.js /app/src/hq-runtime/scheduler.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/routes.js /app/src/hq-runtime/routes.js
+USER nodejs

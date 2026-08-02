@@ -119,6 +119,26 @@ def test_campaign_compiler_normalizes_offsets_to_the_promised_horizon():
     assert [row["scheduled_offset_minutes"] for row in bundle["timeline"]] == [0, 9360, 18720]
 
 
+def test_campaign_compiler_completes_missing_creative_hypothesis_links_without_resynthesis():
+    bundle = assemble_campaign_bundle(
+        {
+            "strategy": "Introduce the product through a focused organic sequence.",
+            "actions": [
+                {"id": "one", "channel": "x_organic", "final_copy": "First post"},
+                {"id": "two", "channel": "x_organic", "final_copy": "Second post"},
+            ],
+        },
+        channels=["x_organic"], requirements=["goal", "channel:x_organic"],
+        campaign_brief={"brief": {"duration_days": 7, "cadence": {"preset": "focused"}}},
+    )
+
+    hypotheses = bundle["creative_system"]["hypotheses"]
+    assert len(hypotheses) == 2
+    assert {action["hypothesis_id"] for action in bundle["actions"]}.issubset(
+        {hypothesis["id"] for hypothesis in hypotheses}
+    )
+
+
 def test_campaign_governance_does_not_mutate_missing_semantics():
     bundle = {"contract_version": CAMPAIGN_CONTRACT_VERSION, "actions": [], "evidence": []}
     before = copy.deepcopy(bundle)

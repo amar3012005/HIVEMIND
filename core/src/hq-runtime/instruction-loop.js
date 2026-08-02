@@ -31,6 +31,22 @@ export function normalizePrepareCapabilities(capabilities, kind = '') {
     .filter(Boolean))];
 }
 
+function normalizeRuntimeCapabilities(capabilities) {
+  const aliases = new Map([
+    ['google-maps', 'google-maps'], ['google_maps', 'google-maps'], ['maps', 'google-maps'],
+    ['gmail', 'gmail'], ['google-mail', 'gmail'],
+    ['x', 'x'], ['twitter', 'x'], ['x_organic', 'x'],
+    ['linkedin', 'linkedin'], ['linkedin_ads', 'linkedin'],
+    ['instagram', 'instagram'],
+    ['facebook', 'facebook'], ['meta', 'facebook'],
+    ['tiktok', 'tiktok'], ['youtube', 'youtube'], ['pinterest', 'pinterest'],
+    ['reddit', 'reddit'], ['threads', 'threads'], ['bluesky', 'bluesky'],
+  ]);
+  return [...new Set((Array.isArray(capabilities) ? capabilities : [])
+    .map((value) => aliases.get(String(value || '').trim().toLowerCase()))
+    .filter(Boolean))];
+}
+
 export function getPlatformManagedCapabilities() {
   return new Set(Object.entries(PLATFORM_MANAGED_CAPABILITIES)
     .filter(([, available]) => available())
@@ -54,43 +70,33 @@ export function interpretHqInstruction(body, company = {}) {
     room_tag: 'general',
     target: { location: location || null, quantity: null, sector: null, audience: null },
     acceptance_criteria: ['Reach a terminal playbook state with every expected artifact accepted by its declared predicates.'],
+    source_instruction: text,
+    requested_action: 'complete_requested_outcome',
+    requested_terminal_outcome: 'completed_as_requested',
+    external_action_requested: false,
+    exact_targets: [],
+    execution_mode: 'single_outcome',
   };
   return { ...base, work_units: [{
     title: base.title, objective: base.objective, room_tag: base.room_tag,
     kind: base.intent, skill: base.skill,
     required_capabilities: base.required_capabilities, target: base.target,
-    acceptance_criteria: base.acceptance_criteria,
-    completion_requirements: [],
-    authority_mode: 'PREPARE', depends_on: null,
-  }] };
+      acceptance_criteria: base.acceptance_criteria,
+      completion_requirements: [],
+      authority_mode: 'PREPARE', depends_on: null,
+      source_instruction: base.source_instruction,
+      requested_action: base.requested_action,
+      requested_terminal_outcome: base.requested_terminal_outcome,
+      external_action_requested: base.external_action_requested,
+      exact_targets: base.exact_targets,
+    }] };
 }
 
-const ROOM_TAGS = new Set(['general', 'outreach', 'seo', 'marketing', 'campaign', 'branding', 'research', 'product', 'fundraising', 'legal_finance']);
-const REQUIREMENT_TYPES = new Set([
-  'records_persisted', 'source_evidence', 'distinct_fields', 'evidence_refs',
-  'deliverables', 'email_drafts', 'external_actions', 'delivery_receipts',
-]);
-
-function normalizeRequirement(row) {
-  if (!row || typeof row !== 'object') return null;
-  const type = String(row.type || '').trim().toLowerCase();
-  if (!REQUIREMENT_TYPES.has(type)) return null;
-  const requirement = { type };
-  if (Number.isFinite(Number(row.minimum))) requirement.minimum = Math.max(0, Math.min(50, Number(row.minimum)));
-  if (Number.isFinite(Number(row.maximum))) requirement.maximum = Math.max(0, Math.min(50, Number(row.maximum)));
-  if (row.entity) requirement.entity = String(row.entity).slice(0, 60);
-  if (Array.isArray(row.fields)) requirement.fields = row.fields.map(String).slice(0, 8);
-  return requirement;
-}
-
-function defaultRequirements(unit, target) {
-  return [];
-}
-
-export function normalizeInstructionWorkUnits(parsed, fallback) {
+export function normalizeInstructionWorkUnits(parsed, fallback, availableRoomTags = []) {
+  const allowedRooms = new Set([...availableRoomTags, fallback.room_tag, 'general'].map((value) => String(value || '').toLowerCase()));
   const source = Array.isArray(parsed?.work_units) && parsed.work_units.length ? parsed.work_units : fallback.work_units;
   const units = source.slice(0, 1).map((raw) => {
-    const roomTag = ROOM_TAGS.has(String(raw?.room_tag || '').toLowerCase())
+    const roomTag = allowedRooms.has(String(raw?.room_tag || '').toLowerCase())
       ? String(raw.room_tag).toLowerCase() : fallback.room_tag;
     const target = { ...(fallback.target || {}), ...(raw?.target && typeof raw.target === 'object' ? raw.target : {}) };
     const quantity = Number(target.quantity);
@@ -101,18 +107,24 @@ export function normalizeInstructionWorkUnits(parsed, fallback) {
       objective: String(raw?.objective || fallback.objective).slice(0, 5000),
       room_tag: roomTag,
       kind: String(raw?.kind || fallback.intent).slice(0, 60).toLowerCase(),
-      skill: KNOWN_SKILLS.has(String(raw?.skill || '').toLowerCase()) ? String(raw.skill).toLowerCase()
-        : fallback.skill,
+      skill: fallback.skill,
       target,
       authority_mode: authorityMode,
       depends_on: null,
       required_capabilities: [],
       acceptance_criteria: Array.isArray(raw?.acceptance_criteria) && raw.acceptance_criteria.length
         ? raw.acceptance_criteria.map(String).slice(0, 10) : fallback.acceptance_criteria,
+      source_instruction: String(raw?.source_instruction || fallback.source_instruction || fallback.objective).slice(0, 5000),
+      requested_action: String(raw?.requested_action || fallback.requested_action || 'complete_requested_outcome').slice(0, 120),
+      requested_terminal_outcome: String(raw?.requested_terminal_outcome || fallback.requested_terminal_outcome || 'completed_as_requested').slice(0, 120),
+      external_action_requested: raw?.external_action_requested === true,
+      exact_targets: Array.isArray(raw?.exact_targets) ? raw.exact_targets.slice(0, 50).map((targetRow) => ({
+        type: String(targetRow?.type || 'entity').slice(0, 80),
+        value: String(targetRow?.value || '').slice(0, 1000),
+        ...(targetRow?.label ? { label: String(targetRow.label).slice(0, 240) } : {}),
+      })).filter((targetRow) => targetRow.value) : [],
     };
-    const requirements = Array.isArray(raw?.completion_requirements)
-      ? raw.completion_requirements.map(normalizeRequirement).filter(Boolean) : [];
-    provisional.completion_requirements = requirements.length ? requirements : defaultRequirements(provisional, target);
+    provisional.completion_requirements = [];
     return provisional;
   });
   return units.length ? units : fallback.work_units;
@@ -122,7 +134,7 @@ export function normalizeInstructionWorkUnits(parsed, fallback) {
 // failover), NOT a hardcoded provider endpoint. If classification is unavailable,
 // the fallback preserves one complete objective without making a semantic routing
 // decision; the playbook Director remains the only lifecycle selector.
-export async function interpretHqInstructionSemantic(body, company = {}) {
+export async function interpretHqInstructionSemantic(body, company = {}, availableRooms = []) {
   const fallback = interpretHqInstruction(body, company);
   const text = String(body || '').trim();
   if (!text) return fallback;
@@ -133,20 +145,20 @@ export async function interpretHqInstructionSemantic(body, company = {}) {
         temperature: 0,
         response_format: { type: 'json_object' }, max_completion_tokens: 1400,
         messages: [
-          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its domain lifecycle. Return JSON only with intent, title, objective, room_tag, skill, location, target:{quantity,sector,audience}, required_capabilities, acceptance_criteria, and exactly one work_units item preserving the complete requested outcome. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, and authority gates. room_tag must be one of general,outreach,seo,marketing,campaign,branding,research,product,fundraising,legal_finance. Preserve exact audience, geography, quantity, timing, and external-action restrictions. If geography was not explicitly stated, use the supplied retained company location and do not infer a broader market from the company profile. If quantity was not specified, use null; do not invent one. Set authority_mode to EXECUTE only when the requested terminal outcome necessarily requires an external action; otherwise use PREPARE.' },
-          { role: 'user', content: JSON.stringify({ instruction: String(body || '').slice(0, 5000), company }) },
+          { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its lifecycle. Return JSON only with intent, title, objective, room_tag, location, target:{quantity,sector,audience}, acceptance_criteria, source_instruction, requested_action, requested_terminal_outcome, external_action_requested, exact_targets:[{type,value,label}], execution_mode, and exactly one work_units item preserving those same request fields. Copy source_instruction verbatim. Preserve every explicit recipient, phone number, account, URL, geography, audience, quantity, timing, and external-action restriction in exact_targets and objective. Select room_tag semantically from available_rooms. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, skills, and authority gates. If geography was not explicitly stated, use the supplied retained company location and do not infer a broader market from the company profile. If quantity was not specified, use null; do not invent one. Set external_action_requested when the requested terminal outcome requires an external action. Set execution_mode to single_outcome only for one bounded requested result; use operating_plan for broad preferences or multi-area focus that should shape the initial company plan.' },
+          { role: 'user', content: JSON.stringify({ instruction: String(body || '').slice(0, 5000), company, available_rooms: availableRooms }) },
         ],
       }),
     });
     if (!response.ok) return fallback;
     const payload = await response.json();
     const parsed = JSON.parse(String(payload?.choices?.[0]?.message?.content || '{}'));
-    if (!ROOM_TAGS.has(String(parsed.room_tag || '').toLowerCase())) return fallback;
-    const skillId = String(parsed.skill || '').toLowerCase().trim();
+    const allowedRooms = new Set([...availableRooms, 'general'].map((value) => String(value || '').toLowerCase()));
+    if (!allowedRooms.has(String(parsed.room_tag || '').toLowerCase())) return fallback;
     const roomTag = String(parsed.room_tag).toLowerCase();
     const parsedTarget = parsed.target && typeof parsed.target === 'object' ? parsed.target : {};
     const explicitQuantity = Number(parsedTarget.quantity);
-    const skill = KNOWN_SKILLS.has(skillId) ? skillId : fallback.skill;
+    const skill = fallback.skill;
     const interpreted = {
       intent: String(parsed.intent || parsed.room_tag || fallback.intent).slice(0, 60),
       title: String(parsed.title || fallback.title).slice(0, 240),
@@ -162,8 +174,18 @@ export async function interpretHqInstructionSemantic(body, company = {}) {
       required_capabilities: [],
       acceptance_criteria: Array.isArray(parsed.acceptance_criteria) && parsed.acceptance_criteria.length
         ? parsed.acceptance_criteria.map(String).slice(0, 12) : fallback.acceptance_criteria,
+      source_instruction: text,
+      requested_action: String(parsed.requested_action || fallback.requested_action).slice(0, 120),
+      requested_terminal_outcome: String(parsed.requested_terminal_outcome || fallback.requested_terminal_outcome).slice(0, 120),
+      external_action_requested: parsed.external_action_requested === true,
+      exact_targets: Array.isArray(parsed.exact_targets) ? parsed.exact_targets.slice(0, 50).map((targetRow) => ({
+        type: String(targetRow?.type || 'entity').slice(0, 80),
+        value: String(targetRow?.value || '').slice(0, 1000),
+        ...(targetRow?.label ? { label: String(targetRow.label).slice(0, 240) } : {}),
+      })).filter((targetRow) => targetRow.value) : [],
+      execution_mode: parsed.execution_mode === 'operating_plan' ? 'operating_plan' : 'single_outcome',
     };
-    interpreted.work_units = normalizeInstructionWorkUnits(parsed, { ...fallback, ...interpreted });
+    interpreted.work_units = normalizeInstructionWorkUnits(parsed, { ...fallback, ...interpreted }, availableRooms);
     return interpreted;
   } catch {
     return fallback;
@@ -179,15 +201,21 @@ export function shouldDeferInstruction({ deferTodos = false, instruction = {} } 
 }
 
 export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false }) {
-  const pending = await prisma.hqInstruction.findMany({
-    where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 20,
-  });
+  const [pending, roomRows] = await Promise.all([
+    prisma.hqInstruction.findMany({
+      where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 20,
+    }),
+    prisma.hyperRoom.findMany({
+      where: { orgId: runtime.orgId, archivedAt: null }, select: { roomTag: true },
+    }),
+  ]);
+  const availableRooms = [...new Set(roomRows.map((room) => room.roomTag).filter(Boolean))];
   const created = [];
   for (const instruction of pending) {
-    const interpreted = await interpretHqInstructionSemantic(instruction.body, company);
-    const executionMode = instruction.interpreted?.execution_mode === 'single_outcome'
+    const interpreted = await interpretHqInstructionSemantic(instruction.body, company, availableRooms);
+    const executionMode = interpreted.execution_mode === 'single_outcome'
       ? 'single_outcome' : 'operating_plan';
-    if (shouldDeferInstruction({ deferTodos, instruction })) {
+    if (shouldDeferInstruction({ deferTodos, instruction: { interpreted } })) {
       await prisma.hqInstruction.update({ where: { id: instruction.id }, data: {
         status: 'APPLIED', interpreted: { ...interpreted, execution_mode: executionMode, incorporated_into_initial_plan: true }, appliedAt: new Date(),
       } });
@@ -198,7 +226,7 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
       // Direct owner instructions preempt autonomous plan work. They still pass
       // through the same capability and governance gates, but they must be the
       // first executable item considered on the next wake.
-      const units = normalizeInstructionWorkUnits(interpreted, interpretHqInstruction(instruction.body, company));
+      const units = normalizeInstructionWorkUnits(interpreted, interpretHqInstruction(instruction.body, company), availableRooms);
       const rows = [];
       for (let index = 0; index < units.length; index += 1) {
         const unit = units[index];
@@ -206,13 +234,20 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
         const row = await tx.hqTodo.create({ data: {
           runtimeId: runtime.id, orgId: runtime.orgId, instructionId: instruction.id,
           title: unit.title, objective: unit.objective, kind: unit.kind || canonicalInstructionKind(unit),
-          status: dependency ? 'WAITING_FOR_DEPENDENCY' : 'READY',
+          status: dependency ? 'WAITING_FOR_DEPENDENCY' : 'PROPOSED',
           priority: -100 + index, position: index,
           requiredCapabilities: unit.required_capabilities,
           context: { location: unit.target?.location || interpreted.location, target: unit.target,
             skill: unit.skill, room_tag: unit.room_tag, acceptance_criteria: unit.acceptance_criteria,
             completion_requirements: unit.completion_requirements, authority_mode: unit.authority_mode,
+            source_instruction: unit.source_instruction || interpreted.source_instruction || instruction.body,
+            requested_action: unit.requested_action || interpreted.requested_action,
+            requested_terminal_outcome: unit.requested_terminal_outcome || interpreted.requested_terminal_outcome,
+            external_action_requested: unit.external_action_requested === true || interpreted.external_action_requested === true,
+            exact_targets: unit.exact_targets?.length ? unit.exact_targets : interpreted.exact_targets || [],
             execution_mode: executionMode, workflow_index: index, workflow_size: units.length,
+            proposal_origin: 'user_instruction',
+            effect_class: unit.external_action_requested === true || interpreted.external_action_requested === true ? 'external' : 'internal',
             depends_on_todo_id: dependency?.id || null },
         } });
         rows.push(row);
@@ -259,7 +294,8 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
   const resolved = [];
   for (const todo of todos) {
     const original = Array.isArray(todo.requiredCapabilities) ? todo.requiredCapabilities : [];
-    const required = normalizePrepareCapabilities(original, todo.kind);
+    const runtimeRequired = normalizeRuntimeCapabilities(todo.context?.runtime_required_capabilities);
+    const required = [...new Set([...normalizePrepareCapabilities(original, todo.kind), ...runtimeRequired])];
     const capabilitiesChanged = JSON.stringify(original) !== JSON.stringify(required);
     if (capabilitiesChanged) {
       await prisma.$transaction([

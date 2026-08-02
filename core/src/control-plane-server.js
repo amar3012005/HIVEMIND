@@ -1663,7 +1663,7 @@ function applyCorsHeaders(req, res) {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
 }
 
 function sanitizeSlug(input) {
@@ -6794,6 +6794,46 @@ Write the persona now.`;
   // workspace WS at boot. App-level tokens (xapp-) remain admin-managed
   // via env (SLACK_APP_TOKEN_<team_id>) since Slack issues them per-app,
   // not per-OAuth-grant.
+  if (pathname === '/internal/hyper/prospects' && req.method === 'GET') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const orgId = String(url.searchParams.get('org_id') || '');
+    const userId = String(url.searchParams.get('user_id') || '');
+    const query = String(url.searchParams.get('query') || '').trim().toLowerCase().slice(0, 240);
+    const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 50), 100));
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)) {
+      return jsonResponse(res, { error: 'org_id and user_id are required' }, 400);
+    }
+    try {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT t.id, t.company, t.email, t.phone, t.website, t.address, t.state,
+                t.input_context, t.updated_at, c.id AS campaign_id
+           FROM hivemind.outreach_targets t
+           JOIN hivemind.outreach_campaigns c ON c.id=t.campaign_id
+          WHERE c.org_id=$1::uuid AND c.user_id=$2::uuid
+            AND ($3='' OR lower(concat_ws(' ', t.company, t.email, t.website, t.address,
+                                           t.input_context::text)) LIKE '%' || $3 || '%')
+          ORDER BY t.updated_at DESC LIMIT $4`, orgId, userId, query, limit,
+      );
+      const records = rows.map((row) => ({
+        memory_id: row.id, company: row.company, email: row.email, phone: row.phone,
+        website: row.website, address: row.address, state: row.state,
+        source_url: row.input_context?.source_url || row.website || null,
+        fit_reason: row.input_context?.fit_rationale || null,
+        distinctive_signal: row.input_context?.distinctive_signal || null,
+        outreach_angle: row.input_context?.outreach_angle || null,
+        note: row.input_context?.notes || null, campaign_id: row.campaign_id,
+        updated_at: row.updated_at,
+      }));
+      return jsonResponse(res, { status: 'completed', count: records.length, records });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   if (pathname === '/internal/hyper/prospects/bulk' && req.method === 'POST') {
     const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
       || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
@@ -6815,14 +6855,6 @@ Write the persona now.`;
     // memories in semantic recall. Observed live in /chat — "Prospect: Hannover Re"
     // was cited as a source for a question about Solvis heat-pump documentation.
     //
-    // One env flag governs all three writers.
-    if (String(process.env.HYPER_PROSPECTS_TO_MEMORY || '').toLowerCase() !== 'true') {
-      return jsonResponse(res, {
-        skipped: 'prospect_memory_writes_disabled',
-        reason: 'prospects are CRM records, not memories; set HYPER_PROSPECTS_TO_MEMORY=true to override',
-        written: 0,
-      }, 200);
-    }
     const body = await parseBody(req).catch(() => ({}));
     const orgId = String(body?.org_id || '');
     const userId = String(body?.user_id || '');
@@ -6855,6 +6887,68 @@ Write the persona now.`;
     // them before concurrent writes so one request cannot race itself.
     const clean = [...new Map(normalized.map((row) => [row.slug, row])).values()];
     if (!clean.length) return jsonResponse(res, { error: 'no complete qualified prospects' }, 400);
+    // Prospects belong to the tenant CRM surface. Keep the legacy memory writer
+    // available only behind its explicit compatibility flag, while the normal
+    // path persists Room discoveries in the same outreach target store rendered
+    // by Your Leads.
+    if (String(process.env.HYPER_PROSPECTS_TO_MEMORY || '').toLowerCase() !== 'true') {
+      if (!turnId) return jsonResponse(res, { error: 'turn_id is required for CRM lead persistence' }, 400);
+      try {
+        const turn = await prisma.hyperTurn.findFirst({
+          where: { id: turnId }, select: { roomId: true },
+        });
+        const room = turn?.roomId ? await prisma.hyperRoom.findFirst({
+          where: { id: turn.roomId, orgId, userId, archivedAt: null }, select: { id: true },
+        }) : null;
+        if (!room) return jsonResponse(res, { error: 'tenant Room not found for lead persistence' }, 404);
+        let campaign = await prisma.outreachCampaign.findFirst({
+          where: { orgId, userId, roomId: room.id, turnId, channel: 'email' },
+          include: { targets: { orderBy: { position: 'asc' } } },
+        });
+        if (!campaign) {
+          campaign = await prisma.outreachCampaign.create({
+            data: { roomId: room.id, turnId, userId, orgId, channel: 'email', status: 'queued' },
+            include: { targets: { orderBy: { position: 'asc' } } },
+          });
+        }
+        const keyFor = (row) => String(row.email || row.company || '').trim().toLowerCase();
+        const byKey = new Map((campaign.targets || []).map((row) => [keyFor(row), row]));
+        let position = (campaign.targets || []).reduce((max, row) => Math.max(max, Number(row.position) || 0), -1) + 1;
+        let created = 0;
+        for (const row of clean) {
+          const key = keyFor(row);
+          if (byKey.has(key)) continue;
+          const target = await prisma.outreachTarget.create({
+            data: {
+              campaignId: campaign.id, position: position++, company: row.company,
+              email: row.email || null, phone: row.phone || null,
+              website: row.website || null, address: row.address || null,
+              inputContext: {
+                source_url: records.find((source) => String(source?.company || '').trim() === row.company)?.source_url || row.website || null,
+                fit_rationale: row.fitReason, distinctive_signal: row.signal || null,
+                outreach_angle: row.angle, notes: row.content, source: row.source,
+              },
+            },
+          });
+          byKey.set(key, target); created += 1;
+        }
+        const persistedRecords = clean.map((row) => {
+          const target = byKey.get(keyFor(row));
+          return target ? {
+            record_id: target.id, memory_id: target.id, company: row.company,
+            email: row.email || null, campaign_id: campaign.id,
+          } : null;
+        }).filter(Boolean);
+        return jsonResponse(res, {
+          status: 'completed', store: 'outreach_targets', received: clean.length,
+          persisted: persistedRecords.length, created, updated: persistedRecords.length - created,
+          ids: persistedRecords.map((row) => row.record_id), records: persistedRecords,
+        }, 200);
+      } catch (err) {
+        console.warn('[prospects.bulk.crm] failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
     try {
       let created = 0; let updated = 0;
       const ids = [];

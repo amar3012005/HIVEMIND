@@ -1,0 +1,4 @@
+interface:
+  display_name: "Growth Plan"
+  short_description: "Turn company evidence into a bounded growth operating plan."
+  default_prompt: "Create an evidence-backed next growth stage for this organization."

@@ -269,7 +269,12 @@ export class GenericStageExecutor {
           playbook_id: playbook.playbook_id,
           playbook_version: playbook.version,
           stage_id: stage.id,
-          objective: stage.objective,
+          instruction: String(asObject(run.context).request?.instruction || asObject(run.context).request?.objective || stage.objective),
+          objective: run.completedStageIds.length
+            ? `${stage.objective}\n\nContinue the same execution for: ${String(asObject(run.context).request?.instruction || asObject(run.context).request?.objective || '').trim()}`.trim()
+            : String(asObject(run.context).request?.instruction || asObject(run.context).request?.objective || stage.objective),
+          stage_guidance: stage.objective,
+          runtime_context: asObject(run.context),
           expected_artifacts: stage.expected_artifacts,
           authority_granted: authorityGranted(run, stage),
           inputs: resolveInputs(run, stage, event),

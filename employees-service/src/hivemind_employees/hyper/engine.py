@@ -41,6 +41,7 @@ from ..hivemind_client import (
     connector_exec_emulated,
     connector_inspect_emulated,
     google_exec_emulated,
+    list_prospects_emulated,
     org_members_emulated,
     recall_emulated,
     report_llm_usage,
@@ -1207,7 +1208,9 @@ class Director:
         # recalled once before the turn. Injected into PLAN + SYNTH so the director grounds
         # queries + the deliverable in THIS company — not a generic industry. '' = no brief.
         self.company_brief = str(company_brief or "")
-        self.execution_context = str(execution_context or "")[:16000]
+        # Runtime phase envelopes carry bounded company, evidence, lifecycle, and
+        # artifact references. Keep the complete JSON contract parseable.
+        self.execution_context = str(execution_context or "")[:64000]
         self.room_phase = self._parse_room_phase_envelope(self.execution_context)
         self.runtime_stage = self._parse_runtime_stage_envelope(self.execution_context)
         self.work_order = (self._parse_work_order_envelope(self.execution_context)
@@ -1265,6 +1268,7 @@ class Director:
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)
         self.blackboard: List[str] = []
+        self._retained_prospect_rows: List[Dict[str, Any]] = []
         self.transcript: List[Dict[str, Any]] = []
         self.tokens = 0
         self.gather_count = 0
@@ -1342,13 +1346,13 @@ class Director:
 
     @staticmethod
     def _parse_room_phase_envelope(raw: str) -> Optional[Dict[str, Any]]:
-        if "room-phase.v1" not in str(raw or ""):
+        if "room-phase.v1" not in str(raw or "") and "room-phase.v2" not in str(raw or ""):
             return None
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
             return None
-        return parsed if isinstance(parsed, dict) and parsed.get("contract") == "room-phase.v1" else None
+        return parsed if isinstance(parsed, dict) and parsed.get("contract") in {"room-phase.v1", "room-phase.v2"} else None
 
     @staticmethod
     def _work_order_from_room_phase(phase: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -1360,29 +1364,28 @@ class Director:
         """
         if not isinstance(phase, dict):
             return None
-        inputs = phase.get("inputs") if isinstance(phase.get("inputs"), dict) else {}
-        target = inputs.get("context.target") if isinstance(inputs.get("context.target"), dict) else {}
-        constraints = (inputs.get("context.constraints")
-                       if isinstance(inputs.get("context.constraints"), dict) else {})
-        authority = phase.get("authority") if isinstance(phase.get("authority"), dict) else {}
-        expected = {str(value) for value in (phase.get("expected_artifacts") or [])}
-        requirements: List[Dict[str, Any]] = []
-        if "lead_record" in expected:
-            requirements.extend([
-                {"type": "records_persisted", "minimum": 1},
-                {"type": "source_evidence", "minimum": 1},
-                {"type": "distinct_fields", "minimum": 1},
-            ])
-        if "message_record" in expected:
-            requirements.append({"type": "email_drafts", "minimum": 1})
-        requirements.append({"type": "external_actions", "maximum": 0})
+        is_v2 = phase.get("contract") == "room-phase.v2"
+        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        inputs = (context.get("prior_artifacts") if is_v2 else phase.get("inputs"))
+        inputs = inputs if isinstance(inputs, dict) else {}
+        target = context.get("target") if isinstance(context.get("target"), dict) else {}
+        if not target:
+            target = inputs.get("context.target") if isinstance(inputs.get("context.target"), dict) else {}
+        constraints = context.get("request") if isinstance(context.get("request"), dict) else {}
+        if not constraints:
+            constraints = inputs.get("context.constraints") if isinstance(inputs.get("context.constraints"), dict) else {}
+        authority = lifecycle.get("authority") if is_v2 else phase.get("authority")
+        authority = authority if isinstance(authority, dict) else {}
+        expected = lifecycle.get("expected_artifacts") if is_v2 else phase.get("expected_artifacts")
+        expected = [str(value) for value in (expected or [])]
         return {
             "contract": "hq-work-order.v2",
             "work_order_id": f"room-phase:{phase.get('run_id')}:{phase.get('phase_id')}",
-            "objective": str(phase.get("objective") or "Complete the assigned Runtime phase."),
+            "objective": str(phase.get("instruction") or phase.get("objective") or "Complete the assigned Runtime phase."),
             "location": target.get("location") or target.get("geography"),
             "target": target,
-            "completion_requirements": requirements,
+            "completion_requirements": [],
             "upstream_result": None,
             "room_checkpoint": None,
             "authority": {
@@ -1390,14 +1393,23 @@ class Director:
                 "external_writes": authority.get("external_writes") is True,
             },
             "selected_skills": [],
-            "required_evidence": ["company context", "source-backed records", "durable lead identifiers"],
+            "required_evidence": ["Use the supplied company, baseline, prior artifacts, and exact targets only when relevant to the instruction."],
             "acceptance_criteria": [
-                "Produce every expected phase artifact from real Room tools and retained company evidence.",
-                "Persist accepted records before preparing personalized messages.",
-                "Return exact gaps rather than presenting unfinished work as complete.",
+                "Complete the natural instruction using the Room Director's normal skills and tools.",
+                "Return only real persisted artifacts that match the private lifecycle return contract.",
+                "Return exact unresolved gaps instead of presenting unfinished work as complete.",
             ],
             "evidence_refs": [],
             "constraints": constraints,
+            "runtime_support": {
+                "company": context.get("company"),
+                "baseline": context.get("baseline"),
+                "prior_artifacts": inputs,
+                "phase_guidance": lifecycle.get("guidance") if is_v2 else phase.get("objective"),
+                "expected_artifacts": expected,
+                "completion_checks": lifecycle.get("completion_checks") if is_v2 else phase.get("completion_checks"),
+                "execution_config": lifecycle.get("execution_config") if is_v2 else {},
+            },
         }
 
     # ── LLM ───────────────────────────────────────────────────────────
@@ -1916,7 +1928,9 @@ class Director:
             persisted_count = int(persisted.get("persisted") or 0) if isinstance(persisted, dict) else 0
             persisted_rows = persisted.get("records") if isinstance(persisted, dict) else []
             persisted_by_company = {
-                str(item.get("company") or "").strip().casefold(): str(item.get("memory_id") or "").strip()
+                str(item.get("company") or "").strip().casefold(): str(
+                    item.get("record_id") or item.get("memory_id") or item.get("lead_id") or ""
+                ).strip()
                 for item in (persisted_rows or []) if isinstance(item, dict)
             }
             for item in discovered:
@@ -2285,6 +2299,39 @@ class Director:
     def _prospect_count(self) -> int:
         return sum(1 for row in self.blackboard if "PROSPECT:" in str(row))
 
+    async def _prefetch_runtime_prospects(self) -> None:
+        """Load reusable CRM records when the versioned Room phase requests reuse-first execution."""
+        phase = self.room_phase if isinstance(self.room_phase, dict) else {}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        config = lifecycle.get("execution_config") if isinstance(lifecycle.get("execution_config"), dict) else {}
+        if self.room_kind != "outreach" or config.get("reuse_existing_records") is not True:
+            return
+        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
+        target = context.get("target") if isinstance(context.get("target"), dict) else {}
+        query = str(target.get("location") or target.get("sector") or "").strip()
+        payload = await list_prospects_emulated(
+            user_id=self.user_id, org_id=self.org_id, query=query, limit=100,
+        )
+        rows = [row for row in (payload.get("records") or []) if isinstance(row, dict)]
+        self._retained_prospect_rows = [
+            row for row in rows
+            if str(row.get("company") or "").strip()
+            and str(row.get("fit_reason") or "").strip()
+            and str(row.get("outreach_angle") or "").strip()
+            and (row.get("source_url") or row.get("website"))
+        ]
+        for row in self._retained_prospect_rows:
+            self.blackboard.append(
+                f"- RETAINED PROSPECT: {row.get('company')} | contact {row.get('email') or '—'} "
+                f"| {row.get('phone') or '—'} | {row.get('website') or '—'} | {row.get('address') or '—'} "
+                f"| fit {row.get('fit_reason')} | angle {row.get('outreach_angle')}"
+            )
+        await self.emit({
+            "t": "gather", "sources": ["your-leads"], "tool": "list_prospects",
+            "query": query or "accepted leads", "connector_hits": ["list_prospects"],
+            "memory_hits": len(self._retained_prospect_rows),
+        })
+
     async def _compose_outreach_email(
         self, record: Dict[str, Any], sender_company: str,
     ) -> Dict[str, Any]:
@@ -2328,12 +2375,12 @@ class Director:
         """Execute a Room Director plan under the HQ machine-result contract."""
         envelope = self.work_order or {}
         upstream = envelope.get("upstream_result") if isinstance(envelope.get("upstream_result"), dict) else {}
-        upstream_records = [
+        upstream_records = [*self._retained_prospect_rows, *[
             record
             for artifact in (upstream.get("deliverables") or []) if isinstance(artifact, dict)
             and artifact.get("kind") == "prospect_records"
             for record in (artifact.get("records") or []) if isinstance(record, dict)
-        ]
+        ]]
         requirements = [
             requirement for requirement in (envelope.get("completion_requirements") or [])
             if isinstance(requirement, dict)
@@ -2390,16 +2437,44 @@ class Director:
             }, ensure_ascii=False)})
         if plan.get("places_query"):
             planned_calls.append({"name": "places_search", "args_json": json.dumps({"query": str(plan["places_query"])}, ensure_ascii=False)})
-        outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else {}
+        phase_lifecycle = self.room_phase.get("lifecycle") if isinstance((self.room_phase or {}).get("lifecycle"), dict) else {}
+        phase_expected = {
+            str(value) for value in (phase_lifecycle.get("expected_artifacts") or [])
+        }
+        outreach = dict(plan.get("outreach_request")) if isinstance(plan.get("outreach_request"), dict) else {}
+        if self.room_kind == "outreach" and self.room_phase:
+            target = (self.work_order or {}).get("target") if isinstance((self.work_order or {}).get("target"), dict) else {}
+            # The phase declares outcomes, not a fixed tool sequence. Preserve
+            # the Director's approach while preventing omitted Room work and
+            # model-invented quotas.
+            outreach["discover"] = outreach.get("discover") is True or "lead_record" in phase_expected
+            outreach["persist"] = outreach.get("persist") is True or "lead_record" in phase_expected
+            outreach["draft"] = outreach.get("draft") is True or "message_record" in phase_expected
+            outreach["requested_count"] = target.get("quantity")
+            outreach["geography"] = outreach.get("geography") or target.get("location") or target.get("geography")
+            outreach["sector"] = outreach.get("sector") or target.get("sector")
+            outreach["audience"] = outreach.get("audience") or target.get("audience")
+            contactable_retained = sum(1 for row in self._retained_prospect_rows if str(row.get("email") or "").strip())
+            requested_count = outreach.get("requested_count")
+            if isinstance(requested_count, int) and requested_count > 0 and contactable_retained >= requested_count:
+                planned_calls = [call for call in planned_calls if call.get("name") != "places_search"]
+                plan["places_query"] = None
         prospect_work = bool(outreach.get("discover") or outreach.get("persist") or plan.get("places_query"))
         # The immutable phase contract is authoritative even when the Director's
         # semantic plan omitted an internal checkpoint. This does not prescribe
         # a tool sequence: it tells the Outreach Room to keep operating until its
         # declared deliverable exists.
-        draft_work = bool(outreach.get("draft")) or any(
+        draft_work = "message_record" in phase_expected or bool(outreach.get("draft")) or any(
             str(row.get("type") or "") == "email_drafts" and int(row.get("minimum") or 0) > 0
             for row in requirements
         )
+        if prospect_work and not plan.get("places_query") and not any(
+            str(call.get("name") or "") == "places_search"
+            for call in planned_calls if isinstance(call, dict)
+        ):
+            queries = await self._compose_places_queries()
+            for query in queries[:3]:
+                planned_calls.append({"name": "places_search", "args_json": json.dumps({"query": query}, ensure_ascii=False)})
         action = {
             "tool_calls": planned_calls,
             "requires_tool": bool(planned_calls),
@@ -2516,7 +2591,9 @@ class Director:
                     )
                     persisted_rows = persisted.get("records") if isinstance(persisted, dict) else []
                     persisted_by_company = {
-                        str(row.get("company") or "").strip().casefold(): str(row.get("memory_id") or "").strip()
+                        str(row.get("company") or "").strip().casefold(): str(
+                            row.get("record_id") or row.get("memory_id") or row.get("lead_id") or ""
+                        ).strip()
                         for row in (persisted_rows or []) if isinstance(row, dict)
                     }
                     for record in worker_records:
@@ -2569,6 +2646,78 @@ class Director:
                     if str(record.get("company") or "").strip()
                     and str(record.get("email") or "").strip()
                 ]
+                phase_context = self.room_phase.get("context") if isinstance((self.room_phase or {}).get("context"), dict) else {}
+                phase_request = phase_context.get("request") if isinstance(phase_context.get("request"), dict) else {}
+                exact_recipients = list(dict.fromkeys(
+                    str(row.get("value") or "").strip().casefold()
+                    for row in (phase_request.get("exact_targets") or [])
+                    if isinstance(row, dict)
+                    and str(row.get("type") or "").strip().casefold() == "email"
+                    and str(row.get("value") or "").strip()
+                ))
+                # Exact addresses are capability data, not lifecycle routing.
+                # Retain them from the natural instruction when an upstream
+                # semantic interpreter omitted the optional exact_targets field.
+                if not exact_recipients:
+                    exact_recipients = list(dict.fromkeys(
+                        match.casefold() for match in re.findall(
+                            r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+                            str((self.room_phase or {}).get("instruction") or self.user_message),
+                            re.I,
+                        )
+                    ))
+                if not verified_records and exact_recipients:
+                    response = await self._groq([
+                        {"role": "system", "content": (
+                            _now_block()
+                            + "You are the Outreach Room's message composer. Return one JSON object with "
+                              "email_drafts, an array containing exactly one object per supplied recipient. "
+                              "Each object has to, subject, and body. Follow the natural instruction and "
+                              "company evidence. Do not claim delivery, invent attachments, or add placeholders."
+                        )},
+                        {"role": "user", "content": json.dumps({
+                            "instruction": str((self.room_phase or {}).get("instruction") or self.user_message),
+                            "recipients": exact_recipients,
+                            "company_context": self.company_brief[:8000],
+                            "supporting_context": (self.work_order or {}).get("runtime_support") or {},
+                        }, ensure_ascii=False, default=str)[:24000]},
+                    ], model=self.persona_model, temp=0.2, bucket="worker", force_text=True,
+                       schema={
+                           "type": "object",
+                           "properties": {
+                               "email_drafts": {
+                                   "type": "array",
+                                   "items": {
+                                       "type": "object",
+                                       "properties": {
+                                           "to": {"type": "string"},
+                                           "subject": {"type": "string"},
+                                           "body": {"type": "string"},
+                                       },
+                                       "required": ["to", "subject", "body"],
+                                       "additionalProperties": False,
+                                   },
+                               },
+                           },
+                           "required": ["email_drafts"],
+                           "additionalProperties": False,
+                       }, max_tokens=1600)
+                    direct_payload = _first_json_object(str((response or {}).get("content") or "")) or {}
+                    for draft in (direct_payload.get("email_drafts") or []):
+                        if not isinstance(draft, dict):
+                            continue
+                        recipient = str(draft.get("to") or "").strip().casefold()
+                        subject = str(draft.get("subject") or "").strip()
+                        body = str(draft.get("body") or "").strip()
+                        if recipient not in exact_recipients or not subject or not body:
+                            continue
+                        generated_email_drafts.append({
+                            "to": recipient,
+                            "subject": subject[:500],
+                            "body": body[:6000],
+                            "rationale": "Prepared for the exact recipient in the Runtime instruction.",
+                            "source_url": "runtime-request:exact-recipient",
+                        })
                 for record in verified_records:
                     await self.emit({
                         "t": "typing", "agent": owner.get("slug"),
@@ -2632,6 +2781,26 @@ class Director:
                     str(record.get("company") or "").strip().casefold(): record
                     for record in draft_sources if str(record.get("company") or "").strip()
                 }
+                for draft in generated_email_drafts:
+                    supplied_to = str(draft.get("to") or "").strip().casefold()
+                    subject = str(draft.get("subject") or "").strip()
+                    body = str(draft.get("body") or "").strip()
+                    signature = re.search(
+                        r"\n(?:best regards|kind regards|regards|sincerely|thank you|thanks|mit freundlichen gr(?:ü|u)ßen)[,\s]*\n",
+                        body, re.I,
+                    )
+                    if signature:
+                        body = body[:signature.start()].rstrip()
+                    if (not str(draft.get("prospect_company") or "").strip()
+                            and supplied_to in exact_recipients and subject and body):
+                        email_drafts.append({
+                            "prospect_company": "",
+                            "to": supplied_to,
+                            "subject": subject[:500],
+                            "body": body[:6000],
+                            "rationale": str(draft.get("rationale") or "").strip()[:1000],
+                            "source_url": "runtime-request:exact-recipient",
+                        })
                 def accept_draft(draft: Any) -> Optional[Dict[str, str]]:
                     if not isinstance(draft, dict):
                         return None
@@ -2642,11 +2811,13 @@ class Director:
                     subject = str(draft.get("subject") or "").strip()
                     body = str(draft.get("body") or "").strip()
                     signature = re.search(
-                        r"\n(?:best|regards|kind regards|sincerely|thank you|thanks|mit freundlichen gr(?:ü|u)ßen)[,\s]*\n",
+                        r"\n(?:best regards|kind regards|regards|sincerely|thank you|thanks|mit freundlichen gr(?:ü|u)ßen)[,\s]*\n",
                         body, re.I)
                     if signature:
                         body = body[:signature.start()].rstrip()
-                    if not source or not verified_to or supplied_to != verified_to or not subject or not body:
+                    direct_recipient = supplied_to in exact_recipients
+                    if ((not direct_recipient and (not source or not verified_to or supplied_to != verified_to))
+                            or not subject or not body):
                         return None
                     if re.search(r"\[[^\]]+\]|<[^>]+>|\{\{[^}]+\}\}", subject + "\n" + body):
                         return None
@@ -2655,15 +2826,23 @@ class Director:
                     if re.search(r"\bguarantee(?:d|s|ing)?\b", body, re.I):
                         return None
                     return {
-                        "prospect_company": company, "to": verified_to,
+                        "prospect_company": company,
+                        "to": supplied_to if direct_recipient else verified_to,
                         "subject": subject[:500], "body": body[:6000],
                         "rationale": str(draft.get("rationale") or "").strip()[:1000],
-                        "source_url": str(source.get("source_url") or source.get("website") or "")[:1000],
+                        "source_url": (
+                            "runtime-request:exact-recipient" if direct_recipient
+                            else str((source or {}).get("source_url") or (source or {}).get("website") or "")[:1000]
+                        ),
                     }
 
                 for draft in (parsed_drafts.get("email_drafts") or []):
                     accepted_draft = accept_draft(draft)
-                    if accepted_draft:
+                    if accepted_draft and not any(
+                        row.get("to") == accepted_draft.get("to")
+                        and row.get("subject") == accepted_draft.get("subject")
+                        for row in email_drafts
+                    ):
                         email_drafts.append(accepted_draft)
 
                 if email_drafts:
@@ -2760,8 +2939,19 @@ class Director:
     def _compile_room_phase_result(self, work_order_result: Dict[str, Any]) -> Dict[str, Any]:
         """Compile verified Room deliverables into append-only playbook artifacts."""
         phase = self.room_phase or {}
-        expected = {str(value) for value in (phase.get("expected_artifacts") or [])}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        expected = {str(value) for value in (lifecycle.get("expected_artifacts") or phase.get("expected_artifacts") or [])}
         deliverables = [row for row in (work_order_result.get("deliverables") or []) if isinstance(row, dict)]
+        if not deliverables:
+            # The synthesis wrapper may omit a machine deliverable while
+            # shortening its report. Verified subtask artifacts remain the
+            # authoritative Room evidence and are safe to compile directly.
+            deliverables = [
+                artifact
+                for result in self.work_results if isinstance(result, dict)
+                for artifact in ((result.get("output") or {}).get("artifacts") or [])
+                if isinstance(artifact, dict)
+            ]
         prospect_records = [
             record for artifact in deliverables if artifact.get("kind") == "prospect_records"
             for record in (artifact.get("records") or []) if isinstance(record, dict)
@@ -2774,9 +2964,13 @@ class Director:
             str(record.get("prospect_company") or "").strip().casefold(): record
             for record in draft_records if str(record.get("prospect_company") or "").strip()
         }
-        inputs = phase.get("inputs") if isinstance(phase.get("inputs"), dict) else {}
+        direct_drafts = [record for record in draft_records if str(record.get("to") or "").strip()]
+        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
+        inputs = context.get("prior_artifacts") if isinstance(context.get("prior_artifacts"), dict) else phase.get("inputs")
+        inputs = inputs if isinstance(inputs, dict) else {}
+        request = context.get("request") if isinstance(context.get("request"), dict) else {}
         constraints = inputs.get("context.constraints") if isinstance(inputs.get("context.constraints"), dict) else {}
-        delivery_requested = constraints.get("delivery_requested") is True
+        delivery_requested = request.get("external_action_requested") is True or constraints.get("delivery_requested") is True
         artifacts: List[Dict[str, Any]] = []
         lead_by_company: Dict[str, str] = {}
 
@@ -2813,6 +3007,7 @@ class Director:
                         "company": company,
                         "persistence_ref": persistence_ref,
                         "recipient": recipient,
+                        "address": str(record.get("address") or "").strip(),
                         "fit_rationale": str(record.get("fit_reason") or record.get("fit_rationale") or "").strip(),
                         "outreach_angle": str(record.get("outreach_angle") or "").strip(),
                     },
@@ -2822,6 +3017,7 @@ class Director:
                 lead_by_company[company_key] = lead_id
 
         if "message_record" in expected:
+            used_draft_ids = set()
             for company_key, draft in drafts_by_company.items():
                 lead_ref = lead_by_company.get(company_key)
                 recipient = str(draft.get("to") or "").strip()
@@ -2842,6 +3038,32 @@ class Director:
                         "delivery_requested": delivery_requested,
                     },
                     "source_refs": [lead_ref],
+                    "external_ref": None,
+                })
+                used_draft_ids.add(id(draft))
+            # Exact-recipient requests do not require artificial prospect
+            # discovery. Preserve the Room's real composed draft as a message
+            # artifact even when no lead record is part of this lifecycle.
+            for draft in direct_drafts:
+                if id(draft) in used_draft_ids:
+                    continue
+                recipient = str(draft.get("to") or "").strip()
+                subject = str(draft.get("subject") or "").strip()
+                body = str(draft.get("body") or "").strip()
+                if not recipient or not subject or not body:
+                    continue
+                message_id = artifact_id("message_record", recipient.casefold())
+                artifacts.append({
+                    "id": message_id,
+                    "key": "message_record",
+                    "status": "READY",
+                    "data": {
+                        "recipient": recipient,
+                        "subject": subject,
+                        "body": body,
+                        "delivery_requested": delivery_requested,
+                    },
+                    "source_refs": ["runtime-request:exact-recipient"],
                     "external_ref": None,
                 })
 
@@ -3418,7 +3640,9 @@ class Director:
             "the task. Fewer, sharper queries beat many — each costs money.\n"
             "- Return {\"queries\": []} when the board already has enough prospects or Maps cannot help."
         )
+        work_target = ((self.work_order or {}).get("target") or {}) if self.work_order else {}
         user = (f"TASK: {(self.user_message or '')[:500]}\n"
+                f"ASSIGNMENT TARGET: {json.dumps(work_target, ensure_ascii=False)[:900]}\n"
                 f"PROSPECTS ALREADY ON BOARD: {prospects}\n"
                 f"BOARD (latest context):\n{board_ctx}")
         try:
@@ -4765,6 +4989,7 @@ class Director:
                 "report_contract": True,
             })
         await self._init_connector_tools()  # register toggled connectors as read tools
+        await self._prefetch_runtime_prospects()
         if self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             self.blackboard.append("GROWTH_CONTEXT[authoritative]: " + self.execution_context[:12000])
         # PHASE 1 — STRUCTURED GATHER PLAN. One JSON-schema call (NOT native tool-calling)

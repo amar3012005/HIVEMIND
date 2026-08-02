@@ -141,7 +141,7 @@ function _resolveClient() {
   const ctxOrg = _orgCtx.getStore()?.orgId;
   if (ctxOrg) {
     const c = clientForOrg(ctxOrg); // full residency: memory→customer PG, global→central
-    if (process.env.MNEME_DEBUG_ROUTING) console.log('[resolve] ctxOrg', ctxOrg, 'split?', !!c);
+    if (process.env.MNEME_DEBUG_ROUTING === '1') console.log('[resolve] ctxOrg', ctxOrg, 'split?', !!c);
     if (c) return c;
   }
   const real = buildRealClient();

@@ -1,0 +1,5 @@
+FROM hivemind/control-plane:prod-20260802-runtime-room-input-v4
+
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/predicate-engine.js /app/src/runtime-playbooks/predicate-engine.js
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/fixtures/registry.json /app/src/runtime-playbooks/fixtures/registry.json
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/fixtures/outreach-prospect-to-conversation.v10.json /app/src/runtime-playbooks/fixtures/outreach-prospect-to-conversation.v10.json

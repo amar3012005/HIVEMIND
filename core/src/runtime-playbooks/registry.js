@@ -126,6 +126,8 @@ export class RuntimePlaybookRegistry {
         status: record.definition.status,
         name: record.definition.name,
         description: record.definition.description || '',
+        metadata: record.definition.metadata || {},
+        terminal_states: record.definition.terminal_states || [],
         input_contract: record.definition.input_contract || { fields: [] },
         content_hash: record.content_hash,
       }))

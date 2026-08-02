@@ -210,6 +210,29 @@ async def save_prospects_bulk_emulated(*, prospects: List[Dict[str, Any]], user_
         return {"error": str(exc)[:200]}
 
 
+async def list_prospects_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                                  query: str = "", limit: int = 50,
+                                  api_key: str = "") -> Dict[str, Any]:
+    """Read the tenant CRM lead book through the same private boundary used for writes."""
+    if not user_id or not org_id:
+        return {"error": "user_id and org_id are required", "records": []}
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL") or "http://hm-control:3000").rstrip("/")
+    headers = {"Authorization": f"Bearer {key}", "X-API-Key": key}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            response = await client.get(f"{base}/internal/hyper/prospects", headers=headers, params={
+                "org_id": org_id, "user_id": user_id, "query": str(query or "")[:240],
+                "limit": max(1, min(int(limit or 50), 100)),
+            })
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[prospects.list] failed: %s", exc)
+        return {"error": str(exc)[:200], "records": []}
+
+
 async def list_tagged_emulated(*, tags: str, user_id: Optional[str], org_id: Optional[str],
                                api_key: str = "", limit: int = 6) -> list:
     """Guaranteed tag-filtered memory lane (same pattern as the org-canon lane) —

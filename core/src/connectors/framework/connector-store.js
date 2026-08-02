@@ -313,7 +313,7 @@ export class ConnectorStore {
     const record = await this.prisma.platformIntegration.findFirst({
       where: {
         platformType: provider,
-        userAccountRef: { equals: normalized, mode: 'insensitive' },
+        platformUserId: { equals: normalized, mode: 'insensitive' },
         syncStatus: { not: 'revoked' },
       },
     });

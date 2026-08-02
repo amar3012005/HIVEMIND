@@ -15,6 +15,10 @@ export async function ensureHqRuntime({ prisma, orgId, userId, objective, author
   const mergedAuthorityPolicy = normalizeAuthorityPolicy({
     ...(current?.authorityPolicy || {}),
     ...authorityPolicy,
+    gate_overrides: {
+      ...(current?.authorityPolicy?.gate_overrides || {}),
+      ...(authorityPolicy?.gate_overrides || {}),
+    },
   });
   return prisma.hqRuntime.upsert({
     where: { orgId },
@@ -73,6 +77,7 @@ export async function resetHqForCompanyReplacement({ prisma, orgId }) {
       data: {
         epoch: nextEpoch,
         objective: FIRST_LIFE_OBJECTIVE,
+        authorityPolicy: normalizeAuthorityPolicy({}),
         state: 'INACTIVE', activeGoalId: null, activeStageId: null,
         currentCycleId: null, nextWakeAt: null, pauseReason: null,
         blockedReason: null, eventSequence: 0, activatedAt: null,
@@ -112,6 +117,7 @@ export async function activateHqAfterOnboarding({ prisma, orgId, userId, objecti
     },
     update: {
       ownerUserId: userId, objective: normalizedObjective, state: 'INACTIVE',
+      authorityPolicy: normalizeAuthorityPolicy({}),
       activeGoalId: null, activeStageId: null, currentCycleId: null,
       nextWakeAt: null, pauseReason: null, blockedReason: null,
       activatedAt: null, version: { increment: 1 },

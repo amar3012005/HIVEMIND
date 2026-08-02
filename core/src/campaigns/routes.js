@@ -2,11 +2,15 @@ import { getCampaignCapabilities } from './capabilities.js';
 import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, deleteCampaign, editCampaignAction, getCampaign, getCampaignSettings, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics, updateCampaignSettings } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { processDueCampaignActions } from './worker.js';
-import { campaignWorkerEnabled } from './state.js';
+import { campaignWorkerEnabled, requireCampaignsV2 } from './state.js';
 import {
   deleteCampaignAsset, enqueueCampaignImages, getCampaignAssetContent, MAX_UPLOAD_BYTES,
   selectCampaignAsset, uploadCampaignAsset,
 } from './image-service.js';
+import {
+  disconnectCampaignAccount, getCampaignConnectionState, provisionCampaignConnectionState,
+  listCampaignAdAccounts, selectCampaignAdAccount, startCampaignAccountConnection, syncCampaignConnectionState,
+} from './zernio-execution.js';
 
 function sendError(res, jsonResponse, error) {
   return jsonResponse(res, { error: error.code || 'campaign_error', message: error.message, ...(error.details != null ? { details: error.details } : {}) }, error.status || 500);
@@ -59,6 +63,7 @@ function multipartImage(req, raw) {
 
 export async function handleCampaignRequest({ pathname, method, body, req, res, prisma, userId, orgId, jsonResponse, auditLogger }) {
   try {
+    if (pathname === '/api/campaigns/connections' || pathname.startsWith('/api/campaigns/connections/')) requireCampaignsV2(orgId);
     if (pathname === '/api/campaigns/capabilities' && method === 'GET') {
       return jsonResponse(res, await getCampaignCapabilities({ prisma, userId, orgId }));
     }
@@ -69,6 +74,49 @@ export async function handleCampaignRequest({ pathname, method, body, req, res, 
       const settings = await updateCampaignSettings({ prisma, orgId, userId, autonomyMode: body?.autonomy_mode });
       await audit(prisma, auditLogger, { userId, orgId, action: 'autonomy_changed', campaignId: null, metadata: settings });
       return jsonResponse(res, settings);
+    }
+    if (pathname === '/api/campaigns/connections' && method === 'GET') {
+      return jsonResponse(res, await getCampaignConnectionState({ prisma, orgId }));
+    }
+    if (pathname === '/api/campaigns/connections/provision' && method === 'POST') {
+      const state = await provisionCampaignConnectionState({ prisma, orgId, userId });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'execution_profile_provisioned', campaignId: null, metadata: { account_count: state.account_count } });
+      return jsonResponse(res, state, 201);
+    }
+    if (pathname === '/api/campaigns/connections/sync' && method === 'POST') {
+      const state = await syncCampaignConnectionState({ prisma, orgId });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'execution_connections_synced', campaignId: null, metadata: { account_count: state.account_count } });
+      return jsonResponse(res, state);
+    }
+    if (pathname === '/api/campaigns/connections/connect' && method === 'POST') {
+      const connection = await startCampaignAccountConnection({
+        prisma, orgId, userId, platform: body?.platform, connectionKind: body?.connection_kind,
+        accountRef: body?.account_ref, returnPath: body?.return_path,
+      });
+      await audit(prisma, auditLogger, {
+        userId, orgId, action: 'execution_connection_started', campaignId: null,
+        metadata: { platform: connection.platform, connection_kind: connection.connection_kind },
+      });
+      return jsonResponse(res, connection);
+    }
+    if (pathname === '/api/campaigns/connections/disconnect' && method === 'POST') {
+      const state = await disconnectCampaignAccount({ prisma, orgId, accountRef: body?.account_ref });
+      await audit(prisma, auditLogger, {
+        userId, orgId, action: 'execution_connection_removed', campaignId: null,
+        metadata: { account_ref: body?.account_ref || null },
+      });
+      return jsonResponse(res, state);
+    }
+    if (pathname === '/api/campaigns/connections/ad-accounts' && method === 'GET') {
+      const requestUrl = new URL(req.url, 'http://localhost');
+      return jsonResponse(res, { accounts: await listCampaignAdAccounts({ prisma, orgId, accountRef: requestUrl.searchParams.get('account_ref') }) });
+    }
+    if (pathname === '/api/campaigns/connections/ad-accounts/select' && method === 'POST') {
+      const state = await selectCampaignAdAccount({
+        prisma, orgId, channel: body?.channel, accountRef: body?.account_ref, adAccountRef: body?.ad_account_ref,
+      });
+      await audit(prisma, auditLogger, { userId, orgId, action: 'ad_account_selected', campaignId: null, metadata: { channel: body?.channel || null } });
+      return jsonResponse(res, state);
     }
     if (pathname === '/api/campaigns' && method === 'GET') {
       return jsonResponse(res, { campaigns: await listCampaigns({ prisma, orgId }) });

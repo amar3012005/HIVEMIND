@@ -1,0 +1,11 @@
+# Overlay on the image the OTHER session deployed, adding back only the files it
+# predates. Built this way so their work is preserved rather than reverted — the
+# collision on 2026-08-02 was two sessions each rebuilding from a shared dirty tree.
+FROM hivemind/core-api:prod-20260802-e3bbbe77c0c5
+
+COPY core/src/routes/chat.js /app/src/routes/chat.js
+COPY core/src/control-plane-server.js /app/src/control-plane-server.js
+COPY core/src/knowledge/enterprise/docling-adapter.js /app/src/knowledge/enterprise/docling-adapter.js
+COPY core/src/memory/prisma-graph-store.js /app/src/memory/prisma-graph-store.js
+COPY core/src/services/image-ingest.js /app/src/services/image-ingest.js
+COPY core/src/server.js /app/src/server.js

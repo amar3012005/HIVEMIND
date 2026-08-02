@@ -24,10 +24,15 @@ export function createTenantRecordsAdapter({ prisma } = {}) {
       if (references.length !== artifacts.length * recordPaths.length) {
         return { passed: false, evidence: [], unmet: [{ predicate: 'record_exists', reason: 'durable_record_reference_missing' }] };
       }
-      const rows = await prisma.memory.findMany({
-        where: { id: { in: references }, orgId: context.orgId, deletedAt: null, isLatest: true },
-        select: { id: true },
-      });
+      const recordStore = String(config.record_store || 'memories');
+      const rows = recordStore === 'outreach_targets'
+        ? await prisma.outreachTarget.findMany({
+          where: { id: { in: references }, campaign: { orgId: context.orgId } }, select: { id: true },
+        })
+        : await prisma.memory.findMany({
+          where: { id: { in: references }, orgId: context.orgId, deletedAt: null, isLatest: true },
+          select: { id: true },
+        });
       const found = new Set(rows.map((row) => row.id));
       const missing = references.filter((reference) => !found.has(reference));
 
@@ -49,7 +54,7 @@ export function createTenantRecordsAdapter({ prisma } = {}) {
       return {
         passed: missing.length === 0 && missingSources.length === 0,
         evidence: [
-          ...rows.map((row) => ({ type: 'tenant_record', id: row.id })),
+          ...rows.map((row) => ({ type: recordStore, id: row.id })),
           ...sourceRows.map((row) => ({ type: 'source_artifact', id: row.id })),
         ],
         unmet: [

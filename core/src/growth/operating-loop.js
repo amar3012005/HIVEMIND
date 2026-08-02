@@ -6,7 +6,7 @@ export function evaluateNextGrowthAction({ baseline, stage, delegations = [], no
   if (stage.status === 'PAUSED') return { action: 'iterate', reason: 'The current stage is paused and needs an evidence-backed decision.', priority: 'medium' };
   if (stage.checkpoint_at && new Date(stage.checkpoint_at) <= now) return { action: 'monitor', reason: 'The stage checkpoint is due; compare connector results with its thresholds.', priority: 'high' };
   if (!delegations.some((item) => ['PENDING', 'RUNNING', 'COMPLETED'].includes(item.status))) return { action: 'delegate', reason: 'The active stage has no specialist work in progress.', priority: 'high' };
-  return { action: 'monitor', reason: 'Observe real channel and campaign outcomes until the next checkpoint.', priority: 'normal' };
+  return { action: 'monitor', reason: 'Observe correlated lifecycle outcomes until the next checkpoint.', priority: 'normal' };
 }
 
 export async function getGrowthOperatingState({ prisma, orgId }) {
@@ -38,7 +38,6 @@ export async function createGrowthGoal({ prisma, orgId, userId, title, objective
   return goal;
 }
 
-const ROOM_TAGS = new Set(['campaign', 'seo', 'marketing', 'branding', 'research', 'product', 'design', 'fundraising', 'legal_finance', 'sales', 'outreach']);
 const CONSTRAINTS = new Set(['positioning', 'reach', 'conversion', 'qualified_pipeline', 'retention', 'measurement']);
 
 const compact = (value) => JSON.stringify(value, null, 2);
@@ -172,9 +171,6 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
   if (!CONSTRAINTS.has(constraint)) throw new Error('Growth plan must choose one supported constraint');
   const queue = Array.isArray(contract.operating_queue) ? contract.operating_queue : [];
   if (!queue.length) throw new Error('Growth plan must contain an operating queue');
-  if (queue.some((item) => !ROOM_TAGS.has(String(item?.room_tag || '').toLowerCase()))) {
-    throw new Error('Growth plan queue contains an unsupported specialist room');
-  }
   const stage = contract.stage || {};
   const durationDays = Number(stage.duration_days);
   if (!Number.isInteger(durationDays) || durationDays < 7 || durationDays > 30) throw new Error('Growth stage must be bounded to 7-30 days');
@@ -237,13 +233,19 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
         String(hypothesis.expected_signal || ''), String(hypothesis.falsification || ''),
       );
     }
+    const firstLife = contract.first_life && typeof contract.first_life === 'object' ? contract.first_life : null;
+    const recommendedSourceId = String(firstLife?.recommended_todo_source_id || stage.queue_item_id || '');
     const todos = [];
     for (const [index, item] of queue.entries()) {
       const target = item.target && typeof item.target === 'object' ? item.target : {};
+      const proposalConstraint = constraints.find((row) => String(row?.id || '') === String(item.constraint_id || contract.primary_constraint_id || ''));
+      const proposalEvidenceRefs = Array.isArray(item.evidence_refs) && item.evidence_refs.length
+        ? item.evidence_refs
+        : Array.isArray(proposalConstraint?.evidence_refs) ? proposalConstraint.evidence_refs : sourceRefs;
       const todo = await tx.hqTodo.create({ data: {
         runtimeId: runtime.id, orgId,
         title: String(item.title).slice(0, 240), objective: String(item.objective),
-        kind: String(item.kind || item.room_tag).toLowerCase(), status: 'READY',
+        kind: String(item.kind || item.room_tag).toLowerCase(), status: firstLife ? 'PROPOSED' : 'READY',
         priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : (index + 1) * 10,
         position: Number.isFinite(Number(item.position)) ? Number(item.position) : index,
         requiredCapabilities: Array.isArray(item.required_capabilities) ? item.required_capabilities : [],
@@ -257,6 +259,19 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           constraint_id: item.constraint_id || contract.primary_constraint_id,
           baseline_ref: contract.baseline_ref, growth_plan_cycle_id: hqCycleId || null,
           runtime_epoch: runtime.epoch,
+          activation_sprint_id: item.activation_sprint_id || null,
+          activation_slot: item.activation_slot || null,
+          proposal_source_id: item.id || null,
+          first_life_policy_id: item.first_life_policy_id || firstLife?.policy_id || null,
+          first_life_policy_version: item.first_life_policy_version || firstLife?.policy_version || null,
+          recommendation_rank: Number(item.recommendation_rank || index + 1),
+          recommended: String(item.id || '') === recommendedSourceId,
+          effect_class: item.external_action_requested === true ? 'external' : 'internal',
+          response_locale: contract.response_locale || null,
+          evidence_refs: proposalEvidenceRefs,
+          requested_action: item.requested_action || null,
+          requested_terminal_outcome: item.requested_terminal_outcome || null,
+          external_action_requested: item.external_action_requested === true,
           authority_mode: 'PREPARE',
           ignored_capability_suggestions: Array.isArray(item.ignored_capability_suggestions) ? item.ignored_capability_suggestions : [],
         },
@@ -268,7 +283,14 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
        (org_id,growth_goal_id,growth_stage_id,actor_user_id,event_type,summary,evidence_refs,decision)
        VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,'initial_operating_queue_committed',$5,$6::jsonb,$7::jsonb)`,
       orgId, goal.id, createdStage.id, userId, `HQ ranked ${constraints.length} constraints and committed ${todos.length} ordered operating todo(s).`,
-      JSON.stringify(sourceRefs), JSON.stringify({ turn_id: turnId, hq_cycle_id: hqCycleId, todo_ids: todos.map((todo) => todo.id), runtime_epoch: runtime.epoch }),
+      JSON.stringify(sourceRefs), JSON.stringify({
+        turn_id: turnId,
+        hq_cycle_id: hqCycleId,
+        todo_ids: todos.map((todo) => todo.id),
+        recommended_todo_id: todos.find((todo) => todo.context?.recommended)?.id || null,
+        first_life: firstLife,
+        runtime_epoch: runtime.epoch,
+      }),
     );
     return { goal, stage: createdStage, todos };
   }, { timeout: 15000 });

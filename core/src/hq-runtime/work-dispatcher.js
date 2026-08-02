@@ -1,5 +1,6 @@
 import { appendHqEvent, scheduleHqWake } from './repository.js';
 import { validateWorkResultPacket } from './contracts.js';
+import { employeesSidecarUrl, runtimeRequestJson } from '../runtime-transport/client.js';
 
 export function specialistEventSummary({ status, packet = {}, orderTitle = '' }) {
   const artifacts = Array.isArray(packet.artifacts) ? packet.artifacts.length : 0;
@@ -19,10 +20,80 @@ function internalKey() {
 }
 
 function sidecarUrl() {
-  return process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+  return employeesSidecarUrl();
 }
 
-async function nextQueuedOrder(prisma) {
+const WORK_LEASE_MS = Math.max(30000, Number(process.env.HQ_WORK_ORDER_LEASE_MS || 120000));
+const WORK_HEARTBEAT_MS = Math.max(10000, Number(process.env.HQ_WORK_ORDER_HEARTBEAT_MS || 30000));
+const WORK_MAX_ATTEMPTS = Math.max(1, Number(process.env.HQ_WORK_ORDER_MAX_ATTEMPTS || 3));
+
+export async function reconcileExpiredWorkOrders({ prisma, logger = console } = {}) {
+  const expired = await prisma.hyperWorkOrder.findMany({
+    where: {
+      hqCycleId: { not: null }, status: 'running',
+      leaseExpiresAt: { lt: new Date() },
+    },
+    orderBy: { leaseExpiresAt: 'asc' }, take: 50,
+  });
+  const reconciled = [];
+  for (const order of expired) {
+    const result = await prisma.hyperWorkResult.findFirst({
+      where: { workOrderId: order.id }, orderBy: { attempt: 'desc' },
+    });
+    if (result) {
+      await prisma.hyperWorkOrder.updateMany({
+        where: { id: order.id, status: 'running', leaseExpiresAt: { lt: new Date() } },
+        data: {
+          status: result.status,
+          completedAt: ['completed', 'blocked', 'failed'].includes(result.status) ? result.createdAt : null,
+          error: result.status === 'completed' ? null : String(result.summary || result.status).slice(0, 2000),
+          leaseOwner: null, leaseExpiresAt: null, lastHeartbeatAt: null,
+        },
+      });
+      reconciled.push({ id: order.id, outcome: 'result_reconciled' });
+      continue;
+    }
+    const turn = order.turnId ? await prisma.hyperTurn.findUnique({
+      where: { id: order.turnId }, select: { status: true },
+    }) : null;
+    if (turn?.status === 'complete') {
+      await prisma.hyperWorkOrder.updateMany({
+        where: { id: order.id, status: 'running', leaseExpiresAt: { lt: new Date() } },
+        data: {
+          status: 'blocked', completedAt: new Date(),
+          error: 'room_turn_completed_without_typed_work_result',
+          leaseOwner: null, leaseExpiresAt: null, lastHeartbeatAt: null,
+        },
+      });
+      reconciled.push({ id: order.id, outcome: 'completed_turn_needs_intervention' });
+      continue;
+    }
+    if (order.attempt >= WORK_MAX_ATTEMPTS) {
+      await prisma.hyperWorkOrder.updateMany({
+        where: { id: order.id, status: 'running', leaseExpiresAt: { lt: new Date() } },
+        data: {
+          status: 'blocked', completedAt: new Date(),
+          error: 'room_work_infrastructure_attempts_exhausted',
+          leaseOwner: null, leaseExpiresAt: null, lastHeartbeatAt: null,
+        },
+      });
+      reconciled.push({ id: order.id, outcome: 'attempts_exhausted' });
+      continue;
+    }
+    const reset = await prisma.hyperWorkOrder.updateMany({
+      where: { id: order.id, status: 'running', leaseExpiresAt: { lt: new Date() } },
+      data: {
+        status: 'queued', error: 'reclaimed_after_expired_worker_lease',
+        leaseOwner: null, leaseExpiresAt: null, lastHeartbeatAt: null,
+      },
+    });
+    if (reset.count) reconciled.push({ id: order.id, outcome: 'requeued' });
+  }
+  if (reconciled.length) logger.warn('[hq-runtime] reconciled expired Room work:', reconciled);
+  return reconciled;
+}
+
+async function nextQueuedOrder(prisma, leaseOwner) {
   // Claim Room-owned work atomically so multiple bounded workers can execute
   // independent Company Rooms concurrently without selecting the same order.
   // Non-Room legacy work remains on the sidecar's own claim path below.
@@ -41,7 +112,12 @@ async function nextQueuedOrder(prisma) {
        LIMIT 1
     ), claimed AS (
       UPDATE hivemind.hyper_work_orders wo
-         SET status = 'running', started_at = COALESCE(started_at, now())
+         SET status = 'running',
+             started_at = COALESCE(started_at, now()),
+             attempt = attempt + 1,
+             lease_owner = $1,
+             lease_expires_at = now() + ($2::bigint * interval '1 millisecond'),
+             last_heartbeat_at = now()
         FROM candidate
        WHERE wo.id = candidate.id
        RETURNING wo.*
@@ -49,7 +125,7 @@ async function nextQueuedOrder(prisma) {
     SELECT wo.id, wo.org_id, wo.hq_cycle_id, wo.growth_delegation_id,
            wo.title, wo.objective, wo.kind, wo.room_id,
            wo.selected_skills, wo.acceptance_criteria, wo.required_evidence,
-           wo.input_snapshot, wo.evidence_refs, wo.runtime_epoch,
+           wo.input_snapshot, wo.evidence_refs, wo.runtime_epoch, wo.attempt,
            r.room_tag, r.goal AS room_goal, r.project_id, r.participant_ids,
            -- Work orders carry an owning EMPLOYEE, never a user. Tenant identity for
            -- the delegated Room turn comes from the runtime owner (server-side only),
@@ -59,7 +135,7 @@ async function nextQueuedOrder(prisma) {
       FROM claimed wo
       JOIN hivemind.hq_runtimes rt ON rt.org_id = wo.org_id
       LEFT JOIN hivemind.hyper_rooms r ON r.id = wo.room_id
-  `);
+  `, leaseOwner, WORK_LEASE_MS);
   if (roomRows[0]) return roomRows[0];
   const legacyRows = await prisma.$queryRawUnsafe(`
     SELECT wo.id, wo.org_id, wo.hq_cycle_id, wo.growth_delegation_id,
@@ -83,11 +159,14 @@ async function nextQueuedOrder(prisma) {
   return legacyRows[0] || null;
 }
 
-export async function drainHqWorkOrders({ prisma, logger = console, concurrency = 2 } = {}) {
+export async function drainHqWorkOrders({ prisma, logger = console, concurrency = 2, leaseOwner = `hq-worker:${process.pid}`, transport = runtimeRequestJson } = {}) {
+  await reconcileExpiredWorkOrders({ prisma, logger });
   const width = Math.max(1, Math.min(4, Number(concurrency) || 2));
   const completed = [];
   while (true) {
-    const batch = await Promise.all(Array.from({ length: width }, () => dispatchNextHqWorkOrder({ prisma, logger })));
+    const batch = await Promise.all(Array.from({ length: width }, (_, index) => dispatchNextHqWorkOrder({
+      prisma, logger, leaseOwner: `${leaseOwner}:${index}`, transport,
+    })));
     const active = batch.filter(Boolean);
     if (!active.length) return completed;
     completed.push(...active);
@@ -214,7 +293,8 @@ export async function createRoomTurn(prisma, order) {
     `INSERT INTO hivemind.hyper_turns (room_id, seq, user_message, status, idempotency_key)
      SELECT $1::uuid, COALESCE(MAX(seq), 0) + 1, $2, 'live', $3
        FROM hivemind.hyper_turns WHERE room_id = $1::uuid
-     ON CONFLICT (idempotency_key) DO UPDATE SET status = 'live'
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET status = CASE WHEN hivemind.hyper_turns.status = 'complete' THEN hivemind.hyper_turns.status ELSE 'live' END
      RETURNING id`,
     order.room_id, workOrderDisplayMessage(order).slice(0, 8000), `hq-wo:${order.id}`,
   );
@@ -271,8 +351,8 @@ function resultPacket(body, status) {
   });
 }
 
-export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {}) {
-  const order = await nextQueuedOrder(prisma);
+export async function dispatchNextHqWorkOrder({ prisma, logger = console, leaseOwner = `hq-worker:${process.pid}`, transport = runtimeRequestJson } = {}) {
+  const order = await nextQueuedOrder(prisma, leaseOwner);
   if (!order) return null;
   const key = internalKey();
   if (!key) throw new Error('hq_dispatch_internal_key_missing');
@@ -286,10 +366,18 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
   let response;
   let body;
   let roomTurnId = null;
+  let heartbeat = null;
   try {
+    heartbeat = setInterval(() => prisma.hyperWorkOrder.updateMany({
+      where: { id: order.id, status: 'running', leaseOwner },
+      data: { leaseExpiresAt: new Date(Date.now() + WORK_LEASE_MS), lastHeartbeatAt: new Date() },
+    }).catch(() => {}), WORK_HEARTBEAT_MS);
     if (useRoom) {
       roomTurnId = await createRoomTurn(prisma, order);
-      response = await fetch(`${sidecarUrl()}/internal/hyper/room-turn`, {
+      await prisma.hyperWorkOrder.updateMany({
+        where: { id: order.id, status: 'running', leaseOwner }, data: { turnId: roomTurnId },
+      });
+      response = await transport(`${sidecarUrl()}/internal/hyper/room-turn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
         body: JSON.stringify({
@@ -312,25 +400,33 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
           callback_url: `${controlPlaneUrl()}/internal/hyper/turn-event`,
           write_policy: asObject(order.input_snapshot).authority?.mode === 'EXECUTE' ? 'ask' : 'deny',
         }),
-        signal: AbortSignal.timeout(600000),
+        timeoutMs: 600000,
       });
     } else {
-      response = await fetch(`${sidecarUrl()}/internal/hq/work-order/execute`, {
+      response = await transport(`${sidecarUrl()}/internal/hq/work-order/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
         body: JSON.stringify({ work_order_id: order.id, org_id: order.org_id }),
-        signal: AbortSignal.timeout(180000),
+        timeoutMs: 180000,
       });
     }
-    body = await response.json().catch(() => ({}));
+    body = response.body || {};
   } catch (error) {
     // The executor claims before model execution, so a transport timeout is
     // ambiguous and must be reconciled from the durable Work Order, not replayed.
     // Return NULL, not a truthy row: the caller drains with `while (await ...)`,
     // and a truthy ambiguous result spins that loop forever whenever the sidecar
     // is unreachable — which also starves the schedule drain in the same tick.
-    logger.warn('[hq-runtime] specialist dispatch transport outcome is ambiguous:', error.message);
+    logger.warn('[hq-runtime] specialist dispatch transport outcome is ambiguous:', {
+      work_order_id: order.id,
+      classification: error.classification || 'uncertain_transport',
+      code: error.code || error.cause?.code || error.name,
+      reconciliation_required: error.reconciliation_required !== false,
+      message: error.message,
+    });
     return null;
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
 
   const currentRuntime = await prisma.hqRuntime.findFirst({
@@ -346,8 +442,28 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     return { workOrderId: order.id, status: 'OBSOLETE_EPOCH' };
   }
 
+  if (!response.ok && response.classification === 'transient_response') {
+    logger.warn('[hq-runtime] specialist dispatch returned a transient response; retaining the lease for reconciliation:', {
+      work_order_id: order.id,
+      status: response.status,
+      classification: response.classification,
+      reconciliation_required: true,
+    });
+    return null;
+  }
+
   if (!response.ok && !body.status) {
-    throw new Error(`hq_dispatch_sidecar_http_${response.status}`);
+    body = {
+      ...body,
+      status: 'blocked',
+      error: `hq_dispatch_sidecar_http_${response.status}`,
+      transport: {
+        classification: response.classification,
+        status: response.status,
+        retryable: response.retryable,
+        reconciliation_required: response.reconciliation_required,
+      },
+    };
   }
 
   if (response.status === 409 || body.status === 'already_claimed') {
@@ -375,7 +491,7 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
     packet.verification = body?.verification || {};
     await prisma.hyperWorkOrder.updateMany({
       where: { id: order.id, orgId: order.org_id, runtimeEpoch: orderEpoch },
-      data: { status, completedAt: new Date(), ...(status === 'completed' ? {} : { error: verdict.gaps.join('; ').slice(0, 2000) }) },
+      data: { status, completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null, lastHeartbeatAt: null, ...(status === 'completed' ? { error: null } : { error: verdict.gaps.join('; ').slice(0, 2000) }) },
     });
     // HQ's REVIEWING path reads the DURABLE result row, not this response. The
     // sidecar writes one on its own path; the Room path must write its own or the
@@ -384,7 +500,7 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console } = {})
       `INSERT INTO hivemind.hyper_work_results
          (work_order_id, runtime_epoch, attempt, status, summary, output, evidence, artifacts, usage)
        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
-      order.id, orderEpoch, 1, status,
+      order.id, orderEpoch, Number(order.attempt || 1), status,
       String(body?.summary || body?.result?.text || verdict.gaps.join('; ') || status).slice(0, 4000),
       JSON.stringify({
         todo_id: asObject(order.input_snapshot).todo_id || null,

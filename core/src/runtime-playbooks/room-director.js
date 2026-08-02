@@ -1,4 +1,5 @@
 import crypto, { randomUUID } from 'node:crypto';
+import { employeesSidecarUrl, runtimeRequestJson } from '../runtime-transport/client.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -13,7 +14,7 @@ function internalKey() {
 }
 
 function defaultSidecarUrl() {
-  return process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+  return employeesSidecarUrl();
 }
 
 function defaultCallbackUrl() {
@@ -28,6 +29,18 @@ function turnIdempotencyKey(request) {
 
 function usesRoomPhase(request) {
   return asObject(request.execution_config).contract === 'room-phase.v1';
+}
+
+function roomPhaseContext(request) {
+  const runtime = asObject(request.runtime_context);
+  return {
+    company: runtime.company || null,
+    baseline: runtime.baseline || null,
+    request: runtime.request || null,
+    target: runtime.target || null,
+    policy: runtime.policy || null,
+    prior_artifacts: asObject(request.inputs),
+  };
 }
 
 function normalizeArtifact(artifact, expectedKeys) {
@@ -69,20 +82,26 @@ export function runtimeStageEnvelope(request) {
 
 export function roomPhaseEnvelope(request) {
   return {
-    contract: 'room-phase.v1',
+    contract: 'room-phase.v2',
     run_id: request.run_id,
     playbook_id: request.playbook_id,
     playbook_version: request.playbook_version,
     phase_id: request.stage_id,
     phase_kind: String(asObject(request.execution_config).phase_kind || 'execute'),
-    objective: request.objective,
-    inputs: asObject(request.inputs),
-    expected_artifacts: asArray(request.expected_artifacts),
-    completion_checks: asArray(request.checks),
-    unmet: asArray(request.unmet),
-    adapter_descriptors: asArray(request.adapter_descriptors),
-    authority: { external_writes: request.authority_granted === true },
-    result_contract: {
+    instruction: String(request.instruction || request.objective || '').trim(),
+    context: roomPhaseContext(request),
+    lifecycle: {
+      guidance: String(request.stage_guidance || '').trim(),
+      expected_artifacts: asArray(request.expected_artifacts),
+      completion_checks: asArray(request.checks),
+      unmet: asArray(request.unmet),
+      checkpoint_sequence: request.checkpoint_sequence,
+      attempt: asObject(request.stage_attempts)[request.stage_id] || 1,
+      authority: { external_writes: request.authority_granted === true },
+      execution_config: asObject(request.execution_config),
+    },
+    capabilities: asArray(request.adapter_descriptors),
+    output_contract: {
       contract: 'room-phase-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
       rule: 'Return append-only artifacts actually produced by this Room phase and exact unresolved gaps.',
@@ -125,16 +144,24 @@ export class RuntimeRoomDirector {
   }
 
   async #post(payload) {
-    const response = await fetch(`${this.sidecarUrl}/internal/hyper/room-turn`, {
+    const response = await runtimeRequestJson(`${this.sidecarUrl}/internal/hyper/room-turn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': this.apiKey },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(600_000),
+      timeoutMs: 600_000,
     });
-    const body = await response.json().catch(() => ({}));
+    const body = response.body;
     if (!response.ok) {
       const detail = JSON.stringify(body?.detail || body || {}).slice(0, 1000);
-      throw new Error(`runtime_room_director_http_${response.status}:${detail}`);
+      const error = new Error(`runtime_room_director_http_${response.status}:${detail}`);
+      Object.assign(error, {
+        classification: response.classification,
+        status: response.status,
+        retryable: response.retryable,
+        reconciliation_required: response.reconciliation_required,
+        ambiguous: response.reconciliation_required === true,
+      });
+      throw error;
     }
     return body;
   }
@@ -143,7 +170,7 @@ export class RuntimeRoomDirector {
     if (!request.room_id) throw new Error('runtime_room_id_required');
     const roomPhase = usesRoomPhase(request);
     const envelope = roomPhase ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
-    const requestContract = roomPhase ? 'room-phase.v1' : 'runtime-stage.v1';
+    const requestContract = roomPhase ? 'room-phase.v2' : 'runtime-stage.v1';
     const resultContract = roomPhase ? 'room-phase-result.v1' : 'runtime-stage-result.v1';
     let room = asObject(request.room_context);
     let turnId = String(request.turn_id || '').trim();
@@ -151,7 +178,7 @@ export class RuntimeRoomDirector {
       room = await this.#roomContext(request.room_id, request.org_id);
       turnId = turnId || await this.#createTurn(
         request.room_id,
-        `Runtime stage | ${String(request.objective || '').trim()}`.slice(0, 8000),
+        String(request.instruction || request.objective || '').trim().slice(0, 8000),
         turnIdempotencyKey(request),
         { runId: request.run_id, stageId: request.stage_id, checkpointSequence: request.checkpoint_sequence, attempt: asObject(request.stage_attempts)[request.stage_id] || 1 },
       );
@@ -163,8 +190,8 @@ export class RuntimeRoomDirector {
       turn_id: turnId,
       user_id: String(room.user_id || request.owner_user_id || ''),
       org_id: request.org_id,
-      user_message: String(request.objective || '').slice(0, 8000),
-      display_message: `${roomPhase ? 'Runtime phase' : 'Runtime stage'} - ${String(request.objective || '').trim()}`.slice(0, 8000),
+      user_message: String(request.instruction || request.objective || '').slice(0, 8000),
+      display_message: String(request.instruction || request.objective || '').trim().slice(0, 8000),
       execution_context: JSON.stringify(envelope),
       participant_ids: asArray(room.participant_ids).map(String).slice(0, 8),
       callback_url: this.callbackUrl,

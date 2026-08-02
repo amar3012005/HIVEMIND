@@ -3,10 +3,15 @@ export const CAMPAIGN_STATUSES = new Set([
   'RUNNING', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED',
 ]);
 
-export const EXECUTABLE_V1_CHANNELS = new Set(['x_organic', 'gmail', 'tara']);
+export const EXECUTABLE_V1_CHANNELS = new Set([
+  'x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube',
+  'pinterest', 'reddit', 'threads', 'bluesky', 'google_business', 'gmail', 'tara',
+  'x_ads', 'google_ads', 'meta', 'linkedin_ads', 'tiktok_ads', 'pinterest_ads',
+]);
 export const PLANNABLE_CHANNELS = new Set([
-  'x_organic', 'gmail', 'tara',
-  'x_ads', 'google_ads', 'meta', 'linkedin', 'youtube_ads', 'tiktok_ads',
+  'x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube',
+  'pinterest', 'reddit', 'threads', 'bluesky', 'google_business', 'gmail', 'tara',
+  'x_ads', 'google_ads', 'meta', 'linkedin_ads', 'youtube_ads', 'tiktok_ads',
   'microsoft_ads', 'apple_ads', 'amazon_ads', 'reddit_ads', 'pinterest_ads', 'snapchat_ads',
 ]);
 export const KNOWN_CHANNELS = PLANNABLE_CHANNELS;

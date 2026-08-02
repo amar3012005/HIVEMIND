@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getGrowthPlanToolCatalog } from '../../src/agent/connector-toolkits/growth-plan-tools.js';
 import { buildGrowthPlanArtifactData, compilePrepareQueue, completeGrowthPlanAssessments, growthPlanArtifactMetadata, normalizeGrowthPlanEvidence, renderGrowthPlanReport, selectGrowthPlanAspects } from '../../src/growth/planner.js';
+import { applyFirstLifePolicy, loadFirstLifePolicy } from '../../src/growth/first-life-policy.js';
 
 test('initial growth plan always assesses the complete operating system', () => {
   assert.deepEqual(selectGrowthPlanAspects('initial_full', ['pipeline']), [
@@ -76,14 +77,61 @@ test('missing initial assessment rows become explicit unknowns instead of failin
   assert.deepEqual(plan.aspect_assessments[1].evidence_refs, ['baseline-1']);
 });
 
-test('prepare queue ignores invented execution connectors while retaining Maps discovery', () => {
+test('prepare queue retains model suggestions as evidence but grants no execution capability', () => {
   const plan = compilePrepareQueue({ operating_queue: [
     { kind: 'seo', required_capabilities: ['google-search-console', 'content-management'] },
     { kind: 'outreach', required_capabilities: ['google-maps', 'email-automation'] },
     { kind: 'marketing', required_capabilities: ['zernio', 'instagram', 'linkedin', 'x_organic'] },
     { kind: 'legal_finance', required_capabilities: ['document_review'] },
   ] });
-  assert.deepEqual(plan.operating_queue.map((item) => item.required_capabilities), [[], ['google-maps'], [], []]);
+  assert.deepEqual(plan.operating_queue.map((item) => item.required_capabilities), [[], [], [], []]);
   assert.ok(plan.operating_queue.every((item) => item.authority_mode === 'PREPARE' && item.external_actions_required === false));
   assert.deepEqual(plan.operating_queue[2].ignored_capability_suggestions, ['zernio', 'instagram', 'linkedin', 'x_organic']);
+});
+
+test('first-life policy preserves varied company proposals without injecting a domain or language', async () => {
+  const policy = await loadFirstLifePolicy();
+  const cases = [
+    ['English SaaS', ['Clarify retained demand', 'Measure activation evidence']],
+    ['Deutsche Agentur', ['Angebotssignale pruefen', 'Bestandskunden lernen']],
+    ['استشارات عربية', ['تحليل الطلب الحالي', 'توثيق إشارات الثقة']],
+    ['GreenLeaf Bakery', ['Reduce unconfirmed orders', 'Measure fulfillment delays']],
+  ];
+  for (const [company, titles] of cases) {
+    const baselineId = `baseline:${company}`;
+    const plan = {
+      mode: 'initial_full',
+      constraints: titles.map((title, index) => ({ id: `c${index}`, evidence_refs: [baselineId] })),
+      stage: { queue_item_id: 'q0' },
+      operating_queue: titles.map((title, index) => ({
+        id: `q${index}`, constraint_id: `c${index}`, title,
+        objective: `${title}.`, room_tag: `room-${index}`,
+        external_action_requested: index === 0,
+      })),
+    };
+    const result = applyFirstLifePolicy(plan, { baseline: { resource_id: baselineId } }, policy);
+    assert.deepEqual(result.operating_queue.map((item) => item.title), titles);
+    assert.equal(result.first_life.recommended_todo_source_id, 'q0');
+    assert.ok(result.operating_queue.every((item) => item.first_life_policy_id === 'runtime.first-life-policy'));
+  }
+});
+
+test('first-life policy removes unsupported proposals and never pads the queue', async () => {
+  const policy = await loadFirstLifePolicy();
+  const plan = {
+    mode: 'initial_full',
+    constraints: [
+      { id: 'c1', evidence_refs: ['baseline-1'] },
+      { id: 'c2', evidence_refs: ['baseline-1'] },
+      { id: 'c3', evidence_refs: [] },
+    ],
+    stage: { queue_item_id: 'q1' },
+    operating_queue: [
+      { id: 'q1', constraint_id: 'c1', title: 'First', external_action_requested: true },
+      { id: 'q2', constraint_id: 'c2', title: 'Second', external_action_requested: false },
+      { id: 'q3', constraint_id: 'c3', title: 'Unsupported', external_action_requested: false },
+    ],
+  };
+  const result = applyFirstLifePolicy(plan, { baseline: { resource_id: 'baseline-1' } }, policy);
+  assert.deepEqual(result.operating_queue.map((item) => item.id), ['q1', 'q2']);
 });

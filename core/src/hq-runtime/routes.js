@@ -10,6 +10,9 @@ import {
 import { reconcileTodoCapabilities } from './instruction-loop.js';
 import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot } from '../runtime-playbooks/snapshot.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
+import { projectCurrentActivationSprint } from './activation-sprint.js';
+import { activateEligibleFirstLifeWork } from './first-life-control.js';
+import { normalizeAuthorityPolicy, resolveAuthorityPreference } from './contracts.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
@@ -24,6 +27,17 @@ function asJsonEvent(row) {
 function asJsonRuntime(row) {
   if (!row) return null;
   return { ...row, eventSequence: String(row.eventSequence ?? 0) };
+}
+
+export function eventCursor(...values) {
+  return values.reduce((highest, value) => {
+    try {
+      const parsed = BigInt(String(value || '0').trim() || '0');
+      return parsed > highest ? parsed : highest;
+    } catch {
+      return highest;
+    }
+  }, 0n);
 }
 
 function tokenPair(usage = {}) {
@@ -99,12 +113,26 @@ async function reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler }) 
 
 function queueStatus(value) {
   const status = String(value || '').toUpperCase();
+  if (status === 'PROPOSED') return 'PROPOSED';
   if (['COMPLETED', 'COMPLETE'].includes(status)) return 'COMPLETED';
   if (status === 'WAITING_FOR_CONNECTOR') return 'WAITING_FOR_CONNECTOR';
   if (status === 'WAITING_FOR_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
-  if (status === 'BLOCKED') return 'BLOCKED';
+  if (status === 'MONITORING' || status === 'WAITING_FOR_EVIDENCE') return 'MONITORING';
+  if (['BLOCKED', 'NEEDS_ATTENTION', 'NEEDS_INTERVENTION', 'FAILED'].includes(status)) return 'NEEDS_ATTENTION';
+  if (status === 'CANCELLED') return 'CANCELLED';
   if (['RUNNING', 'ACTIVE', 'QUEUED'].includes(status)) return 'RUNNING';
   return 'READY';
+}
+
+export function playbookQueueStatus(run) {
+  const status = String(run?.status || '').toUpperCase();
+  if (status === 'WAITING_EVENT') {
+    const waitingTypes = Array.isArray(run?.waitingFor?.types) ? run.waitingFor.types : [];
+    return waitingTypes.includes('capability.connected') ? 'WAITING_FOR_CONNECTOR' : 'MONITORING';
+  }
+  if (status === 'WAITING_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
+  if (status === 'NEEDS_INTERVENTION' || status === 'TERMINATED') return 'NEEDS_ATTENTION';
+  return queueStatus(status);
 }
 
 function runtimeQueue({ todos, stages, delegations }) {
@@ -136,7 +164,7 @@ function runtimeQueue({ todos, stages, delegations }) {
     .sort((left, right) => left.priority - right.priority || left.position - right.position || new Date(left.updated_at) - new Date(right.updated_at));
 }
 
-export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, emailLifecycle = null, runtimePlaybooks = null }) {
+export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, emailLifecycle = null, runtimePlaybooks = null, logger = console }) {
   return async function handleHqRuntimeRoute(req, res, url) {
     const pathname = url.pathname;
     if (!pathname.startsWith('/v1/hq/')) return false;
@@ -156,26 +184,37 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         const body = await parseBody(req).catch(() => ({}));
-        const outboundMessages = String(body.outbound_messages || '').trim().toLowerCase();
-        if (!['manual', 'auto'].includes(outboundMessages)) {
+        const legacyOverrides = Object.fromEntries(Object.entries(body)
+          .filter(([key, value]) => key.startsWith('outbound_') && value != null)
+          .map(([key, value]) => [key, String(value || '').trim().toLowerCase()]));
+        const requestedOverrides = body.gate_overrides && typeof body.gate_overrides === 'object' && !Array.isArray(body.gate_overrides)
+          ? body.gate_overrides : {};
+        const externalDefault = body.external_default == null ? null : String(body.external_default).trim().toLowerCase();
+        const requested = normalizeAuthorityPolicy({
+          ...(runtime.authorityPolicy || {}),
+          ...(externalDefault ? { external_default: externalDefault } : {}),
+          gate_overrides: {
+            ...(runtime.authorityPolicy?.gate_overrides || {}),
+            ...legacyOverrides,
+            ...requestedOverrides,
+          },
+        });
+        if ((!externalDefault && !Object.keys(legacyOverrides).length && !Object.keys(requestedOverrides).length)
+            || (externalDefault && !['manual', 'auto'].includes(externalDefault))
+            || Object.values({ ...legacyOverrides, ...requestedOverrides }).some((value) => !['manual', 'auto'].includes(value))) {
           return jsonResponse(res, { error: 'hq_runtime_outbound_authority_invalid' }, 400);
         }
-        if (runtime.authorityPolicy?.outbound_messages !== outboundMessages) {
+        if (JSON.stringify(normalizeAuthorityPolicy(runtime.authorityPolicy || {})) !== JSON.stringify(requested)) {
           await prisma.hqRuntime.update({
             where: { id: runtime.id },
-            data: {
-              authorityPolicy: { ...(runtime.authorityPolicy || {}), outbound_messages: outboundMessages },
-              version: { increment: 1 },
-            },
+            data: { authorityPolicy: requested, version: { increment: 1 } },
           });
           await appendHqEvent({
             prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
             eventType: 'verification',
-            title: outboundMessages === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review enabled',
-            summary: outboundMessages === 'auto'
-              ? 'Future verified outbound-message checkpoints may proceed automatically. Existing pending batches still require their exact approval action.'
-              : 'Future outbound-message checkpoints will wait for explicit approval before delivery.',
-            details: { actor: userId, policy_key: 'outbound_messages', preference: outboundMessages },
+            title: 'External authority policy updated',
+            summary: 'The organization policy now governs future exact playbook gates. No pending or future action was granted by this policy update.',
+            details: { actor: userId, external_default: requested.external_default, gate_overrides: requested.gate_overrides },
           });
         }
         return jsonResponse(res, { runtime: asJsonRuntime(await getHqRuntime({ prisma, orgId })) });
@@ -347,24 +386,47 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
       if (pathname === '/v1/hq/events/stream' && req.method === 'GET') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
-        let cursor = BigInt(url.searchParams.get('after') || '0');
+        let cursor = eventCursor(url.searchParams.get('after'), req.headers['last-event-id']);
         let closed = false;
+        let writing = false;
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+        res.flushHeaders?.();
+        res.write('retry: 3000\n\n');
         const writeAvailable = async () => {
-          if (closed) return;
-          const rows = await prisma.hqRuntimeEvent.findMany({
-            where: { runtimeId: runtime.id, orgId, sequence: { gt: cursor }, visibility: 'USER' },
-            orderBy: { sequence: 'asc' }, take: 100,
-          });
-          for (const row of rows) {
-            cursor = row.sequence;
-            res.write(`id: ${row.sequence}\nevent: hq_event\ndata: ${JSON.stringify(asJsonEvent(row))}\n\n`);
+          if (closed || writing) return;
+          writing = true;
+          try {
+            const rows = await prisma.hqRuntimeEvent.findMany({
+              where: { runtimeId: runtime.id, orgId, sequence: { gt: cursor }, visibility: 'USER' },
+              orderBy: { sequence: 'asc' }, take: 100,
+            });
+            for (const row of rows) {
+              cursor = row.sequence;
+              res.write(`id: ${row.sequence}\nevent: hq_event\ndata: ${JSON.stringify(asJsonEvent(row))}\n\n`);
+            }
+          } finally {
+            writing = false;
           }
         };
         await writeAvailable();
-        const poll = setInterval(() => writeAvailable().catch(() => {}), 1000);
+        const poll = setInterval(() => writeAvailable().catch((error) => {
+          logger.warn('[hq-runtime] event stream delivery query failed:', {
+            runtime_id: runtime.id, org_id: orgId, cursor: String(cursor), message: error.message,
+          });
+        }), 1000);
         const heartbeat = setInterval(() => { if (!closed) res.write(': keepalive\n\n'); }, 15000);
-        req.on('close', () => { closed = true; clearInterval(poll); clearInterval(heartbeat); });
+        const close = (reason, error = null) => {
+          if (closed) return;
+          closed = true;
+          clearInterval(poll);
+          clearInterval(heartbeat);
+          if (error) logger.warn('[hq-runtime] event stream closed with an error:', {
+            runtime_id: runtime.id, org_id: orgId, cursor: String(cursor), reason, message: error.message,
+          });
+        };
+        req.on('close', () => close('client_closed'));
+        req.on('error', (error) => close('request_error', error));
+        res.on('error', (error) => close('response_error', error));
         return true;
       }
 
@@ -391,8 +453,24 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           }).catch(() => []) : Promise.resolve([]),
         ]);
         const todoById = new Map(todos.map((todo) => [todo.id, todo]));
+        const campaignsByRun = new Map((playbookRuns.length ? await prisma.campaign.findMany({
+          where: { orgId, sourceType: 'runtime_playbook', sourceId: { in: playbookRuns.map((run) => run.id) } },
+          select: { id: true, sourceId: true, name: true, status: true, requestedChannels: true, currentPlanVersionId: true },
+        }) : []).map((campaign) => [campaign.sourceId, campaign]));
+        const playbookProjectionWarnings = [];
         const playbookApprovals = playbookRuns.filter((run) => run.status === 'WAITING_AUTHORITY').map((run) => {
-          const playbook = playbookService?.registry?.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+          let playbook;
+          try {
+            playbook = playbookService?.registry?.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+          } catch (error) {
+            playbookProjectionWarnings.push({
+              run_id: run.id,
+              playbook_id: run.playbookId,
+              playbook_version: run.playbookVersion,
+              code: 'playbook_definition_unavailable',
+            });
+            return null;
+          }
           const stage = playbook?.stages?.find((candidate) => candidate.id === run.currentStageId);
           if (!stage?.authority_gate || !stage?.authority_policy_key) return null;
           const messages = run.artifacts.filter((artifact) => artifact.artifactKey === 'message_record').map((artifact) => ({
@@ -403,17 +481,140 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             body: artifact.data?.body || null,
           }));
           const todo = todoById.get(String(run.trigger?.todo_id || ''));
+          const campaign = campaignsByRun.get(run.id) || null;
           return {
             run_id: run.id,
             todo_id: todo?.id || null,
             title: todo?.title || playbook?.name || 'External messages are ready',
             gate: stage.authority_gate,
             policy_key: stage.authority_policy_key,
-            preference: runtime.authorityPolicy?.[stage.authority_policy_key] || 'unconfigured',
+            preference: resolveAuthorityPreference(runtime.authorityPolicy, stage.authority_policy_key),
+            kind: 'external_action',
             messages,
+            campaign: campaign ? {
+              id: campaign.id,
+              name: campaign.name,
+              status: campaign.status,
+              channels: campaign.requestedChannels || [],
+              plan_version_id: campaign.currentPlanVersionId || null,
+            } : null,
           };
         }).filter(Boolean);
-        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: runtimeQueue({ todos, stages, delegations }), playbook_approvals: playbookApprovals, playbook_runs: playbookRuns, playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)) });
+        const baseQueue = runtimeQueue({ todos, stages, delegations });
+        const runByTodo = new Map(playbookRuns.map((run) => [String(run.trigger?.todo_id || ''), run]).filter(([todoId]) => todoId));
+        const projectedQueue = baseQueue.map((item) => {
+          if (item.source !== 'todo') return item;
+          const run = runByTodo.get(String(item.source_id));
+          if (!run) return item;
+          return {
+            ...item,
+            execution_id: run.id,
+            status: playbookQueueStatus(run),
+            lifecycle_stage: run.currentStageId,
+            terminal_state: run.terminalState || null,
+            waiting_for: run.waitingFor || null,
+          };
+        });
+        const activationSprint = await projectCurrentActivationSprint({ prisma, orgId });
+        const firstLife = activationSprint?.policy?.id === 'runtime.first-life-policy' ? activationSprint : null;
+        return jsonResponse(res, { work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions, runtime_queue: projectedQueue, playbook_approvals: playbookApprovals, playbook_runs: playbookRuns, playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)), playbook_projection_warnings: playbookProjectionWarnings, first_life: firstLife, activation_sprint: activationSprint });
+      }
+
+      if ((pathname === '/v1/hq/first-life/current' || pathname === '/v1/hq/activation-sprints/current') && req.method === 'GET') {
+        const sprint = await projectCurrentActivationSprint({ prisma, orgId });
+        const firstLife = sprint?.policy?.id === 'runtime.first-life-policy' ? sprint : null;
+        return jsonResponse(res, { first_life: firstLife, sprint });
+      }
+
+      const firstLifePolicyMatch = pathname.match(/^\/v1\/hq\/first-life\/([^/]+)\/policy$/);
+      const activationReviewMatch = firstLifePolicyMatch
+        || pathname.match(/^\/v1\/hq\/activation-sprints\/([^/]+)\/review$/);
+      if (activationReviewMatch && req.method === 'POST') {
+        const body = await parseBody(req).catch(() => ({}));
+        const preference = String(body.preference || 'manual').toLowerCase();
+        if (!['manual', 'auto'].includes(preference)) return jsonResponse(res, { error: 'activation_sprint_preference_invalid' }, 400);
+        const sprint = await projectCurrentActivationSprint({ prisma, orgId });
+        if (!sprint || sprint.id !== decodeURIComponent(activationReviewMatch[1])) return jsonResponse(res, { error: 'activation_sprint_not_found' }, 404);
+        if (firstLifePolicyMatch && sprint.policy?.id !== 'runtime.first-life-policy') {
+          return jsonResponse(res, { error: 'first_life_not_found' }, 404);
+        }
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (sprint.policy?.id === 'runtime.first-life-policy') {
+          if (sprint.status !== 'AWAITING_POLICY') return jsonResponse(res, { error: 'first_life_policy_already_recorded' }, 409);
+          const authorityPolicy = normalizeAuthorityPolicy({ ...(runtime.authorityPolicy || {}), external_default: preference });
+          const activation = await activateEligibleFirstLifeWork({
+            prisma,
+            runtime,
+            expansionTrigger: 'organization_policy',
+            recordExternalDefault: preference,
+          });
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'verification',
+            title: 'First operating policy recorded',
+            summary: `${preference === 'auto' ? 'Auto' : 'Manual review'} is now the default for future exact external gates. This decision granted no action. ${activation.promoted.length} proposal(s) became eligible for playbook selection.`,
+            details: { first_life_id: sprint.id, preference, promoted: activation.promoted },
+          });
+          for (const promoted of activation.promoted) await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: 'todo_created',
+            title: `Promoted from the operating plan: ${promoted.title}`,
+            summary: 'The proposal is now eligible for semantic playbook selection within the recorded concurrency policy.',
+            details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'organization_policy' },
+          });
+          if (activation.promoted.length) await requestWake({
+            prisma, runtime: { ...runtime, authorityPolicy }, triggerType: 'queue_advance',
+            payload: { first_life_id: sprint.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
+            key: `first-life-policy:${sprint.id}:${preference}`,
+          });
+          Promise.resolve(wakeScheduler?.()).catch(() => {});
+          return jsonResponse(res, { ok: true, first_life_id: sprint.id, preference, promoted: activation.promoted }, 202);
+        }
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const preflight = sprint.status === 'AWAITING_POLICY';
+        const runIds = sprint.reviewable_run_ids || [];
+        if (!preflight && !runIds.length) return jsonResponse(res, { error: 'activation_sprint_not_ready' }, 409);
+        const grants = [];
+        for (const runId of runIds) {
+          const loaded = await service.executor.store.loadRun(runId, orgId);
+          const playbook = service.registry.get(loaded.playbookId, loaded.playbookVersion, { scopeKey: loaded.scopeKey });
+          const stage = playbook.stages.find((candidate) => candidate.id === loaded.currentStageId);
+          if (!stage?.authority_gate || !stage?.authority_policy_key) continue;
+          grants.push({ run: loaded, stage, inputHash: stageAuthorityHash(loaded, stage) });
+        }
+        const policyKeys = preflight
+          ? (sprint.authority_policy_keys || [])
+          : grants.map(({ stage }) => stage.authority_policy_key);
+        if (!policyKeys.length) return jsonResponse(res, { error: 'activation_sprint_authority_policy_missing' }, 409);
+        const policyPatch = Object.fromEntries(policyKeys.map((key) => [key, preference]));
+        await prisma.$transaction(async (tx) => {
+          await tx.hqRuntime.update({ where: { id: runtime.id }, data: { authorityPolicy: { ...(runtime.authorityPolicy || {}), ...policyPatch }, version: { increment: 1 } } });
+          for (const { run, stage, inputHash } of preflight ? [] : grants) {
+            await tx.runtimePlaybookAuthority.upsert({
+              where: { runId_gate: { runId: run.id, gate: stage.authority_gate } },
+              create: { runId: run.id, orgId, gate: stage.authority_gate, grantedBy: userId, payload: { preference, input_hash: inputHash, activation_sprint_id: sprint.id } },
+              update: { status: 'GRANTED', grantedBy: userId, payload: { preference, input_hash: inputHash, activation_sprint_id: sprint.id }, grantedAt: new Date(), revokedAt: null },
+            });
+          }
+        });
+        await appendHqEvent({
+          prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+          eventType: 'verification',
+          title: preflight ? 'First Growth Sprint operating policy recorded' : 'First Growth Sprint launch authority recorded',
+          summary: preflight
+            ? `${preference === 'auto' ? 'Auto' : 'Manual review'} now governs the first sprint's external actions. No campaign, message, or call was launched by this policy choice; each playbook must still prepare and verify its exact batch before its authority gate.`
+            : `I bound ${grants.length} exact launch batch${grants.length === 1 ? '' : 'es'} to ${preference === 'auto' ? 'automatic' : 'manual'} organization policy and resumed their existing lifecycles.`,
+          details: { activation_sprint_id: sprint.id, run_ids: grants.map(({ run }) => run.id), policy_keys: policyKeys, preference, phase: preflight ? 'preflight' : 'exact_batch' },
+        });
+        if (!preflight) await Promise.all(grants.map(({ run }) => service.execute(run.id, orgId)));
+        if (preflight) await requestWake({
+          prisma, runtime, triggerType: 'queue_advance',
+          payload: { activation_sprint_id: sprint.id, authority_policy_keys: policyKeys },
+          key: `activation-sprint-policy:${sprint.id}:${preference}`,
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { ok: true, sprint_id: sprint.id, resumed: grants.map(({ run }) => run.id), preference }, 202);
       }
 
       const playbookSnapshotMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/snapshot$/i);
@@ -478,17 +679,21 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         if (preference) {
           const policyValue = preference;
+          const policy = normalizeAuthorityPolicy({
+            ...(runtime.authorityPolicy || {}),
+            gate_overrides: { ...(runtime.authorityPolicy?.gate_overrides || {}), [stage.authority_policy_key]: policyValue },
+          });
           await prisma.hqRuntime.updateMany({
             where: { id: runtime.id, orgId, epoch: runtime.epoch },
-            data: { authorityPolicy: { ...(runtime.authorityPolicy || {}), [stage.authority_policy_key]: policyValue }, version: { increment: 1 } },
+            data: { authorityPolicy: policy, version: { increment: 1 } },
           });
           await appendHqEvent({
             prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
             eventType: 'verification',
-            title: preference === 'auto' ? 'Automatic message delivery enabled' : 'Manual message review retained',
+            title: preference === 'auto' ? 'Automatic gate policy recorded' : 'Manual gate review retained',
             summary: preference === 'auto'
-              ? 'This organization authorized future checkpoints governed by this exact outbound-message policy. Other external writes, spending, deletion, and policy changes remain separately governed.'
-              : 'Every future outbound-message checkpoint will wait for an explicit Approve and send decision.',
+              ? `Future verified checkpoints governed by ${stage.authority_policy_key} may use Auto. This did not grant any different artifact batch.`
+              : `Future checkpoints governed by ${stage.authority_policy_key} will wait for an explicit approval decision.`,
             details: { policy_key: stage.authority_policy_key, preference: policyValue, run_id: run.id },
           });
         }

@@ -5,6 +5,7 @@ import { NativeHqEngine } from './native-engine.js';
 import { HqScheduleStore } from './schedule-store.js';
 import { drainHqWorkOrders } from './work-dispatcher.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
+import { employeesSidecarUrl, warmRuntimeOrigin } from '../runtime-transport/client.js';
 
 function artifactCountSummary(artifacts = []) {
   const counts = artifacts.reduce((result, artifact) => {
@@ -51,6 +52,23 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
     await prisma.hqRuntime.updateMany({
       where: { id: runtime.id, orgId: runtime.orgId, epoch: runtime.epoch },
       data: { currentCycleId: cycle.id, version: { increment: 1 } },
+    });
+    await appendHqEvent({
+      prisma,
+      runtimeId: runtime.id,
+      orgId: runtime.orgId,
+      runtimeEpoch: runtime.epoch,
+      cycleId: cycle.id,
+      eventType: 'wake_received',
+      title: 'Runtime received a wake trigger',
+      summary: 'The trigger is durably claimed. I am loading the current company state before choosing or executing any action.',
+      details: {
+        trigger_type: schedule.trigger_type,
+        schedule_id: schedule.id,
+        cycle_id: cycle.id,
+        runtime_epoch: runtime.epoch,
+        instruction_id: schedule.payload?.instruction_id || null,
+      },
     });
     const engine = new NativeHqEngine({ prisma, logger, runtimePlaybooks });
     const decision = await engine.runCycle({ runtime: await getHqRuntime({ prisma, orgId: runtime.orgId }), cycle, trigger: { type: schedule.trigger_type, payload: schedule.payload || {}, schedule_id: schedule.id } });
@@ -171,6 +189,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
         drainHqWorkOrders({
           prisma, logger,
           concurrency: Number(process.env.HQ_WORKER_CONCURRENCY || 2),
+          leaseOwner,
         }),
         runtimePlaybooks?.drainActive({
           limit: Number(process.env.RUNTIME_PLAYBOOK_WORKER_CONCURRENCY || 2),
@@ -189,6 +208,9 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   };
   const timer = setInterval(wake, intervalMs);
   timer.unref?.();
+  await warmRuntimeOrigin(employeesSidecarUrl(), { force: true }).catch((error) => {
+    logger.warn('[hq-runtime] Employees transport warmup was unavailable; normal reconciliation remains active:', error.message);
+  });
   wake();
   logger.log(`[hq-runtime] scheduler active as ${leaseOwner}`);
   return {

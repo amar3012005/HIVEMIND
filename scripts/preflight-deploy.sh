@@ -60,7 +60,45 @@ if [ "$BEHIND" != "0" ]; then
   fail "$BEHIND commit(s) behind origin/$DEPLOY_REF — pull first, or you ship a regression."
 fi
 
-# ── 4. Emit the SHA so the image can be tagged by it ─────────────────────────
+# ── 4. Every gitlink must point at a commit the REMOTE can serve ─────────────
+# A submodule pinned to an unpushed commit is the gitlink version of "production
+# runs code in no committed branch": it resolves on this box and nowhere else.
+#
+# Hit 2026-08-02 — the parent pinned frontend/Da-vinci at bfd076a5, which lives on
+# origin/codex/meeting-notes-ui-final-* and NOT on the `branch = main` configured
+# in .gitmodules. A fresh clone running `git submodule update --init` could not
+# resolve it, a release worktree detached instead of updating the gitlink, and the
+# recovery attempt wired in a /root/builds local remote that made it worse. The
+# commits were never lost; the pin simply pointed somewhere `--remote` would not
+# look.
+#
+# Reachability is checked against the remote, not the local object store —
+# `git cat-file -e` would pass on a commit that exists only here, which is exactly
+# the failure being prevented.
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  SUB_SHA="$(echo "$line" | awk '{print $3}')"
+  SUB_PATH="$(echo "$line" | awk '{print $4}')"
+  [ -n "$SUB_SHA" ] && [ -d "$SUB_PATH" ] || continue
+  if ! git -C "$SUB_PATH" fetch origin --quiet 2>/dev/null; then
+    echo "PREFLIGHT WARN: could not fetch $SUB_PATH — gitlink reachability unverified" >&2
+    continue
+  fi
+  if [ -z "$(git -C "$SUB_PATH" branch -r --contains "$SUB_SHA" 2>/dev/null | head -1)" ]; then
+    echo "PREFLIGHT FAIL: $SUB_PATH is pinned at $SUB_SHA, which is on NO remote branch." >&2
+    echo "PREFLIGHT: push it first —  git -C $SUB_PATH push origin HEAD:<branch>" >&2
+    echo "PREFLIGHT: a gitlink only this box can resolve is not releasable." >&2
+    [ "${ALLOW_UNPUSHED_GITLINK:-}" = "1" ] || exit 1
+    echo "PREFLIGHT WARN: ALLOW_UNPUSHED_GITLINK=1 — shipping an unreproducible pin." >&2
+  else
+    echo "PREFLIGHT OK: $SUB_PATH @ ${SUB_SHA:0:9} reachable on $(git -C "$SUB_PATH" branch -r --contains "$SUB_SHA" | head -1 | tr -d ' ')" >&2
+  fi
+# -r is REQUIRED: without it ls-tree lists only the TOP level, so a nested
+# gitlink like frontend/Da-vinci is never seen and the check silently passes —
+# a guard that quietly does nothing is worse than none, because you trust it.
+done <<< "$(git ls-tree -r HEAD | awk '$2 == "commit"')"
+
+# ── 5. Emit the SHA so the image can be tagged by it ─────────────────────────
 SHA="$(git rev-parse --short=9 HEAD)"
 echo "PREFLIGHT OK: $TREE @ $BRANCH clean, up to date with origin/$DEPLOY_REF" >&2
 echo "PREFLIGHT: tag the image hivemind/<svc>:sha-${SHA}" >&2

@@ -616,6 +616,8 @@ export class NativeHqEngine {
           objective: readyTodo.objective,
           requested_action: readyTodo.context?.requested_action || 'complete_requested_outcome',
           requested_terminal_outcome: readyTodo.context?.requested_terminal_outcome || 'completed_as_requested',
+          playbook_id: readyTodo.context?.planned_playbook_id || null,
+          playbook_version: readyTodo.context?.planned_playbook_version || null,
           external_action_requested: readyTodo.context?.external_action_requested === true || readyTodo.context?.authority_mode === 'EXECUTE',
           exact_targets: Array.isArray(readyTodo.context?.exact_targets) ? readyTodo.context.exact_targets : [],
           acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
@@ -714,11 +716,22 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: 'I am ranking the company constraints', summary: `${selectedSkill.description} I will compare the complete company state, preserve material unknowns, and order only the work justified by evidence and the operating requirements.`, skillRef: selectedSkill.id, details: { model_policy: selectedSkill.model_policy, selected_model: selectedModel } });
       await event(prisma, runtime, cycle, { eventType: 'tool_started', title: 'I am building the first Growth Operating Plan', summary: 'I will assess the complete baseline, rank multiple constraints, define the first bounded stage, and commit an ordered specialist todo queue before dispatching any work.', toolRef: 'growth_plan_run', details: { toolkit: growthToolkit.id, model: selectedModel, mode: 'initial_full' } });
       const planningRequirements = appliedInstructions.map((item) => item.instruction.body).filter(Boolean);
+      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global' })
+        .filter((entry) => entry.status === 'ACTIVE')
+        .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.playbook_id === entry.playbook_id) === index)
+        .map((entry) => ({
+          playbook_id: entry.playbook_id,
+          version: entry.version,
+          owner_room_tag: entry.metadata?.owner_room_tag || null,
+          supported_actions: Array.isArray(entry.metadata?.supported_actions) ? entry.metadata.supported_actions : [],
+          purpose: entry.metadata?.purpose || entry.description || '',
+          terminal_states: entry.terminal_states,
+        })) || [];
       let result;
       try {
         result = await this.toolkits.invoke('growth_plan', 'run', {
           mode: 'initial_full', objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
-          model: selectedModel,
+          model: selectedModel, lifecycleCatalog,
           onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
             eventType: 'observation',
             title: stage === 'context' ? 'I loaded the evidence for this decision' : stage === 'planning' ? 'I am comparing the company as a whole' : stage === 'governance' ? 'I am checking whether this plan can actually operate' : 'I am committing the chosen next move',

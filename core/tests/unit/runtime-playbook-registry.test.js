@@ -441,6 +441,33 @@ test('Director sees the complete catalog when the planner suggests a different R
   assert.equal(suppliedCatalog.includes(fixture.playbook_id), true);
 });
 
+test('Director validates only the lifecycle durably selected by the planner', async () => {
+  const selectedFixture = await loadFixture();
+  const unrelatedFixture = structuredClone(selectedFixture);
+  unrelatedFixture.playbook_id = 'sample.unrelated-lifecycle';
+  unrelatedFixture.name = 'Unrelated lifecycle';
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(selectedFixture);
+  registry.register(unrelatedFixture);
+  let suppliedCatalog = '';
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async (_model, request) => {
+      suppliedCatalog = JSON.parse(request.body).messages[1].content;
+      return {
+        ok: true,
+        async json() { return { choices: [{ message: { content: '{"playbook_id":null,"version":null,"reason":"no lifecycle fit"}' } }] }; },
+      };
+    },
+  });
+  await selector.select({
+    objective: 'Validate the planned lifecycle.',
+    context: { request: { playbook_id: selectedFixture.playbook_id, playbook_version: selectedFixture.version } },
+  });
+  assert.equal(suppliedCatalog.includes(selectedFixture.playbook_id), true);
+  assert.equal(suppliedCatalog.includes(unrelatedFixture.playbook_id), false);
+});
+
 test('Runtime selection binds one exact supported action from playbook data', async () => {
   const fixture = await loadFixture();
   fixture.metadata = { ...(fixture.metadata || {}), supported_actions: ['perform_declared_effect'] };

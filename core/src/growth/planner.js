@@ -90,7 +90,7 @@ export function compilePrepareQueue(plan) {
   return plan;
 }
 
-function validatePlan(plan, context, mode, aspects) {
+function validatePlan(plan, context, mode, aspects, lifecycleCatalog = []) {
   if (!plan || plan.contract_version !== 'growth-plan.v3') throw new Error('growth_plan_v3_contract_required');
   if (plan.mode !== mode) throw new Error('growth_plan_mode_mismatch');
   plan.response_locale = String(plan.response_locale || context?.company?.locale || context?.company?.language || 'und').slice(0, 80);
@@ -122,6 +122,16 @@ function validatePlan(plan, context, mode, aspects) {
   if (!constraints.some((item) => item.id === plan.primary_constraint_id)) throw new Error('growth_plan_primary_constraint_required');
   if (!plan.stage?.name || !plan.stage?.objective) throw new Error('growth_plan_stage_required');
   if (!queue.some((item) => item.id === plan.stage.queue_item_id)) throw new Error('growth_plan_stage_queue_item_required');
+  if (mode === 'initial_full' && lifecycleCatalog.length) {
+    const recommended = queue.find((item) => item.id === plan.stage.queue_item_id);
+    const lifecycle = lifecycleCatalog.find((entry) => entry.playbook_id === recommended?.playbook_id
+      && Number(entry.version) === Number(recommended?.playbook_version));
+    const actions = Array.isArray(lifecycle?.supported_actions) ? lifecycle.supported_actions : [];
+    if (!lifecycle || !actions.includes(recommended?.requested_action)
+      || recommended.room_tag !== lifecycle.owner_room_tag) {
+      throw new Error('growth_plan_recommended_lifecycle_binding_required');
+    }
+  }
   plan.constraint = constraints.find((item) => item.id === plan.primary_constraint_id);
   plan.delegation = queue.find((item) => item.id === plan.stage.queue_item_id);
   return plan;
@@ -181,7 +191,7 @@ export function growthPlanArtifactMetadata({ mode, aspects, plan, committed }) {
   return { mode, aspects, baseline_id: plan.baseline_ref.resource_id, growth_stage_id: committed.stage_id };
 }
 
-export async function runGrowthPlan({ prisma, orgId, userId, mode = 'operate', aspects = [], objective = '', autonomyMode, turnId, hqCycleId, onProgress, model = 'gpt-oss-120b' }) {
+export async function runGrowthPlan({ prisma, orgId, userId, mode = 'operate', aspects = [], objective = '', autonomyMode, turnId, hqCycleId, onProgress, model = 'gpt-oss-120b', lifecycleCatalog = [] }) {
   if (!MODES.has(mode)) throw new Error('growth_plan_mode_invalid');
   const context = await buildGrowthPlanningContext({ prisma, orgId });
   if (!context) throw new Error('growth_plan_baseline_required');
@@ -203,10 +213,10 @@ export async function runGrowthPlan({ prisma, orgId, userId, mode = 'operate', a
 Facts must come from the supplied context. A correlation is not a cause. Unknown causes must remain hypotheses. Never invent competitors, CRM results, connector capabilities, budgets, dates, or benchmarks.
 For initial_full, assess every requested company aspect, rank multiple material constraints, and create an ordered queue of bounded work across only the specialist Rooms genuinely needed. The first queue item defines the first Growth Stage, but the complete ordered queue must survive so HQ can continue without replanning after every result. For operate, inspect only the requested aspects and current operating state, then update the queue as evidence requires. Use the language of the operating requirements when they establish one; otherwise use the company's retained locale. Keep machine identifiers unchanged while writing every user-facing field in response_locale.
 Return JSON only. Contract:
-{contract_version:'growth-plan.v3',mode:'initial_full|operate',response_locale:string,baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:string,statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:string,room_tag:string,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null},effect_class:'internal|external',effect_basis:string,external_action_requested:boolean,requested_action:string,requested_terminal_outcome:string}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
+{contract_version:'growth-plan.v3',mode:'initial_full|operate',response_locale:string,baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:string,statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:string,room_tag:string,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null},playbook_id:string|null,playbook_version:integer|null,effect_class:'internal|external',effect_basis:string,external_action_requested:boolean,requested_action:string|null,requested_terminal_outcome:string}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
 For initial_full return 2-4 ranked, genuinely evidenced queue items. Do not create busywork, prescribe a domain, pad the queue, or assign every Room. Every queue item must address an evidenced constraint, have an exact available room_tag, and be independently verifiable. The first queue item must match stage.queue_item_id and the primary constraint. Every factual assessment, constraint, and hypothesis must reference the baseline resource id or another supplied source reference.
-		effect_class describes the complete lifecycle's eventual effect, not the authority of the current planning phase. Use external whenever reaching requested_terminal_outcome requires any state change outside Runtime's persisted internal artifacts. Use internal only when persisted internal evidence or preparation fully satisfies every acceptance criterion. State that distinction briefly in effect_basis, and set external_action_requested to exactly (effect_class == 'external'). All initial queue items still begin in PREPARE authority: they may research and persist internal deliverables, but may not make an external change. The selected playbook, not this planner, resolves capabilities and exact authority gates. Treat unavailable evidence as an explicit gap and do not block unrelated safe preparation.`;
-  const user = JSON.stringify({ objective: String(objective || '').slice(0, 4000), mode, aspects: selected, autonomy_mode: autonomyMode || context.active_goal?.autonomy_mode || 'MANUAL_REVIEW', context });
+		effect_class describes the complete lifecycle's eventual effect, not the authority of the current planning phase. Use external whenever reaching requested_terminal_outcome requires any state change outside Runtime's persisted internal artifacts. Use internal only when persisted internal evidence or preparation fully satisfies every acceptance criterion. State that distinction briefly in effect_basis, and set external_action_requested to exactly (effect_class == 'external'). For initial_full, the first queue item must bind one supplied available_lifecycle by exact playbook_id, version, owner_room_tag, and one exact supported_actions value. Other proposals may use null playbook fields when no supplied lifecycle directly implements them; never invent a lifecycle or action identifier. All initial queue items still begin in PREPARE authority: they may research and persist internal deliverables, but may not make an external change. The selected playbook, not this planner, resolves capabilities and exact authority gates. Treat unavailable evidence as an explicit gap and do not block unrelated safe preparation.`;
+  const user = JSON.stringify({ objective: String(objective || '').slice(0, 4000), mode, aspects: selected, autonomy_mode: autonomyMode || context.active_goal?.autonomy_mode || 'MANUAL_REVIEW', available_lifecycles: lifecycleCatalog, context });
   await progress('planning', mode === 'initial_full' ? 'Assessing the complete company growth system.' : `Reviewing ${selected.join(', ')} for the next operating decision.`);
   const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -217,7 +227,7 @@ For initial_full return 2-4 ranked, genuinely evidenced queue items. Do not crea
   const extracted = extractJson(body?.choices?.[0]?.message?.content);
   let preparedPlan = completeGrowthPlanAssessments(normalizeGrowthPlanEvidence(extracted, context), context, selected);
   if (mode === 'initial_full') preparedPlan = applyFirstLifePolicy(preparedPlan, context, await loadFirstLifePolicy());
-  const plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected);
+  const plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected, lifecycleCatalog);
   plan.report_markdown = renderGrowthPlanReport(plan);
   await progress('governance', 'Validated evidence references, aspect coverage, stage bounds, and specialist ownership.');
 

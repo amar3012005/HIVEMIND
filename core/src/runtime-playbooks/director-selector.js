@@ -86,10 +86,15 @@ export class DirectorPlaybookSelector {
     const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
     // New assignments always use the newest active version. Existing runs remain
     // pinned to their immutable version through RuntimePlaybookRun.
-    const catalog = [...active.reduce((latest, entry) => {
+    let catalog = [...active.reduce((latest, entry) => {
       if (!latest.has(entry.playbook_id)) latest.set(entry.playbook_id, entry);
       return latest;
     }, new Map()).values()];
+    const requested = asObject(asObject(context).request);
+    if (requested.playbook_id) {
+      catalog = catalog.filter((entry) => entry.playbook_id === requested.playbook_id
+        && (requested.playbook_version == null || entry.version === Number(requested.playbook_version)));
+    }
     if (catalog.length === 0) throw new Error('runtime_playbook_catalog_empty');
     let previousError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {

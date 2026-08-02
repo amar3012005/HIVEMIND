@@ -40,12 +40,17 @@ docker tag "hivemind/fe:$OLD-single" "hivemind/fe:rollback-$TS-single" 2>/dev/nu
 echo "rollback tags: rollback-$TS"
 # Preserve exactly one conventional rollback alias for each service being
 # replaced. Immutable rollback-$TS remains useful for this release's audit.
+tag_running_as_stable() {
+  local container="$1" target="$2" image_id
+  image_id=$(docker inspect "$container" --format '{{.Image}}')
+  docker tag "$image_id" "$target"
+}
 for s in "${SERVICES[@]}"; do case "$s" in
-  core)          docker inspect hm-core --format '{{.Image}}' | xargs -r docker tag hivemind/core-api:stable ;;
-  control-plane) docker inspect hm-control --format '{{.Image}}' | xargs -r docker tag hivemind/control-plane:stable ;;
-  employees)     docker inspect hm-employees --format '{{.Image}}' | xargs -r docker tag hivemind/employees:stable ;;
-  tara-deepgram) docker inspect tara-deepgram --format '{{.Image}}' | xargs -r docker tag hivemind/tara-deepgram:stable ;;
-  fe)            docker inspect hivemind-next-frontend-1 --format '{{.Image}}' | xargs -r docker tag hivemind/fe:stable ;;
+  core)          tag_running_as_stable hm-core hivemind/core-api:stable ;;
+  control-plane) tag_running_as_stable hm-control hivemind/control-plane:stable ;;
+  employees)     tag_running_as_stable hm-employees hivemind/employees:stable ;;
+  tara-deepgram) tag_running_as_stable tara-deepgram hivemind/tara-deepgram:stable ;;
+  fe)            tag_running_as_stable hivemind-next-frontend-1 hivemind/fe:stable ;;
 esac; done
 # Build only what changed; retag the rest under the new RID.
 for s in "${SERVICES[@]}"; do case "$s" in

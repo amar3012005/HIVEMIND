@@ -183,6 +183,50 @@ export class KbIngestQueue {
     this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
     this.redis.on('error', () => {});
     this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
+    this._startStaleJobReaper();
+  }
+
+  /**
+   * Reap jobs that died without ever reporting a terminal state.
+   *
+   * A container recreate loses in-flight BullMQ jobs, but the tracker row in
+   * knowledge_ingest_jobs stays exactly as it was — so the job sits `queued` or
+   * `processing` forever. Nothing times it out, nothing retries it, and nothing
+   * surfaces it: the FE just shows a spinner that never resolves.
+   *
+   * Measured 2026-08-02: `kb-canary-amr.md` and `kb-canary-hybrid.md` had been
+   * `queued` for over FIVE HOURS (18086s / 18524s) and had never started, and
+   * `BundB-Solvis_Pitch-Praesentation.pptx` had been `processing` for two hours.
+   * All three were orphaned by restarts during that session's deploys.
+   *
+   * Marking them failed is the honest outcome — an upload that is never going to
+   * finish should say so, so the user can retry. Silence is the worst option.
+   */
+  _startStaleJobReaper() {
+    if (String(process.env.KB_QUEUE_REAPER ?? 'true').toLowerCase() === 'false') return;
+    const EVERY_MS = Number(process.env.KB_REAPER_INTERVAL_MS || 5 * 60 * 1000);
+    // Generous: a 54-page enriched PDF legitimately takes ~11 minutes, and with
+    // several workers a job can wait behind others. Only reap well past that.
+    const QUEUED_MAX_MIN = Number(process.env.KB_REAPER_QUEUED_MAX_MIN || 90);
+    const PROCESSING_MAX_MIN = Number(process.env.KB_REAPER_PROCESSING_MAX_MIN || 45);
+
+    const sweep = async () => {
+      if (!this.jobStore?.reapStale) return;
+      try {
+        await this.jobStore.reapStale({
+          queuedMaxMin: QUEUED_MAX_MIN,
+          processingMaxMin: PROCESSING_MAX_MIN,
+        });
+      } catch (e) {
+        this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);
+      }
+    };
+
+    // First sweep shortly after boot — a restart is exactly when jobs get orphaned.
+    this._reaperBoot = setTimeout(sweep, 30_000);
+    this._reaperTimer = setInterval(sweep, EVERY_MS);
+    this._reaperTimer.unref?.();
+    this._reaperBoot.unref?.();
   }
 
   async _setStatus(trackerJobId, obj) {

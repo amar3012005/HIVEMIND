@@ -11,6 +11,55 @@ export class KnowledgeUploadJobStore {
     return this.prisma.knowledgeIngestJob.create({ data: input });
   }
 
+  /**
+   * Mark jobs failed that died without ever reaching a terminal state.
+   *
+   * A container recreate loses in-flight BullMQ jobs, but the row here stays as
+   * it was — so a job sits `queued` or `processing` forever. Nothing times it
+   * out, nothing retries it, nothing surfaces it: the user gets a spinner that
+   * never resolves and an upload that silently never happened.
+   *
+   * Measured 2026-08-02: kb-canary-amr.md and kb-canary-hybrid.md had been
+   * `queued` over FIVE HOURS (18086s / 18524s) having never started, and
+   * BundB-Solvis_Pitch-Praesentation.pptx `processing` for two — all orphaned by
+   * restarts during that session's deploys.
+   *
+   * Failing them is the honest outcome: an upload that will never finish should
+   * say so, so the user can retry. Silence is the worst available option.
+   *
+   * Thresholds are deliberately generous — a 54-page enriched PDF legitimately
+   * takes ~11 minutes and can wait behind others before it starts.
+   */
+  async reapStale({ queuedMaxMin = 90, processingMaxMin = 45 } = {}) {
+    const cutoff = (mins) => new Date(Date.now() - mins * 60_000);
+    try {
+      const { count } = await this.prisma.knowledgeIngestJob.updateMany({
+        where: {
+          OR: [
+            { status: 'queued', createdAt: { lt: cutoff(queuedMaxMin) } },
+            { status: 'processing', updatedAt: { lt: cutoff(processingMaxMin) } },
+          ],
+        },
+        data: {
+          status: 'failed',
+          stage: 'failed',
+          errorCode: 'STALE_ABANDONED',
+          errorMessage: 'Ingestion never completed — the worker was lost, most often a service '
+            + 'restart mid-flight. Nothing was partially saved; re-upload to retry.',
+          completedAt: new Date(),
+        },
+      });
+      if (count > 0) {
+        this.logger?.warn?.(`[upload-jobs] reaped ${count} stale ingest job(s) → failed `
+          + '(user now sees a retryable error instead of a spinner that never resolves)');
+      }
+      return count;
+    } catch (e) {
+      this.logger?.warn?.(`[upload-jobs] reapStale failed: ${e.message}`);
+      return 0;
+    }
+  }
+
   async findOwned(jobId, { orgId, userId = null }) {
     if (!jobId || !orgId) return null;
     return this.prisma.knowledgeIngestJob.findFirst({ where: {

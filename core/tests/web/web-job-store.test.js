@@ -41,10 +41,20 @@ describe('WebJobStore', () => {
   });
 
   it('gets daily usage', async () => {
-    await store.create({ type: 'search', params: { query: 'a' }, userId: 'u1', orgId: 'o1' });
-    await store.create({ type: 'search', params: { query: 'b' }, userId: 'u1', orgId: 'o1' });
+    const first = await store.create({ type: 'search', params: { query: 'a' }, userId: 'u1', orgId: 'o1' });
+    const second = await store.create({ type: 'search', params: { query: 'b' }, userId: 'u1', orgId: 'o1' });
+    await store.update(first.id, { status: 'succeeded' });
+    await store.update(second.id, { status: 'succeeded' });
     const usage = await store.getUsage('u1');
     expect(usage.web_search_requests).toBe(2);
+  });
+
+  it('does not count failed or queued work against allowance', async () => {
+    const failed = await store.create({ type: 'search', params: { query: 'failed' }, userId: 'u1', orgId: 'o1' });
+    await store.update(failed.id, { status: 'failed', error: 'provider unavailable' });
+    await store.create({ type: 'search', params: { query: 'queued' }, userId: 'u1', orgId: 'o1' });
+    const usage = await store.getUsage({ userId: 'u1', orgId: 'o1' });
+    expect(usage.web_search_requests).toBe(0);
   });
 
   it('retries a failed job', async () => {
@@ -63,7 +73,8 @@ describe('WebJobStore', () => {
   });
 
   it('gets monthly usage', async () => {
-    await store.create({ type: 'search', params: { query: 'a' }, userId: 'u1', orgId: 'o1' });
+    const job = await store.create({ type: 'search', params: { query: 'a' }, userId: 'u1', orgId: 'o1' });
+    await store.update(job.id, { status: 'succeeded' });
     const monthly = await store.getMonthlyUsage('u1');
     expect(monthly.web_search_requests.used).toBe(1);
     expect(monthly.month).toMatch(/^\d{4}-\d{2}$/);

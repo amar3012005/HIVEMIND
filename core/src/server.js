@@ -16686,9 +16686,11 @@ exit \$RC
                     });
                   };
 
-                  const watchdog = setTimeout(() => {
-                    throw new Error('Research stream timeout — 8min cap reached');
-                  }, STREAM_TIMEOUT_MS);
+                  // Never throw from a timer callback: that escapes this job's
+                  // error boundary and can terminate the entire Core process.
+                  // The stream is checked at each provider event instead.
+                  let timedOut = false;
+                  const watchdog = setTimeout(() => { timedOut = true; }, STREAM_TIMEOUT_MS);
 
                   try {
                     for await (const evt of tv.researchStream({
@@ -16696,6 +16698,7 @@ exit \$RC
                       model,
                       citationFormat: citation_format,
                     })) {
+                      if (timedOut) throw new Error('Research stream timeout — 8min cap reached');
                       if (evt?.kind === 'done') break;
                       const delta = evt?.choices?.[0]?.delta;
                       if (!delta) continue;

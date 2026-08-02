@@ -1398,6 +1398,8 @@ export class BrowserRuntime {
     let fallbackApplied = false;
     let runtimeUsed = this.primary.name;
     let result;
+    let primaryError = null;
+    let lightpandaError = null;
 
     // Try Tavily first (primary)
     if (!this._tavilyUnavailable) {
@@ -1410,6 +1412,7 @@ export class BrowserRuntime {
           duration_ms: Date.now() - start,
         };
       } catch (primaryErr) {
+        primaryError = primaryErr;
         // Check if Tavily is unavailable (auth error or not configured)
         if (primaryErr.isAuthError || primaryErr.message.includes('not configured')) {
           this._tavilyUnavailable = true;
@@ -1446,6 +1449,7 @@ export class BrowserRuntime {
           errors: result.errors || [],
         };
       } catch (lpErr) {
+        lightpandaError = lpErr;
         if (lpErr._jobTimeout) {
           _recordDuration(Date.now() - start);
           return {
@@ -1479,7 +1483,7 @@ export class BrowserRuntime {
           errors: [classifyError(null, { jobTimeout: true })],
         };
       }
-      throw new Error(`All runtimes failed. Tavily: ${primaryErr?.message || 'skipped'}; Lightpanda: ${lpErr?.message || 'skipped'}; Fallback: ${fallbackErr.message}`);
+      throw new Error(`All runtimes failed. Tavily: ${primaryError?.message || 'skipped'}; Lightpanda: ${lightpandaError?.message || 'skipped'}; Fallback: ${fallbackErr.message}`);
     }
 
     _recordDuration(Date.now() - start);
@@ -1498,8 +1502,9 @@ export class BrowserRuntime {
     let runtimeUsed = 'firecrawl';
     let result;
 
-    // Crawl/extract is Firecrawl-first. Tavily remains a useful fallback for
-    // smaller extraction jobs; rendered Lightpanda and safe fetch complete the chain.
+    // Crawl/extract is Firecrawl-first. Rendering is the next best fallback;
+    // direct fetch is deliberately last. Search providers never masquerade as
+    // a crawl result because that loses page coverage and extraction semantics.
     if (this.firecrawl.isAvailable()) {
       try {
         result = await withJobTimeout(this.firecrawl.crawl({ urls, depth, pageLimit, include, exclude }));
@@ -1510,18 +1515,11 @@ export class BrowserRuntime {
         };
       } catch {
         fallbackApplied = true;
-        runtimeUsed = 'tavily';
+        runtimeUsed = 'lightpanda';
       }
     }
 
     if (fallbackApplied || !this.firecrawl.isAvailable()) {
-      try {
-        result = await withJobTimeout(this.primary.crawl({ urls, depth, pageLimit, include, exclude }));
-        telemetry.tavilySuccesses = (telemetry.tavilySuccesses || 0) + 1;
-        return { ...result, fallback_applied: true, runtime_used: 'tavily', duration_ms: Date.now() - start };
-      } catch {
-        runtimeUsed = 'lightpanda';
-      }
       try {
         result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit, include, exclude }));
         telemetry.lightpandaSuccesses = (telemetry.lightpandaSuccesses || 0) + 1;

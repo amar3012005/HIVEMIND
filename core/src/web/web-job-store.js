@@ -165,7 +165,7 @@ export class WebJobStore {
 
   async getUsage(scope) {
     const normalized = typeof scope === 'string' ? { userId: scope } : scope;
-    const jobs = await this._all(normalized || {});
+    const jobs = await this._settledJobs(normalized || {});
     const start = new Date(); start.setUTCHours(0, 0, 0, 0);
     const today = jobs.filter((job) => new Date(job.created_at) >= start);
     return {
@@ -183,7 +183,7 @@ export class WebJobStore {
 
   async getMonthlyUsage(scope) {
     const normalized = typeof scope === 'string' ? { userId: scope } : scope;
-    const jobs = await this._all(normalized || {});
+    const jobs = await this._settledJobs(normalized || {});
     const now = new Date(); const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
     const current = jobs.filter((job) => new Date(job.created_at) >= monthStart);
@@ -235,5 +235,24 @@ export class WebJobStore {
       if (error?.code === 'P2002') return { settled: false, duplicate: true };
       throw error;
     }
+  }
+
+  // Customer allowance reflects successful, durably settled work only. Jobs
+  // are intentionally not the ledger: a provider failure or a cancelled job
+  // must never consume an organization's Web Intel allowance.
+  async _settledJobs(scope = {}) {
+    if (!this.prisma) {
+      return (await this._all(scope)).filter((job) => job.status === 'succeeded');
+    }
+
+    const settlements = await this.prisma.webIntelUsageSettlement.findMany({
+      where: scope.orgId ? { orgId: scope.orgId } : {},
+      select: { jobId: true },
+    });
+    const jobIds = [...new Set(settlements.map((settlement) => settlement.jobId))];
+    if (jobIds.length === 0) return [];
+    return (await this.prisma.webIntelJob.findMany({
+      where: { id: { in: jobIds }, ...scope, status: 'succeeded' },
+    })).map(toLegacy);
   }
 }

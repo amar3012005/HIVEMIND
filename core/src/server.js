@@ -6171,9 +6171,48 @@ exit \$RC
       if (pathname === '/api/meetings' && req.method === 'POST') {
         const mUser = _mUserId;
         const mOrg = _mOrgId;
+        // A finalized meeting is tenant-owned.  Do not let an incomplete scoped
+        // principal fall through to a database NOT NULL error: the recorder has
+        // already persisted its transcript segments by session_id and needs a
+        // recoverable response, not an opaque 500.
+        const sessionId = typeof body.session_id === 'string'
+          && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
+          ? body.session_id
+          : null;
+        if (!mUser || !mOrg) {
+          console.warn('[meetings] rejected save without tenant principal', {
+            has_user_id: Boolean(mUser),
+            has_org_id: Boolean(mOrg),
+            session_id: sessionId,
+          });
+          return jsonResponse(res, {
+            error: 'no_active_organization',
+            recoverable: Boolean(sessionId),
+            session_id: sessionId,
+          }, 400);
+        }
         const ins = body.insights || {};
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
-        const transcript = (body.transcript || '').toString();
+        let transcript = (body.transcript || '').toString();
+        // A client may retry finalization after a network or database failure
+        // without retaining the assembled transcript in the tab. Rebuild it
+        // only from the caller's own durably persisted segments.
+        if (!transcript.trim() && sessionId && !orgIsRemote(mOrg) && prisma) {
+          try {
+            const segments = await prisma.$queryRawUnsafe(
+              `SELECT text FROM hivemind.meeting_segments
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                ORDER BY idx ASC`,
+              sessionId, mOrg, mUser,
+            );
+            transcript = (segments || []).map((segment) => segment.text).filter(Boolean).join('\n').trim();
+          } catch (error) {
+            console.warn('[meetings] segment recovery failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              error: error?.message || String(error),
+            });
+          }
+        }
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
         const SCOPES = ['personal', 'project', 'team', 'organization'];
@@ -6200,12 +6239,30 @@ exit \$RC
               scope: mScope,
             };
             const result = await amrMeetingWrite(mOrg, meeting);
-            if (!result?.ok) return jsonResponse(res, { error: 'meetings_save_error' }, 500);
+            if (!result?.ok) {
+              console.error('[meetings] remote save failed', {
+                org_id: mOrg,
+                user_id: mUser,
+                session_id: sessionId,
+                transcript_chars: transcript.length,
+                result: result?.error || result?.message || 'unknown',
+              });
+              return jsonResponse(res, {
+                error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              }, 500);
+            }
             const _newId = result.id;
             if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
             return jsonResponse(res, { ok: true, id: result.id, created_at: result.created_at }, 201);
           } catch (e) {
-            return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            console.error('[meetings] remote save failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              transcript_chars: transcript.length, error: e?.message || String(e),
+            });
+            return jsonResponse(res, {
+              error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+            }, 500);
           }
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
@@ -6238,14 +6295,22 @@ exit \$RC
           // to this finalized meeting row, so the crash-recovery cache is tied to it.
           if (_newId && body.session_id && /^[0-9a-fA-F-]{36}$/.test(String(body.session_id))) {
             await prisma.$executeRawUnsafe(
-              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid WHERE session_id=$2::uuid AND meeting_id IS NULL`,
-              _newId, body.session_id,
+              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid
+                WHERE session_id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND meeting_id IS NULL`,
+              _newId, body.session_id, mOrg, mUser,
             ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
           }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          console.error('[meetings] postgres save failed', {
+            org_id: mOrg, user_id: mUser, session_id: sessionId,
+            transcript_chars: transcript.length, error: e?.message || String(e),
+          });
+          return jsonResponse(res, {
+            error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+            message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+          }, 500);
         }
       }
 
@@ -6306,16 +6371,16 @@ exit \$RC
       {
         const mSeg = pathname.match(/^\/api\/meetings\/session\/([0-9a-fA-F-]{36})\/segments$/);
         if (mSeg && req.method === 'GET') {
-          const mOrg = _mOrgId;
+          const mOrg = _mOrgId, mUser = _mUserId;
           if (orgIsRemote(mOrg)) return jsonResponse(res, { segments: [], skipped: 'remote' });
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id, extraction, extraction_status
                  FROM hivemind.meeting_segments
-                WHERE session_id=$1::uuid AND org_id=$2::uuid
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
                 ORDER BY idx ASC`,
-              mSeg[1], mOrg,
+              mSeg[1], mOrg, mUser,
             );
             return jsonResponse(res, { segments: rows || [], stitched: (rows || []).map((r) => r.text).join('\n').trim() });
           } catch (e) {
@@ -18228,7 +18293,6 @@ exit \$RC
                 scope: body.scope || undefined,
                 primary_team_id: body.primary_team_id || null,
                 project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
-                __bypass_membership: body.__bypass_membership === true ? true : undefined,
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,

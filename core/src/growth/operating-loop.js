@@ -112,7 +112,7 @@ export async function buildGrowthPlanningContext({ prisma, orgId }) {
       participant_ids: room.participantIds, permanent_lead_id: room.permanentLeadId,
     })),
     rules: {
-      rank_constraints: [...CONSTRAINTS], stage_duration_days: { min: 7, max: 30 },
+      stage_duration_days: { min: 7, max: 30 },
       max_hypotheses: 3, ordered_todo_queue: true,
       numbers_require_evidence: true, provider_results_are_source_of_truth: true,
     },

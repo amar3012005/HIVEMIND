@@ -404,7 +404,7 @@ export class NativeHqEngine {
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
-        if (!waitingForCapability) {
+        if (!waitingForCapability && run.waitingFor?.releases_execution_slot === true) {
           const activation = await activateEligibleFirstLifeWork({
             prisma, runtime, expansionTrigger: 'verified_monitoring_checkpoint',
           });

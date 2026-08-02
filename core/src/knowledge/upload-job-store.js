@@ -55,14 +55,29 @@ export class KnowledgeUploadJobStore {
    * Thresholds are deliberately generous — a 54-page enriched PDF legitimately
    * takes ~11 minutes and can wait behind others before it starts.
    */
-  async reapStale({ queuedMaxMin = 90, processingMaxMin = 45 } = {}) {
+  async reapStale({ queuedMaxMin = 90, processingMaxMin = 45, bootOrphanMin = 5, bootedAt = null } = {}) {
     const cutoff = (mins) => new Date(Date.now() - mins * 60_000);
     try {
+      // A job created BEFORE this process booted, still non-terminal, has no
+      // BullMQ job behind it — the worker died with the previous container. It
+      // will never progress, so age it out in minutes rather than waiting for the
+      // 90-minute generic threshold.
+      //
+      // Measured 2026-08-02: four uploads sat `queued` for 26 minutes with no
+      // document and zero memories, orphaned by restarts during a deploy. Under
+      // the generic threshold alone they would have shown a spinner for another
+      // 64 minutes before failing. The user reasonably read that as "upload is
+      // broken" — and functionally it was.
+      const orphanClauses = bootedAt
+        ? [{ status: { in: ['queued', 'processing'] }, documentId: null,
+             createdAt: { lt: new Date(Math.min(bootedAt.getTime(), Date.now() - bootOrphanMin * 60_000)) } }]
+        : [];
       const { count } = await this._model().updateMany({
         where: {
           OR: [
             { status: 'queued', createdAt: { lt: cutoff(queuedMaxMin) } },
             { status: 'processing', updatedAt: { lt: cutoff(processingMaxMin) } },
+            ...orphanClauses,
           ],
         },
         data: {

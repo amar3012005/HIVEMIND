@@ -203,6 +203,7 @@ export class KbIngestQueue {
    * finish should say so, so the user can retry. Silence is the worst option.
    */
   _startStaleJobReaper() {
+    const BOOTED_AT = new Date();
     if (String(process.env.KB_QUEUE_REAPER ?? 'true').toLowerCase() === 'false') return;
     const EVERY_MS = Number(process.env.KB_REAPER_INTERVAL_MS || 5 * 60 * 1000);
     // Generous: a 54-page enriched PDF legitimately takes ~11 minutes, and with
@@ -216,6 +217,9 @@ export class KbIngestQueue {
         await this.jobStore.reapStale({
           queuedMaxMin: QUEUED_MAX_MIN,
           processingMaxMin: PROCESSING_MAX_MIN,
+          // Anything non-terminal that predates this boot lost its BullMQ job when
+          // the previous container went away. Age it out in minutes, not 90.
+          bootedAt: BOOTED_AT,
         });
       } catch (e) {
         this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);

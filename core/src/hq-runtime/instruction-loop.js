@@ -200,6 +200,13 @@ export function shouldDeferInstruction({ deferTodos = false, instruction = {} } 
   return Boolean(deferTodos && instruction?.interpreted?.execution_mode !== 'single_outcome');
 }
 
+export function resolveInstructionExecutionMode({ semantic = {}, persisted = {} } = {}) {
+  if (persisted?.source === 'runtime_invitation' && persisted?.execution_mode === 'operating_plan') {
+    return 'operating_plan';
+  }
+  return semantic?.execution_mode === 'operating_plan' ? 'operating_plan' : 'single_outcome';
+}
+
 export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false }) {
   const [pending, roomRows] = await Promise.all([
     prisma.hqInstruction.findMany({
@@ -212,9 +219,15 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
   const availableRooms = [...new Set(roomRows.map((room) => room.roomTag).filter(Boolean))];
   const created = [];
   for (const instruction of pending) {
-    const interpreted = await interpretHqInstructionSemantic(instruction.body, company, availableRooms);
-    const executionMode = interpreted.execution_mode === 'single_outcome'
-      ? 'single_outcome' : 'operating_plan';
+    const semantic = await interpretHqInstructionSemantic(instruction.body, company, availableRooms);
+    const persisted = instruction.interpreted && typeof instruction.interpreted === 'object' ? instruction.interpreted : {};
+    const executionMode = resolveInstructionExecutionMode({ semantic, persisted });
+    const interpreted = {
+      ...semantic,
+      execution_mode: executionMode,
+      source_attribution: persisted.source || null,
+      planning_focus_refs: Array.isArray(persisted.focuses) ? persisted.focuses : [],
+    };
     if (shouldDeferInstruction({ deferTodos, instruction: { interpreted } })) {
       await prisma.hqInstruction.update({ where: { id: instruction.id }, data: {
         status: 'APPLIED', interpreted: { ...interpreted, execution_mode: executionMode, incorporated_into_initial_plan: true }, appliedAt: new Date(),

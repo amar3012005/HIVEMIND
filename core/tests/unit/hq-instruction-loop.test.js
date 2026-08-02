@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { canonicalInstructionKind, getPlatformManagedCapabilities, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities, shouldDeferInstruction } from '../../src/hq-runtime/instruction-loop.js';
+import { canonicalInstructionKind, getPlatformManagedCapabilities, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities, resolveInstructionExecutionMode, shouldDeferInstruction } from '../../src/hq-runtime/instruction-loop.js';
 
 test('instruction ingestion contains no keyword router or domain lifecycle decomposition', async () => {
   const source = await readFile(new URL('../../src/hq-runtime/instruction-loop.js', import.meta.url), 'utf8');
@@ -86,4 +86,15 @@ test('single-outcome instructions remain executable before the first broad opera
     deferTodos: true,
     instruction: { interpreted: { execution_mode: 'operating_plan' } },
   }), true);
+});
+
+test('structured first-life launch attribution survives a semantic fallback', () => {
+  assert.equal(resolveInstructionExecutionMode({
+    semantic: { execution_mode: 'single_outcome' },
+    persisted: { source: 'runtime_invitation', execution_mode: 'operating_plan' },
+  }), 'operating_plan');
+  assert.equal(resolveInstructionExecutionMode({
+    semantic: { execution_mode: 'single_outcome' },
+    persisted: { source: 'instruction_editor' },
+  }), 'single_outcome');
 });

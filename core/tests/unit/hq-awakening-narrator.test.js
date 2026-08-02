@@ -40,6 +40,15 @@ test('baseline acknowledgement never presents absent metrics as measured zero', 
   assert.doesNotMatch(result.summary, /0 impressions|0 website page/);
 });
 
+test('baseline acknowledgement treats a limited fallback website result as unobserved', () => {
+  const result = summarizeBaselineResult({
+    website: { provider: 'fallback', mapped_pages: 0, limitation: 'No usable first-party pages' },
+    social_presence: { totals: {} },
+  });
+  assert.match(result.summary, /Website pages were not observed/);
+  assert.equal(result.details.website_pages, null);
+});
+
 test('growth plan acknowledgement names constraints and ordered specialist work', () => {
   const result = summarizeGrowthPlanResult({ plan: {
     constraints: [{ type: 'reach' }, { type: 'pipeline' }],

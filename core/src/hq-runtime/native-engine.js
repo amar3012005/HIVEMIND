@@ -25,7 +25,9 @@ export function summarizeBaselineResult(baseline = {}) {
   const totals = social.totals && typeof social.totals === 'object' ? social.totals : {};
   const activity = [['impressions', 'impressions'], ['reach', 'reach'], ['likes', 'likes'], ['clicks', 'clicks']]
     .map(([key, label]) => hasMetric(totals, key) ? `${metric(totals[key])} ${label}` : `${label} not observed`);
-  const pagesObserved = hasMetric(baseline.website, 'mapped_pages');
+  const websiteLimited = Boolean(baseline.website?.limitation)
+    || String(baseline.website?.provider || '').toLowerCase() === 'fallback';
+  const pagesObserved = !websiteLimited && hasMetric(baseline.website, 'mapped_pages');
   const pages = pagesObserved ? Number(baseline.website.mapped_pages) : null;
   const gaps = Array.isArray(baseline.data_gaps) ? baseline.data_gaps.filter(Boolean) : [];
   return {

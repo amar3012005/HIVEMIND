@@ -1,5 +1,6 @@
 import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle } from './service.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
+import { scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
 
@@ -104,13 +105,22 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
       ? await autoLaunchCampaignIfReady({ prisma, campaignId: run.campaignId })
       : { launched: false };
     const response = automatic.launched ? { ...result, status: 'RUNNING', autoLaunched: true } : result;
+    await scheduleRuntimeCampaignEvent({
+      prisma, campaignId: run.campaignId,
+      type: result?.ok ? 'campaign.contract_ready' : 'campaign.contract_failed',
+      data: { plan_version_id: result?.planVersionId || null, status: response?.status || null },
+    }).catch(() => {});
     return readyEvent ? { ...response, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : response;
   }
   if (normalized.t === 'campaign_governance' && normalized.status === 'unmet') {
-    return markCampaignNeedsInput({ prisma, turnId, errors: normalized.verdict?.unmet_deliverables || [] });
+    const result = await markCampaignNeedsInput({ prisma, turnId, errors: normalized.verdict?.unmet_deliverables || [] });
+    await scheduleRuntimeCampaignEvent({ prisma, campaignId: run.campaignId, type: 'campaign.contract_failed', data: { status: 'NEEDS_INPUT' } }).catch(() => {});
+    return result;
   }
   if (normalized.t === 'campaign_bundle_invalid') {
-    return markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });
+    const result = await markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });
+    await scheduleRuntimeCampaignEvent({ prisma, campaignId: run.campaignId, type: 'campaign.contract_failed', data: { status: 'NEEDS_INPUT' } }).catch(() => {});
+    return result;
   }
   if (normalized.t !== 'seal') return { campaignId: run.campaignId, status: 'RUNNING' };
 

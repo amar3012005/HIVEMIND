@@ -4,6 +4,9 @@ import { HqSkillRegistry, HqToolkitRegistry } from './skill-registry.js';
 import { ingestPendingInstructions, reconcileTodoCapabilities } from './instruction-loop.js';
 import { narrateAwakening } from './awakening-narrator.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
+import { projectCurrentActivationSprint } from './activation-sprint.js';
+import { activateEligibleFirstLifeWork } from './first-life-control.js';
+import { resolveAuthorityPreference } from './contracts.js';
 
 const DAY = 86400000;
 
@@ -102,7 +105,8 @@ export function resolveAuthorityDecision(stage, authorityPolicy = {}) {
   return {
     gate,
     policyKey,
-    autoGrant: Boolean(gate && policyKey && authorityPolicy?.[policyKey] === 'auto'),
+    preference: resolveAuthorityPreference(authorityPolicy, policyKey),
+    autoGrant: Boolean(gate && policyKey && resolveAuthorityPreference(authorityPolicy, policyKey) === 'auto'),
   };
 }
 
@@ -179,12 +183,40 @@ export class NativeHqEngine {
         details: { instruction_id: applied.instruction.id, interpretation: applied.interpreted },
       });
     }
+    if (appliedInstructions.some((item) => item.todo)) {
+      const activation = await activateEligibleFirstLifeWork({
+        prisma, runtime, expansionTrigger: 'user_instruction',
+      });
+      for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
+        eventType: 'todo_created', title: `Promoted by the new instruction: ${promoted.title}`,
+        summary: 'The instruction now owns an available execution slot and is eligible for semantic playbook selection.',
+        details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'user_instruction' },
+      });
+    }
     const capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
-    for (const resolved of capabilityState.resolved) await event(prisma, runtime, cycle, {
-      eventType: 'capability_resolved', title: 'A required capability is available',
-      summary: `${resolved.platform_managed?.length ? `${resolved.platform_managed.join(', ')} is provided by the platform.` : `I verified ${resolved.capabilities.join(', ')} against this organization.`} The blocked todo is ready again, so I am continuing from it instead of rebuilding the plan.`,
-      details: resolved,
-    });
+    for (const resolved of capabilityState.resolved) {
+      await event(prisma, runtime, cycle, {
+        eventType: 'capability_resolved', title: 'A required capability is available',
+        summary: `${resolved.platform_managed?.length ? `${resolved.platform_managed.join(', ')} is provided by the platform.` : `I verified ${resolved.capabilities.join(', ')} against this organization.`} The blocked todo is ready again, so I am continuing from it instead of rebuilding the plan.`,
+        details: resolved,
+      });
+      const waitingRun = this.runtimePlaybooks ? await prisma.runtimePlaybookRun.findFirst({
+        where: { orgId: runtime.orgId, status: 'WAITING_EVENT', trigger: { path: ['todo_id'], equals: resolved.todo_id } },
+        orderBy: { updatedAt: 'desc' },
+      }) : null;
+      if (waitingRun && (waitingRun.waitingFor?.types || []).includes('capability.connected')) {
+        let resumedRun = waitingRun;
+        for (const capability of resolved.capabilities || []) {
+          resumedRun = await this.runtimePlaybooks.resumeEvent(waitingRun.id, runtime.orgId, {
+            id: `capability-connected:${waitingRun.id}:${capability}`,
+            type: 'capability.connected',
+            data: { capability, correlation_ref: capability, todo_id: resolved.todo_id },
+          });
+        }
+        const projectedTodo = capabilityState.todos.find((todo) => todo.id === resolved.todo_id);
+        if (projectedTodo && projectedTodo.status === 'READY') projectedTodo.status = resumedRun?.status === 'WAITING_EVENT' ? 'WAITING_FOR_CONNECTOR' : 'RUNNING';
+      }
+    }
     for (const request of baselineMissingBeforeCollection ? [] : capabilityState.requests) {
       const alreadyShown = await prisma.hqRuntimeEvent.findFirst({ where: { runtimeId: runtime.id, eventType: 'capability_required', details: { path: ['capability_request_id'], equals: request.id } } }).catch(() => null);
       if (!alreadyShown) await event(prisma, runtime, cycle, {
@@ -268,7 +300,31 @@ export class NativeHqEngine {
       });
     }
 
+    const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
+    if (activationSprint?.status === 'AWAITING_POLICY') {
+      const alreadyRequested = await prisma.hqRuntimeEvent.findFirst({
+        where: {
+          runtimeId: runtime.id,
+          eventType: 'approval_required',
+          details: { path: ['activation_sprint_id'], equals: activationSprint.id },
+        },
+      }).catch(() => null);
+      if (!alreadyRequested) await event(prisma, runtime, cycle, {
+        eventType: 'approval_required',
+        title: 'The first operating plan is ready for your policy',
+        summary: 'I have committed evidence-backed proposals but will not delegate them until you choose Manual review or Auto. This choice sets the default for future exact external gates; it grants no action by itself.',
+        details: {
+          activation_sprint_id: activationSprint.id,
+          policy: activationSprint.policy || null,
+          item_count: activationSprint.item_count,
+        },
+      });
+      await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
+      return { transition: 'WAIT_FOR_AUTHORITY_POLICY', activation_sprint_id: activationSprint.id };
+    }
+
     let queueContinuationScheduled = false;
+    let initialPolicyCommitted = false;
     if (trigger.type === 'runtime_playbook_result') {
       const runId = String(trigger.payload?.run_id || '');
       const run = runId ? await prisma.runtimePlaybookRun.findFirst({
@@ -322,8 +378,10 @@ export class NativeHqEngine {
           });
         }
       } else if (run.status === 'WAITING_EVENT') {
+        const waitingForCapability = (run.waitingFor?.types || []).includes('capability.connected');
         await prisma.hqTodo.update({ where: { id: todo.id }, data: {
-          status: 'RUNNING', blockedReason: null,
+          status: waitingForCapability ? 'WAITING_FOR_CONNECTOR' : 'MONITORING',
+          blockedReason: waitingForCapability ? 'A required tenant capability is not connected yet.' : null,
           result: {
             runtime_playbook_run_id: run.id,
             playbook_id: run.playbookId,
@@ -334,19 +392,48 @@ export class NativeHqEngine {
           },
         } });
         await event(prisma, runtime, cycle, {
-          eventType: 'observation', title: `Response monitoring is active: ${todo.title}`,
-          summary: `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). Provider response correlation is active; a matching event will resume this same run immediately.`,
+          eventType: waitingForCapability ? 'capability_required' : 'observation',
+          title: waitingForCapability ? `A connection is required: ${todo.title}` : `Response monitoring is active: ${todo.title}`,
+          summary: waitingForCapability
+            ? `The Room's accepted work and ${artifactRefs.length} durable artifact(s) remain attached to this execution. HQ is waiting for the missing tenant connection and will resume the same playbook checkpoint when it becomes available.`
+            : `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). Provider response correlation is active; a matching event will resume this same run immediately.`,
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
+        if (!waitingForCapability) {
+          const activation = await activateEligibleFirstLifeWork({
+            prisma, runtime, expansionTrigger: 'verified_monitoring_checkpoint',
+          });
+          for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
+            eventType: 'todo_created',
+            title: `Promoted from the operating plan: ${promoted.title}`,
+            summary: 'A verified lifecycle checkpoint released policy capacity. This proposal is now eligible for its own playbook selection.',
+            details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'verified_monitoring_checkpoint' },
+          });
+          if (activation.promoted.length) {
+            await scheduleHqWake({
+              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+              idempotencyKey: `first-life-monitoring:${run.id}:${run.checkpointSequence}`,
+              triggerType: 'queue_advance', dueAt: new Date(),
+              payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
+            });
+            queueContinuationScheduled = true;
+          }
+        }
       } else {
-        const completed = run.status === 'COMPLETED';
+        const requestedTerminals = Array.isArray(run.context?.playbook_selection?.acceptable_terminal_states)
+          ? run.context.playbook_selection.acceptable_terminal_states : [];
+        const terminalMatchesRequest = requestedTerminals.length > 0 && requestedTerminals.includes(run.terminalState);
+        const completed = run.status === 'COMPLETED' && terminalMatchesRequest;
+        const outcomeGap = run.status === 'COMPLETED' && !terminalMatchesRequest
+          ? `Lifecycle reached ${run.terminalState || 'an unspecified terminal state'}, but the requested outcome requires one of: ${requestedTerminals.join(', ') || 'a Director-approved terminal state'}.`
+          : null;
         await prisma.hqTodo.update({
           where: { id: todo.id },
           data: {
             status: completed ? 'COMPLETED' : 'BLOCKED',
             completedAt: completed ? new Date() : null,
-            blockedReason: completed ? null : JSON.stringify(run.lastVerdict || {}).slice(0, 2000),
+            blockedReason: completed ? null : (outcomeGap || JSON.stringify(run.lastVerdict || {})).slice(0, 2000),
             result: {
               runtime_playbook_run_id: run.id,
               playbook_id: run.playbookId,
@@ -354,6 +441,8 @@ export class NativeHqEngine {
               terminal_state: run.terminalState,
               status: run.status,
               artifact_refs: artifactRefs,
+              requested_terminal_states: requestedTerminals,
+              requested_outcome_satisfied: completed,
               last_verdict: run.lastVerdict || {},
             },
           },
@@ -363,10 +452,30 @@ export class NativeHqEngine {
           title: completed ? `Completed: ${todo.title}` : `Playbook needs intervention: ${todo.title}`,
           summary: completed
             ? `I read the completed lifecycle and accepted ${artifactRefs.length} durable output(s)${artifactSummary ? `: ${artifactSummary}` : ''}. It reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). This todo is complete; the next executable queue item can now start.`
-            : 'The lifecycle stopped at a failed predicate or terminal safety condition. Exact unmet checks remain attached to the run.',
-          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, artifact_refs: artifactRefs, artifact_counts: artifactCounts, verdict: run.lastVerdict || {} },
+            : outcomeGap || 'The lifecycle stopped at a failed predicate or terminal safety condition. Exact unmet checks remain attached to the run.',
+          details: { run_id: run.id, playbook_id: run.playbookId, terminal_state: run.terminalState, requested_terminal_states: requestedTerminals, requested_outcome_satisfied: completed, artifact_refs: artifactRefs, artifact_counts: artifactCounts, verdict: run.lastVerdict || {} },
           evidenceRefs: artifactRefs,
         });
+        if (completed) {
+          const activation = await activateEligibleFirstLifeWork({
+            prisma, runtime, expansionTrigger: 'verified_result',
+          });
+          for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
+            eventType: 'todo_created',
+            title: `Promoted from the operating plan: ${promoted.title}`,
+            summary: 'A verified result released policy capacity. This proposal is now eligible for its own playbook selection.',
+            details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'verified_result' },
+          });
+          if (activation.promoted.length) {
+            await scheduleHqWake({
+              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+              idempotencyKey: `first-life-result:${run.id}:${run.checkpointSequence}`,
+              triggerType: 'queue_advance', dueAt: new Date(),
+              payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
+            });
+            queueContinuationScheduled = true;
+          }
+        }
         await scheduleHqWake({
           prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
           idempotencyKey: `queue-after-playbook:${run.id}`, triggerType: 'queue_advance', dueAt: new Date(),
@@ -487,14 +596,25 @@ export class NativeHqEngine {
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
       const lifecycleContext = {
         company: compactCompanyOperatingContext(context.company),
+        baseline: context.evidence?.baseline || null,
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),
         },
         constraints: {
-          authority_mode: readyTodo.context?.authority_mode === 'EXECUTE' ? 'EXECUTE' : 'PREPARE',
+          authority_mode: readyTodo.context?.external_action_requested === true || readyTodo.context?.authority_mode === 'EXECUTE' ? 'EXECUTE' : 'PREPARE',
           acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
           instruction_id: readyTodo.instructionId || null,
+        },
+        request: {
+          owner_room_tag: String(readyTodo.context?.room_tag || readyTodo.kind || '').trim().toLowerCase() || null,
+          instruction: readyTodo.context?.source_instruction || readyTodo.objective,
+          objective: readyTodo.objective,
+          requested_action: readyTodo.context?.requested_action || 'complete_requested_outcome',
+          requested_terminal_outcome: readyTodo.context?.requested_terminal_outcome || 'completed_as_requested',
+          external_action_requested: readyTodo.context?.external_action_requested === true || readyTodo.context?.authority_mode === 'EXECUTE',
+          exact_targets: Array.isArray(readyTodo.context?.exact_targets) ? readyTodo.context.exact_targets : [],
+          acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
         },
       };
       let selectionError = null;
@@ -580,16 +700,6 @@ export class NativeHqEngine {
               selection_reason: playbookAssignment.selection.reason,
             },
           });
-          const nextReady = capabilityState.todos.find((todo) => todo.id !== readyTodo.id && todo.status === 'READY');
-          if (nextReady) {
-            await scheduleHqWake({
-              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-              idempotencyKey: `queue-after-playbook-delegation:${playbookAssignment.run.id}`,
-              triggerType: 'queue_advance', dueAt: new Date(),
-              payload: { delegated_todo_id: readyTodo.id, next_todo_id: nextReady.id },
-            });
-            queueContinuationScheduled = true;
-          }
         }
       }
     } else if (!context.evidence.latest_growth_plan && !focusedOutcome) {
@@ -613,7 +723,7 @@ export class NativeHqEngine {
       const acknowledged = summarizeGrowthPlanResult(result);
       await event(prisma, runtime, cycle, {
         eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
-        summary: `${acknowledged.summary} The persisted queue is now the source of truth; I will dispatch its first executable item next.`,
+        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. I will not delegate them until the first operating policy is recorded.`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
@@ -624,15 +734,16 @@ export class NativeHqEngine {
         details: { constraints: result.plan?.constraints, stage: result.plan?.stage }, evidenceRefs: [result.artifact_id],
       });
       await event(prisma, runtime, cycle, {
-        eventType: 'todo_created', title: 'I committed the first operating queue',
-        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. I will take the first executable item; a waiting item will remain visible while the next independent ready item advances.`,
+        eventType: 'todo_created', title: 'I committed the first operating proposals',
+        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. These remain proposed until the first operating policy is recorded.`,
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       await scheduleHqWake({
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-        idempotencyKey: `initial-plan-queue:${result.artifact_id}`,
-        triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id },
+        idempotencyKey: `initial-plan-policy:${result.artifact_id}`,
+        triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id, reason: 'initial_policy_choice' },
       });
+      initialPolicyCommitted = true;
     } else if (focusedOutcome) {
       await event(prisma, runtime, cycle, {
         eventType: 'observation', title: 'The focused outcome remains retained',
@@ -687,7 +798,9 @@ export class NativeHqEngine {
     } : null);
     const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
     const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
-    const sleepReason = queueContinuationScheduled
+    const sleepReason = initialPolicyCommitted
+      ? 'I have retained the evidenced proposals without dispatching them. Choose Manual or Auto as the default for future exact external gates; this policy choice will not grant or execute any action.'
+      : queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability
       ? `I am pausing because ${openCapability.provider} is not connected. That capability is required by the next todo; pretending otherwise would produce an unusable result. Connect it and I will wake immediately, verify the tenant binding, and continue the same todo.`
@@ -701,8 +814,9 @@ export class NativeHqEngine {
         ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
       : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
     if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
-    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null });
-    const waitingTitle = queueContinuationScheduled ? 'The queue is still moving'
+    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialPolicyCommitted ? 'initial_policy_choice' : null });
+    const waitingTitle = initialPolicyCommitted ? 'I am waiting for the first operating policy'
+      : queueContinuationScheduled ? 'The queue is still moving'
       : openCapability ? 'I am waiting for access'
       : waitingForResponse ? 'I am monitoring for replies'
       : pendingSpecialist ? 'I am waiting for specialist work'

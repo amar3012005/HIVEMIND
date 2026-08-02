@@ -80,7 +80,11 @@ export class DirectorPlaybookSelector {
   }
 
   async select({ objective, context = {}, scopeKey = 'global' } = {}) {
-    const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
+    const requestedOwner = String(asObject(asObject(context).request).owner_room_tag || '').trim().toLowerCase();
+    const active = this.registry.descriptors({ scopeKey }).filter((entry) => (
+      entry.status === 'ACTIVE'
+      && (!requestedOwner || String(entry.metadata?.owner_room_tag || '').trim().toLowerCase() === requestedOwner)
+    ));
     // New assignments always use the newest active version. Existing runs remain
     // pinned to their immutable version through RuntimePlaybookRun.
     const catalog = [...active.reduce((latest, entry) => {
@@ -100,7 +104,7 @@ export class DirectorPlaybookSelector {
           messages: [
             {
               role: 'system',
-              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle semantically fits the objective. The objective may be written in any language. Never infer an identifier that is absent from the registry. For the selected playbook, bind only its declared input_contract fields from the objective and supplied context, using an object keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"reason":"brief evidence-based reason","bindings":{"declared.path":value}}. Return one complete JSON object only.',
+              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata semantically support the exact requested action and terminal outcome. The objective may be written in any language. A messaging lifecycle is incompatible with a voice-call request unless its metadata explicitly supports that action. Never infer an identifier that is absent from the registry. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
             },
             { role: 'user', content: JSON.stringify({
               objective: String(objective || '').slice(0, 8000), context, playbooks: catalog,
@@ -125,11 +129,23 @@ export class DirectorPlaybookSelector {
         const allowed = catalog.some((entry) => entry.playbook_id === playbookId && entry.version === version);
         if (!allowed) throw new Error(`runtime_playbook_selection_not_in_registry:${playbookId}:${version}`);
         const playbook = this.registry.get(playbookId, version, { scopeKey });
+        let acceptableTerminalStates = Array.isArray(selected.acceptable_terminal_states)
+          ? [...new Set(selected.acceptable_terminal_states.map(String).filter((state) => playbook.terminal_states.includes(state)))] : [];
+        // Runtime assignments always include the durable request contract and
+        // therefore require an explicit outcome binding. The broader selector
+        // API remains backwards-compatible for non-Runtime registry consumers.
+        const runtimeRequest = Boolean(asObject(context).request);
+        if (!acceptableTerminalStates.length && runtimeRequest) {
+          throw new Error('runtime_playbook_acceptable_terminal_states_required');
+        }
+        if (!acceptableTerminalStates.length) acceptableTerminalStates = [...playbook.terminal_states];
         const contextPatch = bindContext(playbook, selected, context);
         return {
           playbook_id: playbookId,
           version,
           reason: String(selected.reason || '').slice(0, 1000),
+          ...(runtimeRequest || Array.isArray(selected.acceptable_terminal_states)
+            ? { acceptable_terminal_states: acceptableTerminalStates } : {}),
           ...(contextPatch ? { context_patch: contextPatch } : {}),
         };
       } catch (error) {

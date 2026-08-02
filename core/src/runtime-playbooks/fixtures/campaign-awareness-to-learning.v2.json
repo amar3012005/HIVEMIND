@@ -1,0 +1,146 @@
+{
+  "playbook_id": "campaign.awareness-to-learning",
+  "version": 2,
+  "status": "ACTIVE",
+  "name": "Awareness campaign to learning",
+  "description": "A governed Campaign Intelligence lifecycle from company-grounded planning through channel capability readiness, launch authority, observation and evidence-backed review.",
+  "metadata": {
+    "owner_room_tag": "campaign",
+    "supported_actions": ["plan_awareness_campaign", "prepare_campaign", "launch_campaign", "monitor_campaign", "evaluate_campaign"],
+    "purpose": "Use for a bounded awareness campaign that should be prepared by Campaign Intelligence and continue through governed launch and measurement."
+  },
+  "input_contract": {"fields": [
+    {"path": "target.location", "type": "string", "description": "Optional retained geographic focus."},
+    {"path": "target.duration_days", "type": "integer", "description": "Bounded campaign horizon.", "default_value": 7},
+    {"path": "policy.campaign_observation_seconds", "type": "integer", "description": "Time before the first campaign evidence review.", "default_value": 604800}
+  ]},
+  "initial_stage_id": "prepare_campaign_contract",
+  "terminal_states": ["reviewed", "campaign_needs_input", "launch_blocked", "cancelled"],
+  "stages": [
+    {
+      "id": "prepare_campaign_contract",
+      "objective": "Create the durable Campaign, open the permanent Campaign Intelligence Room, and let its existing Director research, debate, govern and persist the complete Campaign Contract. Images remain asynchronous after contract acceptance.",
+      "input_refs": ["context.company", "context.baseline", "context.request", "context.target", "context.policy"],
+      "expected_artifacts": ["campaign_record"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "create_campaign"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_record", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_record", "path": "data.campaign_id"},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_record", "path": "data.room_id"}
+      ],
+      "waits_for_event": {"types": ["campaign.contract_ready", "campaign.contract_failed"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
+      "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "inspect_campaign_contract",
+      "objective": "Read the persisted Campaign Contract, actions and selected visual readiness without regenerating the Room report.",
+      "input_refs": ["artifacts.campaign_record", "event"],
+      "expected_artifacts": ["campaign_status"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "inspect_contract"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_status", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_status", "path": "data.contract_state"}
+      ],
+      "transitions": [
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_status", "path": "data.contract_state", "value": "ready"}, "to_stage": "preflight_campaign_channels"},
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_status", "path": "data.contract_state", "value": "waiting_assets"}, "to_stage": "wait_for_campaign_visuals"},
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_status", "path": "data.contract_state", "value": "needs_input"}, "to_terminal": "campaign_needs_input"},
+        {"default": true, "to_stage": "wait_for_campaign_visuals"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "wait_for_campaign_visuals",
+      "objective": "Keep the accepted Campaign Contract available while selected campaign visuals finish asynchronously.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_status"],
+      "expected_artifacts": ["campaign_observation"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "observe"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_observation", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_observation", "path": "data.correlation_ref"}
+      ],
+      "waits_for_event": {"types": ["campaign.visuals_ready", "campaign.contract_failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
+      "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "preflight_campaign_channels",
+      "objective": "Verify that every selected Campaign channel has a tenant-connected executable adapter before asking for launch authority.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_status", "event"],
+      "expected_artifacts": ["campaign_capability_status"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "preflight_launch"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_capability_status", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_capability_status", "path": "data.all_ready"}
+      ],
+      "transitions": [
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_capability_status", "path": "data.all_ready", "value": true}, "to_stage": "launch_campaign"},
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_capability_status", "path": "data.waiting_for_connection", "value": true}, "to_stage": "wait_for_campaign_channels"},
+        {"default": true, "to_terminal": "launch_blocked"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "wait_for_campaign_channels",
+      "objective": "Retain the accepted Campaign Contract while HQ requests only the missing tenant channel connections.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_status", "artifacts.campaign_capability_status"],
+      "expected_artifacts": ["campaign_capability_status"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "preflight_launch"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_capability_status", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_capability_status", "path": "data.waiting_for_connection"}
+      ],
+      "waits_for_event": {"types": ["capability.connected", "campaign.connection_changed", "wait.timeout"], "timeout_after_seconds": 3600},
+      "transitions": [{"default": true, "to_stage": "preflight_campaign_channels"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "launch_campaign",
+      "objective": "Launch the exact approved Campaign Contract and schedule its immutable actions through the campaign adapters.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_status", "artifacts.campaign_capability_status"],
+      "expected_artifacts": ["campaign_launch_status"],
+      "authority_gate": "campaign_launch",
+      "authority_policy_key": "outbound_campaigns",
+      "authority_binding": "stage_inputs",
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "launch"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_launch_status", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_launch_status", "path": "data.outcome"}
+      ],
+      "transitions": [
+        {"when": {"predicate": "latest_field_equals", "select": "campaign_launch_status", "path": "data.outcome", "value": "launched"}, "to_stage": "observe_campaign"},
+        {"default": true, "to_terminal": "launch_blocked"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_campaign",
+      "objective": "Register the launched campaign for its first evidence checkpoint and wait without holding the Campaign Room open.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_launch_status"],
+      "expected_artifacts": ["campaign_observation"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "observe"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_observation", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_observation", "path": "data.correlation_ref"}
+      ],
+      "waits_for_event": {"types": ["campaign.performance_checkpoint", "campaign.completed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 604800},
+      "transitions": [{"default": true, "to_stage": "evaluate_campaign"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "evaluate_campaign",
+      "objective": "Synchronize current provider metrics and persist the first campaign learning checkpoint for HQ.",
+      "input_refs": ["artifacts.campaign_record", "artifacts.campaign_launch_status", "event"],
+      "expected_artifacts": ["campaign_outcome"],
+      "execution": {"mode": "adapter", "adapter_id": "campaigns", "operation": "execute", "config": {"action": "evaluate"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "campaign_outcome", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "campaign_outcome", "path": "data.outcome"}
+      ],
+      "transitions": [{"default": true, "to_terminal": "reviewed"}],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    }
+  ]
+}

@@ -60,10 +60,10 @@ test('instruction normalization keeps one outcome and leaves stages to the playb
   const units = normalizeInstructionWorkUnits({ work_units: [
     { title: 'Find Berlin prospects', objective: 'Find five prospects', room_tag: 'outreach', kind: 'outreach_discovery', target: { quantity: 5 }, completion_requirements: [{ type: 'records_persisted', minimum: 5 }] },
     { title: 'Draft their emails', objective: 'Write one email per accepted prospect', room_tag: 'outreach', kind: 'email_drafting', target: { quantity: 5 }, depends_on: 0, completion_requirements: [{ type: 'email_drafts', minimum: 5 }] },
-  ] }, fallback);
+  ] }, fallback, ['outreach']);
   assert.equal(units.length, 1);
   assert.equal(units[0].depends_on, null);
-  assert.deepEqual(units[0].completion_requirements, [{ type: 'records_persisted', minimum: 5 }]);
+  assert.deepEqual(units[0].completion_requirements, []);
 });
 
 test('instruction normalization does not encode adapter requirements from a task kind', () => {
@@ -72,7 +72,7 @@ test('instruction normalization does not encode adapter requirements from a task
     title: 'Deliver emails', objective: 'Send prepared emails', room_tag: 'outreach',
     kind: 'email_delivery', authority_mode: 'EXECUTE', required_capabilities: [],
     completion_requirements: [{ type: 'external_actions', minimum: 3 }, { type: 'delivery_receipts', minimum: 3 }],
-  }] }, fallback);
+  }] }, fallback, ['outreach']);
   assert.equal(unit.authority_mode, 'EXECUTE');
   assert.deepEqual(unit.required_capabilities, []);
 });

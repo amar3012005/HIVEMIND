@@ -31,15 +31,36 @@ export function assertHqTransition(from, to) {
 }
 
 export function normalizeAuthorityPolicy(value = {}) {
+  const legacyOverrides = Object.fromEntries(Object.entries(value)
+    .filter(([key, preference]) => key.startsWith('outbound_') && ['manual', 'auto'].includes(preference)));
+  const suppliedOverrides = value.gate_overrides && typeof value.gate_overrides === 'object' && !Array.isArray(value.gate_overrides)
+    ? Object.fromEntries(Object.entries(value.gate_overrides)
+      .filter(([key, preference]) => /^[a-z0-9_.:-]{1,120}$/i.test(key) && ['manual', 'auto'].includes(preference)))
+    : {};
+  const externalDefault = ['manual', 'auto'].includes(value.external_default)
+    ? value.external_default
+    : ['manual', 'auto'].includes(value.external_writes) ? value.external_writes : 'unconfigured';
   return {
     internal_autonomy: value.internal_autonomy !== false,
     external_writes: value.external_writes || 'approval_required',
+    external_default: externalDefault,
+    gate_overrides: { ...legacyOverrides, ...suppliedOverrides },
     outbound_messages: value.outbound_messages || 'unconfigured',
+    outbound_calls: value.outbound_calls || 'unconfigured',
+    outbound_campaigns: value.outbound_campaigns || 'unconfigured',
     spending: value.spending || 'approval_required',
     deletion: value.deletion || 'approval_required',
     policy_changes: value.policy_changes || 'approval_required',
     emergency_stop: value.emergency_stop !== false,
   };
+}
+
+export function resolveAuthorityPreference(value = {}, policyKey = null) {
+  const policy = normalizeAuthorityPolicy(value);
+  if (policyKey && ['manual', 'auto'].includes(policy.gate_overrides?.[policyKey])) {
+    return policy.gate_overrides[policyKey];
+  }
+  return policy.external_default;
 }
 
 export function validateWorkResultPacket(value) {

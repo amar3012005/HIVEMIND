@@ -2,9 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   dispatchNextHqWorkOrder,
+  reconcileExpiredWorkOrders,
   specialistEventSummary,
   workOrderDisplayMessage,
 } from '../../src/hq-runtime/work-dispatcher.js';
+
+function transportResponse(body, status = 200) {
+  return async (_url, options) => {
+    assert.equal(options.headers['X-API-Key'], 'internal-test-key');
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      body,
+      classification: status === 408 || status === 429 || status >= 500
+        ? 'transient_response' : 'deterministic_response',
+      retryable: status === 408 || status === 429 || status >= 500,
+      reconciliation_required: status === 408 || status === 429 || status >= 500,
+    };
+  };
+}
 
 test('HQ Room turn visibly carries scope, authority, dependency, and completion checks', () => {
   const message = workOrderDisplayMessage({
@@ -49,19 +65,16 @@ test('HQ dispatcher persists a terminal specialist result event and immediate re
     if (previousKey === undefined) delete process.env.HIVEMIND_MASTER_API_KEY;
     else process.env.HIVEMIND_MASTER_API_KEY = previousKey;
   });
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, options) => {
-    assert.equal(options.headers['X-API-Key'], 'internal-test-key');
-    return new Response(JSON.stringify({
-      ok: true,
-      status: 'completed',
-      result: { text: 'Evidence-grounded specialist result.', owner_slug: 'researcher', tool_calls: 2 },
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  };
-  t.after(() => { globalThis.fetch = previousFetch; });
+  const transport = transportResponse({
+    ok: true,
+    status: 'completed',
+    result: { text: 'Evidence-grounded specialist result.', owner_slug: 'researcher', tool_calls: 2 },
+  });
 
   const captured = { event: null, schedule: null, delegation: null };
   const transactionClient = {
+    $queryRawUnsafe: async (query) => String(query).includes('MAX(sequence)')
+      ? [{ max_sequence: 8n }] : [{ epoch: 'epoch-1', event_sequence: 8n }],
     hqRuntime: {
       update: async () => ({ eventSequence: 9n }),
       updateMany: async () => ({ count: 1 }),
@@ -87,13 +100,46 @@ test('HQ dispatcher persists a terminal specialist result event and immediate re
     hqRuntime: { findFirst: async () => ({ epoch: 'epoch-1' }) },
   };
 
-  const result = await dispatchNextHqWorkOrder({ prisma });
+  const result = await dispatchNextHqWorkOrder({ prisma, transport });
   assert.deepEqual(result, { workOrderId: 'work-1', status: 'COMPLETED' });
   assert.equal(captured.delegation.status, 'COMPLETED');
   assert.equal(captured.event.eventType, 'work_order_completed');
   assert.equal(captured.event.workOrderId, 'work-1');
   assert.equal(captured.schedule.triggerType, 'work_result');
   assert.equal(captured.schedule.payload.work_order_id, 'work-1');
+});
+
+test('expired Room work reconciles a durable result instead of replaying the Room', async () => {
+  let update = null;
+  const prisma = {
+    hyperWorkOrder: {
+      findMany: async () => [{ id: 'work-lease', attempt: 1, turnId: 'turn-1' }],
+      updateMany: async (args) => { update = args; return { count: 1 }; },
+    },
+    hyperWorkResult: {
+      findFirst: async () => ({ status: 'completed', createdAt: new Date('2026-08-02T00:00:00Z') }),
+    },
+    hyperTurn: { findUnique: async () => ({ status: 'complete' }) },
+  };
+  const result = await reconcileExpiredWorkOrders({ prisma, logger: { warn: () => {} } });
+  assert.deepEqual(result, [{ id: 'work-lease', outcome: 'result_reconciled' }]);
+  assert.equal(update.data.status, 'completed');
+  assert.equal(update.data.leaseOwner, null);
+});
+
+test('expired Room work is requeued only while infrastructure attempts remain', async () => {
+  let update = null;
+  const prisma = {
+    hyperWorkOrder: {
+      findMany: async () => [{ id: 'work-retry', attempt: 1, turnId: null }],
+      updateMany: async (args) => { update = args; return { count: 1 }; },
+    },
+    hyperWorkResult: { findFirst: async () => null },
+    hyperTurn: { findUnique: async () => null },
+  };
+  const result = await reconcileExpiredWorkOrders({ prisma, logger: { warn: () => {} } });
+  assert.deepEqual(result, [{ id: 'work-retry', outcome: 'requeued' }]);
+  assert.equal(update.data.status, 'queued');
 });
 
 test('HQ dispatcher does not replay a claimed Work Order', async (t) => {
@@ -103,16 +149,12 @@ test('HQ dispatcher does not replay a claimed Work Order', async (t) => {
     if (previousKey === undefined) delete process.env.HIVEMIND_MASTER_API_KEY;
     else process.env.HIVEMIND_MASTER_API_KEY = previousKey;
   });
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, status: 'already_claimed' }), {
-    status: 200, headers: { 'Content-Type': 'application/json' },
-  });
-  t.after(() => { globalThis.fetch = previousFetch; });
+  const transport = transportResponse({ ok: false, status: 'already_claimed' });
   const prisma = {
     $queryRawUnsafe: async () => [{ id: 'work-2', org_id: 'org-1', runtime_id: 'runtime-1', runtime_epoch: 'epoch-1', input_snapshot: { runtime_epoch: 'epoch-1' } }],
     hqRuntime: { findFirst: async () => ({ epoch: 'epoch-1' }) },
   };
-  assert.deepEqual(await dispatchNextHqWorkOrder({ prisma }), { workOrderId: 'work-2', status: 'ALREADY_CLAIMED' });
+  assert.deepEqual(await dispatchNextHqWorkOrder({ prisma, transport }), { workOrderId: 'work-2', status: 'ALREADY_CLAIMED' });
 });
 
 test('HQ dispatcher discards a result returned from an obsolete Runtime epoch', async (t) => {
@@ -122,11 +164,7 @@ test('HQ dispatcher discards a result returned from an obsolete Runtime epoch', 
     if (previousKey === undefined) delete process.env.HIVEMIND_MASTER_API_KEY;
     else process.env.HIVEMIND_MASTER_API_KEY = previousKey;
   });
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    ok: true, status: 'completed', result: { text: 'Late result.' },
-  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  t.after(() => { globalThis.fetch = previousFetch; });
+  const transport = transportResponse({ ok: true, status: 'completed', result: { text: 'Late result.' } });
 
   let cancelled = null;
   const prisma = {
@@ -140,7 +178,7 @@ test('HQ dispatcher discards a result returned from an obsolete Runtime epoch', 
     },
   };
 
-  assert.deepEqual(await dispatchNextHqWorkOrder({ prisma, logger: { warn: () => {} } }), {
+  assert.deepEqual(await dispatchNextHqWorkOrder({ prisma, transport, logger: { warn: () => {} } }), {
     workOrderId: 'work-old', status: 'OBSOLETE_EPOCH',
   });
   assert.equal(cancelled.where.runtimeEpoch, 'epoch-old');

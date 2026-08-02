@@ -918,14 +918,17 @@ model OutreachTarget {
   phone      String?          @db.VarChar(40)
   website    String?          @db.VarChar(500)
   address    String?          @db.VarChar(500)
+  leadId     String?          @map("lead_id") @db.Uuid
+  inputContext Json           @default("{}") @map("input_context") @db.JsonB
   payload    Json?            @db.JsonB // email: {subject, body} · call: {goal, opener} — editable until executed
-  state      String           @default("selected") @db.VarChar(12) // selected | deselected | generating | ready | sending | sent | failed | skipped
+  state      String           @default("selected") @db.VarChar(20) // selected | deselected | generating | ready | dialing | in_call | analyzing | analyzed | sent | failed | skipped
   resultRef  Json?            @map("result_ref") @db.JsonB // {outboundActionId} | {taraCallLegId, sessionId} + {error}
   updatedAt  DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   campaign   OutreachCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, position])
   @@index([campaignId, state])
+  @@index([leadId])
   @@map("outreach_targets")
 }
 
@@ -2900,6 +2903,9 @@ model HyperWorkOrder {
   evidenceRefs        Json     @default("[]") @map("evidence_refs") @db.JsonB
   attempt             Int      @default(0)
   error               String?  @db.Text
+  leaseOwner          String?  @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt      DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  lastHeartbeatAt     DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
   startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
   completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -2911,6 +2917,7 @@ model HyperWorkOrder {
   @@index([turnId])
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
+  @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")
   @@map("hyper_work_orders")
 }
 

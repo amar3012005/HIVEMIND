@@ -474,6 +474,9 @@ export function normalizeCampaignInput(body = {}) {
   const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels });
   return {
     name, goal, objective, channels, autonomyMode, creationKey, requirements,
+    sourceType: cleanText(body.source_type, 40, 'Source type') || null,
+    sourceId: cleanText(body.source_id, 80, 'Source id') || null,
+    runtimeLink: body.runtime_link && typeof body.runtime_link === 'object' ? body.runtime_link : null,
     brief: {
       offer: cleanText(body.offer, 2000, 'Offer'), cta: cleanText(body.cta, 1000, 'CTA'),
       destination_url: validateDestinationUrl(cleanText(body.destination_url, 2048, 'Destination URL')),
@@ -594,11 +597,16 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
       objective: input.objective, goal: input.goal, brief: input.brief, requirements: input.requirements,
       requestedChannels: input.channels, audiencePolicy: input.audiencePolicy,
       schedulePolicy: input.schedulePolicy, autonomyMode: input.autonomyMode,
+      sourceType: input.sourceType, sourceId: input.sourceId,
       roomId, status: 'GENERATING',
     } }),
     prisma.hyperTurn.create({ data: {
       id: turnId, roomId, seq: (lastTurn?.seq || 0) + 1, userMessage: kickoff, status: 'live',
       idempotencyKey: `campaign-kickoff-${campaignId}`, lines: [],
+      runtimePlaybookRunId: input.runtimeLink?.run_id || null,
+      runtimeStageId: input.runtimeLink?.stage_id || null,
+      runtimeCheckpointSequence: Number.isInteger(input.runtimeLink?.checkpoint_sequence) ? input.runtimeLink.checkpoint_sequence : null,
+      runtimeAttempt: Number.isInteger(input.runtimeLink?.attempt) ? input.runtimeLink.attempt : null,
     } }),
     prisma.campaignRun.create({ data: {
       campaignId, roomId, turnId, status: 'DISPATCHING', briefSnapshot, startedAt: new Date(),

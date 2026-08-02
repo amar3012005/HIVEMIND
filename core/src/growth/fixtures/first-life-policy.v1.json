@@ -1,0 +1,16 @@
+{
+  "policy_id": "runtime.first-life-policy",
+  "version": 1,
+  "proposal_target": 4,
+  "proposal_minimum": 2,
+  "external_execution_limit": 1,
+  "internal_execution_limit": 1,
+  "initial_status": "PROPOSED",
+  "require_initial_policy_choice": true,
+  "expansion_triggers": [
+    "verified_result",
+    "verified_monitoring_checkpoint",
+    "user_instruction",
+    "organization_policy"
+  ]
+}

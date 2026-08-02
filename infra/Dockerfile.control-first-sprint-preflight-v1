@@ -1,0 +1,13 @@
+FROM hivemind/control-plane:prod-20260802-runtime-room-input-v5
+
+COPY --chown=nodejs:nodejs core/src/control-plane-server.js /app/src/control-plane-server.js
+COPY --chown=nodejs:nodejs core/src/growth/first-growth-sprint.js /app/src/growth/first-growth-sprint.js
+COPY --chown=nodejs:nodejs core/src/growth/fixtures/first-growth-sprint.v3.json /app/src/growth/fixtures/first-growth-sprint.v3.json
+COPY --chown=nodejs:nodejs core/src/hq-runtime/activation-sprint.js /app/src/hq-runtime/activation-sprint.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/instruction-loop.js /app/src/hq-runtime/instruction-loop.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/routes.js /app/src/hq-runtime/routes.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/repository.js /app/src/hq-runtime/repository.js
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/adapters/campaigns.js /app/src/runtime-playbooks/adapters/campaigns.js
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/fixtures/registry.json /app/src/runtime-playbooks/fixtures/registry.json
+COPY --chown=nodejs:nodejs core/src/runtime-playbooks/fixtures/campaign-awareness-to-learning.v2.json /app/src/runtime-playbooks/fixtures/campaign-awareness-to-learning.v2.json

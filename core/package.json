@@ -57,6 +57,7 @@
     "tree-sitter-python": "^0.21.0",
     "tree-sitter-typescript": "^0.21.0",
     "uuid": "14.0.1",
+    "undici": "6.27.0",
     "whatsapp-web.js": "^1.34.1",
     "xlsx": "npm:@e965/xlsx@0.20.3",
     "zod": "^3.22.4"

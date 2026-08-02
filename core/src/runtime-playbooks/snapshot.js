@@ -19,6 +19,8 @@ export function projectRuntimePlaybookSnapshot(run, { turns = [] } = {}) {
     todo_id: run.trigger?.todo_id || null,
     room_id: run.roomId || null,
     playbook: { id: run.playbookId, version: run.playbookVersion },
+    requested_outcome: run.context?.request?.requested_terminal_outcome || null,
+    acceptable_terminal_states: rows(run.context?.playbook_selection?.acceptable_terminal_states),
     status: run.status,
     current_stage: run.currentStageId,
     completed_stages: rows(run.completedStageIds),

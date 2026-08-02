@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { groqFetch } from '../llm/groq-fallback.js';
 import { buildGrowthPlanningContext, commitGrowthPlan, getGrowthOperatingState } from './operating-loop.js';
+import { applyFirstLifePolicy, loadFirstLifePolicy } from './first-life-policy.js';
 
 const ALL_ASPECTS = ['positioning', 'audience', 'offer', 'product_readiness', 'channels', 'content', 'pipeline', 'measurement', 'operations', 'risks'];
 const MODES = new Set(['initial_full', 'operate']);
@@ -76,21 +77,14 @@ export function completeGrowthPlanAssessments(plan, context, aspects) {
 
 export function compilePrepareQueue(plan) {
   if (!plan || typeof plan !== 'object') return plan;
-  const aliases = new Map([
-    ['google-maps', 'google-maps'], ['google_maps', 'google-maps'], ['maps', 'google-maps'],
-  ]);
   plan.operating_queue = (Array.isArray(plan.operating_queue) ? plan.operating_queue : []).map((item) => {
     const requested = Array.isArray(item?.required_capabilities) ? item.required_capabilities : [];
-    const canonical = [...new Set(requested.map((value) => String(value || '').trim().toLowerCase())
-      .map((value) => aliases.get(value)).filter(Boolean))];
-    const required = ['outreach', 'sales'].includes(String(item?.kind || '').toLowerCase())
-      ? canonical.filter((value) => value === 'google-maps') : [];
     return {
       ...item,
-      required_capabilities: required,
+      required_capabilities: [],
       authority_mode: 'PREPARE',
       external_actions_required: false,
-      ignored_capability_suggestions: requested.filter((value) => !required.includes(String(value || '').trim().toLowerCase())),
+      ignored_capability_suggestions: requested,
     };
   });
   return plan;
@@ -99,6 +93,7 @@ export function compilePrepareQueue(plan) {
 function validatePlan(plan, context, mode, aspects) {
   if (!plan || plan.contract_version !== 'growth-plan.v3') throw new Error('growth_plan_v3_contract_required');
   if (plan.mode !== mode) throw new Error('growth_plan_mode_mismatch');
+  plan.response_locale = String(plan.response_locale || context?.company?.locale || context?.company?.language || 'und').slice(0, 80);
   if (plan.baseline_ref?.resource_id !== context.baseline.resource_id) throw new Error('growth_plan_baseline_mismatch');
   const assessments = Array.isArray(plan.aspect_assessments) ? plan.aspect_assessments : [];
   for (const aspect of aspects) {
@@ -137,6 +132,9 @@ function toCommitContract(plan) {
     hypotheses: plan.hypotheses,
     operating_queue: plan.operating_queue,
     policy: plan.policy,
+    response_locale: plan.response_locale,
+    first_life: plan.first_life || null,
+    activation_sprint: plan.activation_sprint || null,
   };
 }
 
@@ -197,11 +195,11 @@ export async function runGrowthPlan({ prisma, orgId, userId, mode = 'operate', a
 
   const system = `You are the Company HQ Growth Planner. Produce a source-grounded company operating decision, not a brainstorm and not a generic report.
 Facts must come from the supplied context. A correlation is not a cause. Unknown causes must remain hypotheses. Never invent competitors, CRM results, connector capabilities, budgets, dates, or benchmarks.
-For initial_full, assess every requested company aspect, rank multiple material constraints, and create an ordered queue of bounded work across only the specialist Rooms genuinely needed. The first queue item defines the first Growth Stage, but the complete ordered queue must survive so HQ can continue without replanning after every result. For operate, inspect only the requested aspects and current operating state, then update the queue as evidence requires.
+For initial_full, assess every requested company aspect, rank multiple material constraints, and create an ordered queue of bounded work across only the specialist Rooms genuinely needed. The first queue item defines the first Growth Stage, but the complete ordered queue must survive so HQ can continue without replanning after every result. For operate, inspect only the requested aspects and current operating state, then update the queue as evidence requires. Use the language of the operating requirements when they establish one; otherwise use the company's retained locale. Keep machine identifiers unchanged while writing every user-facing field in response_locale.
 Return JSON only. Contract:
-{contract_version:'growth-plan.v3',mode:'initial_full|operate',baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:'positioning|reach|conversion|qualified_pipeline|retention|measurement',statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:'outreach|seo|marketing|campaign|branding|research|product|fundraising|legal_finance',room_tag,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null}}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
-For initial_full return 3-7 ranked constraints and 3-7 ordered queue items. Do not create busywork and do not assign every Room. Every queue item must address an evidenced constraint, have an exact available room_tag, and be independently verifiable. The first queue item must match stage.queue_item_id and the primary constraint. Every factual assessment, constraint, and hypothesis must reference the baseline resource id or another supplied source reference.
-	All initial queue items run in PREPARE authority: they may research and persist internal deliverables, but may not publish, send, spend, or modify an external system. Do not require a CMS, scheduler, UTM builder, email automation, social account, publishing provider, or analytics connector merely to prepare useful work. Never expose or return internal implementation vendors such as Zernio as capabilities; customer-facing execution is expressed only as a concrete channel such as X, LinkedIn, or Instagram, and channel authorization is requested later at launch. Use google-maps only for location-based prospect discovery. Treat unavailable measurement sources as evidence gaps, not blockers for producing the bounded deliverable.`;
+{contract_version:'growth-plan.v3',mode:'initial_full|operate',response_locale:string,baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:string,statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:string,room_tag:string,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null},external_action_requested:boolean,requested_action:string,requested_terminal_outcome:string}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
+For initial_full return 2-4 ranked, genuinely evidenced queue items. Do not create busywork, prescribe a domain, pad the queue, or assign every Room. Every queue item must address an evidenced constraint, have an exact available room_tag, and be independently verifiable. The first queue item must match stage.queue_item_id and the primary constraint. Every factual assessment, constraint, and hypothesis must reference the baseline resource id or another supplied source reference.
+	All initial queue items run in PREPARE authority: they may research and persist internal deliverables, but may not make an external change. The selected playbook, not this planner, resolves capabilities and exact authority gates. Treat unavailable evidence as an explicit gap and do not block unrelated safe preparation.`;
   const user = JSON.stringify({ objective: String(objective || '').slice(0, 4000), mode, aspects: selected, autonomy_mode: autonomyMode || context.active_goal?.autonomy_mode || 'MANUAL_REVIEW', context });
   await progress('planning', mode === 'initial_full' ? 'Assessing the complete company growth system.' : `Reviewing ${selected.join(', ')} for the next operating decision.`);
   const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -211,9 +209,9 @@ For initial_full return 3-7 ranked constraints and 3-7 ordered queue items. Do n
   if (!response?.ok) throw new Error(`growth_plan_model_failed:${response?.status || 'unknown'}`);
   const body = await response.json();
   const extracted = extractJson(body?.choices?.[0]?.message?.content);
-  const plan = validatePlan(compilePrepareQueue(completeGrowthPlanAssessments(
-    normalizeGrowthPlanEvidence(extracted, context), context, selected,
-  )), context, mode, selected);
+  let preparedPlan = completeGrowthPlanAssessments(normalizeGrowthPlanEvidence(extracted, context), context, selected);
+  if (mode === 'initial_full') preparedPlan = applyFirstLifePolicy(preparedPlan, context, await loadFirstLifePolicy());
+  const plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected);
   plan.report_markdown = renderGrowthPlanReport(plan);
   await progress('governance', 'Validated evidence references, aspect coverage, stage bounds, and specialist ownership.');
 

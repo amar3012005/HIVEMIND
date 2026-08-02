@@ -140,7 +140,12 @@ async function finalizeCampaignAssets(prisma, campaignId) {
   const missing = currentActions.filter((action) => action.payload?.creative_brief?.required === true && !action.payload?.asset_id);
   if (missing.length) {
     const message = `Image generation needs attention for ${missing.length} campaign action${missing.length === 1 ? '' : 's'}`;
-    await prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_asset_generation_failed', data: { action_ids: missing.map((action) => action.id), error: message } } });
+    await prisma.$transaction([
+      prisma.campaign.update({ where: { id: campaign.id }, data: { status: 'NEEDS_INPUT', lastError: message } }),
+      prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_asset_generation_failed', data: { action_ids: missing.map((action) => action.id), error: message } } }),
+    ]);
+    const { scheduleRuntimeCampaignEvent } = await import('./runtime-bridge.js');
+    await scheduleRuntimeCampaignEvent({ prisma, campaignId: campaign.id, type: 'campaign.contract_failed', data: { status: 'NEEDS_INPUT', reason: message } }).catch(() => {});
     return;
   }
   if (campaign.status === 'PREPARING_ASSETS') {
@@ -152,6 +157,8 @@ async function finalizeCampaignAssets(prisma, campaignId) {
     await prisma.campaignEvent.create({ data: { campaignId: campaign.id, orgId: campaign.orgId, eventType: 'campaign_visuals_ready', data: { plan_version_id: campaign.currentPlanVersionId, action_count: currentActions.length } } });
   }
   const { autoLaunchCampaignIfReady } = await import('./service.js');
+  const { scheduleRuntimeCampaignEvent } = await import('./runtime-bridge.js');
+  await scheduleRuntimeCampaignEvent({ prisma, campaignId: campaign.id, type: 'campaign.visuals_ready', data: { plan_version_id: campaign.currentPlanVersionId } }).catch(() => {});
   await autoLaunchCampaignIfReady({ prisma, campaignId: campaign.id });
 }
 

@@ -1,0 +1,20 @@
+FROM hivemind/core-api:sha-984bb12df
+USER root
+COPY --chown=nodejs:nodejs core/prisma/schema.prisma /app/prisma/schema.prisma
+COPY --chown=nodejs:nodejs core/src/growth/first-life-policy.js /app/src/growth/first-life-policy.js
+COPY --chown=nodejs:nodejs core/src/growth/fixtures/first-life-policy.v1.json /app/src/growth/fixtures/first-life-policy.v1.json
+COPY --chown=nodejs:nodejs core/src/growth/planner.js /app/src/growth/planner.js
+COPY --chown=nodejs:nodejs core/src/growth/operating-loop.js /app/src/growth/operating-loop.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/activation-sprint.js /app/src/hq-runtime/activation-sprint.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/contracts.js /app/src/hq-runtime/contracts.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/first-life-control.js /app/src/hq-runtime/first-life-control.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/instruction-loop.js /app/src/hq-runtime/instruction-loop.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/repository.js /app/src/hq-runtime/repository.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/routes.js /app/src/hq-runtime/routes.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/scheduler.js /app/src/hq-runtime/scheduler.js
+COPY --chown=nodejs:nodejs core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js
+RUN npx prisma generate --schema /app/prisma/schema.prisma \
+ && chown -R nodejs:nodejs /app/node_modules/.prisma /app/node_modules/@prisma \
+ && chmod -R u+rwX,g+rX /app/node_modules/.prisma /app/node_modules/@prisma
+USER nodejs

@@ -45,6 +45,10 @@ const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 
+export function durableQueueJobId(trackerJobId, processingVersion = 1) {
+  return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
+}
+
 function tryLoadBullMQ() {
   try {
     const bullmq = require_('bullmq');
@@ -293,7 +297,7 @@ export class KbIngestQueue {
     const job = await this.queue.add('ingest', {
       userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId, processingVersion,
     }, {
-      jobId: `${trackerJobId}:v${processingVersion}`,
+      jobId: durableQueueJobId(trackerJobId, processingVersion),
       attempts: ATTEMPTS,
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 1000,

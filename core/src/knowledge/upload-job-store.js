@@ -29,7 +29,10 @@ export class KnowledgeUploadJobStore {
   }
 
   async progress(jobId, orgId, stage, progress, extra = {}) {
-    await this.updateOwned(jobId, orgId, { stage, progress: Math.max(0, Math.min(100, Number(progress) || 0)), ...extra });
+    await this.prisma.knowledgeIngestJob.updateMany({
+      where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } },
+      data: { stage, progress: Math.max(0, Math.min(100, Number(progress) || 0)), ...extra },
+    });
   }
 
   async fail(jobId, orgId, error) {
@@ -80,8 +83,9 @@ export class KnowledgeUploadJobStore {
 
   static response(job) {
     if (!job) return null;
+    const ready = job.status === 'ready';
     return {
-      job_id: job.id, status: job.status, stage: job.stage, progress: job.progress,
+      job_id: job.id, status: job.status, stage: ready ? 'ready' : job.stage, progress: ready ? 100 : job.progress,
       document_id: job.documentId, memory_ids: job.memoryIds || [], storage_mode: job.storageMode,
       counts: { pages: job.pageCount, segments: job.segmentCount, candidates: job.candidateCount, memories: job.promotedCount },
       error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,

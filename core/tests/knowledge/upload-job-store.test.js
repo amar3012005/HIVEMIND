@@ -18,3 +18,12 @@ test('usage is emitted only when the idempotency ledger inserts', async () => {
   await store.settle('33333333-3333-4333-8333-333333333333', '22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'uploads', 1);
   assert.equal(calls.length, 1);
 });
+
+test('ready responses always expose an authoritative terminal lifecycle', () => {
+  const response = KnowledgeUploadJobStore.response({
+    id: 'job', status: 'ready', stage: 'promoted', progress: 95,
+    memoryIds: [], storageMode: 'hybrid', createdAt: new Date(), updatedAt: new Date(),
+  });
+  assert.equal(response.stage, 'ready');
+  assert.equal(response.progress, 100);
+});

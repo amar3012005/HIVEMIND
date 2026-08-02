@@ -5954,6 +5954,12 @@ exit \$RC
       }
 
       if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
+        if (body?.consent !== true) {
+          return jsonResponse(res, {
+            error: 'recording_consent_required',
+            message: 'Confirm recording consent before starting a meeting.',
+          }, 400);
+        }
         if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
         const usage = await planEnforcer.getUsageSummary(_mOrgId);
         const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
@@ -5979,7 +5985,7 @@ exit \$RC
         return jsonResponse(res, {
           session_id: crypto.randomUUID(),
           remaining_seconds: remainingSeconds,
-          consent_recorded: body?.consent === true,
+          consent_recorded: true,
         }, 201);
       }
 

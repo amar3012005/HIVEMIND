@@ -64,6 +64,22 @@ esac; done
 for img in employees control-plane core-api tara-deepgram byod-broker hm-playwright; do
   docker image inspect "hivemind/$img:$RID" >/dev/null 2>&1 || docker tag "hivemind/$img:$OLD" "hivemind/$img:$RID" 2>/dev/null || true; done
 docker image inspect "hivemind/fe:$RID-single" >/dev/null 2>&1 || docker tag "hivemind/fe:$OLD-single" "hivemind/fe:$RID-single"
+# Compose is the runtime source of truth. Pin only the selected service image,
+# under the shared release lock, before its named --no-deps recreation.
+RUNTIME_COMPOSE=/root/hivemind/infra/docker-compose.hetzner.yml
+cp "$RUNTIME_COMPOSE" "$RUNTIME_COMPOSE.bak-$RID"
+pin_runtime_image() {
+  local service="$1" image="$2"
+  sed -i "/^  ${service}:/,/^  [a-zA-Z0-9_-]*:/ s|^    image:.*|    image: ${image}|" "$RUNTIME_COMPOSE"
+  grep -A3 "^  ${service}:" "$RUNTIME_COMPOSE" | grep -Fq "image: ${image}" \
+    || { echo "FATAL: failed to pin ${service} to ${image}"; exit 1; }
+}
+for s in "${SERVICES[@]}"; do case "$s" in
+  core)          pin_runtime_image core "hivemind/core-api:$RID" ;;
+  control-plane) pin_runtime_image control-plane "hivemind/control-plane:$RID" ;;
+  employees)     pin_runtime_image employees "hivemind/employees:$RID" ;;
+esac; done
+
 # Env bump (backed up) + one-at-a-time recreates with health gates.
 cp "$ENV" "$ENV.bak-$RID"; cp "$NEXTENV" "$NEXTENV.bak-$RID"
 sed -i "s/^VERSION=.*/VERSION=$RID/" "$ENV"; sed -i "s/^NEXT_VERSION=.*/NEXT_VERSION=$RID/" "$NEXTENV"

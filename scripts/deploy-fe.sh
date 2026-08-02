@@ -19,62 +19,68 @@ ssh -o ConnectTimeout=25 "$HOST" bash -s "$REF" <<'REMOTE'
 set -euo pipefail
 REF="$1"
 FE=/root/hivemind/frontend/Da-vinci
-cd "$FE"
 
-# ── GUARD: this tree is SHARED, and the reset below is destructive ────────────
-# `git reset --hard` permanently destroys uncommitted work — no stash, no backup,
-# no recovery. And /root/hivemind/frontend/Da-vinci is the tree EVERY session on
-# this box works in.
+# ── BUILD FROM A WORKTREE, NEVER FROM THE SHARED TREE ─────────────────────────
+# Same model as core: `main` is the one clean production branch, sessions work in
+# their own branches, and a release builds from a throwaway checkout of a named
+# commit. The shared tree is never reset, so a session with uncommitted work is
+# not a blocker and cannot be destroyed.
 #
-# Caught 2026-08-02 before it fired: HyperAgents.jsx held 231 uncommitted lines
-# (97 insertions / 134 deletions) from a concurrent session, and the live FE image
-# had been deployed 18 minutes earlier by that same session — quite possibly built
-# FROM that dirty file. Running this would have destroyed the source AND shipped a
-# build without it, silently reverting their feature.
-#
-# A dirty tree is a STOP, not a warning. Find whose work it is first.
-DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
-if [ "$DIRTY" != "0" ]; then
-  echo "[deploy-fe] REFUSING: $DIRTY uncommitted path(s) in $FE" >&2
-  git status --porcelain | head -20 >&2
-  echo "[deploy-fe] 'git reset --hard' would DESTROY this work permanently." >&2
-  echo "[deploy-fe] Options, in order:" >&2
-  echo "[deploy-fe]   1. the owning session commits (then main is a true superset)" >&2
-  echo "[deploy-fe]   2. build from a worktree instead of resetting this tree" >&2
-  echo "[deploy-fe]   3. git stash push <paths>  — recoverable, but it is not your work" >&2
-  echo "[deploy-fe] Override only if you own every path above: FE_ALLOW_DIRTY=1" >&2
-  [ "${FE_ALLOW_DIRTY:-}" = "1" ] || exit 1
-  echo "[deploy-fe] WARN: FE_ALLOW_DIRTY=1 — discarding the above. This is not reversible." >&2
+# What this replaces: `cd $FE && git reset --hard "$REF"`. That permanently
+# destroyed uncommitted work in the tree EVERY session shares — caught 2026-08-02
+# with 231 uncommitted lines of HyperAgents.jsx sitting in it, from a session that
+# had deployed 18 minutes earlier. The reset would have destroyed the source AND
+# shipped a build without it.
+git -C "$FE" fetch origin --quiet --prune
+
+# Resolve the ref to an immutable SHA up front, so what gets built, tagged and
+# rolled back to are all provably the same commit.
+FE_SHA_FULL="$(git -C "$FE" rev-parse --verify "${REF}^{commit}" 2>/dev/null)" || {
+  echo "[deploy-fe] REFUSING: '$REF' does not resolve to a commit in $FE" >&2; exit 1; }
+FE_SHA="$(git -C "$FE" rev-parse --short=9 "$FE_SHA_FULL")"
+
+# The commit must be on the remote. A build from a box-only commit is
+# unreproducible and cannot be rolled forward by anyone else.
+if [ -z "$(git -C "$FE" branch -r --contains "$FE_SHA_FULL" 2>/dev/null | head -1)" ]; then
+  echo "[deploy-fe] REFUSING: $FE_SHA is on NO remote branch — push it first." >&2
+  echo "[deploy-fe]   git -C $FE push origin HEAD:main" >&2
+  [ "${FE_ALLOW_UNPUSHED:-}" = "1" ] || exit 1
+  echo "[deploy-fe] WARN: FE_ALLOW_UNPUSHED=1 — this build is not reproducible." >&2
 fi
 
-# Announce who currently serves the FE, so a deploy that supersedes another
-# session's release is a visible act rather than a silent one.
+BUILD_DIR="/root/builds/fe-${FE_SHA}"
+cleanup() { git -C "$FE" worktree remove --force "$BUILD_DIR" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+rm -rf "$BUILD_DIR"; mkdir -p /root/builds
+git -C "$FE" worktree prune >/dev/null 2>&1 || true
+git -C "$FE" worktree add --detach "$BUILD_DIR" "$FE_SHA_FULL" >/dev/null
+cd "$BUILD_DIR"
+echo "[deploy-fe] worktree @ ${FE_SHA}: $(git log -1 --pretty=%s | cut -c1-60)"
+
+# Announce who currently serves the FE, so superseding another session's release
+# is a visible act rather than a silent one.
 LIVE_IMG="$(docker ps --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null \
   | grep -iE 'hm-fe|frontend' | grep -v frozen | head -2 || true)"
 [ -n "$LIVE_IMG" ] && echo "[deploy-fe] currently live: $LIVE_IMG"
 
-git fetch origin main -q
-git reset --hard "$REF" -q
-echo "[deploy-fe] Da-vinci @ $(git rev-parse --short HEAD): $(git log -1 --pretty=%s | cut -c1-60)"
-# Tag by COMMIT SHA, not just :latest. A mutable tag hides which code it holds —
-# "what is live?" becomes unanswerable and rollback becomes guesswork. This is the
-# same rule core follows (sha-<9char>); :latest is still moved so nothing that
-# references it breaks, but the SHA tag is the durable identity.
-FE_SHA="$(git rev-parse --short=9 HEAD)"
+# Tag by COMMIT SHA. A mutable-only tag makes "what is live?" unanswerable and
+# rollback guesswork; :latest still moves so nothing referencing it breaks.
 echo "[deploy-fe] building hivemind/fe:sha-${FE_SHA} (+ :latest) …"
 if ! docker build -t "hivemind/fe:sha-${FE_SHA}" -t hivemind/fe:latest . >/tmp/fe-build.log 2>&1; then
   echo "[deploy-fe] BUILD FAILED — tail:"; tail -25 /tmp/fe-build.log; exit 1
 fi
+
 # Record the outgoing image BEFORE removing the container — inspecting it after
-# `docker rm` always yields nothing, which would leave every deploy with an empty
-# rollback file exactly when it is needed.
+# `docker rm` always yields nothing, leaving an empty rollback file exactly when
+# it is needed.
 docker inspect hm-fe --format '{{.Config.Image}}' > /root/hivemind/.last-fe-rollback 2>/dev/null || true
 [ -s /root/hivemind/.last-fe-rollback ] && echo "[deploy-fe] rollback target: $(cat /root/hivemind/.last-fe-rollback)"
 docker rm -f hm-fe >/dev/null 2>&1 || true
 docker run -d --name hm-fe --restart unless-stopped -p 8088:80 "hivemind/fe:sha-${FE_SHA}" >/dev/null
 sleep 3
 code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8088/ || echo 000)"
-echo "[deploy-fe] hm-fe up — localhost:8088 → HTTP $code"
+echo "[deploy-fe] hm-fe up — localhost:8088 → HTTP $code (sha-${FE_SHA})"
 [ "$code" = "200" ] || { echo "[deploy-fe] WARN: non-200 from hm-fe"; exit 1; }
 REMOTE
 echo "✅ FE deployed to ${HOST} (port 8088)."

@@ -320,6 +320,36 @@ export class SmartIngestRouter {
   // the long-standing 'KB chunks have no parent edge' complaint.
   async _routeKnowledgeBase(payload) {
     const content = payload.content || '';
+    // ATOMIC MEANS ATOMIC. This router chunked unconditionally — it had no concept
+    // of atomic mode — so a caller that explicitly asked for ONE memory still got a
+    // Document parent plus N "· §i/N" Section children.
+    //
+    // Images are the case that proves it: image ingest passes mode:'atomic' because
+    // "an image is ONE thing", and that invariant held only while descriptions were
+    // short enough to fall under the chunk threshold. Enriching the vision prompt
+    // (domain entities, verbatim text, structure) pushed them over it, and every
+    // uploaded PNG silently became 3-4 memories again — §1/3, §2/3, §3/3 plus a
+    // whole copy — reversing the invariant with no error anywhere.
+    //
+    // Honour the caller's DECLARED mode instead of inferring intent from length.
+    const _atomic = payload.metadata?.ingest_mode === 'atomic'
+      || payload.metadata?.mode === 'atomic'
+      || payload.metadata?.document_type === 'image'
+      || payload.metadata?.media_kind === 'image'
+      || (Array.isArray(payload.tags) && payload.tags.includes('kind:image'));
+    if (_atomic) {
+      return [{
+        ...payload,
+        memory_type: payload.memory_type || 'fact',
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'knowledge_base',
+          chunk_strategy: 'atomic',
+          semantic_role: 'document',
+          chunk_total: 1,
+        },
+      }];
+    }
     const chunkStrategy = payload.metadata?.suggestedChunkStrategy
       || payload.metadata?.auto_detected_type && CHUNK_STRATEGY_MAP[payload.metadata.auto_detected_type]
       || 'heading_hierarchy';

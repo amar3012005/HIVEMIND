@@ -441,6 +441,29 @@ test('Director sees the complete catalog when the planner suggests a different R
   assert.equal(suppliedCatalog.includes(fixture.playbook_id), true);
 });
 
+test('Runtime selection binds one exact supported action from playbook data', async () => {
+  const fixture = await loadFixture();
+  fixture.metadata = { ...(fixture.metadata || {}), supported_actions: ['perform_declared_effect'] };
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: fixture.playbook_id,
+        version: fixture.version,
+        matched_supported_action: 'invented_effect',
+        acceptable_terminal_states: [fixture.terminal_states[0]],
+      }) } }] }; },
+    }),
+  });
+  await assert.rejects(() => selector.select({
+    objective: 'Perform the requested effect.',
+    context: { request: { requested_action: 'Perform the requested effect.' } },
+  }), /runtime_playbook_supported_action_required/);
+});
+
 test('Director binds only playbook-declared inputs without keyword parsing in the engine', async () => {
   const registry = new RuntimePlaybookRegistry();
   await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);

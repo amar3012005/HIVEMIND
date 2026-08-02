@@ -103,7 +103,7 @@ export class DirectorPlaybookSelector {
           messages: [
             {
               role: 'system',
-              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata semantically support the exact requested action and terminal outcome. The objective may be written in any language. A messaging lifecycle is incompatible with a voice-call request unless its metadata explicitly supports that action. Never infer an identifier that is absent from the registry. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
+              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata directly implement the exact requested action and terminal outcome. The objective may be written in any language. Prioritize request.requested_action and request.acceptance_criteria over a merely related business outcome. A lifecycle that can facilitate an upstream or downstream result is not compatible unless its supported_actions directly include the requested provider effect. The suggested Room owner is advisory; the selected playbook metadata owns execution. Never infer an identifier that is absent from the registry. Return matched_supported_action as one exact value from the selected playbook metadata.supported_actions. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"matched_supported_action":"exact supported action","reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
             },
             { role: 'user', content: JSON.stringify({
               objective: String(objective || '').slice(0, 8000), context, playbooks: catalog,
@@ -128,12 +128,18 @@ export class DirectorPlaybookSelector {
         const allowed = catalog.some((entry) => entry.playbook_id === playbookId && entry.version === version);
         if (!allowed) throw new Error(`runtime_playbook_selection_not_in_registry:${playbookId}:${version}`);
         const playbook = this.registry.get(playbookId, version, { scopeKey });
+        const runtimeRequest = Boolean(asObject(context).request);
+        const supportedActions = Array.isArray(playbook.metadata?.supported_actions)
+          ? playbook.metadata.supported_actions.map(String) : [];
+        const matchedSupportedAction = String(selected.matched_supported_action || '').trim();
+        if (runtimeRequest && supportedActions.length && !supportedActions.includes(matchedSupportedAction)) {
+          throw new Error('runtime_playbook_supported_action_required');
+        }
         let acceptableTerminalStates = Array.isArray(selected.acceptable_terminal_states)
           ? [...new Set(selected.acceptable_terminal_states.map(String).filter((state) => playbook.terminal_states.includes(state)))] : [];
         // Runtime assignments always include the durable request contract and
         // therefore require an explicit outcome binding. The broader selector
         // API remains backwards-compatible for non-Runtime registry consumers.
-        const runtimeRequest = Boolean(asObject(context).request);
         if (!acceptableTerminalStates.length && runtimeRequest) {
           throw new Error('runtime_playbook_acceptable_terminal_states_required');
         }
@@ -143,6 +149,7 @@ export class DirectorPlaybookSelector {
           playbook_id: playbookId,
           version,
           reason: String(selected.reason || '').slice(0, 1000),
+          ...(matchedSupportedAction ? { matched_supported_action: matchedSupportedAction } : {}),
           ...(runtimeRequest || Array.isArray(selected.acceptable_terminal_states)
             ? { acceptable_terminal_states: acceptableTerminalStates } : {}),
           ...(contextPatch ? { context_patch: contextPatch } : {}),

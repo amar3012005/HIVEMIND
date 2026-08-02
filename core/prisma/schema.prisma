@@ -1850,6 +1850,52 @@ model KnowledgeUsageSettlement {
   @@map("knowledge_usage_settlements")
 }
 
+/// Durable, tenant-scoped Web Intelligence orchestration. Provider payloads are
+/// retained only as a bounded result manifest; credentials never enter this row.
+model WebIntelJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  type              String    @db.VarChar(24)
+  status            String    @default("queued") @db.VarChar(24)
+  request           Json      @default("{}")
+  result            Json?     
+  progress          Json      @default("[]")
+  providerAttempts  Json      @default("[]") @map("provider_attempts")
+  idempotencyKey    String?   @map("idempotency_key") @db.VarChar(128)
+  runtimeUsed       String?   @map("runtime_used") @db.VarChar(64)
+  fallbackApplied   Boolean   @default(false) @map("fallback_applied")
+  durationMs        Int?      @map("duration_ms")
+  pagesProcessed    Int       @default(0) @map("pages_processed")
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  retriedFromId     String?   @map("retried_from_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@unique([orgId, userId, idempotencyKey])
+  @@index([orgId, userId, updatedAt(sort: Desc)])
+  @@index([orgId, status, updatedAt])
+  @@map("web_intel_jobs")
+}
+
+/// Exactly-once customer and provider accounting marker for a Web Intel job.
+model WebIntelUsageSettlement {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  jobId     String   @map("job_id") @db.Uuid
+  metric    String   @db.VarChar(40)
+  amount    BigInt   @default(1)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, metric])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@map("web_intel_usage_settlements")
+}
+
 /// Named entities — people, orgs, projects, topics, locations, dates
 model Entity {
   id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

@@ -22348,6 +22348,23 @@ exit \$RC
                 isAggregateQuery = chatRecall.isAggregateQuery;
                 isRecencyQuery = chatRecall.isRecencyQuery;
                 msgTrimmed = chatRecall.msgTrimmed;
+                // COUNT INTENT -> tell the model, in the context it actually reads,
+                // that the sampled memories below cannot answer this question and
+                // which tool can. Without this the model sees N plausible memories
+                // and infers a count from them — the exact failure the refusal
+                // "I cannot determine the exact count from top-K recall" was
+                // avoiding, but with no alternative offered.
+                //
+                // A directive rather than an auto-call: the orchestrator still owns
+                // the decision, and a question that merely LOOKS countable
+                // ("how much do we care about X") is not forced down a scan path.
+                if (chatRecall.isCountQuery) {
+                  injectionText = `${injectionText || ''}\n\n[COUNTING REQUIRED] This question asks HOW MANY / ALL. `
+                    + 'The memories above are the most SIMILAR ones, not every matching one — a count read off them '
+                    + 'would be a guess. Call hivemind_count_where with the appropriate filter to get an exact count, '
+                    + 'or hivemind_aggregate_entities when counting entities under a parent. If neither can answer '
+                    + 'completely, say the count is unavailable rather than estimating from the sample.';
+                }
               }
 
               // Inject persistent user profile (sanitized — drop any user-profile

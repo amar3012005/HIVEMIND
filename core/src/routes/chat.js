@@ -23,6 +23,33 @@ export async function buildChatRecallContext(ctx = {}) {
   const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
   const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
 
+  // ── COUNT INTENT — the question class the regexes above cannot see ──────────
+  //
+  // "How many prospects do we have from Hannover" matches NONE of the patterns
+  // above, so it took the default top-K path — and top-K is a sample, not a set.
+  // Even when isAggregateQuery fires it only widens max_memories 10 -> 15; "list
+  // all" gets 15 samples instead of 10. Still a sample.
+  //
+  // Language-agnostic on purpose. The existing patterns are English-only, which is
+  // the same defect class as the de,en OCR default and the English-only extraction
+  // prompt — both of which silently degraded every non-English tenant. A German
+  // user asking "wie viele" deserves the same routing as an English one, so the
+  // markers below cover the major Latin-script languages this product ships to.
+  //
+  // Detection only — it sets a flag. The orchestrator decides whether to call
+  // hivemind_count_where; nothing here bypasses recall.
+  const COUNT_MARKERS = [
+    /\bhow many\b/i, /\bhow much\b/i, /\btotal (number|count)\b/i, /\bcount of\b/i,
+    /\bnumber of\b/i, /\bare there any\b/i, /\blist all\b/i, /\bevery single\b/i,
+    /\bwie viele?\b/i, /\banzahl\b/i, /\bgesamtzahl\b/i,          // de
+    /\bcombien\b/i, /\bnombre (de|d')\b/i,                        // fr
+    /\bcu[áa]nt[oa]s\b/i, /\bn[úu]mero de\b/i,                    // es
+    /\bquant[ie]\b/i, /\bnumero di\b/i,                           // it
+    /\bhoeveel\b/i, /\baantal\b/i,                                // nl
+    /\bquant[oa]s\b/i,                                            // pt
+  ];
+  const isCountQuery = COUNT_MARKERS.some((re) => re.test(msgTrimmed));
+
   let memories = [];
   let injectionText = '';
 
@@ -34,6 +61,7 @@ export async function buildChatRecallContext(ctx = {}) {
       isMetaQuery,
       isAggregateQuery,
       isRecencyQuery,
+      isCountQuery,
       msgTrimmed,
     };
   }
@@ -267,5 +295,5 @@ export async function buildChatRecallContext(ctx = {}) {
     console.warn('[chat] Recall failed:', recallErr.message);
   }
 
-  return { memories, injectionText, isMetaQuery, isAggregateQuery, isRecencyQuery, isQuestion, msgTrimmed };
+  return { memories, injectionText, isMetaQuery, isAggregateQuery, isRecencyQuery, isCountQuery, isQuestion, msgTrimmed };
 }

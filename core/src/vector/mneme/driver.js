@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -268,6 +268,8 @@ export function amrMeetingList(orgId, filter) { return orgIsRemote(orgId) ? remo
 export function amrMeetingGet(orgId, id) { return orgIsRemote(orgId) ? remoteMeetingGet(orgId, id) : null; }
 export function amrMeetingDelete(orgId, id, hard) { return orgIsRemote(orgId) ? remoteMeetingDelete(orgId, id, hard) : null; }
 export function amrMeetingPatch(orgId, id, fields) { return orgIsRemote(orgId) ? remoteMeetingPatch(orgId, id, fields) : null; }
+export function amrMeetingSegmentWrite(orgId, segment) { return orgIsRemote(orgId) ? remoteMeetingSegmentWrite(orgId, segment) : null; }
+export function amrMeetingSegmentList(orgId, filter) { return orgIsRemote(orgId) ? remoteMeetingSegmentList(orgId, filter) : null; }
 
 // TARA call ledger (self-host): route call ledger ops to the agent for remote orgs.
 // Returns null for non-remote (caller uses the central Prisma path). Async.

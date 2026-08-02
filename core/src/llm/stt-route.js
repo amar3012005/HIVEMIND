@@ -34,9 +34,15 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  * @returns {{provider:string,shape?:string,url:string,key:string,model:string}}
  */
 export function sttRoute(featureModel, providerOverride) {
-  const provider = (providerOverride || process.env.STT_PROVIDER || 'groq').toLowerCase();
+  const requestedProvider = (providerOverride || process.env.STT_PROVIDER || 'groq').toLowerCase();
+  const provider = !providerOverride && requestedProvider === 'groq' && !process.env.GROQ_API_KEY && process.env.OPENROUTER_API_KEY
+    ? 'openrouter'
+    : (!providerOverride && requestedProvider === 'openrouter' && !process.env.OPENROUTER_API_KEY && process.env.GROQ_API_KEY
+      ? 'groq'
+      : requestedProvider);
+  const switchedForAvailability = provider !== requestedProvider;
   if (provider === 'openrouter' && process.env.OPENROUTER_API_KEY) {
-    const model = (providerOverride ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT;
+    const model = (providerOverride || switchedForAvailability ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT;
     // Multilingual audio-LLMs (Gemini, gpt-audio) transcribe via the CHAT
     // completions API with an input_audio content part — NOT the whisper-style
     // /audio/transcriptions endpoint parakeet uses. Route them there and mark
@@ -64,7 +70,7 @@ export function sttRoute(featureModel, providerOverride) {
     shape: 'whisper',
     url: (process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '') + '/audio/transcriptions',
     key: process.env.GROQ_API_KEY || '',
-    model: (providerOverride ? null : featureModel) || _groqSafeGlobal || process.env.GROQ_WHISPER_MODEL || GROQ_STT_DEFAULT,
+    model: (providerOverride || switchedForAvailability ? null : featureModel) || _groqSafeGlobal || process.env.GROQ_WHISPER_MODEL || GROQ_STT_DEFAULT,
   };
 }
 

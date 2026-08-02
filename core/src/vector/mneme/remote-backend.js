@@ -274,7 +274,17 @@ export async function remoteMeetingWrite(orgId, meeting) {
 // List meetings for the org (simplified scope: org + deleted_at + limit).
 export async function remoteMeetingList(orgId, filter = {}) {
   try { const out = await _call(orgId, '/v1/meeting-list', { filter }); return out?.meetings || []; }
-  catch (e) { console.warn(`[mneme/remote] meeting-list failed org=${orgId}: ${e.message}`); return []; }
+  catch (e) { console.warn(`[mneme/remote] meeting-list failed org=${orgId}: ${e.message}`); return null; }
+}
+
+export async function remoteMeetingSegmentWrite(orgId, segment) {
+  try { return await _call(orgId, '/v1/meeting-segment-write', { segment }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-segment-write failed org=${orgId}: ${e.message}`); return null; }
+}
+
+export async function remoteMeetingSegmentList(orgId, filter) {
+  try { const out = await _call(orgId, '/v1/meeting-segment-list', { filter }); return out?.segments || []; }
+  catch (e) { console.warn(`[mneme/remote] meeting-segment-list failed org=${orgId}: ${e.message}`); return null; }
 }
 
 // Fetch one meeting by id. Returns the meeting object or null.

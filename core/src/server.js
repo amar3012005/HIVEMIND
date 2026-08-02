@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -5857,6 +5857,45 @@ exit \$RC
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
+      if (pathname.startsWith('/api/meetings')) {
+        const meetingMembership = await prisma?.userOrganization.findUnique({
+          where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
+          select: { isActive: true },
+        }).catch(() => null);
+        if (!meetingMembership?.isActive) return jsonResponse(res, { error: 'not_found' }, 404);
+      }
+      let _mProjectIds = null;
+      const meetingProjectIds = async () => {
+        if (_mProjectIds) return _mProjectIds;
+        const memberships = await prisma?.projectMember.findMany({
+          where: { userId: _mUserId, project: { orgId: _mOrgId, archivedAt: null } },
+          select: { projectId: true },
+        }).catch(() => []);
+        _mProjectIds = (memberships || []).map((row) => row.projectId);
+        return _mProjectIds;
+      };
+      const meetingRecordAccessible = async (meeting) => {
+        if (!meeting || (meeting.org_id && meeting.org_id !== _mOrgId)) return false;
+        if (meeting.user_id === _mUserId || meeting.scope == null || meeting.scope === 'organization' || meeting.scope === 'team') return true;
+        const participants = Array.isArray(meeting.participants) ? meeting.participants : [];
+        if (participants.some((participant) => (
+          (typeof participant === 'string' ? participant : participant?.id) === _mUserId
+        ))) return true;
+        return meeting.scope === 'project' && (await meetingProjectIds()).includes(meeting.project_id);
+      };
+      const remoteMeetingForCaller = async (id) => {
+        const meeting = await amrMeetingGet(_mOrgId, id);
+        return (await meetingRecordAccessible(meeting)) ? meeting : null;
+      };
+      const centralMeetingForCaller = async (id) => {
+        if (!prisma) return null;
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, user_id, org_id, project_id, participants, scope
+             FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+          id, _mOrgId,
+        ).catch(() => []);
+        return (await meetingRecordAccessible(rows?.[0])) ? rows[0] : null;
+      };
       if (pathname.startsWith('/api/tara/')) {
         const membership = await prisma?.userOrganization.findUnique({
           where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
@@ -5889,30 +5928,96 @@ exit \$RC
       // amrMeeting*/amrTaraCall instead of Prisma/raw-SQL. Central/managed orgs are BYTE-UNCHANGED.
 
       // ── AI Meeting Notes ──────────────────────────────────────────────
+      if (pathname === '/api/meetings/usage' && req.method === 'GET') {
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        return jsonResponse(res, {
+          plan: usage.plan,
+          used_seconds: usedSeconds,
+          limit_seconds: limitSeconds,
+          remaining_seconds: limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds),
+          reset_at: new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1)).toISOString(),
+        });
+      }
+
+      if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        const remainingSeconds = limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds);
+        if (remainingSeconds === 0) {
+          return jsonResponse(res, planLimitBody({
+            allowed: false, current: Math.ceil(usedSeconds / 60), limit: meter.limit,
+            plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
+          }, 'meetingMinutes'), 402);
+        }
+        return jsonResponse(res, {
+          session_id: crypto.randomUUID(),
+          remaining_seconds: remainingSeconds,
+          consent_recorded: body?.consent === true,
+        }, 201);
+      }
+
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
       // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
       if (pathname === '/api/meetings/transcribe' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'stt_unavailable' }, 503);
         // Meeting-notes minutes are a plan limit (see src/billing/plans.js —
         // meetingMinutesPerMonth). Checked BEFORE we burn a transcription call,
         // and charged 1 minute here as the admission floor; the real duration is
         // derived from meetings.duration_sec, so this gate only has to stop an
         // org that is already at the ceiling.
         if (planEnforcer && _mOrgId) {
-          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 1);
+          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 0);
           if (!minCheck.allowed) {
             return jsonResponse(res, planLimitBody(minCheck, 'meetingMinutes'), minCheck.status || 402);
           }
         }
         try {
+          if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
           const chunks = [];
-          for await (const c of req) chunks.push(c);
+          const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
+          const maxBytes = maxMb * 1024 * 1024;
+          let receivedBytes = 0;
+          for await (const c of req) {
+            receivedBytes += c.length;
+            if (receivedBytes > maxBytes) {
+              return jsonResponse(res, {
+                error: 'audio_too_large',
+                message: `This recording segment exceeds the ${maxMb} MB transcription limit.`,
+              }, 413);
+            }
+            chunks.push(c);
+          }
           const audio = Buffer.concat(chunks);
           if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
           // Groq Whisper hard file cap (25 MB free / 100 MB dev tier). Catch it
           // HERE with a clear message instead of letting Groq 413 surface as an
           // opaque "whisper model issue" — a long meeting is the #1 cause.
-          const maxMb = Number(process.env.GROQ_WHISPER_MAX_MB || 24);
           if (audio.length > maxMb * 1024 * 1024) {
             return jsonResponse(res, {
               error: 'audio_too_large',
@@ -5983,7 +6088,6 @@ exit \$RC
 
       // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
       if (pathname === '/api/meetings/insights' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
         // Prefer the speaker-attributed transcript (from /transcribe speakerTranscript)
         // when the caller sends it → action items/quotes get attributed to speakers;
         // falls back to the plain transcript. Both carry SPEAKER_xx labels the prompt maps.
@@ -6131,7 +6235,10 @@ exit \$RC
         if (orgIsRemote(mOrg)) {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
           const rows = await amrMeetingList(mOrg, { limit });
-          return jsonResponse(res, { meetings: rows || [] });
+          if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const visible = [];
+          for (const meeting of rows) if (await meetingRecordAccessible(meeting)) visible.push(meeting);
+          return jsonResponse(res, { meetings: visible });
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
@@ -6191,7 +6298,10 @@ exit \$RC
             session_id: sessionId,
           }, 400);
         }
-        const ins = body.insights || {};
+        const ins = {
+          ...(body.insights && typeof body.insights === 'object' && !Array.isArray(body.insights) ? body.insights : {}),
+          recording_consent: body.consent === true,
+        };
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
         let transcript = (body.transcript || '').toString();
         // A client may retry finalization after a network or database failure
@@ -6213,15 +6323,42 @@ exit \$RC
             });
           }
         }
+        // Finalization retries are expected after a lost response. A session
+        // whose transcript segments already point at a meeting returns that
+        // meeting instead of creating another row or charging its duration twice.
+        if (sessionId && !orgIsRemote(mOrg) && prisma) {
+          const existing = await prisma.$queryRawUnsafe(
+            `SELECT meeting_id FROM hivemind.meeting_segments
+              WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                AND meeting_id IS NOT NULL LIMIT 1`,
+            sessionId, mOrg, mUser,
+          ).catch(() => []);
+          if (existing?.[0]?.meeting_id) {
+            return jsonResponse(res, { ok: true, id: existing[0].meeting_id, existing: true }, 200);
+          }
+        }
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
         const SCOPES = ['personal', 'project', 'team', 'organization'];
         const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
+        if (mScope === 'project') {
+          const projectId = typeof body.project_id === 'string' ? body.project_id : '';
+          const projectAccess = projectId ? await prisma?.projectMember.findFirst({
+            where: {
+              projectId,
+              userId: mUser,
+              project: { orgId: mOrg, archivedAt: null },
+            },
+            select: { projectId: true },
+          }).catch(() => null) : null;
+          if (!projectAccess) return jsonResponse(res, { error: 'not_found' }, 404);
+        }
         // Remote (self-host) orgs: write to agent instead of central Postgres.
         if (orgIsRemote(mOrg)) {
           try {
             const meeting = {
               user_id: mUser, project_id: body.project_id || null, title,
+              session_id: sessionId,
               summary: ins.summary || null, transcript,
               language: body.language || null,
               duration_sec: Number.isFinite(body.duration_sec) ? body.duration_sec : null,
@@ -6320,14 +6457,23 @@ exit \$RC
       // in-browser — never persisted central. Idempotent upsert on (session_id, idx).
       if (pathname === '/api/meetings/segments' && req.method === 'POST') {
         const mUser = _mUserId, mOrg = _mOrgId;
-        if (orgIsRemote(mOrg)) return jsonResponse(res, { ok: true, skipped: 'remote' });
-        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         const sid = (body.session_id || '').toString();
         const idx = Number(body.idx);
         const text = (body.text || '').toString();
         if (!/^[0-9a-fA-F-]{36}$/.test(sid) || !Number.isInteger(idx) || idx < 0 || !text.trim()) {
           return jsonResponse(res, { error: 'bad_segment' }, 400);
         }
+        if (orgIsRemote(mOrg)) {
+          const stored = await amrMeetingSegmentWrite(mOrg, {
+            session_id: sid, user_id: mUser, idx, text,
+            speakers: body.speakers || null,
+            start_ms: Number.isFinite(body.start_ms) ? body.start_ms : null,
+            end_ms: Number.isFinite(body.end_ms) ? body.end_ms : null,
+          });
+          if (!stored?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          return jsonResponse(res, { ok: true });
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
           await prisma.$executeRawUnsafe(
             `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
@@ -6372,7 +6518,11 @@ exit \$RC
         const mSeg = pathname.match(/^\/api\/meetings\/session\/([0-9a-fA-F-]{36})\/segments$/);
         if (mSeg && req.method === 'GET') {
           const mOrg = _mOrgId, mUser = _mUserId;
-          if (orgIsRemote(mOrg)) return jsonResponse(res, { segments: [], skipped: 'remote' });
+          if (orgIsRemote(mOrg)) {
+            const rows = await amrMeetingSegmentList(mOrg, { session_id: mSeg[1], user_id: mUser });
+            if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            return jsonResponse(res, { segments: rows, stitched: rows.map((row) => row.text).join('\n').trim() });
+          }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
@@ -6460,15 +6610,32 @@ exit \$RC
       // "who owes what, by when" register. Central only (remote = agent follow-up).
       if (pathname === '/api/meetings/obligations' && req.method === 'GET') {
         const mOrg = _mOrgId;
-        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { obligations: [], counts: {} });
+        const mUser = _mUserId;
+        if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { obligations: [], counts: {} });
         try {
-          const rows = await prisma.$queryRawUnsafe(
+          const projectIds = await meetingProjectIds();
+          let rows;
+          if (orgIsRemote(mOrg)) {
+            const remoteRows = await amrMeetingList(mOrg, { limit: 200 });
+            if (!remoteRows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            rows = [];
+            for (const meeting of remoteRows) {
+              if (await meetingRecordAccessible(meeting) && Array.isArray(meeting.action_items) && meeting.action_items.length) rows.push(meeting);
+            }
+          } else rows = await prisma.$queryRawUnsafe(
             `SELECT id, title, created_at, action_items
                FROM hivemind.meetings
               WHERE org_id=$1::uuid AND deleted_at IS NULL
                 AND action_items IS NOT NULL AND jsonb_array_length(action_items) > 0
+                AND (
+                     user_id=$2::uuid
+                  OR participants @> $3::jsonb
+                  OR scope IS NULL
+                  OR scope IN ('organization','team')
+                  OR (scope='project' AND project_id=ANY($4::uuid[]))
+                )
               ORDER BY created_at DESC LIMIT 200`,
-            mOrg,
+            mOrg, mUser, JSON.stringify([{ id: mUser }]), projectIds,
           );
           const today = new Date().toISOString().slice(0, 10);
           const obligations = [];
@@ -6546,7 +6713,7 @@ exit \$RC
           const mUser = _mUserId;
           // Remote (self-host) orgs: fetch from agent.
           if (orgIsRemote(mOrg)) {
-            const meeting = await amrMeetingGet(mOrg, mGet[1]);
+            const meeting = await remoteMeetingForCaller(mGet[1]);
             if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
             return jsonResponse(res, { meeting: { ...meeting, intelligence: meeting.intelligence || null, intelligence_status: meeting.intelligence_status || 'none', intelligence_generated_at: null } });
           }
@@ -6600,10 +6767,11 @@ exit \$RC
           // Remote (self-host) orgs: fetch from agent. Memory cluster preview is skipped
           // (memories already live on the agent; the delete flow still works correctly).
           if (orgIsRemote(mOrg)) {
-            const meeting = await amrMeetingGet(mOrg, mPrev[1]);
+            const meeting = await remoteMeetingForCaller(mPrev[1]);
             if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
-            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: (meeting.user_id === mUser) || !!isAdmin, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
+            if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: true, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
           }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
@@ -6614,6 +6782,7 @@ exit \$RC
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            if (m.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
             let memories = [];
             if (m.source_memory_id) {
               memories = await prisma.$queryRawUnsafe(
@@ -6626,7 +6795,7 @@ exit \$RC
             }
             return jsonResponse(res, {
               meeting: { id: m.id, title: m.title },
-              can_delete: (m.user_id === mUser) || !!isAdmin,
+              can_delete: true,
               ingested: !!m.source_memory_id,
               memory_count: memories.length,
               memories: memories.map((x) => ({ id: x.id, title: x.title })),
@@ -6659,14 +6828,25 @@ exit \$RC
               const meeting = await amrMeetingGet(mOrg, id);
               if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
               const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
-              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner' }, 403);
+              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+              let deletedMemories = 0;
+              const tagged = await remoteList(mOrg, { tags: [`meeting:${id}`] }, null, 1000).catch(() => null);
+              const memoryIds = new Set((tagged?.memories || []).map((memory) => memory.id).filter(Boolean));
+              if (meeting.source_memory_id) memoryIds.add(meeting.source_memory_id);
+              for (const memoryId of memoryIds) {
+                const removed = await amrDelete(mOrg, memoryId, hard);
+                if (!removed) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+                deletedMemories += 1;
+              }
               if (scope === 'both') {
-                await amrMeetingDelete(mOrg, id, hard);
+                const removed = await amrMeetingDelete(mOrg, id, hard);
+                if (!removed?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
               } else {
                 // memories-only → clear the cluster link, keep the row.
-                await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+                const patched = await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+                if (!patched?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
               }
-              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: 0, meeting_deleted: scope === 'both' });
+              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: deletedMemories, meeting_deleted: scope === 'both' });
             } catch (e) {
               return jsonResponse(res, { error: 'meeting_delete_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
             }
@@ -6681,9 +6861,7 @@ exit \$RC
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
             if (m.user_id !== mUser && !isAdmin) {
-              let owner = null;
-              try { const u = await prisma.user.findUnique({ where: { id: m.user_id }, select: { displayName: true, email: true } }); if (u) owner = { name: u.displayName || null, email: u.email || null }; } catch { /* best-effort */ }
-              return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner', owner }, 403);
+              return jsonResponse(res, { error: 'not_found' }, 404);
             }
             // Collect the meeting's memory set. Canonical ingest tags EVERY
             // meeting memory (distilled facts + transcript-evidence) with
@@ -6757,6 +6935,10 @@ exit \$RC
             }
             let meetingDeleted = false;
             if (scope === 'both') {
+              await prisma.$queryRawUnsafe(
+                `DELETE FROM hivemind.meeting_segments WHERE meeting_id=$1::uuid AND org_id=$2::uuid`,
+                id, mOrg,
+              );
               if (hard) await prisma.$queryRawUnsafe(`DELETE FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               else await prisma.$queryRawUnsafe(`UPDATE meetings SET deleted_at = now() WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               meetingDeleted = true;
@@ -6782,6 +6964,12 @@ exit \$RC
           const mOrg = _mOrgId;
           const mUser = _mUserId;
           if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(mIntel[1])) return jsonResponse(res, { error: 'not_found' }, 404);
+          } else {
+            const meeting = await centralMeetingForCaller(mIntel[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+          }
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -6944,6 +7132,7 @@ exit \$RC
           if (!Object.keys(patchFields).length) return jsonResponse(res, { error: 'no_fields' }, 400);
           // Remote (self-host) orgs: patch on agent.
           if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
             try {
               const r = await amrMeetingPatch(mOrg, id, patchFields);
               if (!r?.ok) return jsonResponse(res, { error: 'not_found' }, 404);
@@ -6953,6 +7142,7 @@ exit \$RC
             }
           }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
           const sets = [];
           const vals = [];
           let i = 1;
@@ -7160,9 +7350,10 @@ exit \$RC
           try {
             let m;
             if (orgIsRemote(mOrg)) {
-              m = await amrMeetingGet(mOrg, id);
+              m = await remoteMeetingForCaller(id);
             } else {
               if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+              if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
               const rows = await prisma.$queryRawUnsafe(
                 `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
                         action_items, decisions, key_points, questions, topics, insights,

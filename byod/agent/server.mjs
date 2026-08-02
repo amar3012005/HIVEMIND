@@ -168,6 +168,20 @@ async function ensureSchema() {
       deleted_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS meetings_org_idx ON meetings(org_id) WHERE deleted_at IS NULL;
+    CREATE TABLE IF NOT EXISTS meeting_segments (
+      session_id uuid NOT NULL,
+      org_id uuid NOT NULL,
+      user_id uuid NOT NULL,
+      idx int NOT NULL,
+      text text NOT NULL,
+      speakers jsonb,
+      start_ms int,
+      end_ms int,
+      meeting_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (session_id, idx)
+    );
+    CREATE INDEX IF NOT EXISTS meeting_segments_owner_idx ON meeting_segments(org_id, user_id, session_id);
     -- TARA call ledger (self-host): call rows + turns live here, never central.
     CREATE TABLE IF NOT EXISTS tara_calls (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -639,6 +653,12 @@ const routes = {
   // Upsert a meeting row. All fields optional except org_id (forced server-side).
   '/v1/meeting-write': async (b) => {
     const m = b.meeting || {};
+    if (m.session_id) {
+      const existing = await pg.query(
+        'SELECT meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 AND meeting_id IS NOT NULL LIMIT 1',
+        [m.session_id, ORG, m.user_id]);
+      if (existing.rows[0]?.meeting_id) return { ok: true, id: existing.rows[0].meeting_id, existing: true };
+    }
     const id = m.id || (await pg.query('SELECT gen_random_uuid() AS id')).rows[0].id;
     const J = (v, def = '[]') => JSON.stringify(Array.isArray(v) ? v : (v != null && typeof v === 'object' && !Array.isArray(v) ? v : JSON.parse(def)));
     await pg.query(
@@ -676,7 +696,32 @@ const routes = {
        m.intelligence != null ? JSON.stringify(m.intelligence) : null,
        m.intelligence_status || null, m.created_at || null]);
     const { rows } = await pg.query('SELECT id, created_at FROM meetings WHERE id=$1', [id]);
+    if (m.session_id && m.user_id) {
+      await pg.query(
+        'UPDATE meeting_segments SET meeting_id=$1 WHERE session_id=$2 AND org_id=$3 AND user_id=$4 AND meeting_id IS NULL',
+        [id, m.session_id, ORG, m.user_id]);
+    }
     return { ok: true, id: rows[0]?.id, created_at: rows[0]?.created_at };
+  },
+
+  '/v1/meeting-segment-write': async (b) => {
+    const s = b.segment || {};
+    if (!s.session_id || !s.user_id || !Number.isInteger(s.idx) || !String(s.text || '').trim()) return { ok: false, error: 'invalid segment' };
+    await pg.query(
+      `INSERT INTO meeting_segments (session_id,org_id,user_id,idx,text,speakers,start_ms,end_ms)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
+       ON CONFLICT (session_id,idx) DO UPDATE SET text=EXCLUDED.text,speakers=EXCLUDED.speakers,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms`,
+      [s.session_id, ORG, s.user_id, s.idx, String(s.text).slice(0, 200000), s.speakers ? JSON.stringify(s.speakers) : null, s.start_ms ?? null, s.end_ms ?? null]);
+    return { ok: true };
+  },
+
+  '/v1/meeting-segment-list': async (b) => {
+    const f = b.filter || {};
+    if (!f.session_id || !f.user_id) return { segments: [] };
+    const { rows } = await pg.query(
+      'SELECT idx,text,speakers,start_ms,end_ms,meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 ORDER BY idx',
+      [f.session_id, ORG, f.user_id]);
+    return { segments: rows };
   },
 
   // List org's non-deleted meetings, newest first. Scope filter is simplified to
@@ -684,7 +729,7 @@ const routes = {
   // server applies the rich scope predicate for managed orgs).
   '/v1/meeting-list': async (b) => {
     const f = b.filter || {};
-    const limit = Math.min(Number(f.limit) || 40, 200);
+    const limit = Math.min(Number(f.limit) || 40, 5000);
     const { rows } = await pg.query(
       `SELECT id, user_id, org_id, project_id, title, summary, language, duration_sec,
               multi_speaker, speaker_count, action_items, decisions, key_points, questions,
@@ -712,6 +757,7 @@ const routes = {
   // Soft or hard delete a meeting row.
   '/v1/meeting-delete': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
+    await pg.query('DELETE FROM meeting_segments WHERE meeting_id=$1 AND org_id=$2', [b.id, ORG]);
     if (b.hard) {
       const r = await pg.query('DELETE FROM meetings WHERE id=$1 AND org_id=$2', [b.id, ORG]);
       return { ok: true, deleted: r.rowCount };

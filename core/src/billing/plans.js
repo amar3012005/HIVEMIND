@@ -66,8 +66,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 100,
       knowledgeBasePagesPerDay: 25,
       maxHyperRooms: 1,
-      // Meeting notes: 60 minutes of transcription per month.
-      meetingMinutesPerMonth: 60,
+      // Meeting notes: 30 minutes of transcription per month.
+      meetingMinutesPerMonth: 30,
       hyperAgentRunsPerDay: 5,
       hyperAgentRunsPerMonth: 25,
       taraTalkSecondsPerDay: 300,
@@ -104,8 +104,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 1_000,
       knowledgeBasePagesPerDay: 250,
       maxHyperRooms: 5,
-      // Meeting notes: 5 hours per month.
-      meetingMinutesPerMonth: 300,
+      // Meeting notes: 100 minutes per month.
+      meetingMinutesPerMonth: 100,
       hyperAgentRunsPerDay: 50,
       hyperAgentRunsPerMonth: 500,
       taraTalkSecondsPerDay: 1_800,
@@ -141,8 +141,8 @@ export const PLANS = {
       knowledgeBasePagesPerMonth: 10_000,
       knowledgeBasePagesPerDay: 2_500,
       maxHyperRooms: 25,
-      // Meeting notes: 10 hours per month.
-      meetingMinutesPerMonth: 600,
+      // Meeting notes: 500 minutes per month.
+      meetingMinutesPerMonth: 500,
       hyperAgentRunsPerDay: 500,
       hyperAgentRunsPerMonth: 5_000,
       taraTalkSecondsPerDay: 14_400,

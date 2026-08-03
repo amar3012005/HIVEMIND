@@ -36,6 +36,7 @@ import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import { UsageService } from './billing/usage-service.js';
 import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
+import { buildCompanyTaskInstruction, clearHumanAgentRoomRuns } from './employees/company-task-runs.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -9348,7 +9349,52 @@ Write the persona now.`;
       }
     }
 
-    // POST /v1/hyper/tasks/open { task_id } — open (or create) the room for a
+    // POST /v1/hyper/rooms/clear-human-runs — refresh the human-operated Room
+    // surface without disturbing durable Runtime playbook executions. Provider
+    // receipts, connector credentials, company memory, and rooms are retained.
+    if (pathname === '/v1/hyper/rooms/clear-human-runs' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const cleared = await clearHumanAgentRoomRuns({
+          prisma,
+          orgId: current.session.orgId,
+        });
+        const companyRows = await prisma.$queryRawUnsafe(
+          `SELECT id, agent_connectors->'_company' AS company
+             FROM "hivemind"."hyper_rooms"
+            WHERE org_id = $1::uuid
+              AND archived_at IS NULL
+              AND agent_connectors ? '_company'
+            ORDER BY created_at DESC LIMIT 1`,
+          current.session.orgId,
+        );
+        const companyRow = companyRows?.[0];
+        if (companyRow?.company) {
+          const company = typeof companyRow.company === 'string'
+            ? JSON.parse(companyRow.company)
+            : companyRow.company;
+          company.tasks = (Array.isArray(company.tasks) ? company.tasks : []).map((task) => ({
+            ...task,
+            status: 'todo',
+            room_id: null,
+          }));
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET agent_connectors = agent_connectors || $1::jsonb WHERE id = $2::uuid',
+            JSON.stringify({ _company: company }),
+            companyRow.id,
+          );
+        }
+        return jsonResponse(res, { ok: true, cleared });
+      } catch (err) {
+        console.warn('[hyper-rooms] clear human runs failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper/tasks/open { task_id } — submit an onboarding task as an
+    // ordinary human instruction to the permanent General Room. Its Director
+    // owns classification, planning, discussion, tools, and final synthesis.
     // dashboard task. First click provisions a room named after the task with
     // the task detail as its goal and marks the task in the persisted state;
     // later clicks return the same room. Polsia: click a task → its workroom.
@@ -9371,131 +9417,66 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const task = (company.tasks || []).find((x) => x.id === taskId);
         if (!task) return jsonResponse(res, { error: 'task not found' }, 404);
-        // Optimized kickoff query — the FE posts this as the room's first turn
-        // (idempotency-keyed) so the swarm starts working the task immediately.
-        const kickoff = [
-          `You are the ${company.company} team. Execute this task now.`,
-          `TASK [${task.tag}]: ${task.title}`,
-          task.detail ? `SCOPE: ${task.detail}` : '',
-          company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
-          'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
-        ].filter(Boolean).join('\n');
-        if (!task.room_id && task.room_tag) {
-          const domainRows = await prisma.$queryRawUnsafe(
-            `SELECT id, name
-               FROM "hivemind"."hyper_rooms"
-              WHERE org_id = $1::uuid
-                AND room_tag = $2
-                AND archived_at IS NULL
-                AND agent_connectors->>'_domain_home' = 'true'
-              ORDER BY created_at ASC LIMIT 1`,
-            current.session.orgId,
-            String(task.room_tag),
-          ).catch(() => []);
-          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
-        }
-        if (task.room_id) {
-          const existing = await prisma.hyperRoom.findFirst({
-            where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
-            select: { id: true, name: true },
-          }).catch(() => null);
-          if (existing) {
-            let created = false;
-            const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
-            const kickTurn = await prisma.$transaction(async (tx) => {
-              const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
-              if (prior) return prior;
-              const last = await tx.hyperTurn.findFirst({
-                where: { roomId: existing.id }, orderBy: { seq: 'desc' }, select: { seq: true },
-              });
-              created = true;
-              return tx.hyperTurn.create({
-                data: { roomId: existing.id, seq: (last?.seq ?? 0) + 1, userMessage: kickoff, status: 'live', idempotencyKey, lines: [] },
-              });
-            });
-            if (created) {
-              const rr = await prisma.hyperRoom.findUnique({
-                where: { id: existing.id }, select: { participantIds: true, goal: true, projectId: true },
-              }).catch(() => null);
-              dispatchHyperRoomTurn({
-                room_id: existing.id, turn_id: kickTurn.id,
-                user_id: current.session.userId, org_id: current.session.orgId,
-                user_message: kickoff, participant_ids: rr?.participantIds || [],
-                project_id: rr?.projectId || null, room_goal: rr?.goal || '',
-                task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
-                callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-              }).catch((e) => console.warn('[hyper-tasks] domain kickoff dispatch failed:', e.message));
-            }
-            task.status = 'active';
-            await prisma.$executeRawUnsafe(
-              'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
-              JSON.stringify({ _company: company }), row.id,
-            ).catch(() => {});
-            return jsonResponse(res, { room: existing, task });
-          }
-        }
-        const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-        const taskRoom = await createHyperRoomWithinPlan({
-            userId: current.session.userId,
-            orgId: current.session.orgId,
-            name: task.title.slice(0, 120),
-            participantIds,
-            template: 'auto',
-            permanentLeadId: participantIds.slice().sort()[0] || null,
+        const kickoff = buildCompanyTaskInstruction(task);
+        if (!kickoff) return jsonResponse(res, { error: 'task instruction is empty' }, 409);
+        const participantIds = (company.team || []).map((member) => member.id).filter(Boolean).slice(0, 5);
+        const domainRooms = await ensureDomainRooms({
+          prisma,
+          orgId: current.session.orgId,
+          userId: current.session.userId,
+          participantIds,
+          company,
         });
-        const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company} — ${company.mission || ''}`.slice(0, 2000);
-        try {
-          await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, taskRoom.id);
-        } catch { /* goal best-effort */ }
-        // EVENT-DRIVEN outbound: an OUTREACH-tagged task auto-enables the org's
-        // Gmail connector on its room (when connected), so the first turn can
-        // produce a ready-to-send email (compose card) instead of downgrading
-        // to a text answer. Driven by the task's tag — no task is hardcoded.
-        if (String(task.tag || '').toUpperCase() === 'OUTREACH') {
-          try {
-            const g = await prisma.platformIntegration.findFirst({
-              where: { orgId: current.session.orgId, platformType: { in: ['gmail', 'google'] } },
-              select: { id: true },
-            }).catch(() => null);
-            if (g) {
-              await prisma.$executeRawUnsafe(
-                'UPDATE "hivemind"."hyper_rooms" SET "enabled_connectors" = ARRAY[\'gmail\'] WHERE "id" = $1::uuid AND ("enabled_connectors" IS NULL OR cardinality("enabled_connectors") = 0)',
-                taskRoom.id,
-              );
-            }
-          } catch { /* best-effort — room still works as text */ }
-        }
-        // Mark the task with its room in the persisted state.
-        task.room_id = taskRoom.id;
-        task.status = 'active';
-        try {
-          await prisma.$executeRawUnsafe(
-            'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
-            JSON.stringify({ _company: company }), row.id,
-          );
-        } catch { /* state best-effort */ }
-        // ATOMIC KICKOFF: create + dispatch the first turn server-side (same
-        // pattern as the nightly cycle) — the FE comment always assumed this,
-        // but this path only RETURNED kickoff_message, so task rooms opened
-        // with 0 turns and sat silent until the user typed. Event-driven: the
-        // task's own kickoff text is the turn, agents start immediately.
-        try {
-          const kickTurn = await prisma.hyperTurn.create({
-            data: { roomId: taskRoom.id, seq: 1, userMessage: kickoff, status: 'live',
-                    idempotencyKey: `task-kickoff-${taskRoom.id}`, lines: [] },
+        const generalRoom = domainRooms.find((candidate) => candidate.room_tag === 'general');
+        if (!generalRoom?.id) return jsonResponse(res, { error: 'general room unavailable' }, 503);
+        task.room_id = generalRoom.id;
+        task.room_tag = 'general';
+        const room = await prisma.hyperRoom.findFirst({
+          where: { id: generalRoom.id, orgId: current.session.orgId, archivedAt: null },
+          select: { id: true, name: true, participantIds: true, goal: true, projectId: true },
+        });
+        if (!room) return jsonResponse(res, { error: 'general room unavailable' }, 503);
+        let created = false;
+        const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
+        const kickTurn = await prisma.$transaction(async (tx) => {
+          const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+          if (prior) return prior;
+          const last = await tx.hyperTurn.findFirst({
+            where: { roomId: room.id }, orderBy: { seq: 'desc' }, select: { seq: true },
           });
-          const roomRow2 = await prisma.hyperRoom.findUnique({
-            where: { id: taskRoom.id }, select: { participantIds: true, goal: true, projectId: true },
-          }).catch(() => null);
+          created = true;
+          return tx.hyperTurn.create({
+            data: {
+              roomId: room.id,
+              seq: (last?.seq ?? 0) + 1,
+              userMessage: kickoff,
+              status: 'live',
+              idempotencyKey,
+              lines: [],
+            },
+          });
+        });
+        if (created) {
           dispatchHyperRoomTurn({
-            room_id: taskRoom.id, turn_id: kickTurn.id,
-            user_id: current.session.userId, org_id: current.session.orgId,
-            user_message: kickoff, participant_ids: roomRow2?.participantIds || [],
-            project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
+            room_id: room.id,
+            turn_id: kickTurn.id,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            user_message: kickoff,
+            participant_ids: room.participantIds || [],
+            project_id: room.projectId || null,
+            room_goal: room.goal || '',
+            task_tag: 'ROOM_GENERAL',
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-          }).catch((e) => console.warn('[hyper-tasks] kickoff dispatch failed:', e.message));
-        } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message || e.code || e); }
-        return jsonResponse(res, { room: { id: taskRoom.id, name: taskRoom.name }, task, kickoff_message: kickoff }, 201);
+          }).catch((error) => console.warn('[hyper-tasks] general kickoff dispatch failed:', error.message));
+        }
+        task.status = 'active';
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET agent_connectors = agent_connectors || $1::jsonb WHERE id = $2::uuid',
+          JSON.stringify({ _company: company }),
+          row.id,
+        );
+        return jsonResponse(res, { room: { id: room.id, name: room.name }, task, kickoff_message: kickoff });
       } catch (err) {
         if (err?.code === 'PLAN_LIMIT') return capacityErrorResponse(res, err);
         return jsonResponse(res, { error: err.message }, 500);

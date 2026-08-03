@@ -1752,7 +1752,20 @@ Every item must include a non-empty content field and one or more valid support_
         visibility: metadata.visibility || 'private',
         primary_team_id: metadata.primary_team_id || null,
         project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-        content: docSummary, title: docTitle, memory_type: 'summary',
+        // Same shape as every other memory: «filename : summary» header + trailing (recorded …).
+        // The fact path applies this in _persistOne, which the summary does NOT go through — so
+        // measured 24 of 25 memories compliant and the summary the lone exception. A summary is the
+        // memory most likely to be read on its own, so it is the one that can least afford to omit
+        // which file it describes or when it was recorded.
+        content: (() => {
+          const _fn = (metadata.filename || docTitle || '').toString().slice(0, 80);
+          const _day = _tsd.toISOString().slice(0, 10);
+          let out = String(docSummary || '');
+          if (_fn && !out.startsWith('\u00ab')) out = `\u00ab${_fn} : summary\u00bb ${out}`;
+          if (!/\(recorded \d{4}-\d{2}-\d{2}\)\s*$/.test(out)) out = `${out.replace(/\s+$/, '')} (recorded ${_day})`;
+          return out;
+        })(),
+        title: docTitle, memory_type: 'summary',
         // The parent is source-local navigation context, not a durable claim.
         importance_score: 0.45,
         document_date: metadata.document_date || null,

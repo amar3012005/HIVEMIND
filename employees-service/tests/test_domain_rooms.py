@@ -10,6 +10,7 @@ from hivemind_employees.hyper.skills import (
 
 
 EXPECTED = {"seo", "marketing", "outreach", "branding", "fundraising", "research", "product", "design", "legal_finance", "campaign"}
+COMPANY_TASK_ROOM_TAGS = {"general", *EXPECTED}
 
 
 def test_initial_domain_packs_are_complete_and_versioned():
@@ -30,6 +31,14 @@ def test_explicit_room_tag_wins_over_message_keyword_classification():
     assert resolve_room_kind("ROOM_BRANDING", "", "research competitors") == "branding"
     assert resolve_room_kind("ROOM_FUNDRAISING", "", "improve our SEO") == "fundraising"
     assert resolve_room_kind("ROOM_OUTREACH", "", "research industrial prospects") == "outreach"
+
+
+def test_every_company_task_room_tag_reaches_its_exact_director_pack():
+    for slug in COMPANY_TASK_ROOM_TAGS:
+        resolved = resolve_room_kind(f"ROOM_{slug.upper()}", "", "beliebige mehrsprachige Aufgabe")
+        assert resolved == slug
+        if slug != "general":
+            assert get_domain_pack(resolved) is not None
 
 
 def test_general_rooms_keep_existing_dynamic_classifier():

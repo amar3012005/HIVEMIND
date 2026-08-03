@@ -1,5 +1,70 @@
 const RUNTIME_TURN_PREFIXES = ['hq-wo:', 'growth-plan:', 'runtime:'];
 
+const COMPANY_TASK_ROOM_TYPES = new Set([
+  'general',
+  'seo',
+  'marketing',
+  'outreach',
+  'campaign',
+  'branding',
+  'fundraising',
+  'research',
+  'product',
+  'design',
+  'legal_finance',
+]);
+
+const COMPANY_TASK_ROOM_NAMES = new Map([
+  ['company hq', 'general'],
+  ['general', 'general'],
+  ['seo', 'seo'],
+  ['marketing', 'marketing'],
+  ['outreach intelligence', 'outreach'],
+  ['outreach', 'outreach'],
+  ['campaign intelligence', 'campaign'],
+  ['campaign', 'campaign'],
+  ['branding', 'branding'],
+  ['fundraising', 'fundraising'],
+  ['research', 'research'],
+  ['product', 'product'],
+  ['design', 'design'],
+  ['legal & finance', 'legal_finance'],
+  ['legal and finance', 'legal_finance'],
+  ['legal finance', 'legal_finance'],
+]);
+
+export function resolveCompanyTaskRoomType(task = {}) {
+  const candidate = String(task.room_tag || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  const roomName = String(task.room_name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const recovered = COMPANY_TASK_ROOM_NAMES.get(roomName);
+  // A prior release overwrote clicked specialist tasks with room_tag=general.
+  // Their immutable onboarding room_name remains available for safe recovery.
+  if (candidate === 'general' && recovered && recovered !== 'general') return recovered;
+  if (COMPANY_TASK_ROOM_TYPES.has(candidate)) return candidate;
+  return recovered || 'general';
+}
+
+export function buildCompanyTaskContext(company = {}) {
+  const profile = company.profile && typeof company.profile === 'object' ? company.profile : {};
+  const lines = [
+    ['Company', company.company || company.name],
+    ['Website', company.website],
+    ['Location', company.company_location || profile.location],
+    ['Mission', company.mission],
+    ['What it does', profile.what_it_does],
+    ['ICP', profile.icp],
+    ['Offer', profile.offer],
+    ['Positioning', profile.positioning],
+    ['Operating context', company.company_context],
+  ].filter(([, value]) => String(value || '').trim())
+    .map(([label, value]) => `${label}: ${String(value).trim()}`);
+  const gaps = Array.isArray(profile.evidence_gaps)
+    ? profile.evidence_gaps.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  if (gaps.length) lines.push(`Known evidence gaps: ${gaps.join('; ')}`);
+  return lines.join('\n').slice(0, 12000);
+}
+
 export function buildCompanyTaskInstruction(task = {}) {
   return [
     String(task.title || '').trim(),

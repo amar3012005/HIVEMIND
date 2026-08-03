@@ -37,7 +37,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Set
 
 import httpx
 from agentscope.agent import ReActAgent
@@ -1705,6 +1705,13 @@ class RoomTurnRequest(BaseModel):
     # orchestration contract stays private and is never rendered as a user turn.
     display_message: Optional[str] = Field(default=None, max_length=8000)
     execution_context: Optional[str] = Field(default=None, max_length=16000)
+    # Persisted onboarding/company snapshot supplied by the Control Plane for a
+    # direct company task. This is private grounding context, never the visible
+    # user instruction, and protects Room execution from a transient recall miss.
+    company_context: Optional[str] = Field(default=None, max_length=12000)
+    # Company-dashboard tasks keep their requested report in the Room. A direct
+    # human instruction still uses the normal provider artifact behavior.
+    output_surface: Optional[Literal["room", "provider"]] = None
     participant_ids: List[str] = Field(default_factory=list)
     callback_url: Optional[str] = None
     flyby_decision: Optional[str] = None
@@ -3153,6 +3160,14 @@ async def _orchestrate_single_agent(
             )
         except Exception:  # noqa: BLE001
             _company_brief = ""
+    _persisted_company_context = str(req.company_context or "").strip()
+    if _persisted_company_context:
+        _snapshot = (
+            "PERSISTED COMPANY SNAPSHOT — factual onboarding state supplied with this "
+            "human company task. Use it as company grounding and retain any stated "
+            "evidence gaps:\n" + _persisted_company_context
+        )
+        _company_brief = f"{_snapshot}\n\n{_company_brief}".strip()
     # Canonical company identity for the verification gate: the onboarded company
     # name + whether the room is flying blind on company context.
     _company_name = ""
@@ -3254,6 +3269,9 @@ async def _orchestrate_single_agent(
         action for action in (result.get("post_output_actions") or [])
         if isinstance(action, dict) and action.get("explicit") is True
     ][:4]
+    if req.output_surface == "room":
+        intended_output = "answer"
+        post_output_actions = []
 
     # Conversational turns are complete when the lead replies. Do not reinterpret
     # a greeting as an operating task by adding a plan, verifier, journal entry,
@@ -3925,6 +3943,12 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
             _build_company_brief(msg, req.user_id, req.org_id, "", project_id=req.project_id), timeout=8.0)
     except Exception:  # noqa: BLE001
         brief = ""
+    if str(req.company_context or "").strip():
+        brief = (
+            "PERSISTED COMPANY SNAPSHOT:\n"
+            + str(req.company_context).strip()
+            + (f"\n\n{brief}" if brief else "")
+        )
     try:
         resp = await recall_emulated(msg, user_id=req.user_id, org_id=req.org_id,
                                      api_key="", max_memories=6, project_id=req.project_id)

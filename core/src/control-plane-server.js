@@ -36,7 +36,12 @@ import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import { UsageService } from './billing/usage-service.js';
 import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
-import { buildCompanyTaskInstruction, clearHumanAgentRoomRuns } from './employees/company-task-runs.js';
+import {
+  buildCompanyTaskContext,
+  buildCompanyTaskInstruction,
+  clearHumanAgentRoomRuns,
+  resolveCompanyTaskRoomType,
+} from './employees/company-task-runs.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -305,35 +310,56 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   return { id: room.id, participantIds, created: true };
 }
 
-async function findOrCreateHumanGeneralRoom(session, company, participantIds = []) {
+async function findOrCreateCompanyTaskWorkRoom(
+  session,
+  companyStateRoomId,
+  company,
+  task,
+  participantIds = [],
+) {
+  const roomType = resolveCompanyTaskRoomType(task);
+  const taskKey = `${companyStateRoomId}:${String(task?.id || '')}:${roomType}`;
   const existing = await prisma.$queryRawUnsafe(
-    `SELECT id, participant_ids
+    `SELECT id, participant_ids, room_tag
        FROM "hivemind"."hyper_rooms"
       WHERE org_id = $1::uuid
         AND archived_at IS NULL
-        AND agent_connectors->>'_human_instruction_home' = 'true'
+        AND agent_connectors->>'_company_task_key' = $2
       ORDER BY created_at ASC
       LIMIT 1`,
-    session.orgId,
+    session.orgId, taskKey,
   ).catch(() => []);
   if (existing?.[0]?.id) {
-    return { id: existing[0].id, participantIds: existing[0].participant_ids || [], created: false };
+    return {
+      id: existing[0].id,
+      participantIds: existing[0].participant_ids || [],
+      roomType: existing[0].room_tag || roomType,
+      created: false,
+    };
   }
 
   const companyName = String(company?.company || company?.name || 'Company').trim() || 'Company';
   const normalizedParticipants = Array.from(new Set(participantIds.filter(Boolean))).slice(0, 5);
+  const definition = DOMAIN_ROOM_DEFINITIONS.find((candidate) => candidate.key === roomType)
+    || DOMAIN_ROOM_DEFINITIONS.find((candidate) => candidate.key === 'general');
+  const companyContext = buildCompanyTaskContext(company);
   const room = await createHyperRoomWithinPlan({
     orgId: session.orgId,
     userId: session.userId,
-    name: `${companyName} - General`.slice(0, 120),
+    name: String(task?.title || `${companyName} task`).trim().slice(0, 120),
     template: 'auto',
     participantIds: normalizedParticipants,
-    goal: 'Handle direct company instructions through the normal Room Director, planning, discussion, tools, and synthesis.',
-    roomTag: 'general',
-    agentConnectors: { _human_instruction_home: true },
+    goal: `${definition?.purpose || 'Complete the company task through the normal Room Director.'}${companyContext ? `\n\n${companyContext}` : ''}`.slice(0, 12000),
+    roomTag: roomType,
+    agentConnectors: {
+      _company_task: true,
+      _company_task_key: taskKey,
+      _company_task_id: String(task?.id || ''),
+      _company_task_room_type: roomType,
+    },
     permanentLeadId: normalizedParticipants.slice().sort()[0] || null,
   });
-  return { id: room.id, participantIds: normalizedParticipants, created: true };
+  return { id: room.id, participantIds: normalizedParticipants, roomType, created: true };
 }
 
 async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles, invitedAt }) {
@@ -9424,10 +9450,10 @@ Write the persona now.`;
     }
 
     // POST /v1/hyper/tasks/open { task_id } — submit an onboarding task as an
-    // ordinary human instruction to the permanent human General Room. This is
-    // deliberately separate from the General domain home that hosts HQ Runtime.
-    // Its Director owns classification, planning, discussion, tools, and final
-    // synthesis; later clicks return the same durable work room.
+    // ordinary human instruction to a typed Work Room. It deliberately remains
+    // outside permanent Company Agent Rooms while its canonical room tag loads
+    // the matching Director, skills, tools, discussion shape, and report contract.
+    // Later clicks return the same durable task room.
     if (pathname === '/v1/hyper/tasks/open' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -9457,19 +9483,28 @@ Write the persona now.`;
           participantIds,
           company,
         });
-        const generalRoom = await findOrCreateHumanGeneralRoom(current.session, company, participantIds);
-        if (!generalRoom?.id) return jsonResponse(res, { error: 'general room unavailable' }, 503);
-        task.room_id = generalRoom.id;
-        task.room_tag = 'general';
+        const taskRoom = await findOrCreateCompanyTaskWorkRoom(
+          current.session,
+          row.id,
+          company,
+          task,
+          participantIds,
+        );
+        if (!taskRoom?.id) return jsonResponse(res, { error: 'task room unavailable' }, 503);
+        const roomType = taskRoom.roomType || resolveCompanyTaskRoomType(task);
+        task.room_id = taskRoom.id;
+        task.room_tag = roomType;
         const room = await prisma.hyperRoom.findFirst({
-          where: { id: generalRoom.id, orgId: current.session.orgId, archivedAt: null },
+          where: { id: taskRoom.id, orgId: current.session.orgId, archivedAt: null },
           select: { id: true, name: true, participantIds: true, goal: true, projectId: true },
         });
-        if (!room) return jsonResponse(res, { error: 'general room unavailable' }, 503);
+        if (!room) return jsonResponse(res, { error: 'task room unavailable' }, 503);
         let created = false;
-        // Version the human-General route so a task previously opened in a
-        // specialist room cannot suppress its first General Room turn.
-        const idempotencyKey = `task-human-v3-${row.id}-${task.id}`.slice(0, 64);
+        const taskIdentity = crypto.createHash('sha256')
+          .update(`${row.id}:${task.id}:${roomType}`)
+          .digest('hex')
+          .slice(0, 32);
+        const idempotencyKey = `task-human-v4:${taskIdentity}`;
         const kickTurn = await prisma.$transaction(async (tx) => {
           const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
           if (prior) return prior;
@@ -9498,9 +9533,11 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            task_tag: 'ROOM_GENERAL',
+            task_tag: `ROOM_${roomType.toUpperCase()}`,
+            company_context: buildCompanyTaskContext(company),
+            output_surface: 'room',
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-          }).catch((error) => console.warn('[hyper-tasks] general kickoff dispatch failed:', error.message));
+          }).catch((error) => console.warn('[hyper-tasks] typed kickoff dispatch failed:', error.message));
         }
         task.status = 'active';
         await prisma.$executeRawUnsafe(

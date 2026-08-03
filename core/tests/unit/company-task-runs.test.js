@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompanyTaskInstruction, clearHumanAgentRoomRuns } from '../../src/employees/company-task-runs.js';
+import {
+  buildCompanyTaskContext,
+  buildCompanyTaskInstruction,
+  clearHumanAgentRoomRuns,
+  resolveCompanyTaskRoomType,
+} from '../../src/employees/company-task-runs.js';
 
 test('company task becomes a direct human instruction without routing copy', () => {
   const message = buildCompanyTaskInstruction({
@@ -14,6 +19,34 @@ test('company task becomes a direct human instruction without routing copy', () 
     'Expected deliverable: Prioritized findings',
   ].join('\n\n'));
   assert.doesNotMatch(message, /runtime|specialist|room|director|debate/i);
+});
+
+test('company tasks preserve every canonical Room type without keyword routing', () => {
+  const roomTypes = [
+    'general', 'seo', 'marketing', 'outreach', 'campaign', 'branding',
+    'fundraising', 'research', 'product', 'design', 'legal_finance',
+  ];
+  for (const roomType of roomTypes) {
+    assert.equal(resolveCompanyTaskRoomType({ room_tag: roomType, title: 'unrelated vocabulary' }), roomType);
+  }
+  assert.equal(resolveCompanyTaskRoomType({ room_tag: 'LEGAL-FINANCE' }), 'legal_finance');
+  assert.equal(resolveCompanyTaskRoomType({ room_tag: 'general', room_name: 'Research' }), 'research');
+  assert.equal(resolveCompanyTaskRoomType({ room_tag: 'unknown' }), 'general');
+});
+
+test('company task context carries persisted onboarding truth outside the visible instruction', () => {
+  const context = buildCompanyTaskContext({
+    company: 'Acme', website: 'https://acme.example', company_location: 'Berlin',
+    mission: 'Make regulated work safer.',
+    profile: {
+      what_it_does: 'Builds compliance software.',
+      icp: 'European banks', offer: 'Auditable automation',
+      evidence_gaps: ['Current social activity not observed'],
+    },
+  });
+  assert.match(context, /^Company: Acme/m);
+  assert.match(context, /ICP: European banks/);
+  assert.match(context, /Known evidence gaps: Current social activity not observed/);
 });
 
 test('clearing human Room runs preserves Runtime-owned turns and work', async () => {

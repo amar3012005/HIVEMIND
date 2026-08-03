@@ -31,6 +31,42 @@ function asJsonRuntime(row) {
   return { ...row, eventSequence: String(row.eventSequence ?? 0) };
 }
 
+export function projectCampaignAuthorityPreview(campaign) {
+  if (!campaign) return null;
+  const actions = (campaign.actions || [])
+    .filter((action) => !campaign.currentPlanVersionId || action.planVersionId === campaign.currentPlanVersionId)
+    .map((action) => ({
+      id: action.id,
+      channel: action.channel,
+      action_type: action.actionType,
+      position: action.position,
+      status: action.status,
+      scheduled_at: action.scheduledAt?.toISOString?.() || action.scheduledAt || null,
+      payload: action.payload || {},
+      rationale: action.rationale || null,
+      success_metric: action.successMetric || null,
+      assets: (action.assets || []).filter((asset) => !asset.deletedAt).map((asset) => ({
+        id: asset.id,
+        status: asset.status,
+        content_type: asset.contentType || null,
+        width: asset.width || null,
+        height: asset.height || null,
+        metadata: asset.metadata || {},
+        content_url: asset.storageKey
+          ? `/v1/campaigns/${campaign.id}/assets/${asset.id}/content`
+          : null,
+      })),
+    }));
+  return {
+    id: campaign.id,
+    name: campaign.name,
+    status: campaign.status,
+    channels: campaign.requestedChannels || [],
+    plan_version_id: campaign.currentPlanVersionId || null,
+    actions,
+  };
+}
+
 export function eventCursor(...values) {
   return values.reduce((highest, value) => {
     try {
@@ -590,7 +626,22 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const todoById = new Map(todos.map((todo) => [todo.id, todo]));
         const campaignsByRun = new Map((playbookRuns.length ? await prisma.campaign.findMany({
           where: { orgId, sourceType: 'runtime_playbook', sourceId: { in: playbookRuns.map((run) => run.id) } },
-          select: { id: true, sourceId: true, name: true, status: true, requestedChannels: true, currentPlanVersionId: true },
+          select: {
+            id: true, sourceId: true, name: true, status: true, requestedChannels: true, currentPlanVersionId: true,
+            actions: {
+              orderBy: { position: 'asc' },
+              select: {
+                id: true, planVersionId: true, channel: true, actionType: true, position: true, status: true,
+                scheduledAt: true, payload: true, rationale: true, successMetric: true,
+                assets: {
+                  select: {
+                    id: true, status: true, storageKey: true, contentType: true, width: true, height: true,
+                    metadata: true, deletedAt: true,
+                  },
+                },
+              },
+            },
+          },
         }) : []).map((campaign) => [campaign.sourceId, campaign]));
         const playbookProjectionWarnings = [];
         const playbookInputs = playbookRuns.filter((run) => run.status === 'WAITING_EVENT'
@@ -652,13 +703,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             kind: 'external_action',
             messages,
             calls,
-            campaign: campaign ? {
-              id: campaign.id,
-              name: campaign.name,
-              status: campaign.status,
-              channels: campaign.requestedChannels || [],
-              plan_version_id: campaign.currentPlanVersionId || null,
-            } : null,
+            campaign: projectCampaignAuthorityPreview(campaign),
           };
         }).filter(Boolean);
         const activationSprint = await projectCurrentActivationSprint({ prisma, orgId });

@@ -6,7 +6,7 @@ import {
   resolveAuthorityPreference,
   validateWorkResultPacket,
 } from '../../src/hq-runtime/contracts.js';
-import { eventCursor, playbookQueueStatus } from '../../src/hq-runtime/routes.js';
+import { eventCursor, playbookQueueStatus, projectCampaignAuthorityPreview } from '../../src/hq-runtime/routes.js';
 
 test('HQ runtime permits only explicit state transitions', () => {
   assert.doesNotThrow(() => assertHqTransition('INACTIVE', 'OBSERVING'));
@@ -75,4 +75,23 @@ test('HQ queue projects semantic playbook waits truthfully', () => {
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), 'WAITING_FOR_CONNECTOR');
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['provider.reply', 'wait.timeout'] } }), 'MONITORING');
   assert.equal(playbookQueueStatus({ status: 'NEEDS_INTERVENTION' }), 'NEEDS_ATTENTION');
+});
+
+test('HQ campaign authority projection exposes only the current immutable launch batch', () => {
+  const preview = projectCampaignAuthorityPreview({
+    id: 'campaign-1', name: 'Awareness', status: 'READY_FOR_APPROVAL', requestedChannels: ['x_organic'],
+    currentPlanVersionId: 'plan-2',
+    actions: [
+      { id: 'old', planVersionId: 'plan-1', channel: 'x_organic', payload: { text: 'Old' }, assets: [] },
+      {
+        id: 'current', planVersionId: 'plan-2', channel: 'x_organic', actionType: 'POST', position: 0,
+        status: 'READY', scheduledAt: new Date('2026-08-03T12:00:00.000Z'), payload: { text: 'Exact copy', asset_id: 'asset-1' },
+        assets: [{ id: 'asset-1', status: 'READY', storageKey: 'private/path', contentType: 'image/png', metadata: { alt_text: 'Proof' } }],
+      },
+    ],
+  });
+  assert.equal(preview.actions.length, 1);
+  assert.equal(preview.actions[0].payload.text, 'Exact copy');
+  assert.equal(preview.actions[0].assets[0].content_url, '/v1/campaigns/campaign-1/assets/asset-1/content');
+  assert.equal('storageKey' in preview.actions[0].assets[0], false);
 });

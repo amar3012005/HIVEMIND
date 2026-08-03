@@ -3264,7 +3264,9 @@ Every item must include a non-empty content field and one or more valid support_
         let uWindows = targets;
         try {
           const { chunkText } = await import('./document-chunker.js');
-          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 })   // 0 meant a claim split across a boundary was seen whole by NEITHER window || [])
+          // overlapSize was 0: a claim whose subject sat in window N and predicate in N+1
+          // was seen whole by NEITHER window. 200 chars of overlap fixes that.
+          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 }) || [])
             .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
           if (uc.length) uWindows = uc.map((content, i) => ({
             segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,

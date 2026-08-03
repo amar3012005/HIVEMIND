@@ -418,11 +418,22 @@ test('campaign room contract carries the campaign identity and completion tool',
   assert.doesNotMatch(displayMessage, /CAMPAIGN_ID|BRIEF_JSON|campaign__govern_delivery/);
   assert.equal(dispatch.user_message, displayMessage);
   assert.equal(dispatch.display_message, displayMessage);
+  assert.equal(dispatch.invocation_mode, 'human');
   assert.match(dispatch.execution_context, /CAMPAIGN_ID: campaign-a/);
   assert.equal(dispatch.task_tag, 'CAMPAIGN');
   assert.equal(dispatch.campaign_id, 'campaign-a');
   assert.equal(normalizeCampaignRoomEvent({ t: 'campaign_bundle', bundle: {} }).t, 'campaign_bundle');
   assert.equal(normalizeCampaignRoomEvent(null), null);
+});
+
+test('runtime campaign dispatch explicitly selects machine-accountable Room mode', () => {
+  const dispatch = buildCampaignRoomDispatch({
+    campaign: { id: 'campaign-runtime', ownerUserId: 'user-a', orgId: 'org-a', goal: 'Prepare', objective: 'AWARENESS', requestedChannels: [], brief: {}, audiencePolicy: {}, sourceType: 'runtime_playbook' },
+    room: { id: 'room-a', goal: 'Campaign room' },
+    turn: { id: 'turn-a', userMessage: 'Prepare the selected campaign.' },
+    participantIds: [], briefSnapshot: {},
+  });
+  assert.equal(dispatch.invocation_mode, 'runtime');
 });
 
 test('first Campaign Room event advances the durable run and records progress', async () => {

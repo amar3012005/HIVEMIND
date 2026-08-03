@@ -390,6 +390,7 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console, leaseO
           // private execution_context lane so it is never rendered as a user turn.
           user_message: workOrderPrompt(order),
           display_message: `HQ Runtime work order — ${order.title}`.slice(0, 8000),
+          invocation_mode: 'runtime',
           execution_context: workEnvelope(order),
           // Keep physical Room ownership, but let the typed workload select the
           // normal domain methodology catalog without keyword routing.

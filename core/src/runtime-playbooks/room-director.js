@@ -197,6 +197,7 @@ export class RuntimeRoomDirector {
       org_id: request.org_id,
       user_message: String(request.instruction || request.objective || '').slice(0, 8000),
       display_message: String(request.instruction || request.objective || '').trim().slice(0, 8000),
+      invocation_mode: 'runtime',
       execution_context: JSON.stringify(envelope),
       participant_ids: asArray(room.participant_ids).map(String).slice(0, 8),
       callback_url: this.callbackUrl,

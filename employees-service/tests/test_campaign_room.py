@@ -615,6 +615,43 @@ def test_campaign_system_prompt_overrides_generic_report_completion():
     assert "generic final_report" in prompt
 
 
+def test_human_campaign_turn_keeps_full_debate_policy():
+    director = Director(
+        user_message="Create an awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign", campaign_brief={"goal": "Build awareness"},
+        invocation_mode="human", debate_max_rounds=3,
+    )
+    assert director._debate_rounds_for_turn() == 3
+
+
+def test_runtime_campaign_turn_uses_bounded_debate_policy():
+    director = Director(
+        user_message="Prepare the selected campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign", campaign_brief={"goal": "Build awareness"},
+        invocation_mode="runtime", debate_max_rounds=3,
+    )
+    assert director._debate_rounds_for_turn() == 1
+
+
+def test_human_campaign_validation_gap_keeps_the_rich_report():
+    director = Director(
+        user_message="Create an awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
+        room_kind="campaign", invocation_mode="human",
+    )
+    director._campaign_draft_report = "## Recommendation\n\nRun the evidence-backed sequence."
+    report = director._campaign_failure_report(["one action needs a verified source"])
+    assert report.startswith("## Recommendation")
+    assert "## Launch Readiness" in report
+    assert "not approved for execution" in report
+    assert "one action needs a verified source" in report
+
+
 def test_campaign_room_cannot_call_generic_synthesis():
     director = Director(
         user_message="Create an awareness campaign\nCHANNELS: x_organic",
@@ -685,7 +722,7 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
     assert calls[0]["json_object"] is True
 
 
-def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
+def test_campaign_governance_repairs_once_and_retains_human_report(monkeypatch):
     models = []
     message_sets = []
 
@@ -712,13 +749,15 @@ def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
     _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
     assert errors == ["strategy needs delivery"]
-    assert models == [director.synth_model]
-    assert len(message_sets) == 1
+    assert models == [director.synth_model, director.synth_model]
+    assert len(message_sets) == 2
+    assert director._campaign_draft_report == "Report"
     system = message_sets[0][0]["content"]
     assert "success_measure:string" in system
     assert "rollback_or_exit:string" in system
     assert "final action must be between 17280 and 18720 inclusive" in system
     assert "it does not repair" in system
+    assert "VALIDATION GAPS" in message_sets[1][-1]["content"]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

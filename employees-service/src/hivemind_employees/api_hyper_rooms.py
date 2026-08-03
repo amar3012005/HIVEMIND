@@ -1705,6 +1705,9 @@ class RoomTurnRequest(BaseModel):
     # orchestration contract stays private and is never rendered as a user turn.
     display_message: Optional[str] = Field(default=None, max_length=8000)
     execution_context: Optional[str] = Field(default=None, max_length=16000)
+    # Caller provenance keeps rich human turns separate from machine-accountable
+    # Runtime phases. Older callers safely default to human behavior.
+    invocation_mode: Optional[str] = None
     participant_ids: List[str] = Field(default_factory=list)
     callback_url: Optional[str] = None
     flyby_decision: Optional[str] = None
@@ -3218,6 +3221,7 @@ async def _orchestrate_single_agent(
             "evo_mode": _evo_mode, "evo_playbooks": _evo_playbooks,
             "company_brief": _company_brief, "intended_output": intended_output,
             "execution_context": req.execution_context or "",
+            "invocation_mode": req.invocation_mode or "",
             "room_kind": _room_kind,
             "room_playbook": _room_playbook, "room_journal": _room_journal,
             "room_instructions": _room_instructions,

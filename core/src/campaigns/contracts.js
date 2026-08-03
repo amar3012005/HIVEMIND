@@ -51,6 +51,7 @@ export function buildCampaignRoomDispatch({ campaign, room, turn, participantIds
     org_id: campaign.orgId,
     user_message: turn.userMessage,
     display_message: turn.userMessage,
+    invocation_mode: campaign.sourceType === 'runtime_playbook' ? 'runtime' : 'human',
     execution_context: buildCampaignExecutionContext(campaign, briefSnapshot?.feedback || '', briefSnapshot?.channel_capabilities || []),
     participant_ids: participantIds,
     room_goal: room.goal,

@@ -145,6 +145,7 @@ function createRoomInvoker({ prisma }) {
       body: JSON.stringify({
         schema_version: 'hq-work-order.v2', room_id: room.id, turn_id: turnId,
         user_id: runtime.ownerUserId, org_id: order.org_id,
+        invocation_mode: 'runtime',
         user_message: userMessage || workOrderPrompt(roomOrder),
         display_message: workOrderDisplayMessage(roomOrder),
         execution_context: executionContext || workEnvelope(roomOrder),

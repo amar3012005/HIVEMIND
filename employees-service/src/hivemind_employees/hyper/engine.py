@@ -1181,6 +1181,7 @@ class Director:
         evo_playbooks: Optional[Dict[str, List[str]]] = None,
         company_brief: str = "",
         execution_context: str = "",
+        invocation_mode: str = "",
         intended_output: str = "answer",
         room_kind: str = "",
         room_playbook: Optional[List[str]] = None,
@@ -1216,6 +1217,12 @@ class Director:
         self.runtime_stage = self._parse_runtime_stage_envelope(self.execution_context)
         self.work_order = (self._parse_work_order_envelope(self.execution_context)
                            or self._work_order_from_room_phase(self.room_phase))
+        requested_mode = str(invocation_mode or "").strip().lower()
+        self.invocation_mode = (
+            requested_mode if requested_mode in {"human", "runtime"}
+            else "runtime" if (self.room_phase or self.runtime_stage or self.work_order)
+            else "human"
+        )
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
@@ -1270,6 +1277,7 @@ class Director:
         # per-turn state (NOT module globals)
         self.blackboard: List[str] = []
         self._retained_prospect_rows: List[Dict[str, Any]] = []
+        self._campaign_draft_report = ""
         self.transcript: List[Dict[str, Any]] = []
         self.tokens = 0
         self.gather_count = 0
@@ -4612,6 +4620,23 @@ class Director:
                 channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
         return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
 
+    def _debate_rounds_for_turn(self) -> int:
+        """Keep human Rooms rich while bounding machine lifecycle phases."""
+        if self.invocation_mode == "runtime" and self.room_kind in {"campaign", "seo"}:
+            return 1
+        return self.debate_max_rounds
+
+    def _campaign_failure_report(self, errors: List[str]) -> str:
+        readiness = (
+            "## Launch Readiness\n\nThis plan is not approved for execution yet. "
+            "Campaign governance found these exact gaps:\n\n" + "\n".join(
+                f"- {error}" for error in errors
+            )
+        )
+        if self.invocation_mode == "human" and self._campaign_draft_report.strip():
+            return f"{self._campaign_draft_report.rstrip()}\n\n{readiness}"
+        return "The campaign plan needs input before it can be approved.\n\n" + readiness
+
     @staticmethod
     def _campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[str]) -> List[str]:
         from .campaign_contract import campaign_bundle_errors
@@ -4676,47 +4701,75 @@ class Director:
         )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
-        msg = await self._groq(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            force_text=True,
-            model=self.synth_model,
-            bucket="synth",
-            temp=0.2,
-            uncapped=True,
-            json_object=True,
-        )
-        envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
-        report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
-        semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
-        for index, action in enumerate(semantic.get("actions") or []):
-            if isinstance(action, dict):
-                action["id"] = str(action.get("id") or f"action_{index + 1}")
-        candidate = assemble_campaign_bundle(
-            semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
-        )
-        candidate["report_markdown"] = report
         from .campaign_contract import campaign__govern_delivery
-        accepted, governance = campaign__govern_delivery(
-            candidate,
-            channels=channels,
-            requirements=requirements,
-            minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
-            campaign_brief=self.campaign_brief,
-        )
-        errors = governance["unmet_deliverables"]
-        await self.emit({
-            "t": "campaign_governance",
-            "tool": "campaign__govern_delivery",
-            "status": governance["status"],
-            "verdict": governance,
-        })
-        if errors:
-            await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
-                             "title": "Governance found unmet deliverables",
-                             "detail": f"The Room did not deliver {len(errors)} promised requirement(s). Nothing was approved."})
-            return None, errors
-        await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
-        return accepted, []
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        errors = ["Campaign synthesis did not return a contract."]
+        candidate: Dict[str, Any] = {}
+        governance: Dict[str, Any] = {"status": "unmet", "unmet_deliverables": errors}
+
+        # A failed contract is usually a synthesis defect, not missing user input.
+        # Repair the already-gathered judgment once without rerunning research or
+        # debate, and keep the full prior candidate so long action sequences survive.
+        for attempt in range(2):
+            if attempt:
+                await self.emit({
+                    "t": "campaign_stage", "stage": "contract_repair", "status": "active",
+                    "title": "Repairing the campaign contract",
+                    "detail": f"Campaign governance returned {len(errors)} exact gap(s). The Room is repairing only those gaps from retained evidence.",
+                })
+                messages.append({"role": "user", "content": (
+                    "Repair every validation gap below using only the supplied brief, company context, gathered board, "
+                    "debate, and evidence already present in the current candidate. Preserve valid strategy and actions. "
+                    "Return the complete JSON object with exactly report_markdown and plan, never a patch. Do not invent "
+                    "facts, proof, URLs, recipients, metrics, or provider actions. Unsupported numeric goals must remain "
+                    "explicitly proposed targets, and company_grounding.facts_used must name only facts actually present "
+                    "in the supplied evidence.\n\nVALIDATION GAPS:\n- " + "\n- ".join(errors) +
+                    "\n\nCURRENT CANDIDATE:\n" + json.dumps(candidate, ensure_ascii=False)
+                )})
+            msg = await self._groq(
+                messages,
+                force_text=True,
+                model=self.synth_model,
+                bucket="synth",
+                temp=0.15 if attempt else 0.2,
+                uncapped=True,
+                json_object=True,
+            )
+            envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
+            report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
+            if report:
+                self._campaign_draft_report = report
+            semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
+            for index, action in enumerate(semantic.get("actions") or []):
+                if isinstance(action, dict):
+                    action["id"] = str(action.get("id") or f"action_{index + 1}")
+            candidate = assemble_campaign_bundle(
+                semantic, channels=channels, requirements=requirements, campaign_brief=self.campaign_brief,
+            )
+            candidate["report_markdown"] = report
+            accepted, governance = campaign__govern_delivery(
+                candidate,
+                channels=channels,
+                requirements=requirements,
+                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+                campaign_brief=self.campaign_brief,
+            )
+            errors = governance["unmet_deliverables"]
+            await self.emit({
+                "t": "campaign_governance",
+                "tool": "campaign__govern_delivery",
+                "status": governance["status"],
+                "verdict": governance,
+                "attempt": attempt + 1,
+            })
+            if not errors:
+                await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
+                return accepted, []
+
+        await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
+                         "title": "Governance found unmet deliverables",
+                         "detail": f"The Room could not repair {len(errors)} promised requirement(s). Nothing was approved."})
+        return None, errors
 
     @staticmethod
     def _render_campaign_report(bundle: Dict[str, Any]) -> str:
@@ -5386,9 +5439,9 @@ class Director:
                 # debate; using room_goal first made unrelated campaigns debate
                 # the same generic room mission and reuse stale prospect context.
                 topic = self._debate_topic()
-                transcript_json = await self._debate(
-                    topic, 1 if self.room_kind in {"campaign", "seo"} else self.debate_max_rounds
-                )
+                # Human turns are the full Room product. Runtime turns are one
+                # checkpointed phase and keep their bounded machine-result path.
+                transcript_json = await self._debate(topic, self._debate_rounds_for_turn())
                 forced_debate = True
                 if self.room_kind == "campaign":
                     await self.emit({"t": "campaign_stage", "stage": "debate", "status": "complete",
@@ -5460,8 +5513,7 @@ class Director:
                 final_text = self._render_campaign_report(campaign_bundle)
             else:
                 await self.emit({"t": "campaign_bundle_invalid", "errors": campaign_bundle_errors})
-                final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
-                    f"- {error}" for error in campaign_bundle_errors)
+                final_text = self._campaign_failure_report(campaign_bundle_errors)
         elif self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             await self.emit({"t": "growth_stage", "stage": "plan", "status": "active",
                              "title": "Choosing the next growth stage", "detail": "HQ is comparing company memory, the saved baseline, and connector signals."})
@@ -5587,6 +5639,7 @@ async def run_director(
     evo_playbooks: Optional[Dict[str, List[str]]] = None,
     company_brief: str = "",
     execution_context: str = "",
+    invocation_mode: str = "",
     intended_output: str = "answer",
     room_kind: str = "",
     room_playbook: Optional[List[str]] = None,
@@ -5609,6 +5662,7 @@ async def run_director(
         evo_mode=evo_mode, evo_playbooks=evo_playbooks,
         company_brief=company_brief,
         execution_context=execution_context,
+        invocation_mode=invocation_mode,
         intended_output=intended_output,
         room_kind=room_kind, room_playbook=room_playbook, room_journal=room_journal,
         room_instructions=room_instructions,

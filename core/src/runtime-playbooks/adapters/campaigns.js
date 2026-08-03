@@ -179,13 +179,20 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
       }
       const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
       const actions = campaign.actions || [];
+      const run = await prisma.runtimePlaybookRun.findFirst({
+        where: { id: context.runId, orgId: context.orgId }, select: { context: true },
+      });
       const requiredAssets = actions.filter((item) => item.payload?.creative_brief?.required === true);
       const assetsReady = requiredAssets.every((item) => item.payload?.asset_id);
       const contractState = campaign.status === 'READY_FOR_APPROVAL' && assetsReady ? 'ready'
         : campaign.status === 'READY_FOR_APPROVAL' ? 'waiting_assets'
-          : ['NEEDS_INPUT', 'FAILED', 'CANCELLED'].includes(campaign.status) ? 'needs_input' : 'preparing';
+          : campaign.status === 'NEEDS_INPUT' ? 'needs_input'
+            : campaign.status === 'FAILED' ? 'failed'
+              : campaign.status === 'CANCELLED' ? 'cancelled' : 'preparing';
       return { artifacts: [statusArtifact(context, 'campaign_status', campaign, {
         contract_state: contractState, action_count: actions.length,
+        delivery_requested: run?.context?.request?.external_action_requested === true,
+        exact_gaps: campaign.lastError ? [String(campaign.lastError).slice(0, 2000)] : [],
         required_asset_count: requiredAssets.length,
         ready_asset_count: requiredAssets.filter((item) => item.payload?.asset_id).length,
       })] };

@@ -843,6 +843,15 @@ const routes = {
     const docId = b.document_id;
     const tables = Array.isArray(b.tables) ? b.tables : [];
     if (!docId || !tables.length) return { ok: true, tables: 0, rows: 0 };
+    // The document must already exist HERE. On a second ingest pass the skip-unchanged path can carry
+    // a document id that was never persisted to this agent, and the FK then throws
+    // "document_tables_document_id_fkey" — an alarming error for a benign re-run. Say what actually
+    // happened instead.
+    const { rows: _dchk } = await pg.query('SELECT 1 FROM knowledge_documents WHERE id=$1 AND org_id=$2', [docId, ORG]);
+    if (!_dchk.length) {
+      console.warn(`[kb-tables] document ${docId} is not on this agent — grids NOT stored (likely a re-ingest pass whose document row was skipped)`);
+      return { ok: false, error: 'document_not_found', tables: 0, rows: 0 };
+    }
     let nt = 0, nr = 0;
     for (let ti = 0; ti < tables.length; ti++) {
       const t = tables[ti] || {};

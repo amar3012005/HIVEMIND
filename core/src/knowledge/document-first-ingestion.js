@@ -2285,8 +2285,17 @@ Every item must include a non-empty content field and one or more valid support_
           document_id: knowledgeDoc.id, user_id: userId,
           tables: _tables.map((t) => ({ sheet: t?.sheet || null, headers: t?.headers || [], rows: t?.rows || [] })),
         });
-        if (_tr) console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
-        else this.logger.warn?.(`[kb-tables] remote write failed for doc ${knowledgeDoc.id} — grids not stored`);
+        if (_tr?.error === 'document_not_found') {
+          // Benign on a re-ingest pass: the skip-unchanged path can carry a document id that was
+          // never persisted to the agent. Named explicitly so it is not mistaken for data loss on a
+          // FIRST ingest, which would be a real bug.
+          this.logger.warn?.(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)} not present on the agent — `
+            + `grids skipped. Expected on a re-ingest pass; on a FIRST ingest it means the document write did not land.`);
+        } else if (_tr) {
+          console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
+        } else {
+          this.logger.warn?.(`[kb-tables] remote write FAILED for doc ${knowledgeDoc.id} — grids not stored`);
+        }
       } else if (_tables.length && this.db?.documentTable) {
         let _rowsTotal = 0;
         for (let ti = 0; ti < _tables.length; ti++) {

@@ -25,6 +25,26 @@ import { v4 as uuidv4 } from 'uuid';
 const AUTO_LINK_FLOOR = 0.95;
 const REVIEW_FLOOR = 0.70;
 
+// Match-time variants for the dedup lookup. The stored slug/normalized name KEEPS
+// umlauts so German display names survive — but that made 'Wärmepumpe',
+// 'Wärmepumpen' and 'Warmepumpe' THREE canonicals (verified in org 1380251c).
+// Variants fold diacritics and trailing German/English plurals for MATCHING only;
+// canonicalName is never rewritten. Complete diacritic dedup of PRE-EXISTING rows
+// needs the backfill (old rows store unfolded keys) — this stops NEW fragmentation.
+function entityMatchVariants(normKey) {
+  const out = new Set([normKey]);
+  const folded = normKey.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+  out.add(folded);
+  for (const k of [normKey, folded]) {
+    if (k.length >= 6) {
+      if (k.endsWith('en')) out.add(k.slice(0, -2));
+      if (k.endsWith('n') || k.endsWith('s') || k.endsWith('e')) out.add(k.slice(0, -1));
+      out.add(`${k}n`); out.add(`${k}en`); out.add(`${k}s`);
+    }
+  }
+  return [...out].filter((k) => k && k.length >= 2);
+}
+
 function normalizeName(name) {
   if (!name) return '';
   return String(name)
@@ -198,7 +218,9 @@ export class EntityResolver {
       const _normKey = normalizeName(_canonName);
       if (_normKey && _normKey.length >= 2) {
         const existing = await this.prisma.canonicalEntity.findFirst({
-          where: { organizationId, normalizedName: _normKey },
+          // in: variants — plural + diacritic folds of the key, so 'Wärmepumpen'
+          // reuses 'Wärmepumpe' instead of minting a sibling canonical.
+          where: { organizationId, normalizedName: { in: entityMatchVariants(_normKey) } },
           orderBy: { createdAt: 'asc' }, // oldest wins — the canonical original
         }).catch(() => null);
         if (existing) {

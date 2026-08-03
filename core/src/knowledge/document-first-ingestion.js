@@ -39,7 +39,10 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
-const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts'];
+const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates', 'Derives'];
+// Derives is INFERRED: it gets metadata.inferred=true at write time, is barred from
+// grounded citation, and must never drive supersession — an inferred fact cannot
+// replace an observed one.
 
 function safeDocumentType(value) {
   const type = String(value || '').toLowerCase().trim()
@@ -972,7 +975,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         const text = String(f?.content || f?.text || '').trim();
         const parts = text.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/).map((t) => t.trim())
           .filter((t) => t.length >= 12 && /\p{L}{3}/u.test(t));
-        if (parts.length > 1) {
+        // Owner directive: memories may carry 2-4 sentences of RELATED detail — only
+        // split when a claim packs 3+ sentences (those are almost always unrelated facts).
+        if (parts.length >= 3) {
           for (const part of parts) split.push({ ...f, content: part, _atomized: true });
         } else {
           split.push(f);
@@ -1162,8 +1167,10 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         if (!toId || toId === fromId) continue;
         try {
           await this.memoryGraphEngine.store.createRelationship({
-            id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type, confidence: 0.85,
-            metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true },
+            id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type,
+            confidence: rel.type === 'Derives' ? 0.6 : 0.85,
+            metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true,
+              ...(rel.type === 'Derives' ? { inferred: true } : {}) },
           });
         } catch { /* best-effort; dup/FK tolerated */ }
       }
@@ -3466,7 +3473,22 @@ Every item must include a non-empty content field and one or more valid support_
         // second generator.
         const uFacts = [];
         const extraEvidenceLinks = [];
-        for (const claim of curated) {
+        // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x
+        // (embed + entity pass + writes) = promote 325s of a 398s ingest. Claims are
+        // distinct post-consolidation/curation, and _ingestUnifiedWindow's own dedup is
+        // content-keyed in the store, so 3 parallel persists cannot double-write.
+        const _persistPool = Math.max(1, Number(process.env.KB_PERSIST_CONCURRENCY || 3));
+        const _tPersist = Date.now();
+        let _ci = 0;
+        const _persistOne = async (claim) => {
+          // «docTitle : heading» — a memory must be self-contained when it leaves the
+          // document's context. Heading comes from the metadata-aware windows (P2).
+          if (claim?.f && String(process.env.KB_MEMORY_CONTEXT_PREFIX ?? 'true').toLowerCase() !== 'false') {
+            const _h = (claim.heading || '').toString().slice(0, 80);
+            const _d = (docTitle || '').toString().slice(0, 80);
+            const _pfx = _d ? (`\u00ab${_d}${_h ? ' : ' + _h : ''}\u00bb `) : '';
+            if (_pfx && !claim.f.startsWith('\u00ab')) claim.f = _pfx + claim.f;
+          }
           const sourceWindow = {
             segmentId: claim.segmentId,
             content: claim.source_window_content || claim.source_quote,
@@ -3477,7 +3499,7 @@ Every item must include a non-empty content field and one or more valid support_
             userId, orgId, documentId, metadata, docTitle, preExtractedFacts: [claim],
           });
           const memory = persisted?.[0];
-          if (!memory) continue;
+          if (!memory) return;
           uFacts.push(memory);
           if (!orgIsRemote(orgId)) {
             for (let index = 1; index < (claim.support_segment_ids || []).length; index++) {
@@ -3488,7 +3510,11 @@ Every item must include a non-empty content field and one or more valid support_
               });
             }
           }
-        }
+        };
+        await Promise.all(Array.from({ length: Math.min(_persistPool, curated.length) }, async () => {
+          while (_ci < curated.length) { const c = curated[_ci++]; await _persistOne(c); }
+        }));
+        console.log(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
         if (extraEvidenceLinks.length) {
           await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
         }

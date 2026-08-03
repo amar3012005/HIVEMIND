@@ -18368,6 +18368,59 @@ exit \$RC
                 if (body.date_to) where.createdAt.lte = new Date(body.date_to);
               }
 
+              // REMOTE (.amr / byod): central `memories` holds ZERO rows for these orgs — their
+              // memories live in the AMR store — so the Prisma query below matched nothing and this
+              // endpoint reported "0 matched" while the user's memories sat untouched. A delete that
+              // silently deletes nothing is the worst shape this API can take, so route it.
+              //
+              // TAG SEMANTICS DIFFER and must be preserved: central uses `hasSome` (ANY of the tags)
+              // while the agent's list filter is `tags @> $n` (ALL of them). Matching ALL would delete
+              // a strict subset — quietly incomplete. So query once per tag and union by id, which
+              // reproduces hasSome exactly. listMemories() is already storage-aware, so this reuses
+              // the routed path instead of adding a second one.
+              if (orgIsRemote(orgId)) {
+                const seen = new Map();
+                for (const tag of requestedTags) {
+                  const { memories: rows } = await persistentMemoryStore.listMemories({
+                    user_id: userId, org_id: orgId, tags: [tag], limit: 5000, offset: 0,
+                  });
+                  for (const m of rows || []) if (m?.id && !seen.has(m.id)) seen.set(m.id, m);
+                }
+                const from = body.date_from ? new Date(body.date_from) : null;
+                const to = body.date_to ? new Date(body.date_to) : null;
+                const rows = [...seen.values()].filter((m) => {
+                  // The agent list has no created-at range filter, so apply it here rather than
+                  // ignoring the caller's date window (which would widen a DELETE).
+                  const t = new Date(m.created_at || m.createdAt || 0);
+                  if (from && !(t >= from)) return false;
+                  if (to && !(t <= to)) return false;
+                  if (project && m.project !== project) return false;
+                  return true;
+                });
+                if (dryRun) {
+                  return jsonResponse(res, {
+                    dry_run: true,
+                    storage_mode: 'amr',
+                    matched_count: rows.length,
+                    filter: { tags: requestedTags, date_from: body.date_from || null, date_to: body.date_to || null, project },
+                    sample: rows.slice(0, 10).map((m) => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.created_at || m.createdAt })),
+                  });
+                }
+                let removed = 0;
+                const failed = [];
+                for (const m of rows) {
+                  try { if (await amrDelete(orgId, m.id, true)) removed += 1; else failed.push(m.id); }
+                  catch (e) { failed.push(m.id); console.warn(`[bulk-delete-by-tag] amr delete failed id=${m.id}: ${e.message}`); }
+                }
+                if (failed.length) {
+                  console.warn(`[bulk-delete-by-tag] org=${orgId} ${failed.length} of ${rows.length} deletes FAILED — reporting the real number`);
+                }
+                return jsonResponse(res, {
+                  dry_run: false, storage_mode: 'amr',
+                  matched_count: rows.length, deleted_count: removed, failed_count: failed.length,
+                });
+              }
+
               const matched = await prisma.memory.findMany({
                 where,
                 select: { id: true, title: true, tags: true, createdAt: true },

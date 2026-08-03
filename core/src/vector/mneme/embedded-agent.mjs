@@ -515,8 +515,44 @@ function routesFor(ctx) {
     },
     '/v1/recall': async (b) => Array.isArray(b.vector)
       ? { results: amr.recall(b.vector, b.limit || 10, b.filter || {}) } : { results: [] },
-    '/v1/lexical': async (b) => b.text
-      ? { results: amr.lexical(b.text, b.filter || {}, b.limit || 10) } : { results: [] },
+    // MEMORY LEXICAL: Postgres FTS on the SQL mirror, identical to the external agent.
+    // This used to be `amr.lexical()` (the shard's own text index) purely because the embedded agent
+    // had no SQL rows to search — so the two .amr modes ranked text differently from each other AND
+    // from hybrid, with no justification. Now that /v1/write mirrors to hm.memories the same query
+    // works here, and it also GAINS the filters the shard index cannot express: layer, must_not.layer,
+    // known_at, and the valid_at temporal snapshot.
+    '/v1/lexical': async (b) => {
+      if (!b.text) return { results: [] };
+      const f = b.filter || {};
+      const tsQuery = lexicalTsQuery(b.text);
+      if (!tsQuery) return { results: [] };
+      const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)"];
+      const args = [org, tsQuery];
+      if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
+      if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
+      if (f.must_not?.layer) { args.push(f.must_not.layer); conds.push(`layer<>$${args.length}`); }
+      const snapshot = f.valid_at || null;
+      if (f.known_at) { args.push(f.known_at); conds.push(`created_at<=$${args.length}::timestamptz`); }
+      if (snapshot) {
+        args.push(snapshot); conds.push(`(valid_from IS NULL OR valid_from<=$${args.length}::timestamptz)`);
+        args.push(snapshot); conds.push(`(valid_to IS NULL OR valid_to>$${args.length}::timestamptz)`);
+      }
+      args.push(b.limit || 10);
+      const { rows } = await db().query(
+        `SELECT id, content, title, tags, memory_type, layer, cognitive_layer_role, is_latest, created_at, user_id,
+                project, project_ids, scope, primary_team_id, document_date, valid_from, valid_to,
+                ts_rank(content_tsv, to_tsquery('simple',$2)) AS score
+         FROM memories WHERE ${conds.join(' AND ')} ORDER BY score DESC LIMIT $${args.length}`, args);
+      return { results: rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
+        memory_id: m.id, org_id: org, user_id: m.user_id, content: m.content, title: m.title, tags: m.tags,
+        project: m.project || null, project_ids: m.project_ids || [], scope: m.scope || null,
+        primary_team_id: m.primary_team_id || null,
+        memory_type: m.memory_type, layer: m.layer, cognitive_layer_role: m.cognitive_layer_role,
+        is_latest: m.is_latest, created_at: m.created_at, document_date: m.document_date,
+        valid_from: m.valid_from, valid_to: m.valid_to } })) };
+    },
+
+    // Hydrate full rows by id (content stays on-box until requested).
     '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
     '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
     '/v1/stats': async (b) => amr.stats(b.filter || {}),

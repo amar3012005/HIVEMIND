@@ -46,6 +46,18 @@ let _routerReranker = null;
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const HOP1_DEFAULT_LIMIT       = 12;
+// Retrieval DEPTH for the evidence lane, decoupled from how many we DELIVER.
+// HOP2_* below are deliver counts. Depth feeds the cross-encoder (RERANK_POOL=150),
+// which then narrows. Measured: small-detail answerability 3/5 -> 5/5 purely from
+// depth 6 -> 150; the reranker chose a segment over a memory 5/5 unprompted.
+const EVIDENCE_DEPTH           = Number(process.env.EVIDENCE_DEPTH || 150);
+// WIDE hand-off from the evidence lane into the single delivery-point cross-encoder.
+// Not user-visible: deliverUnifiedV2 narrows to HOP2_DOC_LIMIT after ranking.
+const EVIDENCE_DELIVER         = Number(process.env.EVIDENCE_DELIVER || 40);
+// The wide hand-off is only SAFE when the delivery-point cross-encoder is on to narrow
+// it. With RECALL_UNIFIED_V2 off, 40 unranked evidence rows would reach the answer
+// instead of 8 — a regression. So the widening is inert unless V2 will actually fire.
+const evidenceDeliverFor = (n) => (process.env.RECALL_UNIFIED_V2 === 'true' ? EVIDENCE_DELIVER : n);
 const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
@@ -440,17 +452,21 @@ function withTimeout(promise, ms, fallback) {
 // Flag-gated (default OFF). Backend-agnostic: operates on candidates, so it
 // works identically for central Qdrant/PG and for `.amr` (dense + agent-PG lexical).
 const V2_RRF_K = 60;
+// The parked A/B ran with a 24 pool while evidence arrived capped at 8 — it never saw
+// depth, which is the variable that moved small-detail answerability 3/5 -> 5/5.
+const V2_POOL  = Number(process.env.RECALL_UNIFIED_POOL || 150);
 async function deliverUnifiedV2({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs, structuredIntent }) {
   const tag = (x, kind, rank, title, content) => ({
     _row: x, _kind: kind, _rrf: 1 / (V2_RRF_K + rank + 1), _title: title || '', _content: content || '',
   });
   const mems = memories.map((m, i) => tag(m, 'memory', i, m.title, typeof m.content === 'string' ? m.content : ''));
   const evs = evidence.map((e, i) => tag(e, 'evidence', i, e.document?.title || e.document_title || '', e.content || e.snippet || ''));
-  const pool = [...mems, ...evs].sort((a, b) => b._rrf - a._rrf).slice(0, 24);
+  const pool = [...mems, ...evs].sort((a, b) => b._rrf - a._rrf).slice(0, V2_POOL);
   if (pool.length <= 1) return null;
 
   // Cross-encoder over the unified window (graceful: keep RRF order on failure).
   let ordered = pool;
+  let usedCrossEncoder = false;
   try {
     const rr = await withTimeout(
       rerank(query, pool.map((p) => ({ title: p._title, content: p._content, _u: p })), { topN: pool.length }),
@@ -459,23 +475,35 @@ async function deliverUnifiedV2({ query, memories = [], evidence = [], deliverN,
     );
     if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
       ordered = rr.map((x) => ({ ...x._u, _rel: x.rerank_score != null ? x.rerank_score : 0 }));
+      usedCrossEncoder = true;
     } else {
       ordered = pool.map((p) => ({ ...p, _rel: p._rrf }));
     }
   } catch { ordered = pool.map((p) => ({ ...p, _rel: p._rrf })); }
 
-  // Surviving amplitude (>1) from fields present on the candidate.
+  // Surviving amplitude from fields present on the candidate.
+  //
+  // CRITICAL: when the cross-encoder ranked the pool, the RELEVANCE guesses here must
+  // NOT multiply its score. They exist to rescue ordering when rerank is off. Left on,
+  // they silently overwrite a real (query,passage) judgement with heuristics — and
+  // because pinned/synthesis/event-time only ever appear on MEMORY rows, every evidence
+  // row scored x1 while memories got up to x2.0/x1.4/x1.3. That systematic bias against
+  // the verbatim layer is the likeliest reason the original A/B showed "no rank win".
+  // Measured: 0 of 485 memories contained the 5 small facts under test; all 5 were in
+  // segments. TRUTH signals (superseded) are kept either way — they are not guesses.
   const nowT = Date.now();
   const amp = (p) => {
     const x = p._row || {}; const tags = Array.isArray(x.tags) ? x.tags : [];
     let a = 1;
-    if (tags.includes('pinned')) a *= 2.0; else if (tags.some((t) => typeof t === 'string' && t.startsWith('thread:'))) a *= 1.25;
-    if (x.memory_type === 'synthesis' && x.synthesis_cluster_hash) a *= 1.3;
+    if (!usedCrossEncoder) {
+      if (tags.includes('pinned')) a *= 2.0; else if (tags.some((t) => typeof t === 'string' && t.startsWith('thread:'))) a *= 1.25;
+      if (x.memory_type === 'synthesis' && x.synthesis_cluster_hash) a *= 1.3;
+    }
     // event/temporal recency: a dated memory whose event is near-future/recent
     const evd = Array.isArray(x.event_dates) && x.event_dates.length ? x.event_dates[0] : (x.valid_from || x.document_date);
-    if (evd) { const dt = new Date(evd).getTime(); if (Number.isFinite(dt) && Math.abs(dt - nowT) < 1000 * 60 * 60 * 24 * 120) a *= 1.4; }
+    if (evd && !usedCrossEncoder) { const dt = new Date(evd).getTime(); if (Number.isFinite(dt) && Math.abs(dt - nowT) < 1000 * 60 * 60 * 24 * 120) a *= 1.4; }
     if (x.is_latest === false || x.supersedes_id) a *= 0.5;      // superseded
-    if (x.memory_type === 'summary' && p._kind === 'memory') a *= 0.85; // weak summaries
+    if (!usedCrossEncoder && x.memory_type === 'summary' && p._kind === 'memory') a *= 0.85; // weak summaries
     return a;
   };
   const scored = ordered
@@ -483,11 +511,19 @@ async function deliverUnifiedV2({ query, memories = [], evidence = [], deliverN,
     .sort((a, b) => b._unified - a._unified);
 
   const outMem = []; const outEv = [];
+  const deliveredMemIds = new Set();
   for (const p of scored) {
     const row = { ...(p._row || {}), score: Number((p._unified).toFixed(4)) };
-    if (p._kind === 'evidence') outEv.push(row); else outMem.push(row);
+    if (p._kind === 'evidence') outEv.push(row); else { outMem.push(row); if (row.id) deliveredMemIds.add(row.id); }
   }
-  return { memories: outMem.slice(0, deliverN), evidence: outEv.slice(0, evidenceN) };
+  // A memory and the segment it was DERIVED FROM must not both occupy the delivered
+  // set — that spends the context budget twice on one fact. `linked_memory_id` is
+  // already computed upstream from source_metadata.document_id, so this is a set
+  // lookup, not another query. Keep the distilled memory, drop its own source.
+  const dedupedEv = outEv.filter((e) => !(e.linked_memory_id && deliveredMemIds.has(e.linked_memory_id)));
+  const droppedBacking = outEv.length - dedupedEv.length;
+  if (droppedBacking) console.log(`[recall-v2] dropped ${droppedBacking} evidence rows backing a delivered memory`);
+  return { memories: outMem.slice(0, deliverN), evidence: dedupedEv.slice(0, evidenceN) };
 }
 
 // ── Hop 1 — Memory layer ────────────────────────────────────────────────────
@@ -861,7 +897,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
       documentIds: docIds,
-      limit: HOP2_DOC_LIMIT,
+      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_DOC_LIMIT),
     });
     return { items, reason, docIds };
   }
@@ -872,7 +908,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   if (inspection.sparse) {
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
-      limit: HOP2_UNFILTERED_LIMIT,
+      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_UNFILTERED_LIMIT),
     });
     return { items, reason: 'sparse-rescue' };
   }

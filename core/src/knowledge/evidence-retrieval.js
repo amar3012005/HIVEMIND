@@ -18,6 +18,26 @@ export class EvidenceRetrievalService {
   }
 
   /**
+   * Order a DEPTH-sized pool and hand back a WIDE slice for the delivery-point
+   * cross-encoder to arbitrate. Local only — no network.
+   *
+   * The cross-encoder deliberately does NOT run here. Measured: calling it per-lane
+   * cost +902ms on a warm query (77ms -> 979ms) because `rerank` is a remote call
+   * that does not cache — and the router already reranks, so a lane-level pass makes
+   * TWO remote calls per query. ONE pass at the delivery point over memories ∪
+   * segments (deliverUnifiedV2) gets the same accuracy for one call, and is the only
+   * place the two lanes can actually be compared against each other.
+   *
+   * `deliver` is therefore a WIDE hand-off (~40), not the user-visible count; the
+   * delivery point narrows to HOP2_DOC_LIMIT after ranking.
+   */
+  _orderAndSlice(candidates, deliver) {
+    return candidates
+      .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
+      .slice(0, deliver);
+  }
+
+  /**
    * Retrieve evidence segments (not canonical memories)
    * @param {Object} params
    * @param {string} params.query - search query
@@ -29,6 +49,14 @@ export class EvidenceRetrievalService {
    */
   async retrieveEvidence({
     query, userId, orgId, limit = 10,
+    // DEPTH vs DELIVER. One `limit` used to do BOTH jobs — it sized the Qdrant
+    // over-fetch AND the returned slice — so production's limit:6 handed the
+    // cross-encoder 12 candidates while RERANK_POOL=150 sat unused. Measured on
+    // org 1380251c: pool recall 1->6, 2->11, 0->8 going from depth 5 to 300, and
+    // small-detail answerability 3/5 -> 5/5. `limit` remains an alias for both so
+    // no existing caller changes behaviour.
+    depth = null,
+    deliver = null,
     documentId = null,        // legacy single-doc filter (kept for backwards compat)
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
@@ -38,6 +66,8 @@ export class EvidenceRetrievalService {
     const collectionName = PER_TENANT
       ? await resolveCollectionForOrg(orgId)
       : (process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence');
+    const _depth = Math.max(1, Number(depth ?? limit) || 10);
+    const _deliver = Math.max(1, Number(deliver ?? limit) || 10);
     const docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]
       : (documentId ? [documentId] : null);
@@ -46,7 +76,7 @@ export class EvidenceRetrievalService {
     // segments (Qdrant cosine on filename-style queries can score below 0.5).
     const effectiveThreshold = scoreThreshold != null
       ? scoreThreshold
-      : (docIdSet ? 0.2 : 0.5);
+      : (docIdSet ? 0.2 : Number(process.env.EVIDENCE_SCORE_FLOOR ?? 0.05));
 
     try {
       // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
@@ -55,7 +85,13 @@ export class EvidenceRetrievalService {
         if (!queryVector) return [];
         // amrKbRecall returns [{segment_id, document_id, content, score}]
         const hits = await amrKbRecall(orgId, queryVector, {
-          limit: limit * 2,
+          // The agent hard-caps `Math.min(limit || 20, 100)` (byod/agent/server.mjs).
+          // Clamp here and SAY SO — a silent clamp is the defect class this repo keeps
+          // shipping (a green number that quietly means "less than you asked for").
+          limit: (() => {
+            if (_depth > 100) console.warn(`[EvidenceRetrieval] .amr depth ${_depth} clamped to agent max 100 (org=${orgId})`);
+            return Math.min(_depth, 100);
+          })(),
           documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
           documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
           scoreThreshold: effectiveThreshold,
@@ -90,7 +126,7 @@ export class EvidenceRetrievalService {
             };
           })
           .filter(Boolean);
-        return remoteResults.sort((a, b) => b.score - a.score).slice(0, limit);
+        return this._orderAndSlice(remoteResults, _deliver);
       }
 
       // Step 1: Vector search in evidence collection.
@@ -112,7 +148,7 @@ export class EvidenceRetrievalService {
             ...docFilter,
           ]
         },
-        limit: limit * 2, // Over-fetch for reranking
+        limit: _depth, // retrieval DEPTH — the cross-encoder narrows to `deliver`
         // searchMemories destructures `score_threshold` (snake) — passing
         // camelCase silently dropped the computed threshold (fell back to 0.15).
         score_threshold: effectiveThreshold,
@@ -227,10 +263,9 @@ export class EvidenceRetrievalService {
               include: {
                 document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
               },
-              take: Math.min(docIdSet ? limit * 4 : limit * 2, 80),
+              take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
             });
             for (const segment of lexSegments) {
-              if (haveIds.has(segment.id)) continue;
               // Score by DISTINCT query-token overlap: a segment containing more
               // of the query's distinctive tokens (e.g. both "1KOMMA5" AND "Enpal")
               // is a stronger literal match → must outrank doc-scoped vector hits
@@ -241,6 +276,23 @@ export class EvidenceRetrievalService {
               const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
                 lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
               const score = Math.min(0.95, 0.55 + (0.3 * coverage) + (0.08 * orderedPairs));
+              // LEXICAL EVIDENCE IS ADDITIVE — NOT A DUPLICATE TO DISCARD.
+              // This used to `continue` when the vector pass had already returned the
+              // segment, which made retrieval NON-MONOTONIC IN DEPTH: lexical scores are
+              // synthetic (0.55-0.95) while cosine is real and often <0.15, so a DEEPER
+              // vector pass pulled the segment into haveIds, suppressed its boost, and
+              // dropped it below the final slice. Measured on query "SPiNE": _lexical rows
+              // 9 -> 8 -> 1 and true hits 24 -> 24 -> 17 as depth went 60 -> 150 -> 300.
+              // Increasing depth was silently deleting the only signal that finds exact
+              // part numbers. Merge the stronger signal instead.
+              const already = haveIds.has(segment.id)
+                ? results.find((r) => r.segmentId === segment.id)
+                : null;
+              if (already) {
+                if (score > (Number(already.score) || 0)) already.score = score;
+                already._lexical = true;
+                continue;
+              }
               results.push(fmt(segment, score, true));
               haveIds.add(segment.id);
             }
@@ -250,7 +302,7 @@ export class EvidenceRetrievalService {
         }
       }
 
-      return results.sort((a, b) => b.score - a.score).slice(0, limit);
+      return this._orderAndSlice(results, _deliver);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
       return [];

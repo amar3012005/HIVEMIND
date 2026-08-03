@@ -119,18 +119,19 @@ export class UsageTracker {
     const f = String(feature || '').slice(0, 64);
     const pt = Number(parts?.promptTokens || 0);
     const ct = Number(parts?.completionTokens || 0);
+    const rc = Math.max(1, Number(parts?.requestCount || 1));
     try {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "api_key_usage" ("org_id", "api_key_id", "month", "model", "feature", "tokens_processed", "prompt_tokens", "completion_tokens", "requests", "last_used_at", "updated_at")
-         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 1, NOW(), NOW())
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
          ON CONFLICT ("org_id", "api_key_id", "month", "model", "feature")
          DO UPDATE SET "tokens_processed" = "api_key_usage"."tokens_processed" + $6,
                        "prompt_tokens" = "api_key_usage"."prompt_tokens" + $7,
                        "completion_tokens" = "api_key_usage"."completion_tokens" + $8,
-                       "requests" = "api_key_usage"."requests" + 1,
+                       "requests" = "api_key_usage"."requests" + $9,
                        "feature" = CASE WHEN "api_key_usage"."feature" = '' THEN EXCLUDED."feature" ELSE "api_key_usage"."feature" END,
                        "last_used_at" = NOW(), "updated_at" = NOW()`,
-        orgId, key, month, m, f, tokenCount, pt, ct
+        orgId, key, month, m, f, tokenCount, pt, ct, rc
       );
     } catch (err) {
       console.warn('[usage-tracker] Record key usage failed:', err.message);

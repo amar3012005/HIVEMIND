@@ -100,6 +100,7 @@ export class UsageService {
         {
           promptTokens: Number(metadata.prompt_tokens || 0),
           completionTokens: Number(metadata.completion_tokens || 0),
+          requestCount: Number(metadata.request_count || 1),
         },
       );
     }

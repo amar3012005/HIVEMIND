@@ -14,6 +14,19 @@ export class UsageService {
     const descriptor = usageMetric(type);
     if (!descriptor || !orgId || !(Number(quantity) > 0)) throw new Error('invalid usage admission');
     const key = String(idempotencyKey || crypto.randomUUID()).slice(0, 180);
+    // Retried requests must return their original admission before evaluating
+    // today's remaining allowance. Otherwise a harmless retry at a hard cap
+    // looks like a new charge and becomes incorrectly non-retryable.
+    const existing = await this.prisma.$queryRawUnsafe(
+      `SELECT id, state, metric, quantity FROM hivemind.usage_events
+       WHERE org_id = $1::uuid AND idempotency_key = $2 LIMIT 1`, orgId, key,
+    );
+    if (existing[0]) {
+      if (existing[0].metric !== descriptor.metric || Number(existing[0].quantity) !== Number(quantity)) {
+        throw new Error('usage idempotency key does not match original operation');
+      }
+      return { admitted: true, event: existing[0], idempotencyKey: key, duplicate: true };
+    }
     const check = await this.planEnforcer?.checkLimit(orgId, type, Number(quantity));
     if (check && !check.allowed) return { admitted: false, check };
     const rows = await this.prisma.$queryRawUnsafe(

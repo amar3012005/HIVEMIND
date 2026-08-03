@@ -31,6 +31,39 @@ export class EvidenceRetrievalService {
    * `deliver` is therefore a WIDE hand-off (~40), not the user-visible count; the
    * delivery point narrows to HOP2_DOC_LIMIT after ranking.
    */
+  /**
+   * Which DOCUMENTS may this caller see? Segments carry no scope of their own —
+   * knowledge_segments has only document_id/user_id/org_id — so scope is enforced by
+   * joining to the document, where it lives in `tags` as `scope-key:*` (written as
+   * scopeKey by knowledge/upload-authorization.js).
+   *
+   * Replaces a blanket `userId` filter that made a COLLEAGUE'S ORG-SHARED UPLOAD
+   * INVISIBLE: an org knowledge base that only ever returned your own documents.
+   * Retrieval is now org-wide in Qdrant and authoritatively scoped here, in Postgres,
+   * before anything is returned.
+   *
+   * Untagged documents (verified: 21 of 100 carry no scope-key) fall to OWNER-ONLY via
+   * the bare `{ userId }` arm — identical to the previous behaviour, so nothing that
+   * used to be visible disappears, and an unknown scope is never published.
+   *
+   * Mirrors the accessibleDocument shape in agent/tool-registry.js rather than adding a
+   * second scope implementation.
+   */
+  _accessibleDocumentWhere({ userId, orgId, projectId = null, accessContext = null }) {
+    const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
+    if (projectId) return { orgId, archivedAt: null, tags: { has: `scope-key:project:${projectId}` } };
+    return {
+      orgId,
+      archivedAt: null,
+      OR: [
+        { userId },                                              // own uploads + untagged
+        { tags: { has: 'scope-key:organization' } },
+        { tags: { has: `scope-key:personal:${userId}` } },
+        ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
+      ],
+    };
+  }
+
   _orderAndSlice(candidates, deliver) {
     return candidates
       .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
@@ -57,6 +90,8 @@ export class EvidenceRetrievalService {
     // no existing caller changes behaviour.
     depth = null,
     deliver = null,
+    projectId = null,         // scope: pin to one project when the caller has one
+    accessContext = null,     // scope: { projectIds, teamIds, orgRole } from the session
     documentId = null,        // legacy single-doc filter (kept for backwards compat)
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
@@ -143,7 +178,9 @@ export class EvidenceRetrievalService {
         query,
         filter: {
           must: [
-            ...(!docIdSet ? [{ key: 'user_id', match: { value: userId } }] : []),
+            // NO user_id here. Scope is enforced authoritatively in the Postgres
+            // hydrate below (_accessibleDocumentWhere) — a payload-level user filter
+            // could only ever express "mine", which hid org-shared documents.
             { key: 'org_id', match: { value: orgId } },
             ...docFilter,
           ]
@@ -162,9 +199,10 @@ export class EvidenceRetrievalService {
       const segments = await this.db.knowledgeSegment.findMany({
         where: {
           id: { in: segmentIds },
-          ...(!docIdSet ? { userId } : {}),
           orgId,
-          document: { archivedAt: null },
+          document: docIdSet
+            ? { archivedAt: null }
+            : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext }),
         },
         include: {
           document: {
@@ -254,9 +292,12 @@ export class EvidenceRetrievalService {
             // always; by docIdSet when the caller scoped to specific docs.
             const lexSegments = await this.db.knowledgeSegment.findMany({
               where: {
-                ...(!docIdSet ? { userId } : {}),
                 orgId,
-                document: { archivedAt: null },
+                // same authoritative scope gate as the vector hydrate — one helper,
+                // not a second implementation that can drift from it
+                document: docIdSet
+                  ? { archivedAt: null }
+                  : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext }),
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },

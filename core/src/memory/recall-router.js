@@ -896,6 +896,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   if (docIds.length > 0) {
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
+      projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
       documentIds: docIds,
       depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_DOC_LIMIT),
     });
@@ -908,6 +909,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   if (inspection.sparse) {
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
+      projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
       depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_UNFILTERED_LIMIT),
     });
     return { items, reason: 'sparse-rescue' };

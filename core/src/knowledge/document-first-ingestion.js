@@ -2131,6 +2131,16 @@ Every item must include a non-empty content field and one or more valid support_
     // otherwise succeeded.
     try {
       const _tables = Array.isArray(parseResult?.tables) ? parseResult.tables : [];
+      // Say WHY when we skip. The first version of this guard short-circuited
+      // silently, so a run that persisted 0 tables was indistinguishable from a
+      // document that had none — the same blind spot this codebase keeps
+      // producing (a hardcoded `remaining: 0`, an inert thin-extraction warning).
+      if (!_tables.length) {
+        console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: parser returned no tables `
+          + `(engine=${parseResult?.engine || '?'}) — nothing to persist`);
+      } else if (!this.db?.documentTable) {
+        console.warn('[kb-tables] db.documentTable missing — prisma client lacks the model; grid NOT persisted');
+      }
       if (_tables.length && !orgIsRemote(orgId) && this.db?.documentTable) {
         let _rowsTotal = 0;
         for (let ti = 0; ti < _tables.length; ti++) {

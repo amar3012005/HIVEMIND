@@ -1666,6 +1666,50 @@ if (process.env.DOCLING_URL) {
         }
 
         // ── CSV/TSV → row-as-segment (no LLM, structure-preserving) ──
+        // ── SPREADSHEET TIER: read the sheet, keep the GRID ──────────────────
+        // Docling flattens a workbook to prose ("Persona 4 Index = 105. Online
+        // (Internet, Mobile, App), Persona 1 Index = 105…"), so by the time the
+        // pipeline sees it the rows and columns are gone and no downstream fix can
+        // recover them. Measured: engine=docling-chunks-only returned ZERO
+        // structured tables for Solvis-Mediennutzung.xlsx.
+        //
+        // SheetJS is already a dependency and reads the workbook natively. Emit the
+        // same {sheet, headers, rows} shape the csv-direct tier below produces, so
+        // the tabular lane persists a real grid AND the markdown still feeds
+        // semantic recall. Falls through to Docling on any failure.
+        if (['xlsx', 'xls'].includes(ext)) {
+          try {
+            const XLSX = (await import('xlsx')).default || (await import('xlsx'));
+            const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+            const tables = [];
+            const mdParts = [];
+            for (const sheetName of (wb.SheetNames || []).slice(0, 50)) {
+              const ws = wb.Sheets[sheetName];
+              if (!ws) continue;
+              const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: null });
+              if (!aoa.length) continue;
+              const headers = (aoa[0] || []).map((h) => String(h ?? '').trim());
+              const rows = aoa.slice(1).filter((r) => Array.isArray(r) && r.some((c) => c !== null && String(c).trim() !== ''));
+              if (!rows.length) continue;
+              tables.push({ sheet: sheetName, headers, rows });
+              // Markdown keeps the sheet readable for recall; the grid above keeps
+              // it countable. Both, not either.
+              mdParts.push(`## ${sheetName}\n\n${XLSX.utils.sheet_to_csv(ws).slice(0, 200000)}`);
+            }
+            if (tables.length) {
+              const md = mdParts.join('\n\n');
+              console.log(`[docling-adapter] tier=sheet-direct file=${filename} sheets=${tables.length} `
+                + `rows=${tables.reduce((n, t) => n + t.rows.length, 0)} ms=${Date.now() - tParse}`);
+              return {
+                text: md, markdown: md, json: null, tables,
+                pages: tables.length, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: 'sheet-direct',
+              };
+            }
+          } catch (sheetErr) {
+            console.warn(`[docling-adapter] sheet-direct failed (${sheetErr.message}) — falling through to Docling`);
+          }
+        }
         if (['csv', 'tsv'].includes(ext)) {
           try {
             const raw = fileBuffer.toString('utf-8');

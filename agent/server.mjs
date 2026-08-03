@@ -756,6 +756,57 @@ const routes = {
   // Clear ONLY the memory layer for this org (hard) — memories + their edges +
   // memory vectors. Leaves KB, meetings, TARA, and all usage/billing untouched.
   // Backs the dashboard "Clear all memories" action. Idempotent.
+  // Delete ONE document and everything derived from it. Ported from the embedded agent's
+  // /v1/kb-doc-delete so the two implementations of this API match: the endpoint existed only
+  // on the embedded side, so on a self-host org a document delete hit a 404 that
+  // remoteKbDocDelete swallowed into null — the delete silently did nothing.
+  // Pure SQL here (no in-memory AMR index on the external agent): the derived fact memories
+  // are found by the same `filename:` / `doc-id:` tags the ingestion writes.
+  '/v1/kb-doc-delete': async (b) => {
+    let doc = null;
+    if (b.document_id) {
+      const { rows } = await pg.query(
+        'SELECT id, filename FROM knowledge_documents WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL',
+        [b.document_id, ORG]);
+      doc = rows[0] || null;
+    }
+    if (!doc && b.filename) {
+      const { rows } = await pg.query(
+        'SELECT id, filename FROM knowledge_documents WHERE filename=$1 AND org_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1',
+        [b.filename, ORG]);
+      doc = rows[0] || null;
+    }
+    if (!doc) return { ok: false, error: 'document not found', deleted_memories: 0 };
+
+    // Memories derived from this document, by the tags ingestion stamps on them.
+    const tags = [`filename:${doc.filename}`, `doc-id:${doc.id}`];
+    const { rows: memRows } = await pg.query(
+      'SELECT id FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]', [ORG, tags]);
+    const memIds = memRows.map((r) => r.id);
+    if (memIds.length) {
+      await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2',
+        [memIds, ORG]).catch(() => {});
+      await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))',
+        [ORG, memIds]).catch(() => {});
+      // Vectors last: a Postgres-only delete leaves orphan points that break recall while
+      // looking exactly like a broken retriever.
+      await qFetch(`/collections/${QCOLL}/points/delete?wait=true`,
+        { method: 'POST', body: JSON.stringify({ points: memIds }) }).catch(() => {});
+    }
+
+    const { rows: segRows } = await pg.query('SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id=$2',
+      [ORG, doc.id]);
+    const segIds = segRows.map((r) => r.id);
+    await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
+    if (segIds.length) {
+      await qFetch(`/collections/${QCOLL}/points/delete?wait=true`,
+        { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});
+    }
+
+    await pg.query('UPDATE knowledge_documents SET deleted_at=now() WHERE id=$1 AND org_id=$2', [doc.id, ORG]);
+    return { ok: true, document_id: doc.id, deleted_memories: memIds.length, deleted_segments: segIds.length };
+  },
+
   '/v1/clear-memories': async () => {
     const m = await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]);
     await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]);

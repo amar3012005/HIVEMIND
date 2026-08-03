@@ -1045,9 +1045,34 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           compact: degraded,
         });
         if (claims.length > best.length) best = claims;
-        if (claims.length >= expected || attempt === attempts) return best;
+        // GATE THE RETRY ON WHAT THE WINDOW ACTUALLY HOLDS, NOT ON 60% OF A BUDGET.
+        // `expected` is Math.round(maxFacts * 0.6) — an arbitrary fraction of the CAP, with
+        // no relation to how many facts the text contains. Measured cost: one gpt-oss-120b
+        // call is ~19s, and on an academic paper 5 of 6 windows "under-delivered" against
+        // expected=6 and each paid a SECOND 19s call — ~95s of a 139s extraction stage,
+        // to re-ask a question the model had already answered correctly. Prose with 3 real
+        // facts per 2500 chars is not a failed extraction.
+        //
+        // Estimate capacity from fact-BEARING sentences: ones carrying a number, a unit, or
+        // a mid-sentence proper noun. Deterministic, no extra call. Retry only when the
+        // model returned materially less than the text plausibly holds.
+        const _sentences = String(window?.content || '')
+          .split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter((x) => x.length >= 25);
+        const _factBearing = _sentences.filter((x) =>
+          /\d/.test(x) || /\b(?:kW|kWh|EUR|€|%|Mio|Nr\.)\b/i.test(x) || /\s\p{Lu}\p{Ll}{2,}/u.test(x)).length;
+        const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
+        const _worthRetrying = Math.min(expected, Math.ceil(_capacity * 0.6));
+        if (claims.length >= _worthRetrying || attempt === attempts) {
+          if (claims.length < expected) {
+            this.logger.info?.(`[kb-unified] sparse but PLAUSIBLE (${claims.length} facts, `
+              + `capacity≈${_capacity} from ${_factBearing}/${_sentences.length} fact-bearing sentences) `
+              + `— no retry, saved one ~19s call`);
+          }
+          return best;
+        }
         sparseOnly = true;
-        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}); re-sampling at full budget (${attempt}/${attempts})`);
+        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}, `
+          + `capacity≈${_capacity}); re-sampling at full budget (${attempt}/${attempts})`);
       } catch (error) {
         lastError = error;
         sparseOnly = false;

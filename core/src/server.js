@@ -1523,6 +1523,18 @@ if (process.env.DOCLING_URL) {
         //   pics   — figures carry meaning worth describing (PDF, PPTX)
         const FORMAT_PROFILES = {
           pdf:  { smart: true,  ocr: true,  tables: true,  pics: true  },
+          // Macro-enabled and OpenDocument siblings behave identically to their
+          // mainstream twins in every parser we use, but were rejected client-side
+          // by ACCEPTED_EXTS — a user with an .xlsm got "unsupported file type" for
+          // a workbook SheetJS reads natively.
+          xlsm: { smart: true,  ocr: false, tables: true,  pics: false },
+          ods:  { smart: true,  ocr: false, tables: true,  pics: false },
+          docm: { smart: true,  ocr: false, tables: true,  pics: false },
+          odt:  { smart: true,  ocr: false, tables: true,  pics: false },
+          rtf:  { smart: true,  ocr: false, tables: true,  pics: false },
+          epub: { smart: true,  ocr: false, tables: false, pics: false },
+          pptm: { smart: true,  ocr: false, tables: false, pics: false },
+          odp:  { smart: true,  ocr: false, tables: false, pics: false },
           docx: { smart: true,  ocr: false, tables: true,  pics: false }, // text layer; best yield in prod (21 mem/1k)
           doc:  { smart: true,  ocr: false, tables: true,  pics: false },
           xlsx: { smart: true,  ocr: false, tables: true,  pics: false }, // cells, never prose or OCR
@@ -1677,7 +1689,7 @@ if (process.env.DOCLING_URL) {
         // same {sheet, headers, rows} shape the csv-direct tier below produces, so
         // the tabular lane persists a real grid AND the markdown still feeds
         // semantic recall. Falls through to Docling on any failure.
-        if (['xlsx', 'xls'].includes(ext)) {
+        if (['xlsx', 'xls', 'xlsm', 'ods'].includes(ext)) {
           try {
             const XLSX = (await import('xlsx')).default || (await import('xlsx'));
             const wb = XLSX.read(fileBuffer, { type: 'buffer' });

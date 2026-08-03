@@ -236,6 +236,10 @@ export async function remoteKbProvenance(orgId, payload = {}) {
   try { return await _call(orgId, '/v1/kb-provenance', payload); }
   catch (e) { console.warn(`[mneme/remote] kb-provenance FAILED org=${orgId}: ${e.message} — provenance for this document is LOST (memories still land)`); return null; }
 }
+export async function remoteKbTables(orgId, payload = {}) {
+  try { return await _call(orgId, '/v1/kb-tables', payload); }
+  catch (e) { console.warn(`[mneme/remote] kb-tables FAILED org=${orgId}: ${e.message} — spreadsheet grids for this document are NOT stored`); return null; }
+}
 export async function remoteMemoryEvidence(orgId, memoryId) {
   try { const out = await _call(orgId, '/v1/memory-evidence', { memory_id: memoryId }); return out?.evidenceLinks || []; }
   catch (e) { console.warn(`[mneme/remote] memory-evidence FAILED org=${orgId}: ${e.message}`); return null; }

@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -262,6 +262,7 @@ export function amrKbDocDetail(orgId, documentId, access) { return orgIsRemote(o
 // KB doc DELETE (full cascade on the agent) for remote orgs. null for non-remote.
 export function amrKbDocDelete(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDocDelete(orgId, opts) : null; }
 export function amrKbProvenance(orgId, payload) { return orgIsRemote(orgId) ? remoteKbProvenance(orgId, payload) : null; }
+export function amrKbTables(orgId, payload) { return orgIsRemote(orgId) ? remoteKbTables(orgId, payload) : null; }
 export function amrMemoryEvidence(orgId, memoryId) { return orgIsRemote(orgId) ? remoteMemoryEvidence(orgId, memoryId) : null; }
 
 // Per-memory edge counts for remote org — returns { <id>: { in, out } } for a batch of memory ids.

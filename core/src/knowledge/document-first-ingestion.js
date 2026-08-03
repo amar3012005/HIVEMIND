@@ -15,7 +15,7 @@ import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
-import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables } from '../vector/mneme/driver.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -2275,7 +2275,19 @@ Every item must include a non-empty content field and one or more valid support_
       } else if (!this.db?.documentTable) {
         console.warn('[kb-tables] db.documentTable missing — prisma client lacks the model; grid NOT persisted');
       }
-      if (_tables.length && !orgIsRemote(orgId) && this.db?.documentTable) {
+      // ROUTED. This was `!orgIsRemote(...)`, so a self-host tenant's spreadsheet grids were never
+      // stored anywhere. Removing the guard alone would have been WRONG: MNEME_MODE is dual, so
+      // wrapPrisma hands back the real client and the rows would land in CENTRAL Postgres pointing at
+      // a document that only exists in the agent's schema — the same FK-violation shape that broke
+      // .amr ingestion earlier tonight, and tenant cell data in the box the tenant chose to avoid.
+      if (_tables.length && orgIsRemote(orgId)) {
+        const _tr = await amrKbTables(orgId, {
+          document_id: knowledgeDoc.id, user_id: userId,
+          tables: _tables.map((t) => ({ sheet: t?.sheet || null, headers: t?.headers || [], rows: t?.rows || [] })),
+        });
+        if (_tr) console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
+        else this.logger.warn?.(`[kb-tables] remote write failed for doc ${knowledgeDoc.id} — grids not stored`);
+      } else if (_tables.length && this.db?.documentTable) {
         let _rowsTotal = 0;
         for (let ti = 0; ti < _tables.length; ti++) {
           const t = _tables[ti] || {};

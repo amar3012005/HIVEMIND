@@ -1760,10 +1760,17 @@ if (process.env.DOCLING_URL) {
         // — NEVER Docling's local EasyOCR — in BOTH smart and non-smart mode.
         // Text-native PDFs use fast pdf-parse (non-smart) or Docling (smart,
         // for table/structure enrichment; the text layer means no OCR is run).
+        // Hoisted probe result: the fast-pdf probe runs inside the pdf-only block below,
+        // but its result is ALSO needed later at the Docling call site to decide ocr/pics.
+        // Referencing the block-scoped `fast` from out there threw
+        // `ReferenceError: fast is not defined` on EVERY pdf upload — swallowed by the
+        // outer catch and surfaced only as NO_RECALLABLE_CONTENT in 18s.
+        let _pdfProbe = null;
         if (ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
+            _pdfProbe = fast;
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
@@ -1869,10 +1876,10 @@ if (process.env.DOCLING_URL) {
         const useSmart = smart === true;
         // Text-bearing and not image-heavy → neither OCR nor picture description is
         // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
-        const _hasTextLayer = ext === 'pdf' && !!(fast && !fast.error && fast.text && fast.text.length > 200);
-        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!fast?.isImageHeavy);
+        const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.text && _pdfProbe.text.length > 200);
+        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy);
         if (ext === 'pdf' && !_doclingHeavyOk) {
-          console.log(`[docling-adapter] ${filename}: text layer present (${fast.text.length} chars / ${fast.pages}p) → docling WITHOUT ocr/picture-description`);
+          console.log(`[docling-adapter] ${filename}: text layer present (${_pdfProbe.text.length} chars / ${_pdfProbe.pages}p) → docling WITHOUT ocr/picture-description`);
         }
         const _tDoclingStart = Date.now();
         const [parseResult, chunkResult] = await Promise.all([

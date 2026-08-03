@@ -7,6 +7,7 @@ import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork } from './first-life-control.js';
 import { resolveAuthorityPreference } from './contracts.js';
+import { publishHqRuntimeTransient } from './event-bus.js';
 
 const DAY = 86400000;
 
@@ -143,16 +144,29 @@ export class NativeHqEngine {
     const firstAwakening = trigger.type === 'onboarding_complete' || trigger.type === 'user_first_activation';
     const restartAwakening = firstAwakening && Boolean(trigger.payload?.restart);
     let context = await buildHqContext({ prisma, runtime, trigger });
+    const awakeningStreamId = firstAwakening ? `awakening:${cycle.id}` : null;
+    if (awakeningStreamId) await publishHqRuntimeTransient({
+      runtimeId: runtime.id, orgId: runtime.orgId,
+      event: { type: 'model_stream', phase: 'start', stream_id: awakeningStreamId, event_type: 'wake', title: 'I am here' },
+    });
     const awakening = firstAwakening ? await narrateAwakening({
       company: context.company,
       objective: runtime.objective,
       capabilities: [...context.capabilities.connected, ...context.capabilities.platform_managed],
       restart: restartAwakening,
       fallbackApiKey: process.env.GROQ_API_KEY,
+      onDelta: async (delta) => publishHqRuntimeTransient({
+        runtimeId: runtime.id, orgId: runtime.orgId,
+        event: { type: 'model_stream', phase: 'delta', stream_id: awakeningStreamId, event_type: 'wake', delta },
+      }),
     }) : null;
+    if (awakeningStreamId) await publishHqRuntimeTransient({
+      runtimeId: runtime.id, orgId: runtime.orgId,
+      event: { type: 'model_stream', phase: 'done', stream_id: awakeningStreamId, event_type: 'wake' },
+    });
     await event(prisma, runtime, cycle, { eventType: 'wake', title: firstAwakening ? 'I am here' : 'I am awake', summary: firstAwakening
       ? awakening.narration
-      : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { narration_model: awakening.model, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
+      : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { stream_id: awakeningStreamId, model_streamed: !awakening.fallback, narration_model: awakening.model, narration_provider: awakening.provider, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
     await event(prisma, runtime, cycle, {
       eventType: 'context_loaded', title: 'I have the company in view',
       summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected ${context.capabilities.connected.length === 1 ? 'capability' : 'capabilities'}. I will use only what is actually present.`,

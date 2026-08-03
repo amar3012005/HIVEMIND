@@ -236,11 +236,15 @@ export function resolveRecallPlan(input = {}) {
     max_graph_hops: mode === 'fact' ? 0 : 1,
     max_memories: operation === 'timeline' ? Math.min(Math.max(Number(input.limit) || 20, 1), 50) : 5,
     context_budget: budget,
-    // Existing mode values retain their event-driven behavior. New modes are
-    // deliberate: fact is fast-only; explain/full permit evidence expansion.
-    expand_evidence: !explicit
-      ? requested === 'auto' || requested === 'hybrid' || requested === 'evidence'
-      : mode !== 'fact',
+    // Evidence is a PARALLEL LANE in its own Qdrant collection — not an expensive
+    // serial hop-2, which is what "fact is fast-only" was written for. So `fact` must
+    // include it: a price, a part number, a kW rating IS a fact question, and it is
+    // answered from verbatim segments. Measured on org 1380251c — 0 of 485 memories
+    // held the 5 small facts under test; all 5 were in knowledge_segments. Routing
+    // fact-lookup to the one mode that refuses to read source text is why those
+    // questions returned "nothing directly answers your question" while the answer sat
+    // in a segment. Only an explicit memory-only request opts out.
+    expand_evidence: !explicit ? requested !== 'memory' : true,
     include_live: explicit && mode === 'fact'
       ? false
       : (!explicit ? input.include_live !== false : input.include_live === true),

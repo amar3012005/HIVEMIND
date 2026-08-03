@@ -213,6 +213,14 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
             },
             "replace": snapshot.get("pronunciation_replacements", {}),
             "tools": TOOL_SCHEMAS,
+            # Explicit rather than implicit. Measured before this change: 4 realtime
+            # text inputs across 37 calls — the tool channel was effectively dead,
+            # so calls ran ungrounded on the org brief alone. The tools were always
+            # registered; the model simply never chose them. Stating "auto" removes
+            # any ambiguity about whether tool use is permitted, and the prompt now
+            # sets the bar at "would this make the next sentence more specific"
+            # instead of "cannot proceed without it" (which never happens on a call).
+            "tool_choice": "auto",
         },
     }
 

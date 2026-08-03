@@ -73,6 +73,9 @@ THRESHOLDS — this is what stops the call drifting:
 action:
 - "recall": message needs facts about the company, products, prices, docs,
   or org history — anything you could get wrong without the knowledge base.
+  Also recall whenever a specific claim about THIS person or a PRIOR interaction
+  would make your next sentence stronger: a grounded sentence beats a fluent one.
+  "I could probably manage without it" is NOT a reason to skip it.
   WHEN IN DOUBT → "recall".
 - "direct": conversation mechanics — greetings, thanks, confirmations,
   repeats, or things fully answerable from the visible conversation.

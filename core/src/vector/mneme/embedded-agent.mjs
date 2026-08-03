@@ -542,20 +542,56 @@ function routesFor(ctx) {
       }
       return { ok: true };
     },
-    '/v1/update-tags': async (b) => { if (b.id && Array.isArray(b.tags)) amr.updateTags(b.id, b.tags); return { ok: true }; },
+    '/v1/update-tags': async (b) => {
+      if (b.id && Array.isArray(b.tags)) {
+        amr.updateTags(b.id, b.tags);
+        // SQL mirror (see /v1/write). Non-fatal: the shard is authoritative for recall; this keeps
+        // hm.memories from going STALE, which for anything reading SQL is worse than no mirror.
+        try { await db().query('UPDATE memories SET tags=$2 WHERE id=$1 AND org_id=$3', [b.id, b.tags, org]); }
+        catch (e) { console.warn(`[embedded-agent] tag mirror failed id=${b.id}: ${e.message}`); }
+      }
+      return { ok: true };
+    },
     '/v1/bump-recall': async (b) => {
       const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
-      return { ok: true, bumped: ids.length ? amr.bumpRecall(ids) : 0 };
+      const bumped = ids.length ? amr.bumpRecall(ids) : 0;
+        // SQL mirror (see /v1/write). Non-fatal: the shard is authoritative for recall; this keeps
+        // hm.memories from going STALE, which for anything reading SQL is worse than no mirror.
+      if (ids.length) {
+        try {
+          await db().query(
+            `UPDATE memories SET recall_count = recall_count + 1,
+               strength = LEAST(1.0, COALESCE(strength, 1.0) + 0.05), last_accessed_at = now()
+             WHERE id = ANY($1::uuid[]) AND org_id = $2::uuid AND deleted_at IS NULL`, [ids, org]);
+        } catch (e) { console.warn(`[embedded-agent] bump-recall mirror failed: ${e.message}`); }
+      }
+      return { ok: true, bumped };
     },
     '/v1/update': async (b) => {
       if (!b.id) return { ok: false, error: 'id required' };
       amr.patchUpdate(b.id, b);
+      // SQL mirror (see /v1/write). Non-fatal; keeps hm.memories from drifting from the shard.
+      try {
+        const sets = []; const args = [b.id, org];
+        if (Array.isArray(b.tags)) { args.push(b.tags); sets.push(`tags=$${args.length}`); }
+        if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
+        if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
+        if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
+        if (sets.length) await db().query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
+      } catch (e) { console.warn(`[embedded-agent] patch mirror failed id=${b.id}: ${e.message}`); }
       return { ok: true };
     },
     '/v1/delete': async (b) => {
       if (!b.id) return { ok: false, error: 'id required' };
       const deleted = amr.remove(b.id) ? 1 : 0;
       await db().query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, org]).catch(() => {});
+      // Edges and provenance must go with the memory. The external agent already did this; the
+      // embedded one did not, which was harmless only while edges were shard-only. Now that they
+      // are mirrored to SQL, skipping it leaves ORPHAN relationships and provenance behind on every
+      // single-memory delete — and the memory row is SOFT-deleted, so no cascade rescues it.
+      await db().query('DELETE FROM relationships WHERE org_id=$1 AND (from_id=$2 OR to_id=$2)', [org, b.id]).catch(() => {});
+      await db().query('DELETE FROM memory_derivations WHERE org_id=$1 AND memory_id=$2', [org, b.id]).catch(() => {});
+      await db().query('DELETE FROM memory_evidence_links WHERE org_id=$1 AND memory_id=$2', [org, b.id]).catch(() => {});
       qFetch(`/collections/${qcoll}/points/delete`, { method: 'POST', body: JSON.stringify({ points: [b.id] }) }).catch(() => {});
       return { ok: true, deleted };
     },

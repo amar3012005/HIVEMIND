@@ -783,6 +783,12 @@ const routes = {
     if (b.hard) {
       const r = await pg.query('DELETE FROM memories WHERE id=$1 AND org_id=$2', [b.id, ORG]); deleted = r.rowCount;
       await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id=$2 OR to_id=$2)', [ORG, b.id]);
+    // Provenance too. This agent already removed edges on a single-memory delete but left
+    // memory_evidence_links / memory_derivations behind, and the memory row is SOFT-deleted so the
+    // ON DELETE CASCADE never fires. Same leak found and fixed on the embedded side; keeping the two
+    // implementations identical is the whole point.
+    await pg.query('DELETE FROM memory_derivations WHERE org_id=$1 AND memory_id=$2', [ORG, b.id]).catch(() => {});
+    await pg.query('DELETE FROM memory_evidence_links WHERE org_id=$1 AND memory_id=$2', [ORG, b.id]).catch(() => {});
     } else {
       const r = await pg.query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, ORG]); deleted = r.rowCount;
     }

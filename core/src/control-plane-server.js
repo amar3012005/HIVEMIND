@@ -9632,6 +9632,7 @@ Write the persona now.`;
               dispatchHyperRoomTurn({
                 room_id: existing.id, turn_id: kickTurn.id,
                 user_id: current.session.userId, org_id: current.session.orgId,
+                invocation_mode: 'human',
                 user_message: kickoff, participant_ids: rr?.participantIds || [],
                 project_id: rr?.projectId || null, room_goal: rr?.goal || '',
                 task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
@@ -9702,6 +9703,7 @@ Write the persona now.`;
           dispatchHyperRoomTurn({
             room_id: taskRoom.id, turn_id: kickTurn.id,
             user_id: current.session.userId, org_id: current.session.orgId,
+            invocation_mode: 'human',
             user_message: kickoff, participant_ids: roomRow2?.participantIds || [],
             project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
@@ -10249,6 +10251,7 @@ Write the persona now.`;
           turn_id: turnId,
           user_id: current.session.userId,
           org_id: current.session.orgId,
+          invocation_mode: 'human',
           user_message: turn.userMessage,
           participant_ids: room.participantIds || [],
           project_id: room.projectId || null,
@@ -10582,6 +10585,7 @@ Write the persona now.`;
             dispatchHyperRoomTurn({
               room_id: target.id, turn_id: tgtTurn.id,
               user_id: current.session.userId, org_id: current.session.orgId,
+              invocation_mode: 'human',
               user_message: userMessage, participant_ids: target.participantIds || [],
               project_id: null, room_goal: `${kind} work routed from HQ`,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -10634,6 +10638,7 @@ Write the persona now.`;
             turn_id: turnId,
             user_id: current.session.userId,
             org_id: current.session.orgId,
+            invocation_mode: 'human',
             user_message: turn.userMessage,
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
@@ -10789,6 +10794,7 @@ Write the persona now.`;
             turn_id: turn.id,
             user_id: current.session.userId,
             org_id: current.session.orgId,
+            invocation_mode: 'human',
             user_message: userMessage,
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,

@@ -3515,6 +3515,49 @@ Every item must include a non-empty content field and one or more valid support_
           while (_ci < curated.length) { const c = curated[_ci++]; await _persistOne(c); }
         }));
         console.log(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
+
+        // ── 5b: DOCUMENT-LEVEL SEMANTIC RELATIONS ──────────────────────────────
+        // Intra-window rels only see facts that shared one 2500-char window, so a
+        // subject in window 2 and its update in window 5 never get an edge — measured:
+        // a full ingest produced ONLY PartOf. One cheap call over the persisted atomic
+        // facts (~10-30 short lines) proposes typed edges across the WHOLE document.
+        // Grounding: both endpoints are already source_quote-verified memories; the
+        // edge itself is validated by index + type allow-list. Derives is INFERRED —
+        // metadata.inferred=true, confidence 0.6, never citable, never supersedes.
+        if (uFacts.length >= 2 && String(process.env.KB_DOC_RELATIONS ?? 'true').toLowerCase() !== 'false') {
+          try {
+            const _relList = uFacts.map((m, idx) => `${idx}: ${String(m.content || '').slice(0, 200)}`).join('\n');
+            const _relParsed = await chatCompletionWithFallback({
+              models: [process.env.KB_UNIFIED_MODEL || 'openai/gpt-oss-120b',
+                ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean)],
+              temperature: 0, max_tokens: 1500, json_mode: true, feature: 'kb-doc-relations',
+              messages: [
+                { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },
+                { role: 'user', content: `Document: ${docTitle}\nFacts:\n${_relList}` },
+              ],
+            });
+            const _edges = (Array.isArray(_relParsed?.edges) ? _relParsed.edges : [])
+              .filter((e) => Number.isInteger(e?.from) && Number.isInteger(e?.to)
+                && e.from !== e.to && uFacts[e.from] && uFacts[e.to]
+                && ['Updates', 'Extends', 'Contradicts', 'Derives'].includes(e.type))
+              .slice(0, 24);
+            let _written = 0;
+            for (const e of _edges) {
+              try {
+                await this.memoryGraphEngine.store.createRelationship({
+                  id: crypto.randomUUID(), from_id: uFacts[e.from].id, to_id: uFacts[e.to].id, type: e.type,
+                  confidence: e.type === 'Derives' ? 0.6 : 0.8,
+                  metadata: { created_by: 'kb_doc_relations_5b', document_id: documentId,
+                    ...(e.type === 'Derives' ? { inferred: true } : {}) },
+                });
+                _written += 1;
+              } catch { /* dup/FK tolerated */ }
+            }
+            console.log(`[kb-relations] doc=${String(documentId).slice(0, 8)} facts=${uFacts.length} proposed=${Array.isArray(_relParsed?.edges) ? _relParsed.edges.length : 0} valid=${_edges.length} written=${_written}`);
+          } catch (error) {
+            console.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
+          }
+        }
         if (extraEvidenceLinks.length) {
           await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
         }

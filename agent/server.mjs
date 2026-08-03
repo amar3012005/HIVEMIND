@@ -875,6 +875,16 @@ const routes = {
     const { rows: memRows } = await pg.query(
       'SELECT id FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]', [ORG, tags]);
     const memIds = memRows.map((r) => r.id);
+    // Provenance is the SECOND source of truth for "which memories came from this
+    // document". Finding them only by the filename:/doc-id: tags missed any memory that
+    // does not carry them (measured: 24 of 27 derivations cleaned, 4 left behind), so union
+    // in whatever the evidence links themselves claim for this document.
+    try {
+      const { rows: _pv } = await pg.query(
+        'SELECT DISTINCT memory_id FROM memory_evidence_links WHERE org_id=$1 AND document_id=$2',
+        [ORG, doc.id]);
+      for (const r of _pv) if (r.memory_id && !memIds.includes(r.memory_id)) memIds.push(r.memory_id);
+    } catch { /* table may not exist on an older agent — the tag path still applies */ }
     if (memIds.length) {
       await pg.query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2',
         [memIds, ORG]).catch(() => {});

@@ -6,7 +6,12 @@ name: BYOD setup-branch publish
 # almost shipped is the failure this prevents).
 on:
   push:
-    branches: [main, master, feat/mneme-foundation]
+    # singulance-main IS the deployable ref (CLAUDE.md: nothing deploys from a feature
+    # branch). It was MISSING from this list, so every byod/ change merged there never
+    # triggered a republish — which is precisely how the running self-host agent went 9 days
+    # stale, without /v1/kb-lexical and without any document-scope enforcement, while the
+    # embedded agent (which rides core deploys) had both.
+    branches: [singulance-main, main, master, feat/mneme-foundation]
     paths: ['byod/**']
   workflow_dispatch: {}   # allow manual re-publish
 

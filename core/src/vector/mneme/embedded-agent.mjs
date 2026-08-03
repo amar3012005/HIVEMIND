@@ -427,6 +427,22 @@ function routesFor(ctx) {
       qFetch(`/collections/${qcoll}/points/delete`, { method: 'POST', body: JSON.stringify({ points: [b.id] }) }).catch(() => {});
       return { ok: true, deleted };
     },
+    // Clear MEMORIES only, leaving the KB (documents + segments) intact. /v1/purge is the
+    // whole-org erase; this is the narrower one, and it existed only on the external agent —
+    // so an amr_embedded org calling it got nothing back while a byod org was cleared. The
+    // two agents implement the same 31-endpoint API and must not diverge on which half of a
+    // destructive pair they support.
+    '/v1/clear-memories': async () => {
+      const shardDeleted = amr.purge();
+      const m = await db().query('DELETE FROM memories WHERE org_id=$1', [org]).catch(() => ({ rowCount: 0 }));
+      await db().query('DELETE FROM relationships WHERE org_id=$1', [org]).catch(() => {});
+      // Drop and recreate the collection rather than deleting points one by one: the KB
+      // segments live in the SAME collection, so they are re-embedded by the reconciler,
+      // which is exactly what the external agent's clear-memories does.
+      await qFetch(`/collections/${qcoll}`, { method: 'DELETE' }).catch(() => {});
+      await ensureQdrant(qcoll).catch(() => {});
+      return { ok: true, deleted: m.rowCount, shard_deleted: shardDeleted };
+    },
     '/v1/purge': async () => {
       const shardDeleted = amr.purge();
       await db().query('DELETE FROM memories WHERE org_id=$1', [org]).catch(() => {});

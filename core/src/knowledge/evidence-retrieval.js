@@ -171,6 +171,16 @@ export class EvidenceRetrievalService {
           ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold })
           : Promise.resolve([]);
         const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
+        // null (not []) means the lane FAILED rather than matched nothing — see
+        // remote-backend.js. Say which lane is missing, because a half-working remote agent
+        // returns plausible answers with a whole retrieval mode silently absent, and that is
+        // indistinguishable from a small corpus unless we log it here.
+        if (vectorHits === null || lexicalHits === null) {
+          console.warn(`[EvidenceRetrieval] REMOTE LANE DOWN org=${orgId}: `
+            + `${vectorHits === null ? 'vector ' : ''}${lexicalHits === null ? 'lexical ' : ''}`
+            + `unavailable — this answer is built from the remaining lane only, so recall is `
+            + `degraded, NOT empty. Check the .amr agent build (is it in sync with byod/?).`);
+        }
         const byId = new Map();
         for (const hit of vectorHits || []) byId.set(hit.segment_id, { ...hit, _lexical: false });
         for (const hit of lexicalHits || []) {

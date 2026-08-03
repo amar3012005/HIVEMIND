@@ -1388,6 +1388,24 @@ export class RecallRouter {
       canonical_entities: mergedCanonicalEntities,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
+    // RESERVE THE FINAL STAGE'S SLICE. Stages draw on one shared latency_budget_ms
+    // (1500ms for mode=fact, 3000ms otherwise) greedily, in order, each taking
+    // `Math.min(itsCap, remaining)` — and the cross-encoder is LAST. One hop alone is
+    // capped at 2300ms, which is more than the entire fact-mode budget, so the reranker
+    // could be starved by construction. Measured with attribution in place: it was skipped
+    // with 17ms / 36ms / 47ms / 58ms / 84ms left, i.e. the memory lane was delivering
+    // ALGORITHMIC order rather than cross-encoded order, silently.
+    //
+    // This is also the one place where .amr/byod are STRUCTURALLY less accurate than
+    // hybrid on identical code: their evidence lanes are a NETWORK hop, so they burn more
+    // of the shared budget before the reranker is reached, and lose it more often. Equal
+    // code cannot give equal accuracy while upstream stages may spend the last stage's slice.
+    //
+    // Upstream stages now size against stageBudget() — remaining MINUS the reserve — while
+    // the reranker itself still sees the true remainder. 450ms default covers a warm rerank
+    // (~270ms measured) with margin; a cold one (~829ms) may still degrade, and now says so.
+    const RERANK_RESERVE_MS = Number(process.env.RERANK_RESERVE_MS || 450);
+    const stageBudget = () => Math.max(1, remainingBudget() - RERANK_RESERVE_MS);
     let cutoffReason = null;
     let explicitSourceDocuments = [];
     let explicitSourceHydration = null;
@@ -1401,7 +1419,7 @@ export class RecallRouter {
           documentId: options.source_document_id || null,
           title: options.source_title || null,
         }),
-        Math.min(350, remainingBudget()),
+        Math.min(350, stageBudget()),
         [],
       );
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
@@ -1474,7 +1492,7 @@ export class RecallRouter {
             : inspectMemories([]),
           prisma: this.prisma,
         }),
-        Math.min(2_300, remainingBudget()),
+        Math.min(2_300, stageBudget()),
         { items: [], reason: 'timeout' },
       ))
       : null;
@@ -1483,7 +1501,7 @@ export class RecallRouter {
     const t1 = Date.now();
     let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
-      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
+      Math.min(HOP1_TIMEOUT_MS, stageBudget()),
       [],
     );
     // Project-scope fallback: if user has a project active but recall came
@@ -1509,7 +1527,7 @@ export class RecallRouter {
       };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
-        Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
+        Math.min(HOP1_TIMEOUT_MS, stageBudget()),
         [],
       );
       projectFallbackFired = memories.length > 0;
@@ -1536,7 +1554,7 @@ export class RecallRouter {
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
-        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
+        Math.min(HOP2_TIMEOUT_MS, stageBudget()),
         { items: [], reason: 'timeout' },
       ),
       !isLiveExpansionEligible({
@@ -1548,7 +1566,7 @@ export class RecallRouter {
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
-            Math.min(HOP3_TIMEOUT_MS, remainingBudget()),
+            Math.min(HOP3_TIMEOUT_MS, stageBudget()),
             { items: [], reason: 'timeout' },
           ),
     ]);
@@ -1567,7 +1585,7 @@ export class RecallRouter {
             clusterIndex:   this.clusterIndex,
             organizationId: ctx.orgId,
           }),
-          Math.min(350, remainingBudget()),
+          Math.min(350, stageBudget()),
           rankedMemories,
         );
       } catch (boostErr) {
@@ -1652,7 +1670,7 @@ export class RecallRouter {
       // read — which IS the answer for explain/full — is never starved to a
       // 0ms wait by earlier hops). Hydration typically completes in ~50ms.
       const fullSource = recallPlan.mode === 'full';
-      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, remainingBudget()));
+      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, stageBudget()));
       const hydrated = await withTimeout(explicitSourceHydration, hydrationBudget, { timed_out: true });
       if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
       else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
@@ -1672,7 +1690,7 @@ export class RecallRouter {
       ? Math.min(options.limit || recallPlan.max_memories, 50)
       : RECALL_DELIVER_LIMIT;
     try {
-      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, stageBudget()), null);
       if (recallPlan.operation !== 'timeline' && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 

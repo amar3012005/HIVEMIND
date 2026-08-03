@@ -208,12 +208,20 @@ export async function remoteKbSegment(orgId, segment, vector) {
   catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteKbRecall(orgId, vector, opts = {}) {
+  // Return NULL on failure, [] on a genuine empty. Returning [] for both made a DEAD AGENT
+  // indistinguishable from an empty knowledge base — the `200 []` defect shape. Callers must
+  // be able to tell "nothing matched" from "the lane did not run".
   try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, documentIds: opts.documentIds, scoreThreshold: opts.scoreThreshold, access: opts.access }); return out?.results || []; }
-  catch (e) { console.warn(`[mneme/remote] kb-recall failed org=${orgId}: ${e.message}`); return []; }
+  catch (e) { console.warn(`[mneme/remote] kb-recall FAILED org=${orgId}: ${e.message} — vector evidence lane contributed nothing to this answer`); return null; }
 }
 export async function remoteKbLexical(orgId, text, filter = {}, limit = 20) {
+  // NULL on failure, [] on a genuine empty — see remoteKbRecall. This one mattered in
+  // practice: the running agent had no /v1/kb-lexical endpoint at all for 9 days, so every
+  // call 404'd and was swallowed into [], leaving remote evidence recall silently
+  // VECTOR-ONLY. Exact part numbers and codes are precisely what the lexical lane exists to
+  // catch, so the degradation was invisible and total.
   try { const out = await _call(orgId, '/v1/kb-lexical', { text, filter, limit }); return out?.results || []; }
-  catch (e) { console.warn(`[mneme/remote] kb-lexical failed org=${orgId}: ${e.message}`); return []; }
+  catch (e) { console.warn(`[mneme/remote] kb-lexical FAILED org=${orgId}: ${e.message} — lexical evidence lane contributed nothing; exact-token matches are LOST for this query`); return null; }
 }
 export async function remoteKbHydrate(orgId, ids, access) {
   try { const out = await _call(orgId, '/v1/kb-hydrate', { ids, access }); return out?.segments || []; }

@@ -13,6 +13,7 @@ const ids = {
   segment: '00000000-0000-4000-8000-00000000c202',
 };
 const vector = (index) => Array.from({ length: 8 }, (_, position) => position === index ? 1 : 0);
+const access = { userId: '00000000-0000-4000-8000-00000000c301' };
 
 async function call(path, body, customHeaders = headers) {
   const response = await fetch(`${base}${path}`, {
@@ -53,12 +54,14 @@ if (process.argv[2] === 'write') {
   assert.equal((await call('/v1/kb-doc', { doc: {
     id: ids.document, userId: '00000000-0000-4000-8000-00000000c301',
     filename: 'policy.md', contentType: 'text/markdown', status: 'ready', checksum: 'parity-checksum',
+    title: 'German policy',
+    tags: ['scope-key:org:00000000-0000-4000-8000-00000000c001'],
     metadata: { source_platform: 'knowledge_base', scope: 'organization' },
   } })).payload.ok, true);
   assert.equal((await call('/v1/kb-segment', { segment: {
     id: ids.segment, documentId: ids.document, userId: '00000000-0000-4000-8000-00000000c301',
-    content: 'Records are retained for seven years.', contentHash: 'segment-hash', segmentIndex: 0,
-    metadata: { source_start: 0, source_end: 38 },
+    content: 'Die Vertragsnummer lautet 35113. Records are retained for seven years.', contentHash: 'segment-hash', segmentIndex: 0,
+    startPage: 4, endPage: 4, wordCount: 9, metadata: { source_start: 0, source_end: 67 },
   }, vector: vector(1) })).payload.ok, true);
 }
 
@@ -67,10 +70,23 @@ assert.equal(recalled.status, 200);
 assert.equal(recalled.payload.results[0].id, ids.claim);
 const hydrated = await call('/v1/hydrate', { ids: [ids.claim] });
 assert.equal(hydrated.payload.memories[0].content, 'Records are retained for seven years.');
-const evidence = await call('/v1/kb-recall', { vector: vector(1), limit: 5, documentId: ids.document });
+const evidence = await call('/v1/kb-recall', { vector: vector(1), limit: 5, documentId: ids.document, access });
 assert.equal(evidence.payload.results[0].segment_id, ids.segment);
-const evidenceHydrated = await call('/v1/kb-hydrate', { ids: [ids.segment] });
-assert.equal(evidenceHydrated.payload.segments[0].content, 'Records are retained for seven years.');
+assert.equal(evidence.payload.results[0].title, 'German policy');
+assert.equal(evidence.payload.results[0].start_page, 4);
+const evidenceHydrated = await call('/v1/kb-hydrate', { ids: [ids.segment], access });
+assert.match(evidenceHydrated.payload.segments[0].content, /35113/);
+const unscopedLexical = await call('/v1/kb-lexical', { text: 'Welche Vertragsnummer ist 35113?', filter: { documentId: ids.document }, limit: 5 });
+assert.equal(unscopedLexical.payload.results.length, 0);
+const lexical = await call('/v1/kb-lexical', { text: 'Welche Vertragsnummer ist 35113?', filter: { documentId: ids.document, access }, limit: 5 });
+assert.ok(lexical.payload.results.length > 0, 'AMR lexical canary must find segment 35113');
+assert.equal(lexical.payload.results[0].segment_id, ids.segment);
+assert.equal(lexical.payload.results[0].title, 'German policy');
+assert.equal(lexical.payload.results[0].start_page, 4);
+const listedWithoutAccess = await call('/v1/kb-docs', { limit: 5 });
+assert.equal(listedWithoutAccess.payload.documents.length, 0);
+const listed = await call('/v1/kb-docs', { limit: 5, access });
+assert.equal(listed.payload.documents[0].id, ids.document);
 const relationships = await call('/v1/mem-relationships', { memoryId: ids.claim });
 assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});
@@ -80,9 +96,10 @@ assertCanonicalBackendContract({
   backend: 'byod',
   memories: stats.payload.memories,
   evidence: evidence.payload.results.length,
+  ev_in: lexical.payload.results.length,
   relationship: relationships.payload.out[0].type,
   recall_hit: recalled.payload.results[0].id === ids.claim,
-  source_hydrated: evidenceHydrated.payload.segments[0].content === 'Records are retained for seven years.',
+  source_hydrated: /35113/.test(evidenceHydrated.payload.segments[0].content),
   isolated: wrongToken.status === 401 && wrongOrg.status === 403,
 });
 

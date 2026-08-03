@@ -817,7 +817,7 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId, pr
   // Remote (self-host): KB docs live on the agent — list them and match filename→title client-side.
   if (orgIsRemote(orgId)) {
     try {
-      const out = await amrKbDocs(orgId, { limit: 200 });
+      const out = await amrKbDocs(orgId, { limit: 200, access: { userId, projectId } });
       const docs = out?.documents || [];
       const lows = filenames.map((f) => String(f).toLowerCase());
       return docs

@@ -1013,8 +1013,25 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // and set compact, so a thin first pass could only ever be followed by a
     // thinner second one. Shrink only after a real failure; re-sample at full
     // budget when the completion was fine but under-delivered.
+    // DON'T PAY FOR A RETRY WHEN THE INPUT IS THE PROBLEM. The re-sample below fires
+    // whenever a window under-delivers, on the assumption the model was unlucky. That is
+    // right for good text and pure waste for damaged text: on a PDF whose fast-pdf output
+    // was letter-spaced ("S O L V I S  G E M E I N W O H L"), EVERY window logged
+    // "sparse extraction (0/6)" and every one paid a second LLM call — 12 calls to extract
+    // zero facts. Detect unusable input first and take the single pass.
+    const _wc = String(window?.content || '');
+    const _tokens = _wc.split(/\s+/).filter(Boolean);
+    const _singleCharRatio = _tokens.length ? _tokens.filter((t) => t.length === 1).length / _tokens.length : 0;
+    const _letterSpaced = _tokens.length >= 20 && _singleCharRatio > 0.45;
+    const _wordish = (_wc.match(/\p{L}{4,}/gu) || []).length;
+    const _tooFewWords = _wc.length > 400 && _wordish < 12;
+    const _inputUnusable = _letterSpaced || _tooFewWords;
+    if (_inputUnusable) {
+      console.warn(`[kb-unified] input unusable (single_char_ratio=${_singleCharRatio.toFixed(2)} `
+        + `words4=${_wordish} chars=${_wc.length}) — ONE pass, no re-sample. Fix the parse tier, not the prompt.`);
+    }
     let sparseOnly = true;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (let attempt = 1; attempt <= (_inputUnusable ? 1 : attempts); attempt++) {
       try {
         const degraded = attempt > 1 && !sparseOnly;
         const claims = await this._extractUnified(window, {
@@ -2865,14 +2882,72 @@ Every item must include a non-empty content field and one or more valid support_
           const segments = [];
           let segmentIndex = 0;
           let previousSegmentId = null;
+          // METADATA-AWARE SEGMENTATION. The schema has declared segment_type (with an
+          // enum in its own comment), depth, start_page, end_page and metadata since it was
+          // written — AND an index on segment_type — but the writer filled 'structured'
+          // (a value not even in that enum), depth 0 and null pages. Measured: 0 of 101
+          // segments had a page, and every row said 'structured'. Populating them is
+          // additive, needs no migration, and cannot regress anything.
+          //
+          // Everything below is DETERMINISTIC — no LLM. It also lands on the shared `base`
+          // object, so hybrid, amr_embedded and byod_amr get identical metadata rather than
+          // the central path being richer.
+
+          // offset -> page, from Docling's own `<!-- page N -->` markers in the markdown.
+          const _pageMarks = [];
+          for (const m of String(src).matchAll(/<!--\s*page\s+(\d+)\s*-->/gi)) {
+            _pageMarks.push({ at: m.index, page: Number(m[1]) });
+          }
+          const _pageAt = (off) => {
+            if (!_pageMarks.length || off == null) return null;
+            let page = null;
+            for (const mk of _pageMarks) { if (mk.at <= off) page = mk.page; else break; }
+            return page;
+          };
+          // running cursor so repeated text does not resolve to the first occurrence
+          let _cursor = 0;
+          // heading stack -> full hierarchy path, not just the nearest heading
+          const _hstack = [];
           for (const text of chunks) {
             const contentHash = crypto.createHash('sha256').update(text).digest('hex');
-            const hm = text.match(/^#{1,6}\s+(.+)$/m);
-            const heading = hm ? hm[1].slice(0, 500) : null;
+            const hm = text.match(/^(#{1,6})\s+(.+)$/m);
+            const heading = hm ? hm[2].slice(0, 500) : null;
+            const level = hm ? hm[1].length : 0;
+            if (heading) {
+              while (_hstack.length && _hstack[_hstack.length - 1].level >= level) _hstack.pop();
+              _hstack.push({ level, title: heading });
+            }
+            const headingPath = _hstack.map((h) => h.title);
+
+            // chunkText returns `{ text: currentChunk.trim(), index }` — no offsets — and the
+            // .trim() means indexOf(fullChunk) MISSES. Measured: 90 of 93 segments got no
+            // offset and therefore no page. Anchor on a PREFIX instead: the chunk's interior
+            // is a verbatim substring of src, only its edges were trimmed.
+            const _anchor = text.slice(0, 60);
+            let found = _anchor.length >= 12 ? String(src).indexOf(_anchor, _cursor) : -1;
+            if (found < 0 && _anchor.length >= 12) found = String(src).indexOf(_anchor); // wrap once
+            if (found < 0) found = String(src).indexOf(text.slice(0, 24), _cursor);
+            const startOffset = found >= 0 ? found : null;
+            const endOffset = startOffset != null ? startOffset + text.length : null;
+            if (found >= 0) _cursor = found + Math.max(1, text.length - 250); // allow for overlap
+            const startPage = _pageAt(startOffset);
+            const endPage = _pageAt(endOffset);
+
+            // HONEST segment_type, matching the enum the schema documents.
+            const _lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+            const _pipeRows = _lines.filter((l) => l.startsWith('|') && l.endsWith('|')).length;
+            const segmentType = _pipeRows >= 2 ? 'table'
+              : /^\s*(!\[|<!--\s*image|Figure|Abbildung|Diagram)/i.test(text) ? 'figure'
+                : _lines.filter((l) => /^([-*+]|\d+\.)\s/.test(l)).length >= Math.max(2, Math.ceil(_lines.length * 0.6)) ? 'list'
+                  : (heading && _lines.length <= 2) ? 'heading'
+                    : 'paragraph';
+
             const base = {
-              documentId, userId, orgId, segmentType: 'structured', content: text, contentHash,
-              segmentIndex, previousSegmentId, depth: 0, startOffset: null, endOffset: null,
-              wordCount: text.split(/\s+/).length, metadata: { heading, source: 'semantic_chunk' },
+              documentId, userId, orgId, segmentType, content: text, contentHash,
+              segmentIndex, previousSegmentId, depth: _hstack.length, startOffset, endOffset,
+              startPage, endPage,
+              wordCount: text.split(/\s+/).length,
+              metadata: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk' },
             };
             if (remote) {
               const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };
@@ -2885,7 +2960,13 @@ Every item must include a non-empty content field and one or more valid support_
             }
           }
           if (segments.length) {
-            console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word)`);
+            const _types = segments.reduce((acc, sg) => { acc[sg.segmentType] = (acc[sg.segmentType] || 0) + 1; return acc; }, {});
+            const _withPage = segments.filter((sg) => sg.startPage != null).length;
+            const _withOffset = segments.filter((sg) => sg.startOffset != null).length;
+            const _withHeading = segments.filter((sg) => sg.metadata?.heading_path?.length).length;
+            console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
+              + `types=${JSON.stringify(_types)} with_offset=${_withOffset}/${segments.length} with_page=${_withPage}/${segments.length} with_heading_path=${_withHeading}/${segments.length}`);
+            if (!_withPage) console.warn('[segments] no start_page on ANY segment — citations cannot name a page. Docling <!-- page N --> markers absent from this parse tier.');
             return segments;
           }
         }
@@ -3081,6 +3162,9 @@ Every item must include a non-empty content field and one or more valid support_
             segmentType: segment.segmentType,
             segmentIndex: segment.segmentIndex,
             previousSegmentId: segment.previousSegmentId || null,
+            startPage: segment.startPage || null,
+            endPage: segment.endPage || null,
+            wordCount: segment.wordCount || null,
             metadata: segment.metadata || {},
             createdAt: segment.createdAt || new Date().toISOString(),
           }, Array.isArray(embedding) ? embedding : []);

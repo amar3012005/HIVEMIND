@@ -300,7 +300,7 @@ const { createTaraGrokRuntime } = await import('./tara/grok-runtime.js');
 // Phase 1: Document-Backed Memory Architecture
 const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
 const { EvidenceRetrievalService } = await import('./knowledge/evidence-retrieval.js');
-const { parseWithDocling, chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+const { parseWithDocling, chunkWithDocling, collapseLetterSpacing } = await import('./knowledge/enterprise/docling-adapter.js');
 
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
@@ -1760,10 +1760,17 @@ if (process.env.DOCLING_URL) {
         // — NEVER Docling's local EasyOCR — in BOTH smart and non-smart mode.
         // Text-native PDFs use fast pdf-parse (non-smart) or Docling (smart,
         // for table/structure enrichment; the text layer means no OCR is run).
+        // Hoisted probe result: the fast-pdf probe runs inside the pdf-only block below,
+        // but its result is ALSO needed later at the Docling call site to decide ocr/pics.
+        // Referencing the block-scoped `fast` from out there threw
+        // `ReferenceError: fast is not defined` on EVERY pdf upload — swallowed by the
+        // outer catch and surfaced only as NO_RECALLABLE_CONTENT in 18s.
+        let _pdfProbe = null;
         if (ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
+            _pdfProbe = fast;
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
@@ -1844,10 +1851,20 @@ if (process.env.DOCLING_URL) {
                 console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
               console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              // COLLAPSE LETTER-SPACING. collapseLetterSpacing() has always existed in
+              // docling-adapter.js and was applied ONLY to Docling's own responses — never
+              // to fast-pdf. Measured consequence on a 46 MB PDF that fell back here:
+              // segments read "S O L V I S  G E M E I N W O H L - B I L A N Z", the
+              // extractor returned 0-1 facts per window ("sparse extraction (0/6)"), and the
+              // document produced 240 SEGMENTS AND ZERO MEMORIES. Letter-spaced text also
+              // defeats both embeddings and lexical matching, so recall could not reach it
+              // either. The fix existed; it was simply not wired to this tier.
+              const _ft = collapseLetterSpacing(fast.text || '');
               return {
-                text: fast.text, markdown: fast.text, json: null,
+                text: _ft, markdown: _ft, json: null,
                 tables: [], pages: fast.pages, confidence: null, error: null,
-                hybridChunks, chunkerError: null, engine: 'pdf-parse',
+                hybridChunks: hybridChunks.map((c) => ({ ...c, text: collapseLetterSpacing(c.text || '') })),
+                chunkerError: null, engine: 'pdf-parse',
               };
             }
           } catch (tierErr) {
@@ -1857,6 +1874,14 @@ if (process.env.DOCLING_URL) {
 
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
+        // Text-bearing and not image-heavy → neither OCR nor picture description is
+        // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
+        const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.text && _pdfProbe.text.length > 200);
+        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy);
+        if (ext === 'pdf' && !_doclingHeavyOk) {
+          console.log(`[docling-adapter] ${filename}: text layer present (${_pdfProbe.text.length} chars / ${_pdfProbe.pages}p) → docling WITHOUT ocr/picture-description`);
+        }
+        const _tDoclingStart = Date.now();
         const [parseResult, chunkResult] = await Promise.all([
           // Pass the format profile through so the adapter can skip passes this
           // format has nothing to gain from (slides need picture description, not
@@ -1864,8 +1889,16 @@ if (process.env.DOCLING_URL) {
           // formats, which the adapter treats as "run everything" — unchanged.
           parseWithDocling(tempPath, filename, {
             smart: useSmart,
-            picture_descriptions,
-            ocr: profile ? profile.ocr : undefined,
+            // OCR AND PICTURE DESCRIPTION ARE THE ENTIRE COST. `pdf` was the only format
+            // with both unconditionally on, and both are wasted when the PDF already
+            // carries a text layer: OCR rasterises and re-reads pages whose text we can
+            // read directly, and picture-description runs a vision model per embedded
+            // image. Measured: 606s on a 46MB PDF that then returned chunks=0.
+            // `fast` is the fast-pdf probe already run above (~800ms) — it knows whether
+            // a text layer exists and whether the doc is image-heavy. Use it instead of a
+            // static per-format guess.
+            picture_descriptions: _doclingHeavyOk ? picture_descriptions : false,
+            ocr: _doclingHeavyOk ? (profile ? profile.ocr : undefined) : false,
             tables: profile ? profile.tables : undefined,
           }),
           // chunkWithDocling REMOVED. It was a SECOND full Docling conversion of the same
@@ -1914,6 +1947,16 @@ if (process.env.DOCLING_URL) {
         // flattened text. My previous fix keyed on parseResult.error alone and so
         // still lost them. Fall back only when there is genuinely nothing usable
         // from EITHER call.
+        const _doclingMs = Date.now() - _tDoclingStart;
+        // Docling returning NOTHING after minutes is the worst outcome: the time is spent
+        // AND the pipeline must re-parse. A 606s run that yielded chunks=0 was previously
+        // invisible except as a mysteriously slow upload.
+        if (usableChunks === 0 && usableChars < 200) {
+          console.warn(`[docling-adapter] TIER FAILED EMPTY: ${filename} spent ${_doclingMs}ms in docling and returned `
+            + `chars=${usableChars} chunks=${usableChunks} — falling back. Time wasted, not an error path.`);
+        } else if (_doclingMs > 120_000) {
+          console.warn(`[docling-adapter] SLOW: ${filename} ${_doclingMs}ms in docling (chars=${usableChars} chunks=${usableChunks})`);
+        }
         const parseFailed = usableChunks === 0
           && (Boolean(parseResult?.error) || usableChars < 200);
         if (parseResult?.error && usableChunks > 0) {
@@ -1922,12 +1965,38 @@ if (process.env.DOCLING_URL) {
         }
         if (parseFailed && ext === 'pdf') {
           try {
+            // PREFER VISION OVER FAST-PDF ON FALLBACK. fast-pdf is measurably worse:
+            // on a real 46MB PDF it emitted letter-spaced display text
+            // ("S O L V I S  G E M E I N W O H L") plus page furniture, the extractor
+            // logged "sparse extraction (0/6)" on every window, and the document produced
+            // 240 SEGMENTS AND ZERO MEMORIES. Vision on the same class of document gave
+            // clean markdown with headings and pages in 74s. Try vision first; keep
+            // fast-pdf as the last resort so a missing vision key still degrades rather
+            // than fails.
+            if (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) {
+              try {
+                const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+                const vfb = await parsePdfWithGroqVision(tempPath);
+                if (!vfb.error && vfb.text.length > 200) {
+                  console.warn(`[docling-adapter] tier=docling failed/empty → VISION fallback for ${filename} (chars=${vfb.text.length})`);
+                  return {
+                    text: vfb.text, markdown: vfb.markdown, json: null,
+                    tables: [], pages: vfb.pages, confidence: null, error: null,
+                    hybridChunks: [], chunkerError: null, engine: 'docling-fallback-vision',
+                  };
+                }
+                console.warn(`[docling-adapter] vision fallback also empty (${vfb.error || 'no text'}) → fast-pdf`);
+              } catch (vErr) {
+                console.warn(`[docling-adapter] vision fallback threw: ${vErr.message} → fast-pdf`);
+              }
+            }
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fb = await fastPdfExtract(tempPath);
             if (!fb.error && fb.text.length > 200) {
               console.warn(`[docling-adapter] tier=docling failed/empty → falling back to fast-pdf for ${filename}`);
+              const _fbt = collapseLetterSpacing(fb.text || '');
               return {
-                text: fb.text, markdown: fb.text, json: null,
+                text: _fbt, markdown: _fbt, json: null,
                 tables: [], pages: fb.pages, confidence: null, error: null,
                 hybridChunks: chunkResult?.chunks?.length ? chunkResult.chunks : [],
                 chunkerError: chunkResult?.error || null,
@@ -8824,14 +8893,30 @@ exit \$RC
       // context set above (master-key engine calls → null → sentinel). Best-effort: never 5xx a meter.
       if (pathname === '/api/usage/llm-report' && req.method === 'POST') {
         try {
-          const total = Number(body?.total_tokens || 0);
-          if (planEnforcer && orgId && total > 0) {
+          const supplied = Array.isArray(body?.entries) && body.entries.length
+            ? body.entries.slice(0, 16)
+            : [body || {}];
+          let recorded = 0;
+          for (let index = 0; index < supplied.length; index += 1) {
+            const entry = supplied[index] || {};
+            const promptTokens = Number(entry.prompt_tokens || 0);
+            const completionTokens = Number(entry.completion_tokens || 0);
+            const total = Number(entry.total_tokens || promptTokens + completionTokens || 0);
+            if (!planEnforcer || !orgId || !(total > 0)) continue;
+            const reportKey = String(body?.idempotency_key || '').slice(0, 150);
             planEnforcer.recordUsage(orgId, 'tokens', total, {
-              model: String(body?.model || 'hyperagents-director').slice(0, 128),
-              feature: String(body?.feature || 'hyperagents-room').slice(0, 64),
+              model: String(entry.model || body?.model || 'hyperagents-director').slice(0, 128),
+              feature: String(entry.feature || body?.feature || 'hyperagents-room').slice(0, 64),
+              promptTokens,
+              completionTokens,
+              cachedTokens: Number(entry.cached_tokens || 0),
+              requestCount: Number(entry.requests || 1),
+              idempotencyKey: reportKey ? `${reportKey}:${index}` : undefined,
+              metadata: { usage_report: 'room-turn.v2' },
             });
+            recorded += total;
           }
-          return jsonResponse(res, { ok: true, recorded: total }, 200);
+          return jsonResponse(res, { ok: true, recorded }, 200);
         } catch (e) {
           return jsonResponse(res, { ok: false, error: e.message }, 200);
         }
@@ -11377,7 +11462,7 @@ exit \$RC
         // RESIDENCY: remote org — KB doc + segments + promoted memories live on the agent.
         if (orgIsRemote(orgId)) {
           try {
-            const remDetail = await amrKbDocDetail(orgId, documentId);
+            const remDetail = await amrKbDocDetail(orgId, documentId, { userId });
             if (!remDetail) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
             return jsonResponse(res, remDetail);
           } catch (remErr) {
@@ -23234,7 +23319,7 @@ ${injectionText}`;
               const remLimit = parseInt(url.searchParams.get('limit') || '20');
               const remOffset = parseInt(url.searchParams.get('offset') || '0');
               try {
-                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset });
+                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset, access: { userId } });
                 if (remResult) return jsonResponse(res, remResult);
                 return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
               } catch (remErr) {
@@ -23334,7 +23419,7 @@ ${injectionText}`;
               // Remote (self-host) orgs have NO central KB rows — list docs from the agent and
               // apply the same title/tag/platform match JS-side.
               if (orgId && orgIsRemote(orgId)) {
-                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId } });
                 const q = query.toLowerCase();
                 const rMatches = (rOut?.documents || []).filter((doc) =>
                   (doc.title || '').toLowerCase().includes(q)

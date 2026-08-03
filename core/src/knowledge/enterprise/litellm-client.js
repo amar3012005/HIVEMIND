@@ -57,6 +57,23 @@ export function _salvageArrayObjects(text = '') {
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const FORCE_GROQ_FOR_MODELS = /^(openai\/gpt-oss|meta-llama\/|llama-|mixtral-|gemma|qwen)/i;
 
+// Which OpenRouter BACKEND serves a given model family. Left unpinned, OpenRouter
+// spreads Gemini across Vertex / Vertex-EU / AI Studio by its own weighting, and the
+// three are NOT priced the same — measured 2026-08-03 for gemini-2.5-flash-lite:
+//   Vertex     $0.087 in / $0.398 out   (49.3% of traffic)
+//   Vertex-EU  $0.080 in / $0.398 out   (42.0%)
+//   AI Studio  $0.074 in / $0.374 out   ( 8.7%)  <- cheapest on BOTH
+// So 91% of our extraction traffic was landing on the dearer backends for no gain.
+// One ordered table instead of a chain of per-family `if`s: first match wins, env
+// overrides per family, and allow_fallbacks stays TRUE everywhere so a backend 429
+// or outage degrades to slower/dearer rather than failing the ingest.
+// NOTE for EU data residency: pinning AI Studio moves these calls off Vertex-EU. If a
+// tenant needs in-EU inference, set OPENROUTER_GEMINI_PROVIDER_ORDER=google-vertex-eu.
+const PROVIDER_PREFERENCE = [
+  { test: FORCE_GROQ_FOR_MODELS, env: 'OPENROUTER_PROVIDER_ORDER', order: 'Groq' },
+  { test: /gemini/i, env: 'OPENROUTER_GEMINI_PROVIDER_ORDER', order: 'google-ai-studio' },
+];
+
 const DEFAULT_MODEL = process.env.ENTERPRISE_EXTRACTION_MODEL
   || (GROQ_KEY ? 'openai/gpt-oss-20b' : 'gemini-2.5-flash-lite');
 const LITELLM_API_KEY = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
@@ -135,10 +152,14 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     // llama, mixtral, gemma, qwen) PREFER the Groq backend — benchmarked ~4s
     // vs ~16s on other OpenRouter providers, valid JSON, 8/8 facts-with-entities.
     // allow_fallbacks stays TRUE so a Groq 429/outage falls back (slower) rather
-    // than failing — robustness over raw speed. Non-Groq models (gemini) unpinned.
-    if (FORCE_GROQ_FOR_MODELS.test(model || '')) {
-      const order = (process.env.OPENROUTER_PROVIDER_ORDER || 'Groq').split(',').map((x) => x.trim()).filter(Boolean);
-      body.provider = { order, allow_fallbacks: process.env.OPENROUTER_ALLOW_FALLBACKS !== 'false' };
+    // than failing — robustness over raw speed. Gemini pins to the cheapest
+    // backend; see PROVIDER_PREFERENCE for the measured prices behind the order.
+    const _pref = PROVIDER_PREFERENCE.find((p) => p.test.test(model || ''));
+    if (_pref) {
+      const order = (process.env[_pref.env] || _pref.order).split(',').map((x) => x.trim()).filter(Boolean);
+      if (order.length) {
+        body.provider = { order, allow_fallbacks: process.env.OPENROUTER_ALLOW_FALLBACKS !== 'false' };
+      }
     }
   }
   // Groq's strict json_object mode rejects empty/invalid generations with

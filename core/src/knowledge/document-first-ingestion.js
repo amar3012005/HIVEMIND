@@ -2018,7 +2018,7 @@ Every item must include a non-empty content field and one or more valid support_
     // VERSION. Same bytes + same scope re-upload → identical key → the partial
     // UNIQUE (org_id, canonical_ingest_key) collapses to one document row.
     const _canonicalIngestKey = crypto.createHash('sha256')
-      .update([orgId, 'knowledge_base', 'knowledge_upload', _scopedSourceId, '1', checksum].join(' '))
+      .update([orgId, 'knowledge_base', 'knowledge_upload', _scopedSourceId, '1', checksum].join('\u0000'))
       .digest('hex').slice(0, 64);
 
     // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →

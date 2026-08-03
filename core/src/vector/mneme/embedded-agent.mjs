@@ -878,6 +878,12 @@ function routesFor(ctx) {
         await db().query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2 AND deleted_at IS NULL', [memIds, org]).catch(() => {});
         await qFetch(`/collections/${qcoll}/points/delete`, { method: 'POST', body: JSON.stringify({ points: memIds }) }).catch(() => {});
         await db().query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))', [org, memIds]).catch(() => {});
+        // Provenance must go with the memory. The memory row is SOFT-deleted (deleted_at), so the
+        // ON DELETE CASCADE on memory_id never fires — measured after a real document delete:
+        // evidence links vanished (they also cascade off the hard-deleted segments) but 25
+        // derivations were left behind, pointing at soft-deleted memories and unreadable forever.
+        await db().query('DELETE FROM memory_derivations WHERE org_id=$1 AND memory_id = ANY($2::uuid[])', [org, memIds]).catch(() => {});
+        await db().query('DELETE FROM memory_evidence_links WHERE org_id=$1 AND memory_id = ANY($2::uuid[])', [org, memIds]).catch(() => {});
       }
 
       const { rows: segRows } = await db().query('SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [org, doc.id]);

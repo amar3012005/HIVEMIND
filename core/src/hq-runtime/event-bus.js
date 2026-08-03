@@ -57,7 +57,12 @@ async function resolvePersistedEvent(runtimeId, sequence) {
 async function handleNotification(message) {
   let notice;
   try { notice = JSON.parse(message.payload || '{}'); } catch { return; }
-  if (!notice.runtime_id || notice.sequence == null || notice.instance_id === instanceId) return;
+  if (!notice.runtime_id || notice.instance_id === instanceId) return;
+  if (notice.transient === true && notice.event) {
+    local.emit(runtimeChannel(String(notice.runtime_id)), notice);
+    return;
+  }
+  if (notice.sequence == null) return;
   const payload = await resolvePersistedEvent(String(notice.runtime_id), String(notice.sequence));
   if (payload) local.emit(runtimeChannel(payload.runtime_id), payload);
 }
@@ -125,6 +130,21 @@ export async function publishHqRuntimeEvent(event) {
     runtime_id: payload.runtime_id,
     sequence: payload.sequence,
   })]).catch(() => {});
+}
+
+export async function publishHqRuntimeTransient({ runtimeId, orgId, event }) {
+  if (!runtimeId || !event) return;
+  const payload = {
+    instance_id: instanceId,
+    transient: true,
+    runtime_id: String(runtimeId),
+    org_id: String(orgId || ''),
+    event: { ...event, transient: true },
+  };
+  local.emit(runtimeChannel(String(runtimeId)), payload);
+  const pool = ensurePublisher();
+  if (!pool) return;
+  await pool.query('SELECT pg_notify($1, $2)', [NOTIFY_CHANNEL, JSON.stringify(payload)]).catch(() => {});
 }
 
 export async function subscribeHqRuntimeEvents(runtimeId, listener) {

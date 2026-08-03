@@ -2905,6 +2905,15 @@ Every item must include a non-empty content field and one or more valid support_
           for (const m of String(src).matchAll(/<!--\s*page\s+(\d+)\s*-->/gi)) {
             _pageMarks.push({ at: m.index, page: Number(m[1]) });
           }
+          // pdf-parse (the fast-pdf tier) emits `-- N of M --` instead of Docling's HTML
+          // comment. Without this, every text-native PDF got start_page=null — measured
+          // 0/53 on a paper that fast-pdf handled perfectly otherwise, so citations could
+          // not name a page. Same markers the tier already splits on for hybridChunks.
+          if (!_pageMarks.length) {
+            for (const m of String(src).matchAll(/--\s*(\d+)\s+of\s+\d+\s*--/g)) {
+              _pageMarks.push({ at: m.index, page: Number(m[1]) });
+            }
+          }
           const _pageAt = (off) => {
             if (!_pageMarks.length || off == null) return null;
             let page = null;
@@ -2918,8 +2927,29 @@ Every item must include a non-empty content field and one or more valid support_
           for (const text of chunks) {
             const contentHash = crypto.createHash('sha256').update(text).digest('hex');
             const hm = text.match(/^(#{1,6})\s+(.+)$/m);
-            const heading = hm ? hm[2].slice(0, 500) : null;
-            const level = hm ? hm[1].length : 0;
+            let heading = hm ? hm[2].slice(0, 500) : null;
+            let level = hm ? hm[1].length : 0;
+            // FLAT TEXT (fast-pdf / whisper / txt) has no '#'. Without a fallback,
+            // heading_path was 0/53 on a text-native PDF — the metadata-aware work was
+            // inert on that tier. Deterministic heuristics only, no LLM:
+            //   "3.2 Method"  -> level 2 (dot depth)   |   "INTRODUCTION" -> level 1
+            // Guarded: short line, no terminal period, at least one letter run.
+            if (!heading) {
+              for (const raw of text.split('\n').slice(0, 4)) {
+                const line = raw.trim();
+                if (!line || line.length > 90 || /[.:;,]$/.test(line) || !/\p{L}{3}/u.test(line)) continue;
+                const numbered = line.match(/^(\d+(?:\.\d+)*)[.)]?\s+(\p{Lu}[^\n]{2,80})$/u);
+                if (numbered) {
+                  heading = line.slice(0, 500);
+                  level = numbered[1].split('.').length;
+                  break;
+                }
+                const letters = line.replace(/[^\p{L}]/gu, '');
+                if (letters.length >= 6 && letters === letters.toUpperCase() && line.split(/\s+/).length <= 9) {
+                  heading = line.slice(0, 500); level = 1; break;
+                }
+              }
+            }
             if (heading) {
               while (_hstack.length && _hstack[_hstack.length - 1].level >= level) _hstack.pop();
               _hstack.push({ level, title: heading });
@@ -3438,6 +3468,7 @@ Every item must include a non-empty content field and one or more valid support_
         // against the result length, which is stale while other workers are mid-flight — 4 workers ×
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
+        const _tExtract = Date.now();
         let uBudget = DOC_CAP;
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
           while (wi < uWindows.length && uBudget > 0) {
@@ -3473,6 +3504,7 @@ Every item must include a non-empty content field and one or more valid support_
           }
         });
         await Promise.all(uWorkers);
+        const _msExtract = Date.now() - _tExtract;
         // NEVER exit a document silently. The tail-drop above survived because nothing
         // reported it: a truncated document and a thin document produced identical logs.
         console.log(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
@@ -3496,6 +3528,7 @@ Every item must include a non-empty content field and one or more valid support_
         // matter" is not knowable at ingest time because the question has not been asked.
         // Keep every distinct candidate and let cross-window consolidation dedup.
         const _dynamicCap = Math.max(8, extractedCandidates.length);
+        const _tCurate = Date.now();
         const curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
@@ -3508,6 +3541,9 @@ Every item must include a non-empty content field and one or more valid support_
         // NO row in memory_evidence_links, so a join on document_id shows zero summaries.
         // If you need document->summary traceability, add the evidence link — do not add a
         // second generator.
+        const _msCurate = Date.now() - _tCurate;
+        console.log(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
+          + `windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
         const uFacts = [];
         const extraEvidenceLinks = [];
         // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x

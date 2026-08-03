@@ -276,6 +276,15 @@ export class EvidenceRetrievalService {
           wordCount: segment.wordCount,
           startPage: segment.startPage,
           endPage: segment.endPage,
+          // heading + heading_path were WRITTEN to knowledge_segments and then dropped
+          // HERE — this formatter built a fresh object and never forwarded the segment's
+          // own metadata. So the metadata-aware segmentation paid off for pages and
+          // segment_type (both forwarded above) and ZERO for headings: a citation could
+          // say "page 3" but never "1. Gesellschaftliche Gründe > Lebensqualität".
+          // 674 of 3137 segments carry a heading_path today and none of it reached recall.
+          heading: segment.metadata?.heading ?? null,
+          heading_path: segment.metadata?.heading_path ?? null,
+          depth: segment.depth ?? null,
         },
       });
 

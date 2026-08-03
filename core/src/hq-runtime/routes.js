@@ -168,14 +168,22 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
   const runByTodo = new Map();
   for (const run of playbookRuns) {
     const todoId = String(run.trigger?.todo_id || '');
-    if (todoId && !runByTodo.has(todoId)) runByTodo.set(todoId, run);
+    if (todoId && !run.parentRunId && !runByTodo.has(todoId)) runByTodo.set(todoId, run);
   }
   return todos.map((todo) => {
     const run = runByTodo.get(String(todo.id)) || null;
     const snapshot = run ? projectRuntimePlaybookSnapshot(run) : null;
+    const children = run ? playbookRuns.filter((candidate) => candidate.parentRunId === run.id)
+      .sort((left, right) => Number(left.position ?? 0) - Number(right.position ?? 0)) : [];
+    const activeChild = children.find((child) => !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(child.status))) || null;
+    const plannedChildCount = run
+      ? run.artifacts.filter((artifact) => artifact.artifactKey === 'call_brief').length
+      : 0;
+    const controllingRun = activeChild || run;
+    const controllingSnapshot = controllingRun ? projectRuntimePlaybookSnapshot(controllingRun) : snapshot;
     const context = todo.context && typeof todo.context === 'object' ? todo.context : {};
-    const status = run ? playbookQueueStatus(run) : queueStatus(todo.status);
-    const waiting = snapshot?.waiting_for || null;
+    const status = controllingRun ? playbookQueueStatus(controllingRun) : queueStatus(todo.status);
+    const waiting = controllingSnapshot?.waiting_for || null;
     const waitingSummary = waiting?.reason || waiting?.capability || waiting?.types?.join(', ') || null;
     return {
       id: todo.id,
@@ -184,11 +192,18 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
       objective: todo.objective,
       status,
       owner: context.room_tag || todo.kind || null,
-      lifecycle_stage: snapshot?.current_stage || null,
+      lifecycle_stage: controllingSnapshot?.current_stage || null,
       blocker: todo.blockedReason || (status === 'WAITING_FOR_CONNECTOR' || status === 'WAITING_FOR_AUTHORITY' ? waitingSummary : null),
-      next_action: snapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
-      checkpoint_sequence: snapshot?.checkpoint_sequence || 0,
-      checkpoint_at: run?.updatedAt || todo.updatedAt,
+      next_action: controllingSnapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
+      checkpoint_sequence: controllingSnapshot?.checkpoint_sequence || 0,
+      checkpoint_at: controllingRun?.updatedAt || todo.updatedAt,
+      child_progress: run ? {
+        total: plannedChildCount || children.length || null,
+        settled: children.filter((child) => ['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(child.status))).length,
+        current_recipient: activeChild?.context?.target?.label || activeChild?.context?.target?.value || activeChild?.itemKey || null,
+        current_run_id: activeChild?.id || null,
+        outcomes: children.map((child) => ({ item_key: child.itemKey, status: child.status, terminal_state: child.terminalState })),
+      } : null,
       recommendation_rank: Number(context.recommendation_rank || todo.position + 1),
       recommended: context.recommended === true,
       effect_class: context.effect_class || (context.external_action_requested === true ? 'external' : 'internal'),
@@ -254,6 +269,12 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const requestedOverrides = body.gate_overrides && typeof body.gate_overrides === 'object' && !Array.isArray(body.gate_overrides)
           ? body.gate_overrides : {};
         const externalDefault = body.external_default == null ? null : String(body.external_default).trim().toLowerCase();
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        const manualOnlyPolicyKeys = new Set((service?.registry?.definitions?.() || [])
+          .flatMap((definition) => definition.stages || [])
+          .filter((stage) => stage.authority_policy_mode === 'manual_only' && stage.authority_policy_key)
+          .map((stage) => stage.authority_policy_key));
+        const combinedOverrides = { ...legacyOverrides, ...requestedOverrides };
         const requested = normalizeAuthorityPolicy({
           ...(runtime.authorityPolicy || {}),
           ...(externalDefault ? { external_default: externalDefault } : {}),
@@ -265,7 +286,8 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         });
         if ((!externalDefault && !Object.keys(legacyOverrides).length && !Object.keys(requestedOverrides).length)
             || (externalDefault && !['manual', 'auto'].includes(externalDefault))
-            || Object.values({ ...legacyOverrides, ...requestedOverrides }).some((value) => !['manual', 'auto'].includes(value))) {
+            || Object.values(combinedOverrides).some((value) => !['manual', 'auto'].includes(value))
+            || Object.entries(combinedOverrides).some(([key, value]) => manualOnlyPolicyKeys.has(key) && value === 'auto')) {
           return jsonResponse(res, { error: 'hq_runtime_outbound_authority_invalid' }, 400);
         }
         if (JSON.stringify(normalizeAuthorityPolicy(runtime.authorityPolicy || {})) !== JSON.stringify(requested)) {
@@ -525,6 +547,18 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           select: { id: true, sourceId: true, name: true, status: true, requestedChannels: true, currentPlanVersionId: true },
         }) : []).map((campaign) => [campaign.sourceId, campaign]));
         const playbookProjectionWarnings = [];
+        const playbookInputs = playbookRuns.filter((run) => run.status === 'WAITING_EVENT'
+          && (run.waitingFor?.types || [run.waitingFor?.type]).includes('input.provided')).map((run) => {
+          const request = [...run.artifacts].reverse().find((artifact) => artifact.artifactKey === 'input_request');
+          if (!request) return null;
+          return {
+            run_id: run.id,
+            input_key: request.data?.input_key,
+            label: request.data?.label || request.data?.input_key,
+            description: request.data?.description || '',
+            value_type: request.data?.value_type || 'string',
+          };
+        }).filter((request) => request?.input_key);
         const playbookApprovals = playbookRuns.filter((run) => run.status === 'WAITING_AUTHORITY').map((run) => {
           let playbook;
           try {
@@ -566,7 +600,9 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             title: todo?.title || playbook?.name || 'External messages are ready',
             gate: stage.authority_gate,
             policy_key: stage.authority_policy_key,
-            preference: resolveAuthorityPreference(runtime.authorityPolicy, stage.authority_policy_key),
+            preference: stage.authority_policy_mode === 'manual_only'
+              ? 'manual' : resolveAuthorityPreference(runtime.authorityPolicy, stage.authority_policy_key),
+            manual_only: stage.authority_policy_mode === 'manual_only',
             kind: 'external_action',
             messages,
             calls,
@@ -592,6 +628,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           runtime_queue: agentRuntimeTasks,
           growth_brief: projectGrowthBrief(baselineArtifact, currentPlanArtifact),
           playbook_approvals: playbookApprovals, playbook_runs: playbookRuns,
+          playbook_inputs: playbookInputs,
           playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),
           playbook_projection_warnings: playbookProjectionWarnings,
           first_life: firstLife, activation_sprint: activationSprint,
@@ -750,6 +787,62 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, created, 201);
       }
 
+      const playbookInputMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/inputs\/([a-z0-9._-]{1,120})$/i);
+      if (playbookInputMatch && req.method === 'POST') {
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        if (!Object.prototype.hasOwnProperty.call(body, 'value')) {
+          return jsonResponse(res, { error: 'runtime_playbook_input_value_required' }, 400);
+        }
+        const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: playbookInputMatch[1], orgId } });
+        if (!run) return jsonResponse(res, { error: 'runtime_playbook_run_not_found' }, 404);
+        const inputKey = playbookInputMatch[2];
+        const waiting = run.waitingFor && typeof run.waitingFor === 'object' ? run.waitingFor : {};
+        if (run.status !== 'WAITING_EVENT' || !(waiting.types || [waiting.type]).includes('input.provided')) {
+          return jsonResponse(res, { error: 'runtime_playbook_input_not_waiting' }, 409);
+        }
+        const acceptedKeys = (waiting.correlation_values || [waiting.correlation_value]).filter(Boolean).map(String);
+        if (acceptedKeys.length && !acceptedKeys.includes(inputKey)) {
+          return jsonResponse(res, { error: 'runtime_playbook_input_key_mismatch', expected: acceptedKeys }, 409);
+        }
+        const requestArtifact = await prisma.runtimePlaybookArtifact.findFirst({
+          where: { runId: run.id, artifactKey: 'input_request' },
+          orderBy: { createdAt: 'desc' },
+        });
+        const requestData = requestArtifact?.data && typeof requestArtifact.data === 'object' ? requestArtifact.data : {};
+        if (requestData.input_key && String(requestData.input_key) !== inputKey) {
+          return jsonResponse(res, { error: 'runtime_playbook_input_contract_mismatch' }, 409);
+        }
+        let value = body.value;
+        if (requestData.value_type === 'email') {
+          value = String(value || '').trim().toLowerCase();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+            return jsonResponse(res, { error: 'runtime_playbook_input_email_invalid' }, 400);
+          }
+        } else if (requestData.value_type === 'phone') {
+          value = String(value || '').replace(/[\s()/-]/g, '');
+          if (!/^\+[1-9]\d{6,14}$/.test(value)) {
+            return jsonResponse(res, { error: 'runtime_playbook_input_phone_invalid' }, 400);
+          }
+        }
+        const context = run.context && typeof run.context === 'object' ? run.context : {};
+        await prisma.runtimePlaybookRun.update({
+          where: { id: run.id },
+          data: { context: {
+            ...context,
+            supplied_inputs: { ...(context.supplied_inputs || {}), [inputKey]: value },
+          } },
+        });
+        const resumed = await service.resumeEvent(run.id, orgId, {
+          id: `input:${run.id}:${inputKey}:${Date.now()}`,
+          type: 'input.provided',
+          data: { input_key: inputKey },
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { run: resumed, input_key: inputKey }, 202);
+      }
+
       const playbookAuthorityMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/authority$/i);
       if (playbookAuthorityMatch && req.method === 'POST') {
         const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
@@ -771,6 +864,9 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         }
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        if (stage.authority_policy_mode === 'manual_only' && preference === 'auto') {
+          return jsonResponse(res, { error: 'runtime_playbook_authority_manual_only' }, 409);
+        }
         if (preference) {
           const policyValue = preference;
           const policy = normalizeAuthorityPolicy({

@@ -19,6 +19,7 @@
 
 import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed, outreachAutoProposeEnabled } from './outreach-contract.js';
 import { buildOutreachContract, resolveDelivery } from './contract.js';
+import { createTaraOutboundCallService } from '../tara/outbound-call-service.js';
 
 // ── Provider capability probe ───────────────────────────────────────────────
 // Telephony is NOT guaranteed: an adapter can ship realtime voice with no PSTN
@@ -84,6 +85,7 @@ export function createOutreachModule(deps) {
     requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor,
     onRuntimeCallResult = null,
   } = deps;
+  const outboundCalls = createTaraOutboundCallService({ prisma });
 
   // ── snapshot: latest prospects event per query from the sealed turn ────────
   function prospectsFromTurn(lines) {
@@ -371,7 +373,6 @@ export function createOutreachModule(deps) {
     if (inFlight) { const err = new Error('another call in this campaign is in flight'); err.status = 409; throw err; }
     await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'dialing' } });
     const to = String(target.phone).replace(/[\s()/-]/g, '');
-    const sessionId = `outreach-${target.id.slice(0, 8)}-${Date.now()}`;
     // Directive folds goal + opener + the auto-selected conversation strategy so TARA's
     // strategist plans with intent.
     const directive = [
@@ -396,7 +397,9 @@ export function createOutreachModule(deps) {
     // last week keeps dialing on the old engine and the toggle looks broken.
     // The snapshot stays as the fallback if the live lookup fails, so a
     // transient error can never leave a campaign unable to dial.
-    let provider = await taraProviderFor(campaign.orgId).catch(() => null);
+    const runtimePinnedProvider = campaign.voiceConfigSnapshot?.runtime_playbook_run_id
+      ? campaign.voiceConfigSnapshot?.selected_provider : null;
+    let provider = runtimePinnedProvider || await taraProviderFor(campaign.orgId).catch(() => null);
     if (!provider && campaign.voiceProvider) {
       provider = {
         provider: campaign.voiceProvider,
@@ -445,16 +448,36 @@ export function createOutreachModule(deps) {
         return await buildOrgBrief(prisma, campaign.orgId, { userId: campaign.userId });
       } catch { return ''; }
     })();
-    const r = await fetch(`${provider.baseUrl}/calls/outbound`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Every adapter shares one dial gate, so send the key regardless of
-        // provider — scoping it to deepgram made a Grok campaign dial 401.
-        ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
-      },
-      body: JSON.stringify({
-        to, session_id: sessionId, user_id: campaign.userId, org_id: campaign.orgId,
+    let receipt;
+    try {
+      receipt = await outboundCalls.execute({
+        executionRef: campaign.voiceConfigSnapshot?.runtime_playbook_run_id || campaign.id,
+        source: 'outreach-campaign',
+        orgId: campaign.orgId,
+        userId: campaign.userId,
+        roomId: campaign.roomId,
+        campaignId: campaign.unifiedCampaignId || null,
+        outreachCampaignId: campaign.id,
+        outreachTargetId: target.id,
+        leadId: target.leadId || null,
+        runtimePlaybookRunId: campaign.voiceConfigSnapshot?.runtime_playbook_run_id || null,
+        runtimeStageId: campaign.voiceConfigSnapshot?.runtime_playbook_stage_id || null,
+        authorityRef: campaign.voiceConfigSnapshot?.authority_ref || null,
+        campaignName: `Outreach calls: ${campaign.id}`,
+        recipientName: target.company,
+        recipientCompany: target.company,
+        to,
+        goal: payload.goal,
+        provider,
+        providerCandidates: campaign.voiceConfigSnapshot?.provider_candidates || [provider.provider],
+        configSnapshot: { revision: provider.revision || 1, skill_id: skillId || null },
+        auditContext: { target_id: target.id, lead_id: target.leadId || null },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        },
+        providerPayload: {
+          user_id: campaign.userId, org_id: campaign.orgId,
         goal: String(directive).slice(0, 600),
         // The SAME goal + skill plan for every outbound call, whichever provider
         // executes it. The snapshot pinned the skill; its prompt is resolved above
@@ -479,34 +502,25 @@ export function createOutreachModule(deps) {
         context: payload.context ? String(payload.context).slice(0, 800) : undefined,
         contact_name: target.company ? String(target.company).slice(0, 120) : undefined,
         provider: provider.provider,
-        config_revision: provider.revision,
-      }),
-      signal: AbortSignal.timeout(20000),
-    }).catch(() => null);
-    if (!r) {
-      await prisma.outreachTarget.update({
-        where: { id: target.id }, data: { state: 'failed', resultRef: { error: 'TARA outbound service unreachable' } },
+          config_revision: provider.revision,
+        },
       });
-      throw new Error('TARA outbound service unreachable');
-    }
-    const tx = await r.text();
-    let result; try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
-    if (!r.ok) {
+    } catch (error) {
+      const uncertain = error?.classification === 'uncertain_transport' || error?.reconciliationRequired === true;
       await prisma.outreachTarget.update({
         where: { id: target.id },
-        data: { state: 'failed', resultRef: { error: String(result?.error || `dial failed (${r.status})`).slice(0, 300) } },
+        data: {
+          state: uncertain ? 'dialing' : 'failed',
+          resultRef: {
+            ...(target.resultRef || {}),
+            taraCallAttemptId: error?.attemptId || null,
+            outcome: uncertain ? 'uncertain' : 'rejected',
+            error: String(error?.message || error).slice(0, 300),
+          },
+        },
       });
-      const err = new Error(result?.error || `dial failed (${r.status})`); err.status = r.status === 400 ? 400 : 502; throw err;
+      throw error;
     }
-    const action = await recordOutboundAction({
-      orgId: campaign.orgId, userId: campaign.userId, roomId: campaign.roomId,
-      channel: 'call', recipient: to, messageId: result?.call_leg_id || null,
-      meta: {
-        via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id,
-        lead_id: target.leadId || undefined, session_id: sessionId,
-        provider: provider.provider, goal: payload.goal, company: target.company || undefined,
-      },
-    }).catch(() => null);
     // A provider dial receipt proves only that the call started. The target stays
     // active until /api/tara/calls/end has produced (or conclusively cannot
     // produce) its post-call insight and the campaign reconciler records it.
@@ -518,10 +532,12 @@ export function createOutreachModule(deps) {
       data: {
         state: 'in_call',
         resultRef: {
-          outboundActionId: action?.id || null,
-          taraCallLegId: result?.call_leg_id || null,
-          sessionId,
-          provider: provider.provider,
+          outboundActionId: receipt.outboundAction?.id || receipt.attempt?.outboundActionId || null,
+          taraCallAttemptId: receipt.attempt?.id || null,
+          taraCallLegId: receipt.callLegId,
+          requestedSessionId: receipt.requestedSessionId,
+          sessionId: receipt.canonicalSessionId,
+          provider: receipt.provider,
           dialedAt: new Date().toISOString(),
         },
       },
@@ -597,13 +613,29 @@ export function createOutreachModule(deps) {
   async function reconcileCall({ orgId, sessionId, campaignId = null, targetId = null }) {
     const where = targetId
       ? { id: targetId, ...(campaignId ? { campaignId } : {}) }
-      : { resultRef: { path: ['sessionId'], equals: sessionId } };
+      : { OR: [
+          { resultRef: { path: ['sessionId'], equals: sessionId } },
+          { resultRef: { path: ['requestedSessionId'], equals: sessionId } },
+        ] };
     const target = await prisma.outreachTarget.findFirst({ where });
     if (!target) return { status: 'not_found' };
     const campaign = await loadCampaign(target.campaignId, orgId, false);
     if (!campaign || campaign.channel !== 'call') return { status: 'not_found' };
-    const expectedSession = String(target.resultRef?.sessionId || '');
-    if (!expectedSession || (sessionId && expectedSession !== String(sessionId))) return { status: 'correlation_mismatch' };
+    let expectedSession = String(target.resultRef?.sessionId || '');
+    const requestedSession = String(target.resultRef?.requestedSessionId || '');
+    if (!expectedSession) return { status: 'correlation_mismatch' };
+    if (sessionId && ![expectedSession, requestedSession].filter(Boolean).includes(String(sessionId))) return { status: 'correlation_mismatch' };
+    const attempt = target.resultRef?.taraCallAttemptId
+      ? await prisma.taraCallAttempt.findFirst({ where: { id: target.resultRef.taraCallAttemptId, orgId } }).catch(() => null)
+      : await prisma.taraCallAttempt.findFirst({ where: {
+          orgId, OR: [{ sessionId: expectedSession }, { requestedSessionId: requestedSession || expectedSession }],
+        }, orderBy: { createdAt: 'desc' } }).catch(() => null);
+    if (attempt?.sessionId && attempt.sessionId !== expectedSession) {
+      expectedSession = attempt.sessionId;
+      await prisma.outreachTarget.update({ where: { id: target.id }, data: {
+        resultRef: { ...(target.resultRef || {}), requestedSessionId: requestedSession || target.resultRef?.sessionId || null, sessionId: expectedSession },
+      } });
+    }
     const call = await prisma.taraCall.findUnique({
       where: { orgId_sessionId: { orgId, sessionId: expectedSession } },
     }).catch(() => null);
@@ -638,7 +670,7 @@ export function createOutreachModule(deps) {
       leadFound: data.lead_found === true,
       taraLearnings: Array.isArray(data.tara_learnings) ? data.tara_learnings.slice(0, 12) : [],
       nextStep: Array.isArray(data.leads) ? data.leads.find((lead) => lead?.next_step)?.next_step || null : null,
-      analyzedAt: new Date().toISOString(),
+      analyzedAt: target.resultRef?.analyzedAt || new Date().toISOString(),
     };
     const updated = await prisma.outreachTarget.update({
       where: { id: target.id }, data: { state: 'analyzed', resultRef },
@@ -652,7 +684,9 @@ export function createOutreachModule(deps) {
         result: { session_id: expectedSession, call, insight },
       }).catch((error) => console.warn('[outreach-call] runtime result wake failed:', updated.id, error.message));
     }
-    await advanceCallCampaign(campaign.id, orgId);
+    // Runtime playbooks own the transition after Room analysis. Human-started
+    // campaigns retain the existing serial continuation behavior.
+    if (!runtimeRunId) await advanceCallCampaign(campaign.id, orgId);
     return { status: 'analyzed', target: updated, campaign: await loadCampaign(campaign.id, orgId) };
   }
 
@@ -751,6 +785,36 @@ export function createOutreachModule(deps) {
 
   // ── HTTP handler — returns true when the request was handled ───────────────
   async function handle(req, res, pathname) {
+    const taraCallReadMatch = pathname.match(/^\/internal\/hyper\/tara\/calls\/([^/]+)$/);
+    if (taraCallReadMatch && req.method === 'GET') {
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const orgId = String(req.headers['x-hm-org-id'] || '').trim();
+      const reference = decodeURIComponent(taraCallReadMatch[1]).replace(/^tara-call:/, '');
+      if (!/^[0-9a-f-]{36}$/i.test(orgId) || !reference) {
+        return jsonResponse(res, { error: 'tenant and call reference are required' }, 400), true;
+      }
+      const call = await prisma.taraCall.findFirst({
+        where: { orgId, OR: [...(/^[0-9a-f-]{36}$/i.test(reference) ? [{ id: reference }] : []), { sessionId: reference }] },
+      });
+      if (!call) return jsonResponse(res, { found: false }, 404), true;
+      const [turns, insight] = await Promise.all([
+        prisma.taraTurn.findMany({ where: { orgId, callId: call.id }, orderBy: { seq: 'asc' } }),
+        prisma.taraInsight.findFirst({ where: { orgId, callId: call.id } }),
+      ]);
+      return jsonResponse(res, {
+        found: true,
+        call: {
+          id: call.id, session_id: call.sessionId, provider: call.provider, status: call.status,
+          goal: call.goal, language: call.language, turn_count: call.turnCount,
+          duration_ms: call.durationMs, started_at: call.startedAt, ended_at: call.endedAt,
+        },
+        transcript_ref: `tara-call:${call.id}`,
+        turns: turns.map((turn) => ({ seq: turn.seq, user_text: turn.userText, agent_text: turn.agentText, created_at: turn.createdAt })),
+        insight: insight ? { id: insight.id, summary: insight.summary, data: insight.data, created_at: insight.createdAt } : null,
+      }), true;
+    }
+
     if (pathname === '/internal/hyper/outreach/calls/reconcile' && req.method === 'POST') {
       const key = String(req.headers['x-api-key'] || '').trim();
       if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;

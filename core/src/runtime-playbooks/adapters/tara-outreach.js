@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { resolveTaraProviderCandidates } from '../../tara/provider-policy.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -68,6 +69,8 @@ async function prepare(prisma, input, context) {
 
   const userId = await ownerFor(prisma, context);
   const turnId = await turnFor(prisma, context, valid);
+  const providerPolicy = await resolveTaraProviderCandidates({ prisma, orgId: context.orgId });
+  if (!providerPolicy.selected) throw new Error('runtime_tara_outbound_capability_unavailable');
   let campaign = await prisma.outreachCampaign.findFirst({
     where: {
       orgId: context.orgId,
@@ -88,7 +91,11 @@ async function prepare(prisma, input, context) {
         voiceConfigSnapshot: {
           runtime_playbook_run_id: context.runId,
           runtime_playbook_stage_id: context.stageId,
+          selected_provider: providerPolicy.selected,
+          provider_candidates: providerPolicy.candidates.map((candidate) => candidate.provider),
+          rejected_providers: providerPolicy.rejected,
         },
+        voiceProvider: providerPolicy.selected.provider,
         targets: {
           create: valid.map((artifact, position) => ({
             position,
@@ -115,6 +122,21 @@ async function prepare(prisma, input, context) {
       include: { targets: { orderBy: { position: 'asc' } } },
     });
   }
+  if (!campaign.voiceConfigSnapshot?.selected_provider) {
+    campaign = await prisma.outreachCampaign.update({
+      where: { id: campaign.id },
+      data: {
+        voiceProvider: providerPolicy.selected.provider,
+        voiceConfigSnapshot: {
+          ...(campaign.voiceConfigSnapshot || {}),
+          selected_provider: providerPolicy.selected,
+          provider_candidates: providerPolicy.candidates.map((candidate) => candidate.provider),
+          rejected_providers: providerPolicy.rejected,
+        },
+      },
+      include: { targets: { orderBy: { position: 'asc' } } },
+    });
+  }
   const byBrief = new Map(campaign.targets.map((target) => [String(target.inputContext?.runtime_call_brief_ref || ''), target]));
   const artifacts = valid.map((artifact) => {
     const target = byBrief.get(artifact.id);
@@ -128,12 +150,17 @@ async function prepare(prisma, input, context) {
         campaign_ref: campaign.id,
         target_ref: target.id,
         phone: target.phone,
+        lead_ref: target.leadId || artifact.data?.lead_ref || null,
+        verified_email: artifact.data?.verified_email || null,
         prospect: target.company,
         goal: target.payload?.goal || null,
         opener: target.payload?.opener || null,
         strategy: target.payload?.strategy || null,
         language: target.payload?.language || 'en',
         voice_style: target.payload?.voice_style || null,
+        provider: campaign.voiceConfigSnapshot?.selected_provider?.provider || campaign.voiceProvider,
+        provider_candidates: campaign.voiceConfigSnapshot?.provider_candidates || [],
+        rejected_providers: campaign.voiceConfigSnapshot?.rejected_providers || [],
       },
       source_refs: [...new Set([...(artifact.source_refs || []), `outreach-campaign:${campaign.id}`, `outreach-target:${target.id}`])],
       external_ref: target.id,

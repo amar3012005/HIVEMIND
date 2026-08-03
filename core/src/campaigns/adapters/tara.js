@@ -1,17 +1,11 @@
 import { evaluateGate } from '../../tara/compliance-gate.js';
 import { assertTransition } from '../../tara/call-attempt-state.js';
+import { createTaraOutboundCallService } from '../../tara/outbound-call-service.js';
+import { resolveTaraProviderCandidates } from '../../tara/provider-policy.js';
 import { CampaignAdapterError, publicProviderResponse, requireApproval, requireValue } from './contract.js';
 
 const E164_RE = /^\+[1-9]\d{6,14}$/;
 const COUNTRY_RE = /^[A-Z]{2}$/;
-
-function providerConfig(runtime) {
-  const provider = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
-  const baseUrl = provider === 'grok'
-    ? (process.env.HIVEMIND_TARA_GROK_URL || process.env.TARA_GROK_INTERNAL_URL || 'http://tara-grok:8092')
-    : (process.env.HIVEMIND_TARA_DEEPGRAM_URL || 'http://tara-deepgram:8091');
-  return { provider, baseUrl };
-}
 
 async function transition(prisma, attempt, next, data = {}) {
   assertTransition(attempt.status, next);
@@ -47,9 +41,9 @@ function validateTaraAction(action) {
 export const taraAdapter = {
   channel: 'tara',
   async checkCapability({ prisma, action }) {
-    const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId }, select: { id: true } });
-    if (!runtime) throw new CampaignAdapterError('TARA is no longer configured for this organization', { code: 'tara_runtime_inactive', outcome: 'BLOCKED' });
-    return { connected: true };
+    const policy = await resolveTaraProviderCandidates({ prisma, orgId: action.campaign.orgId });
+    if (!policy.selected) throw new CampaignAdapterError('No governed TARA provider is currently available', { code: 'tara_runtime_inactive', outcome: 'BLOCKED', details: { rejected_providers: policy.rejected } });
+    return { connected: true, selected_provider: policy.selected.provider, candidates: policy.candidates.map((candidate) => candidate.provider) };
   },
   validateAction({ action }) { validateTaraAction(action); return { valid: true }; },
   async execute({ prisma, action, approval, providers = {}, executionAttempt = 1 }) {
@@ -58,7 +52,19 @@ export const taraAdapter = {
     const { to, opening, lawfulBasis, country, timezone } = validateTaraAction(action);
 
     const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId } });
-    const { provider, baseUrl } = providerConfig(runtime);
+    const providerPolicy = await resolveTaraProviderCandidates({ prisma, orgId: action.campaign.orgId, fetchImpl: providers.fetch || fetch });
+    if (!providerPolicy.selected) throw new CampaignAdapterError('No governed TARA provider is currently available', {
+      code: 'tara_provider_unavailable', outcome: 'BLOCKED', details: { rejected_providers: providerPolicy.rejected },
+    });
+    const authorityProvider = String(payload.provider || '').trim() || null;
+    const selected = authorityProvider
+      ? providerPolicy.candidates.find((candidate) => candidate.provider === authorityProvider)
+      : providerPolicy.selected;
+    if (!selected) throw new CampaignAdapterError('The authority-approved TARA provider is unavailable; refresh the immutable action before retrying', {
+      code: 'tara_provider_change_requires_reauthorization', outcome: 'BLOCKED',
+      details: { approved_provider: authorityProvider, candidates: providerPolicy.candidates.map((candidate) => candidate.provider) },
+    });
+    const { provider, baseUrl } = selected;
     const callingWindow = payload.calling_window && typeof payload.calling_window === 'object'
       ? payload.calling_window : { tz: timezone, days: [1, 2, 3, 4, 5], startHour: 9, endHour: 20 };
     const taraCampaign = await prisma.taraCampaign.upsert({
@@ -66,11 +72,11 @@ export const taraAdapter = {
       create: {
         orgId: action.campaign.orgId, userId: action.campaign.ownerUserId, unifiedCampaignId: action.campaignId,
         name: action.campaign.name.slice(0, 200), status: 'active', provider,
-        configSnapshot: { revision: runtime?.revision || 1 }, goal: action.campaign.goal,
+        configSnapshot: { revision: runtime?.revision || 1, selected_provider: provider, provider_candidates: providerPolicy.candidates.map((candidate) => candidate.provider), rejected_providers: providerPolicy.rejected }, goal: action.campaign.goal,
         callingWindow, caps: payload.caps || { concurrency: 1, dailyMax: 25 },
         complianceConfig: payload.compliance_config || {},
       },
-      update: { status: 'active', provider, configSnapshot: { revision: runtime?.revision || 1 } },
+      update: { status: 'active', provider, configSnapshot: { revision: runtime?.revision || 1, selected_provider: provider, provider_candidates: providerPolicy.candidates.map((candidate) => candidate.provider), rejected_providers: providerPolicy.rejected } },
     });
     const contact = await prisma.taraCampaignContact.upsert({
       where: { campaignId_phone: { campaignId: taraCampaign.id, phone: to } },
@@ -87,7 +93,8 @@ export const taraAdapter = {
       create: {
         campaignId: taraCampaign.id, contactId: contact.id, orgId: action.campaign.orgId,
         userId: action.campaign.ownerUserId, provider, actionKey, attemptNo: executionAttempt,
-        scheduledAt: action.scheduledAt, configSnapshot: { revision: runtime?.revision || 1 },
+        scheduledAt: action.scheduledAt, providerCandidates: providerPolicy.candidates.map((candidate) => candidate.provider),
+        configSnapshot: { revision: runtime?.revision || 1, selected_provider: provider, rejected_providers: providerPolicy.rejected },
       },
       update: {},
     });
@@ -116,41 +123,58 @@ export const taraAdapter = {
       await transition(prisma, attempt, 'skipped');
       throw new CampaignAdapterError('The selected TARA provider requires this call to be started in the browser', { code: 'browser_required', outcome: 'BLOCKED' });
     }
-    const sessionId = `campaign-${action.id.slice(0, 8)}-${Date.now()}`;
-    attempt = await transition(prisma, attempt, 'dialing', { sessionId, startedAt: new Date() });
-    await prisma.taraCampaignContact.update({ where: { id: contact.id }, data: { status: 'calling' } });
-    const response = await providerFetch(`${baseUrl}/calls/outbound`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(provider === 'deepgram' && process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}) },
-      body: JSON.stringify({
-        to, session_id: sessionId, user_id: action.campaign.ownerUserId, org_id: action.campaign.orgId,
+    const outboundCalls = createTaraOutboundCallService({ prisma, fetchImpl: providerFetch });
+    const receipt = await outboundCalls.execute({
+      actionKey,
+      attemptNo: executionAttempt,
+      executionRef: action.campaignId,
+      source: 'campaigns_v2',
+      orgId: action.campaign.orgId,
+      userId: action.campaign.ownerUserId,
+      roomId: action.campaign.roomId || null,
+      campaignId: action.campaignId,
+      campaignActionId: action.id,
+      authorityRef: approval.id,
+      campaignName: action.campaign.name,
+      recipientName: payload.recipient_name || null,
+      recipientCompany: payload.company || null,
+      to,
+      goal: payload.goal || action.campaign.goal,
+      country,
+      timezone,
+      lawfulBasis,
+      callingWindow,
+      caps: payload.caps || { concurrency: 1, dailyMax: 25 },
+      complianceConfig: payload.compliance_config || {},
+      provider: { provider, baseUrl, revision: runtime?.revision || 1 },
+      providerCandidates: providerPolicy.candidates.map((candidate) => candidate.provider),
+      configSnapshot: { revision: runtime?.revision || 1, gate },
+      headers: { 'Content-Type': 'application/json', ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}) },
+      providerPayload: {
+        user_id: action.campaign.ownerUserId,
+        org_id: action.campaign.orgId,
         goal: [payload.goal || action.campaign.goal, `Open with: ${opening}`, payload.strategy ? `Strategy: ${payload.strategy}` : null].filter(Boolean).join('. ').slice(0, 600),
         context: String(payload.context || '').slice(0, 800) || undefined,
-        language: String(payload.language || 'en').slice(0, 8), provider, config_revision: runtime?.revision || 1,
-      }),
-      signal: AbortSignal.timeout(20_000),
+        language: String(payload.language || 'en').slice(0, 8),
+        provider,
+        config_revision: runtime?.revision || 1,
+      },
     });
-    const text = await response.text(); let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 500) }; }
-    if (!response.ok) {
-      await transition(prisma, attempt, 'failed');
-      await transition(prisma, attempt, 'done', { endedAt: new Date(), disposition: 'failed' });
-      const error = new Error(data?.error || `TARA outbound failed (${response.status})`); error.status = response.status; throw error;
-    }
-    const callLegId = data?.call_leg_id || null;
-    await prisma.taraCallAttempt.update({ where: { id: attempt.id }, data: { callLegId } });
-    await prisma.outboundAction.create({ data: {
-      orgId: action.campaign.orgId, userId: action.campaign.ownerUserId, roomId: action.campaign.roomId || null,
-      campaignId: action.campaignId, campaignActionId: action.id, approvalId: approval.id,
-      channel: 'call', recipient: to, messageId: callLegId || sessionId, status: 'sent',
-      meta: { source: 'campaigns_v2', session_id: sessionId, tara_call_attempt_id: attempt.id, provider },
-    } });
-    return { externalId: callLegId || sessionId, response: publicProviderResponse({ ...data, provider, session_id: sessionId }) };
+    return {
+      externalId: receipt.callLegId || receipt.canonicalSessionId,
+      response: publicProviderResponse({
+        ...(receipt.body || {}), provider: receipt.provider,
+        session_id: receipt.canonicalSessionId,
+        requested_session_id: receipt.requestedSessionId,
+        tara_call_attempt_id: receipt.attempt?.id,
+        deduplicated: receipt.deduplicated === true,
+      }),
+    };
   },
   async reconcile({ prisma, action }) {
     const attempt = await prisma.taraCallAttempt.findFirst({ where: { actionKey: { startsWith: `campaign:${action.id}:` } }, orderBy: { createdAt: 'desc' } });
     const ledger = await prisma.outboundAction.findFirst({ where: { campaignActionId: action.id, status: 'sent' }, orderBy: { sentAt: 'desc' } });
-    if (attempt?.callLegId && ledger) return { status: 'SUCCEEDED', externalId: attempt.callLegId, response: { provider: attempt.provider, session_id: attempt.sessionId, source: 'call_attempt_and_outbound_ledger' } };
+    if (attempt?.callLegId && ledger) return { status: 'SUCCEEDED', externalId: attempt.callLegId, response: { provider: attempt.provider, session_id: attempt.sessionId, requested_session_id: attempt.requestedSessionId, source: 'call_attempt_and_outbound_ledger' } };
     return { status: 'NEEDS_RECONCILIATION', reason: attempt?.sessionId
       ? 'A TARA session was reserved but no confirmed call-leg and outbound ledger entry exist; inspect provider state before retrying.'
       : 'No TARA session or call-leg ID was recorded.' };

@@ -51,6 +51,10 @@ export class PostgresRuntimeStore {
       create: {
         orgId: input.orgId,
         roomId: input.roomId || null,
+        parentRunId: input.parentRunId || null,
+        parentStageId: input.parentStageId || null,
+        itemKey: input.itemKey || null,
+        position: Number.isInteger(input.position) ? input.position : null,
         scopeKey: input.scopeKey || 'global',
         playbookId: input.playbookId,
         playbookVersion: input.playbookVersion,

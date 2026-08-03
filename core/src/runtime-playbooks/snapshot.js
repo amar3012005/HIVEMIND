@@ -16,6 +16,10 @@ export function projectRuntimePlaybookSnapshot(run, { turns = [] } = {}) {
   const checkpoint = rows(run.checkpoints).at(-1) || null;
   return {
     execution_id: run.id,
+    parent_execution_id: run.parentRunId || null,
+    parent_stage_id: run.parentStageId || null,
+    item_key: run.itemKey || null,
+    position: run.position ?? null,
     todo_id: run.trigger?.todo_id || null,
     room_id: run.roomId || null,
     playbook: { id: run.playbookId, version: run.playbookVersion },

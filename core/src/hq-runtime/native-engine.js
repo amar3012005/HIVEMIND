@@ -106,11 +106,13 @@ export function verifySpecialistDelivery({ order, result, resultOutput }) {
 export function resolveAuthorityDecision(stage, authorityPolicy = {}) {
   const gate = String(stage?.authority_gate || '').trim() || null;
   const policyKey = String(stage?.authority_policy_key || '').trim() || null;
+  const manualOnly = stage?.authority_policy_mode === 'manual_only';
   return {
     gate,
     policyKey,
-    preference: resolveAuthorityPreference(authorityPolicy, policyKey),
-    autoGrant: Boolean(gate && policyKey && resolveAuthorityPreference(authorityPolicy, policyKey) === 'auto'),
+    preference: manualOnly ? 'manual' : resolveAuthorityPreference(authorityPolicy, policyKey),
+    autoGrant: Boolean(!manualOnly && gate && policyKey && resolveAuthorityPreference(authorityPolicy, policyKey) === 'auto'),
+    manualOnly,
   };
 }
 

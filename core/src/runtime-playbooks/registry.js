@@ -133,6 +133,12 @@ export class RuntimePlaybookRegistry {
       }))
       .sort((left, right) => left.playbook_id.localeCompare(right.playbook_id) || right.version - left.version);
   }
+
+  definitions({ scopeKey = 'global' } = {}) {
+    return [...this.records.values()]
+      .filter((record) => record.scope_key === 'global' || record.scope_key === scopeKey)
+      .map((record) => clone(record.definition));
+  }
 }
 
 export function createJsonPlaybookSource(paths) {

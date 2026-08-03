@@ -73,7 +73,8 @@ export class RuntimePlaybookService {
       throw new Error(`runtime_playbook_nonterminal_definitions_missing:${unresolved.join(',')}`);
     }
     const selector = new DirectorPlaybookSelector({ registry, ...(completionFetch ? { completionFetch } : {}) });
-    const adapterRegistry = adapters || createProductionRuntimeAdapterRegistry({ prisma });
+    let serviceRef = null;
+    const adapterRegistry = adapters || createProductionRuntimeAdapterRegistry({ prisma, getService: () => serviceRef });
     const executionPolicy = JSON.parse(await readFile(executionPolicyUrl, 'utf8'));
     const executor = new GenericStageExecutor({
       registry,
@@ -85,7 +86,8 @@ export class RuntimePlaybookService {
       onStageState,
       executionPolicy,
     });
-    return new RuntimePlaybookService({ prisma, registry, selector, executor, logger, onRunState });
+    serviceRef = new RuntimePlaybookService({ prisma, registry, selector, executor, logger, onRunState });
+    return serviceRef;
   }
 
   async tryCreateAssignment({ orgId, roomId, objective, idempotencyKey, trigger = {}, context = {}, scopeKey = 'global' } = {}) {
@@ -107,7 +109,7 @@ export class RuntimePlaybookService {
     return { matched: true, selection, playbook };
   }
 
-  async createSelectedAssignment({ orgId, roomId, idempotencyKey, trigger = {}, context = {}, scopeKey = 'global', selection } = {}) {
+  async createSelectedAssignment({ orgId, roomId, idempotencyKey, trigger = {}, context = {}, scopeKey = 'global', selection, parentRunId = null, parentStageId = null, itemKey = null, position = null } = {}) {
     if (!selection?.playbook_id || !selection?.version) throw new Error('runtime_playbook_selection_required');
     const run = await this.executor.createRun({
       orgId,
@@ -116,6 +118,10 @@ export class RuntimePlaybookService {
       playbookId: selection.playbook_id,
       playbookVersion: selection.version,
       idempotencyKey,
+      parentRunId,
+      parentStageId,
+      itemKey,
+      position,
       trigger: asObject(trigger),
       context: { ...deepMerge(context, selection.context_patch), playbook_selection: selection },
     });
@@ -127,6 +133,22 @@ export class RuntimePlaybookService {
     const run = await this.executor.run(runId, { orgId, ...options });
     if (this.onRunState && run?.status && run.status !== before?.status) {
       await this.onRunState({ run, previousStatus: before?.status || null });
+    }
+    if (run?.parentRunId && ['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(run.status))) {
+      const artifactRefs = (run.artifacts || []).map((artifact) => artifact.id || artifact.artifactId).filter(Boolean);
+      await this.execute(run.parentRunId, orgId, {
+        event: {
+          id: `child:${run.id}:${run.version}:${run.status}`,
+          type: 'child.terminal',
+          data: {
+            child_run_id: run.id,
+            item_key: run.itemKey,
+            status: run.status,
+            terminal_state: run.terminalState || null,
+            artifact_refs: artifactRefs,
+          },
+        },
+      });
     }
     return run;
   }

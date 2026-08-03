@@ -1038,26 +1038,29 @@ function outreachModule() {
         const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: runId, orgId } }).catch(() => null);
         const trigger = run?.trigger && typeof run.trigger === 'object' ? run.trigger : {};
         if (!run || !trigger.runtime_id || !trigger.runtime_epoch) return;
-        const correlationRef = String(target?.resultRef?.sessionId || result?.session_id || '');
+        const correlationRef = String(result?.session_id || target?.resultRef?.sessionId || '');
         const eventType = String(target?.resultRef?.callStatus || '') === 'failed' ? 'call.failed' : 'call.completed';
         await scheduleHqWake({
           prisma,
           runtimeId: trigger.runtime_id,
           orgId,
           runtimeEpoch: trigger.runtime_epoch,
-          idempotencyKey: `runtime-tara-result:${run.id}:${target.id}:${target.updatedAt?.toISOString?.() || target.resultRef?.analyzedAt || eventType}`,
+          idempotencyKey: `runtime-tara-result:${run.id}:${target.id}:${target.resultRef?.callId || correlationRef || eventType}`,
           triggerType: 'runtime_playbook_event',
           dueAt: new Date(),
           payload: {
             run_id: run.id,
             event: {
-              id: `tara-result:${run.id}:${target.id}:${target.resultRef?.analyzedAt || eventType}`,
+              id: `tara-result:${run.id}:${target.id}:${target.resultRef?.callId || correlationRef || eventType}`,
               type: eventType,
               data: {
                 correlation_ref: correlationRef,
                 campaign_ref: target.campaignId,
                 target_ref: target.id,
+                lead_ref: target.leadId || null,
                 call_id: target.resultRef?.callId || null,
+                transcript_ref: target.resultRef?.callId ? `tara-call:${target.resultRef.callId}` : null,
+                insight_id: result?.insight?.id || null,
                 call_status: target.resultRef?.callStatus || null,
                 outcome: target.resultRef?.callOutcome || null,
                 duration_ms: target.resultRef?.durationMs || 0,
@@ -9301,6 +9304,7 @@ Write the persona now.`;
             outreach_angle: r.outreach_angle || null,
             discovered_at: r.discovered_at || r.campaign_at || null,
             correspondence: r.correspondence || null,
+            call_analysis: rr.callAnalysis || null,
           };
         });
         const summary = {
@@ -10145,7 +10149,8 @@ Write the persona now.`;
     if (pathname.includes('outreach-campaigns')
         || pathname === '/internal/hyper/outreach/propose'
         || pathname === '/internal/hyper/outreach/calls/reconcile'
-        || pathname === '/internal/hyper/outreach/runtime-call/start') {
+        || pathname === '/internal/hyper/outreach/runtime-call/start'
+        || pathname.startsWith('/internal/hyper/tara/calls/')) {
       if (await outreachModule().handle(req, res, pathname)) return true;
     }
 

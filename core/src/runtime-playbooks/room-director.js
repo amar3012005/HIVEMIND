@@ -39,6 +39,7 @@ function roomPhaseContext(request) {
     request: runtime.request || null,
     target: runtime.target || null,
     policy: runtime.policy || null,
+    supplied_inputs: asObject(runtime.supplied_inputs),
     prior_artifacts: asObject(request.inputs),
   };
 }

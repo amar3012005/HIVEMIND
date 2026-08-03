@@ -3139,6 +3139,40 @@ model TaraRuntimeConfig {
   @@map("tara_runtime_configs")
 }
 
+model CapabilityAdapterState {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  capabilityKey        String    @map("capability_key") @db.VarChar(120)
+  adapterId            String    @map("adapter_id") @db.VarChar(120)
+  state                String    @db.VarChar(32)
+  consecutiveNegatives Int       @default(0) @map("consecutive_negatives")
+  lastGoodAt           DateTime? @map("last_good_at") @db.Timestamptz(6)
+  lastCheckedAt        DateTime  @default(now()) @map("last_checked_at") @db.Timestamptz(6)
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz(6)
+  metadata             Json      @default("{}") @db.JsonB
+
+  @@unique([orgId, capabilityKey, adapterId])
+  @@index([orgId, capabilityKey, state, expiresAt])
+  @@map("capability_adapter_states")
+}
+
+model RuntimePerformanceMetric {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  runId     String?  @map("run_id") @db.Uuid
+  stageId   String?  @map("stage_id") @db.VarChar(120)
+  metric    String   @db.VarChar(120)
+  value     Float
+  unit      String   @db.VarChar(24)
+  source    String   @db.VarChar(120)
+  metadata  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, metric, createdAt(sort: Desc)])
+  @@index([runId, stageId])
+  @@map("runtime_performance_metrics")
+}
+
 /// One-time browser and listener capability issuance. The adapter atomically consumes it.
 model TaraVoiceSession {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -3263,10 +3297,21 @@ model TaraCallAttempt {
   disposition String?   @db.VarChar(30)
   gateResult  Json?     @map("gate_result")
   sessionId   String?   @map("session_id") @db.VarChar(120)
+  requestedSessionId String? @map("requested_session_id") @db.VarChar(120)
   callLegId   String?   @map("call_leg_id") @db.VarChar(120)
   provider    String    @default("deepgram") @db.VarChar(32)
   configSnapshot Json   @default("{}") @map("config_snapshot")
   actionKey   String?   @unique @map("action_key") @db.VarChar(120)
+  runtimePlaybookRunId String? @map("runtime_playbook_run_id") @db.Uuid
+  runtimeStageId String? @map("runtime_stage_id") @db.VarChar(120)
+  outreachCampaignId String? @map("outreach_campaign_id") @db.Uuid
+  outreachTargetId String? @map("outreach_target_id") @db.Uuid
+  leadId String? @map("lead_id") @db.Uuid
+  outboundActionId String? @map("outbound_action_id") @db.Uuid
+  authorityRef String? @map("authority_ref") @db.VarChar(160)
+  reconciliationState String @default("pending") @map("reconciliation_state") @db.VarChar(32)
+  providerCandidates Json @default("[]") @map("provider_candidates")
+  lastError String? @map("last_error")
   scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
   startedAt   DateTime? @map("started_at") @db.Timestamptz(6)
   endedAt     DateTime? @map("ended_at") @db.Timestamptz(6)
@@ -3279,6 +3324,9 @@ model TaraCallAttempt {
   @@index([orgId])
   @@index([campaignId, status])
   @@index([contactId])
+  @@index([runtimePlaybookRunId, runtimeStageId])
+  @@index([outreachCampaignId, outreachTargetId])
+  @@index([orgId, reconciliationState, updatedAt])
   @@map("tara_call_attempts")
 }
 
@@ -3683,6 +3731,10 @@ model RuntimePlaybookRun {
   id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId             String    @map("org_id") @db.Uuid
   roomId            String?   @map("room_id") @db.Uuid
+  parentRunId       String?   @map("parent_run_id") @db.Uuid
+  parentStageId     String?   @map("parent_stage_id") @db.VarChar(120)
+  itemKey           String?   @map("item_key") @db.VarChar(160)
+  position          Int?
   scopeKey          String    @default("global") @map("scope_key") @db.VarChar(80)
   playbookId        String    @map("playbook_id") @db.VarChar(160)
   playbookVersion   Int       @map("playbook_version")
@@ -3712,6 +3764,7 @@ model RuntimePlaybookRun {
   @@unique([orgId, idempotencyKey])
   @@index([orgId, status, updatedAt(sort: Desc)])
   @@index([roomId, status])
+  @@index([parentRunId, position])
   @@index([status, leaseExpiresAt])
   @@map("runtime_playbook_runs")
 }

@@ -123,6 +123,7 @@ export const runtimePlaybookSchema = {
           },
           authority_gate: { type: 'string', minLength: 1, maxLength: 120 },
           authority_policy_key: { type: 'string', minLength: 1, maxLength: 120 },
+          authority_policy_mode: { enum: ['organization_default', 'manual_only'] },
           authority_binding: { enum: ['stage_inputs'] },
           waits_for_event: {
             type: 'object',

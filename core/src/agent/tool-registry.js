@@ -36,6 +36,20 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'tara_call_get',
+      description: 'Read one completed TARA call by durable call, transcript, or session reference. Returns the exact tenant-scoped turns and retained insight. This tool never places a call.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reference: { type: 'string', description: 'Call UUID, tara-call:UUID transcript reference, or canonical session ID.' },
+        },
+        required: ['reference'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_recall',
       description:
         `Unified retrieval — the ONLY recall entry point. It runs bounded memory/evidence lanes and typed graph expansion under one tenant-scoped plan.\n\nReturns memories[], evidence[], relationships[], live[], evidence_packet, and trace.\n\nCall once with the user's complete question. Use fact for the initial fast path and explain only for one policy-driven expansion. Full is caller-explicit only. Never fan out paraphrase queries or loop until satisfied.`,
@@ -1360,6 +1374,43 @@ const TOOL_HANDLERS = {
       memory_type: m.memory_type,
       tags: m.tags,
       created_at: m.created_at,
+    };
+  },
+
+  async tara_call_get(args, ctx) {
+    if (!ctx.prisma || !ctx.orgId) throw new Error('tara_call_store_unavailable');
+    const reference = String(args.reference || '').trim().replace(/^tara-call:/, '');
+    if (!reference) return { found: false };
+    const call = await ctx.prisma.taraCall.findFirst({
+      where: {
+        orgId: ctx.orgId,
+        OR: [
+          ...(/^[0-9a-f-]{36}$/i.test(reference) ? [{ id: reference }] : []),
+          { sessionId: reference },
+        ],
+      },
+    });
+    if (!call) return { found: false };
+    const [turns, insight] = await Promise.all([
+      ctx.prisma.taraTurn.findMany({
+        where: { callId: call.id, orgId: ctx.orgId },
+        orderBy: { seq: 'asc' },
+        select: { id: true, seq: true, userText: true, agentText: true, createdAt: true },
+      }),
+      ctx.prisma.taraInsight.findFirst({ where: { callId: call.id, orgId: ctx.orgId } }),
+    ]);
+    return {
+      found: true,
+      call: {
+        id: call.id, session_id: call.sessionId, provider: call.provider, status: call.status,
+        goal: call.goal, language: call.language, turn_count: call.turnCount,
+        duration_ms: call.durationMs, started_at: call.startedAt, ended_at: call.endedAt,
+      },
+      transcript_ref: `tara-call:${call.id}`,
+      turns: turns.map((turn) => ({
+        id: turn.id, seq: turn.seq, user_text: turn.userText, agent_text: turn.agentText, created_at: turn.createdAt,
+      })),
+      insight: insight ? { id: insight.id, summary: insight.summary, data: insight.data, created_at: insight.createdAt } : null,
     };
   },
 

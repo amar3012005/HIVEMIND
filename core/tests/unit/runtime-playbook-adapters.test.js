@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createGmailRuntimeAdapter } from '../../src/runtime-playbooks/adapters/gmail.js';
 import { createTaraOutreachRuntimeAdapter } from '../../src/runtime-playbooks/adapters/tara-outreach.js';
 import { createTenantRecordsAdapter } from '../../src/runtime-playbooks/adapters/tenant-records.js';
+import { createLeadTimelineAdapter } from '../../src/runtime-playbooks/adapters/lead-timeline.js';
+import { createChildPlaybookAdapter } from '../../src/runtime-playbooks/adapters/child-playbook.js';
 import { runtimePlaybookReplyWake } from '../../src/connectors/providers/gmail/gmail-watcher-service.js';
 
 function context() {
@@ -166,6 +168,70 @@ test('TARA Outreach adapter does not dial an ambiguous multi-recipient exact-cal
   assert.equal(requestCount, 0);
   assert.equal(result.artifacts.length, 2);
   assert.equal(result.artifacts.every((artifact) => artifact.key === 'call_rejection'), true);
+});
+
+test('lead timeline adapter persists one call outcome and updates only its tenant-owned target', async () => {
+  const journals = [];
+  const updates = [];
+  const adapter = createLeadTimelineAdapter({ prisma: {
+    hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } },
+    growthJournal: {
+      async findFirst() { return null; },
+      async create({ data }) { const row = { id: 'journal-1', ...data }; journals.push(row); return row; },
+    },
+    outreachTarget: {
+      async findFirst(query) {
+        assert.equal(query.where.campaign.orgId, context().orgId);
+        return { id: 'target-1', resultRef: { sessionId: 'session-1' } };
+      },
+      async update({ data }) { updates.push(data); return { id: 'target-1', ...data }; },
+    },
+  } });
+  const analysis = { id: 'analysis-1', source_refs: ['tara-call:call-1'], data: {
+    terminal_state: 'call_completed', summary: 'Requested a summary.', outcome: 'summary_requested',
+    sentiment: 'interested', objections: [], lead_notes: 'Send the requested summary.',
+    tara_learnings: ['Lead prefers written context.'], next_action: { action_type: 'send_summary' },
+  } };
+  const result = await adapter.execute({
+    config: { input_key: 'call_analysis', contract_key: 'call_contract' },
+    inputs: {
+      'artifacts.call_analysis': [analysis],
+      'artifacts.call_contract': [{ id: 'contract-1', data: { target_ref: 'target-1', lead_ref: 'lead-1' } }],
+    },
+  }, context());
+  assert.equal(journals.length, 1);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].state, 'analyzed');
+  assert.equal(updates[0].resultRef.callAnalysis.next_action.action_type, 'send_summary');
+  assert.equal(result.artifacts[0].data.input_ref, 'analysis-1');
+});
+
+test('child playbook adapter dispatches one ordered unfinished child and carries only safe learning', async () => {
+  const created = [];
+  const prisma = {
+    runtimePlaybookRun: {
+      async findMany() { return [{
+        id: 'child-1', itemKey: '+49111111111', status: 'COMPLETED', terminalState: 'call_completed', position: 0,
+        artifacts: [{ artifactKey: 'call_analysis', data: { safe_generalized_learning: ['Open with the concrete operational problem.'], lead_notes: 'private' } }],
+      }]; },
+      async findFirst() { return { id: 'parent-1', trigger: {}, context: { request: {} }, scopeKey: 'global' }; },
+    },
+  };
+  const adapter = createChildPlaybookAdapter({ prisma, getService: () => ({
+    async createSelectedAssignment(input) { created.push(input); return { run: { id: 'child-2', status: 'ACTIVE' } }; },
+  }) });
+  const result = await adapter.execute({ config: {
+    source_key: 'call_brief', items_path: 'data', item_key_path: 'phone',
+    child_playbook_id: 'outreach.voice-call-to-outcome', child_playbook_version: 2,
+  }, inputs: { 'artifacts.call_brief': [
+    { id: 'brief-1', data: { phone: '+49111111111', personal_notes: 'first lead private' } },
+    { id: 'brief-2', data: { phone: '+49222222222', personal_notes: 'second lead private' } },
+  ] } }, { ...context(), runId: 'parent-1', stageId: 'dispatch_next_call' });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].itemKey, '+49222222222');
+  assert.deepEqual(created[0].context.safe_prior_learning, ['Open with the concrete operational problem.']);
+  assert.equal(JSON.stringify(created[0].context).includes('first lead private'), false);
+  assert.equal(result.artifacts[0].data.item_key, '+49222222222');
 });
 
 test('reply watcher produces one exact generic playbook event correlation', () => {

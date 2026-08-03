@@ -162,6 +162,37 @@ async function ensureSchema() {
       END IF;
     END $$;
 
+
+    -- SPREADSHEET GRIDS (parity with hivemind.document_tables/_rows). These held tenant cell
+    -- contents CENTRALLY only, and the ingestion skipped the write for .amr orgs behind a
+    -- not-orgIsRemote guard, so a self-host tenant's XLSX/CSV grids were never stored at all.
+    -- Removing that guard was NOT the fix: MNEME_MODE is dual, so wrapPrisma returns the real
+    -- client and the write would have landed in CENTRAL Postgres referencing a document that only
+    -- exists in this schema — an FK failure at best, tenant cell data in the wrong box at worst.
+    CREATE TABLE IF NOT EXISTS document_tables (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      document_id uuid NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+      org_id uuid NOT NULL,
+      user_id uuid,
+      sheet text,
+      table_index int NOT NULL DEFAULT 0,
+      headers text[] NOT NULL DEFAULT '{}',
+      row_count int NOT NULL DEFAULT 0,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (document_id, table_index)
+    );
+    CREATE INDEX IF NOT EXISTS doctbl_org_idx ON document_tables(org_id);
+    CREATE INDEX IF NOT EXISTS doctbl_doc_idx ON document_tables(document_id);
+
+    CREATE TABLE IF NOT EXISTS document_table_rows (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      table_id uuid NOT NULL REFERENCES document_tables(id) ON DELETE CASCADE,
+      org_id uuid NOT NULL,
+      row_index int NOT NULL,
+      cells jsonb NOT NULL DEFAULT '{}',
+      UNIQUE (table_id, row_index)
+    );
+    CREATE INDEX IF NOT EXISTS doctblrow_tbl_idx ON document_table_rows(table_id);
     -- PROVENANCE (parity with the central hivemind schema). These two tables existed ONLY
     -- centrally, hard-FK'd to hivemind.memories / knowledge_documents / knowledge_segments, so
     -- for an .amr org whose memories live HERE the rows could never be written and the ingestion
@@ -807,6 +838,45 @@ const routes = {
   // are found by the same `filename:` / `doc-id:` tags the ingestion writes.
   // Provenance writes (parity with central). Batched upsert-ish inserts; ON CONFLICT DO NOTHING so
   // a re-ingest of the same document is idempotent, matching skipDuplicates on the central path.
+  // Spreadsheet grids for a remote org. Mirrors the central documentTable/documentTableRow upsert.
+  '/v1/kb-tables': async (b) => {
+    const docId = b.document_id;
+    const tables = Array.isArray(b.tables) ? b.tables : [];
+    if (!docId || !tables.length) return { ok: true, tables: 0, rows: 0 };
+    let nt = 0, nr = 0;
+    for (let ti = 0; ti < tables.length; ti++) {
+      const t = tables[ti] || {};
+      const headers = (Array.isArray(t.headers) ? t.headers : []).map((h) => String(h ?? '').slice(0, 300));
+      const rows = Array.isArray(t.rows) ? t.rows : [];
+      if (!rows.length) continue;
+      try {
+        const { rows: ins } = await pg.query(
+          `INSERT INTO document_tables (document_id, org_id, user_id, sheet, table_index, headers, row_count)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (document_id, table_index) DO UPDATE SET headers=EXCLUDED.headers, row_count=EXCLUDED.row_count
+           RETURNING id`,
+          [docId, ORG, b.user_id || null, t.sheet ? String(t.sheet).slice(0, 255) : null, ti, headers, rows.length]);
+        const tableId = ins[0]?.id;
+        if (!tableId) continue;
+        nt += 1;
+        for (let ri = 0; ri < Math.min(rows.length, 20000); ri++) {
+          const arr = Array.isArray(rows[ri]) ? rows[ri] : [rows[ri]];
+          const cells = {};
+          arr.forEach((v, ci) => {
+            const key = headers[ci] && String(headers[ci]).trim() ? String(headers[ci]).trim() : `col_${ci}`;
+            cells[key] = v === null || v === undefined ? null : String(v).slice(0, 2000);
+          });
+          await pg.query(
+            `INSERT INTO document_table_rows (table_id, org_id, row_index, cells) VALUES ($1,$2,$3,$4::jsonb)
+             ON CONFLICT (table_id, row_index) DO UPDATE SET cells=EXCLUDED.cells`,
+            [tableId, ORG, ri, JSON.stringify(cells)]);
+          nr += 1;
+        }
+      } catch (e) { console.warn(`[kb-tables] table ${ti} failed doc=${docId}: ${e.message}`); }
+    }
+    return { ok: true, tables: nt, rows: nr };
+  },
+
   '/v1/kb-provenance': async (b) => {
     const links = Array.isArray(b.evidence_links) ? b.evidence_links : [];
     const ders = Array.isArray(b.derivations) ? b.derivations : [];

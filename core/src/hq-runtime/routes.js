@@ -512,6 +512,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           });
         };
         unsubscribe = await subscribeHqRuntimeEvents(runtime.id, (notice) => {
+          if (notice?.event?.visibility && notice.event.visibility !== 'USER') return;
           const sequence = eventCursor(notice?.sequence);
           if (sequence <= cursor) return;
           if (writing || sequence !== cursor + 1n || !notice?.event) {

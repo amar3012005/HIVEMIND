@@ -34,6 +34,7 @@ import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './b
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
+import { UsageService } from './billing/usage-service.js';
 import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
@@ -67,6 +68,7 @@ import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessio
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
+import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -176,6 +178,8 @@ const planEnforcer = new PlanEnforcer(
   { getOrgPlan: async (orgId) => (await getEffectivePlan(prisma, orgId)).plan },
   controlUsageTracker,
 );
+const controlUsageService = new UsageService({ prisma, planEnforcer, usageTracker: controlUsageTracker });
+planEnforcer.setUsageService(controlUsageService);
 
 function dummyCheckoutAllowed(orgId) {
   if (process.env.BILLING_DUMMY_CHECKOUT_ENABLED !== 'true') return false;
@@ -10788,19 +10792,20 @@ Write the persona now.`;
     if (!current) return;
     const callerMem = await getOrgMembership(current.session.userId, current.session.orgId);
     if (!callerMem) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
-    const action = req.method === 'GET' ? 'read' : 'manage';
-    try {
-      const auditLogger = await _getAuditLogger();
-      assertPermission(req, { resource: 'billing', action }, {
-        userRoles: effectiveRoles(callerMem),
-        orgId: current.session.orgId,
-        userId: current.session.userId,
-        auditLogger,
-      });
-    } catch (permErr) {
-      return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
-    }
+    // A plan/allowance summary is shared with active members. Invoices and
+    // every commercial action remain manager-only even though they are GETs.
+    const commercialRead = pathname === '/v1/billing/invoices' || pathname === '/v1/billing/invoices.csv';
+    const action = (req.method === 'GET' && !commercialRead) ? 'read' : 'manage';
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    let billingAccess;
+    try {
+      billingAccess = await resolveTenantAccess(prisma, {
+        orgId: current.session.orgId, userId: current.session.userId,
+      }, { resource: 'billing', action });
+    } catch {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
 
     const orgId = current.session.orgId;
     const userId = current.session.userId;
@@ -10837,8 +10842,11 @@ Write the persona now.`;
         },
         subscription: {
           status: org.subscriptionStatus || 'inactive',
-          stripe_customer_id: org.stripeCustomerId || null,
-          stripe_subscription_id: org.stripeSubscriptionId || null,
+          // Never expose payment-provider identifiers to ordinary members.
+          ...(action === 'manage' ? {
+            stripe_customer_id: org.stripeCustomerId || null,
+            stripe_subscription_id: org.stripeSubscriptionId || null,
+          } : {}),
           current_period_end: org.currentPeriodEnd?.toISOString() || null,
           trial_ends_at: org.trialEndsAt?.toISOString() || null,
         },
@@ -10852,6 +10860,7 @@ Write the persona now.`;
           hosting_mode: org.hostingMode,
           memory_storage_mode: org.memoryStorageMode,
         },
+        can_manage_billing: billingAccess.canManageBilling,
         usage,
         usage_summary: usageSummary,
         cumulative_usage: cumulative,
@@ -10866,7 +10875,6 @@ Write the persona now.`;
           currency: p.currency,
           limits: p.limits,
           features: p.features,
-          stripe_price_id: plansMod.getStripePriceId(p.id),
           available_self_serve: Boolean(plansMod.getStripePriceId(p.id)),
         })),
       });

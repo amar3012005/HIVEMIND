@@ -18,19 +18,20 @@ const _orgClients = new Map(); // orgId -> split client (memory→customer PG, r
 // the org's HIVEMIND API key, not just the org. Defaulted null → existing runWithOrg(orgId, fn) callers
 // (background jobs, workers, re-scoped remote-org ingest) are unchanged and record org-level (null-key)
 // spend; the request path threads the real key via enterOrgContext below.
-export function runWithOrg(orgId, fn, apiKeyId = null) { return _orgCtx.run({ orgId, apiKeyId }, fn); }
+export function runWithOrg(orgId, fn, apiKeyId = null, userId = null) { return _orgCtx.run({ orgId, apiKeyId, userId }, fn); }
 export function currentOrg() { return _orgCtx.getStore()?.orgId || null; }
 // The org's API key id for the current async context (null for system/background/master-key calls).
 export function currentApiKey() { return _orgCtx.getStore()?.apiKeyId || null; }
+export function currentUser() { return _orgCtx.getStore()?.userId || null; }
 // Set the org context for the REST of the current request (no callback to wrap). Used at the auth
 // seam so every downstream handler + synchronous write in this request routes to the org's store.
 // enterWith persists through the awaiting continuation; each HTTP request is its own async context,
 // so there is no cross-request leak. A null/empty orgId is ignored (resolution falls back to central).
 // apiKeyId is threaded from the resolved request principal so the LLM meter can attribute per key.
-export function enterOrgContext(orgId, apiKeyId = null) { if (orgId) _orgCtx.enterWith({ orgId, apiKeyId }); }
+export function enterOrgContext(orgId, apiKeyId = null, userId = null) { if (orgId) _orgCtx.enterWith({ orgId, apiKeyId, userId }); }
 // Bridge for CommonJS modules (ingestion pipeline) that can't statically import this ESM module.
 // Set synchronously at load so CJS code reads the SAME AsyncLocalStorage instance with no import race.
-globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, currentApiKey, enterOrgContext };
+globalThis.__hivemindOrgCtx = { runWithOrg, currentOrg, currentApiKey, currentUser, enterOrgContext };
 
 // Proxy for a self-host org's split client:
 //   • memory-subgraph models (ROUTED_MODELS)            → customer PG (the data plane)

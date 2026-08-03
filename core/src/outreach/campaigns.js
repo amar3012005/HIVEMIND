@@ -82,6 +82,7 @@ export function createOutreachModule(deps) {
   const {
     prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
     requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor,
+    onRuntimeCallResult = null,
   } = deps;
 
   // ── snapshot: latest prospects event per query from the sealed turn ────────
@@ -642,6 +643,15 @@ export function createOutreachModule(deps) {
     const updated = await prisma.outreachTarget.update({
       where: { id: target.id }, data: { state: 'analyzed', resultRef },
     });
+    const runtimeRunId = String(campaign.voiceConfigSnapshot?.runtime_playbook_run_id || '');
+    if (runtimeRunId && typeof onRuntimeCallResult === 'function') {
+      await onRuntimeCallResult({
+        orgId,
+        runId: runtimeRunId,
+        target: updated,
+        result: { session_id: expectedSession, call, insight },
+      }).catch((error) => console.warn('[outreach-call] runtime result wake failed:', updated.id, error.message));
+    }
     await advanceCallCampaign(campaign.id, orgId);
     return { status: 'analyzed', target: updated, campaign: await loadCampaign(campaign.id, orgId) };
   }
@@ -752,6 +762,41 @@ export function createOutreachModule(deps) {
       }
       const result = await reconcileCall({ orgId, sessionId });
       return jsonResponse(res, result, result.status === 'not_found' ? 404 : 200), true;
+    }
+
+    if (pathname === '/internal/hyper/outreach/runtime-call/start' && req.method === 'POST') {
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const campaignId = String(body.campaign_id || '').trim();
+      const runId = String(body.run_id || '').trim();
+      const orgId = String(body.org_id || '').trim();
+      if (![campaignId, runId, orgId].every((value) => /^[0-9a-f-]{36}$/i.test(value))) {
+        return jsonResponse(res, { error: 'campaign_id, run_id and org_id are required' }, 400), true;
+      }
+      const campaign = await loadCampaign(campaignId, orgId, false);
+      if (!campaign || campaign.channel !== 'call') return jsonResponse(res, { error: 'runtime call campaign not found' }, 404), true;
+      if (String(campaign.voiceConfigSnapshot?.runtime_playbook_run_id || '') !== runId) {
+        return jsonResponse(res, { error: 'runtime call ownership mismatch' }, 409), true;
+      }
+      if (!['queued', 'running'].includes(campaign.status)) {
+        return jsonResponse(res, { error: `cannot start a ${campaign.status} runtime call` }, 409), true;
+      }
+      if (campaign.status === 'queued') {
+        await prisma.outreachCampaign.update({
+          where: { id: campaign.id },
+          data: { status: 'running', startedAt: campaign.startedAt || new Date(), lastTickAt: new Date() },
+        });
+      }
+      const advanced = await advanceCallCampaign(campaign.id, orgId);
+      const target = advanced?.targets?.find((row) => ['dialing', 'in_call', 'browser'].includes(row.state))
+        || advanced?.targets?.find((row) => row.resultRef?.sessionId)
+        || null;
+      if (!target) return jsonResponse(res, { error: 'TARA did not return a call receipt' }, 502), true;
+      if (target.state === 'browser') {
+        return jsonResponse(res, { error: 'The selected TARA provider has no outbound telephony capability.' }, 409), true;
+      }
+      return jsonResponse(res, { campaign: advanced, target }, 200), true;
     }
 
     // POST /internal/hyper/outreach/propose { room_id, turn_id, channel } — P6 human-approved

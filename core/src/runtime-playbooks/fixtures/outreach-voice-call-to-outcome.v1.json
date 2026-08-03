@@ -1,0 +1,106 @@
+{
+  "playbook_id": "outreach.voice-call-to-outcome",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "Outreach voice call to outcome",
+  "description": "Prepare, authorize, place, observe, and analyze an outbound voice call through the Outreach Room and the configured TARA provider.",
+  "initial_stage_id": "prepare_call_brief",
+  "terminal_states": ["call_completed", "call_failed"],
+  "metadata": {
+    "owner_room_tag": "outreach",
+    "supported_actions": ["place_voice_call"],
+    "purpose": "Use for an explicit outbound voice call request with a known or resolvable recipient. The Outreach Room prepares the strategy; TARA executes only after the exact outbound-calls authority gate."
+  },
+  "input_contract": {
+    "fields": [
+      {
+        "path": "request.exact_targets",
+        "type": "array",
+        "description": "One exact person or organization and verified phone number retained from the operating instruction. Governed serial call batches use the Outreach campaign lifecycle.",
+        "required": true
+      }
+    ]
+  },
+  "stages": [
+    {
+      "id": "prepare_call_brief",
+      "objective": "Prepare one grounded TARA call brief for each exact verified phone target. Use the controlling instruction, company context, retained lead evidence, personal notes, and prior outreach learning. Do not dial.",
+      "input_refs": ["context.company", "context.baseline", "context.request", "context.target"],
+      "expected_artifacts": ["call_brief"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_brief", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.phone"},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.goal"},
+        {"predicate": "is_source_backed", "select": "call_brief"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "prepare"}},
+      "transitions": [{"default": true, "to_stage": "prepare_call_contract"}],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "prepare_call_contract",
+      "objective": "Persist the exact call batch without dialing and return the immutable provider contract for authority review.",
+      "input_refs": ["artifacts.call_brief"],
+      "expected_artifacts": ["call_contract"],
+      "completion_checks": [
+        {"predicate": "count_matches", "select": "call_contract", "target_select": "call_brief"},
+        {"predicate": "references_cover_all", "select": "call_contract", "path": "data.input_ref", "target_select": "call_brief"},
+        {"predicate": "all_have_nonempty_field", "select": "call_contract", "path": "data.campaign_ref"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "prepare", "input_key": "call_brief", "output_key": "call_contract"}},
+      "transitions": [{"default": true, "to_stage": "place_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "place_call",
+      "objective": "Place the exact authority-approved TARA call and retain its provider receipt or a conclusive isolated failure.",
+      "input_refs": ["artifacts.call_contract"],
+      "expected_artifacts": ["call_receipt", "call_rejection", "call_uncertain"],
+      "completion_checks": [
+        {"predicate": "references_cover_all", "select": ["call_receipt", "call_rejection", "call_uncertain"], "path": "data.input_ref", "target_select": "call_contract"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "deliver", "input_key": "call_contract", "output_key": "call_receipt", "rejection_key": "call_rejection", "uncertain_key": "call_uncertain"}},
+      "authority_gate": "outbound_call",
+      "authority_policy_key": "outbound_calls",
+      "authority_binding": "stage_inputs",
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "call_receipt", "value": 1}, "to_stage": "observe_call"},
+        {"default": true, "to_terminal": "call_failed"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_call",
+      "objective": "Register the TARA session correlation and wait for its real terminal result.",
+      "input_refs": ["artifacts.call_receipt"],
+      "expected_artifacts": ["call_subscription"],
+      "completion_checks": [
+        {"predicate": "count_matches", "select": "call_subscription", "target_select": "call_receipt"},
+        {"predicate": "all_have_nonempty_field", "select": "call_subscription", "path": "data.correlation_ref"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "monitor", "config": {"input_key": "call_receipt", "output_key": "call_subscription"}},
+      "waits_for_event": {"types": ["call.completed", "call.failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 7200},
+      "transitions": [{"default": true, "to_stage": "analyze_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "analyze_call",
+      "objective": "Read the real TARA result, transcript summary, objections, sentiment, and learnings. Update the lead timeline when a lead exists and return the evidence-backed call outcome and recommended next action.",
+      "input_refs": ["artifacts.call_brief", "artifacts.call_receipt", "artifacts.call_subscription", "event"],
+      "expected_artifacts": ["call_analysis"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_analysis", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_analysis", "path": "data.terminal_state"},
+        {"predicate": "is_source_backed", "select": "call_analysis"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "review"}},
+      "transitions": [
+        {"when": {"predicate": "field_equals", "select": "call_analysis", "path": "data.terminal_state", "value": "call_failed", "mode": "any"}, "to_terminal": "call_failed"},
+        {"default": true, "to_terminal": "call_completed"}
+      ],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    }
+  ]
+}

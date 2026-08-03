@@ -52,12 +52,12 @@ const HOP1_DEFAULT_LIMIT       = 12;
 // depth 6 -> 150; the reranker chose a segment over a memory 5/5 unprompted.
 const EVIDENCE_DEPTH           = Number(process.env.EVIDENCE_DEPTH || 150);
 // WIDE hand-off from the evidence lane into the single delivery-point cross-encoder.
-// Not user-visible: deliverUnifiedV2 narrows to HOP2_DOC_LIMIT after ranking.
+// Not user-visible: deliverHybrid narrows to HOP2_DOC_LIMIT after ranking.
 const EVIDENCE_DELIVER         = Number(process.env.EVIDENCE_DELIVER || 40);
 // The wide hand-off is only SAFE when the delivery-point cross-encoder is on to narrow
-// it. With RECALL_UNIFIED_V2 off, 40 unranked evidence rows would reach the answer
+// it. With RECALL_HYBRID_DELIVERY_ALWAYS_ON off, 40 unranked evidence rows would reach the answer
 // instead of 8 — a regression. So the widening is inert unless V2 will actually fire.
-const evidenceDeliverFor = (n) => (process.env.RECALL_UNIFIED_V2 === 'true' ? EVIDENCE_DELIVER : n);
+const evidenceDeliverFor = () => EVIDENCE_DELIVER;   // deliverHybrid always narrows it
 const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
@@ -438,7 +438,7 @@ function withTimeout(promise, ms, fallback) {
   });
 }
 
-// ── RECALL_UNIFIED_V2 — one relevance authority over memories + evidence ──
+// ── RECALL_HYBRID_DELIVERY_ALWAYS_ON — one relevance authority over memories + evidence ──
 // The inventory proved the old tail computed ~20 boosts + RRF + MMR then threw
 // them away (ResultReranker overwrote .score, RRF wrote a dead _rank_score).
 // V2 replaces that churn with a single coherent stage: RRF-fuse the two ranked
@@ -455,75 +455,56 @@ const V2_RRF_K = 60;
 // The parked A/B ran with a 24 pool while evidence arrived capped at 8 — it never saw
 // depth, which is the variable that moved small-detail answerability 3/5 -> 5/5.
 const V2_POOL  = Number(process.env.RECALL_UNIFIED_POOL || 150);
-async function deliverUnifiedV2({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs, structuredIntent }) {
-  const tag = (x, kind, rank, title, content) => ({
-    _row: x, _kind: kind, _rrf: 1 / (V2_RRF_K + rank + 1), _title: title || '', _content: content || '',
-  });
-  const mems = memories.map((m, i) => tag(m, 'memory', i, m.title, typeof m.content === 'string' ? m.content : ''));
-  const evs = evidence.map((e, i) => tag(e, 'evidence', i, e.document?.title || e.document_title || '', e.content || e.snippet || ''));
-  const pool = [...mems, ...evs].sort((a, b) => b._rrf - a._rrf).slice(0, V2_POOL);
+async function deliverHybrid({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs }) {
+  // THE recall pipeline. Two lanes retrieved in parallel, fused into ONE pool, ranked by
+  // ONE cross-encoder pass, split back out. No RRF, no amplitude boosts, no flag.
+  //
+  // Replaces deliverHybrid, parked after an A/B showed "no rank win". Three measured
+  // reasons it lost: its pool capped at 24 while evidence arrived capped at 8, so it
+  // never saw depth — the variable that moves small-detail answerability 3/5 -> 5/5;
+  // its boosts (pinned x2.0 / synthesis x1.3 / event-time x1.4) read fields present only
+  // on MEMORY rows, so every evidence row scored x1; and those boosts MULTIPLIED the
+  // cross-encoder score, overwriting a real (query,passage) judgement with heuristics.
+  //
+  // Verified: 0 of 485 memories held the 5 small facts under test (prices, part numbers,
+  // a kW rating, a surname); all 5 were in segments; one rerank over memories u segments
+  // answered 5/5, choosing a segment over a memory 5/5 unprompted.
+  //
+  // Ordering is the cross-encoder's alone. The only non-relevance signal kept is
+  // supersession, and it FILTERS rather than reweights — truth, not a guess.
+  const pool = [
+    ...memories.map((m) => ({ _row: m, _kind: 'memory', _title: m.title || '', _content: typeof m.content === 'string' ? m.content : '' })),
+    ...evidence.map((e) => ({ _row: e, _kind: 'evidence', _title: e.document?.title || e.document_title || '', _content: e.content || e.snippet || '' })),
+  ].filter((c) => c._content || c._title);
   if (pool.length <= 1) return null;
 
-  // Cross-encoder over the unified window (graceful: keep RRF order on failure).
-  let ordered = pool;
-  let usedCrossEncoder = false;
+  // A memory and the segment it was DERIVED FROM must not both occupy the delivered set
+  // — that spends the context budget twice on one fact. linked_memory_id is computed
+  // upstream from source_metadata.document_id, so this is a set lookup, not a query.
+  const memIds = new Set(memories.map((m) => m.id).filter(Boolean));
+  const deduped = pool.filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
+
+  let ordered = deduped;
   try {
     const rr = await withTimeout(
-      rerank(query, pool.map((p) => ({ title: p._title, content: p._content, _u: p })), { topN: pool.length }),
-      Math.min(Math.max(budgetMs || 0, 300), 1600),
+      rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
+      Math.min(Math.max(budgetMs || 0, 400), 2000),
       null,
     );
-    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
-      ordered = rr.map((x) => ({ ...x._u, _rel: x.rerank_score != null ? x.rerank_score : 0 }));
-      usedCrossEncoder = true;
-    } else {
-      ordered = pool.map((p) => ({ ...p, _rel: p._rrf }));
-    }
-  } catch { ordered = pool.map((p) => ({ ...p, _rel: p._rrf })); }
-
-  // Surviving amplitude from fields present on the candidate.
-  //
-  // CRITICAL: when the cross-encoder ranked the pool, the RELEVANCE guesses here must
-  // NOT multiply its score. They exist to rescue ordering when rerank is off. Left on,
-  // they silently overwrite a real (query,passage) judgement with heuristics — and
-  // because pinned/synthesis/event-time only ever appear on MEMORY rows, every evidence
-  // row scored x1 while memories got up to x2.0/x1.4/x1.3. That systematic bias against
-  // the verbatim layer is the likeliest reason the original A/B showed "no rank win".
-  // Measured: 0 of 485 memories contained the 5 small facts under test; all 5 were in
-  // segments. TRUTH signals (superseded) are kept either way — they are not guesses.
-  const nowT = Date.now();
-  const amp = (p) => {
-    const x = p._row || {}; const tags = Array.isArray(x.tags) ? x.tags : [];
-    let a = 1;
-    if (!usedCrossEncoder) {
-      if (tags.includes('pinned')) a *= 2.0; else if (tags.some((t) => typeof t === 'string' && t.startsWith('thread:'))) a *= 1.25;
-      if (x.memory_type === 'synthesis' && x.synthesis_cluster_hash) a *= 1.3;
-    }
-    // event/temporal recency: a dated memory whose event is near-future/recent
-    const evd = Array.isArray(x.event_dates) && x.event_dates.length ? x.event_dates[0] : (x.valid_from || x.document_date);
-    if (evd && !usedCrossEncoder) { const dt = new Date(evd).getTime(); if (Number.isFinite(dt) && Math.abs(dt - nowT) < 1000 * 60 * 60 * 24 * 120) a *= 1.4; }
-    if (x.is_latest === false || x.supersedes_id) a *= 0.5;      // superseded
-    if (!usedCrossEncoder && x.memory_type === 'summary' && p._kind === 'memory') a *= 0.85; // weak summaries
-    return a;
-  };
-  const scored = ordered
-    .map((p) => ({ ...p, _unified: (Number(p._rel) || 0) * amp(p) }))
-    .sort((a, b) => b._unified - a._unified);
+    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) ordered = rr.map((x) => x._u);
+    else console.warn('[recall-hybrid] cross-encoder returned no scores — keeping lane order');
+  } catch (error) {
+    console.warn(`[recall-hybrid] cross-encoder degraded, keeping lane order: ${error.message}`);
+  }
 
   const outMem = []; const outEv = [];
-  const deliveredMemIds = new Set();
-  for (const p of scored) {
-    const row = { ...(p._row || {}), score: Number((p._unified).toFixed(4)) };
-    if (p._kind === 'evidence') outEv.push(row); else { outMem.push(row); if (row.id) deliveredMemIds.add(row.id); }
+  for (const c of ordered) {
+    const x = c._row || {};
+    if (x.is_latest === false || x.supersedes_id) continue;   // superseded: truth filter
+    if (c._kind === 'evidence') outEv.push(x); else outMem.push(x);
   }
-  // A memory and the segment it was DERIVED FROM must not both occupy the delivered
-  // set — that spends the context budget twice on one fact. `linked_memory_id` is
-  // already computed upstream from source_metadata.document_id, so this is a set
-  // lookup, not another query. Keep the distilled memory, drop its own source.
-  const dedupedEv = outEv.filter((e) => !(e.linked_memory_id && deliveredMemIds.has(e.linked_memory_id)));
-  const droppedBacking = outEv.length - dedupedEv.length;
-  if (droppedBacking) console.log(`[recall-v2] dropped ${droppedBacking} evidence rows backing a delivered memory`);
-  return { memories: outMem.slice(0, deliverN), evidence: dedupedEv.slice(0, evidenceN) };
+  console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> mem=${Math.min(outMem.length, deliverN)} ev=${Math.min(outEv.length, evidenceN)}`);
+  return { memories: outMem.slice(0, deliverN), evidence: outEv.slice(0, evidenceN) };
 }
 
 // ── Hop 1 — Memory layer ────────────────────────────────────────────────────
@@ -898,7 +879,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
       query, userId: ctx.userId, orgId: ctx.orgId,
       projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
       documentIds: docIds,
-      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_DOC_LIMIT),
+      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
     });
     return { items, reason, docIds };
   }
@@ -910,7 +891,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
       projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
-      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(HOP2_UNFILTERED_LIMIT),
+      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
     });
     return { items, reason: 'sparse-rescue' };
   }
@@ -1676,14 +1657,14 @@ export class RecallRouter {
     }
     if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
 
-    // RECALL_UNIFIED_V2: replace the delivered memory/evidence order with one
+    // RECALL_HYBRID_DELIVERY_ALWAYS_ON: replace the delivered memory/evidence order with one
     // coherent relevance authority (RRF-fuse → cross-encoder → surviving
     // amplitude) over BOTH sources, so evidence competes fairly and boosts
     // survive. Default OFF → byte-identical delivery. Falls back to the existing
     // order on any failure/timeout.
     let finalEvidence = evidenceWithLineage;
-    if (process.env.RECALL_UNIFIED_V2 === 'true' && recallPlan.operation !== 'timeline') {
-      const v2 = await deliverUnifiedV2({
+    if (recallPlan.operation !== 'timeline') {
+      const v2 = await deliverHybrid({
         query,
         memories: rankedMemories,          // wide pre-slice pool (rerank window)
         evidence: evidenceWithLineage,

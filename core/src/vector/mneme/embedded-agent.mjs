@@ -1087,6 +1087,12 @@ function routesFor(ctx) {
       const { rows: segRows } = await db().query('SELECT id FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [org, doc.id]);
       const segIds = segRows.map((r) => r.id);
       await db().query('DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [org, doc.id]);
+      // Grids too. document_tables FKs knowledge_documents ON DELETE CASCADE, but the document row
+      // is SOFT-deleted here (deleted_at), so the cascade never fires — measured after a real
+      // delete: docs=0 but tables=1 / tablerows=3 left behind. This is the THIRD time tonight that
+      // adding a table meant its LIFECYCLE also had to be routed (derivations, evidence links, now
+      // grids). document_table_rows cascades off document_tables, which IS a hard delete.
+      await db().query('DELETE FROM document_tables WHERE org_id=$1 AND document_id=$2', [org, doc.id]).catch(() => {});
       if (segIds.length) {
         await qFetch(`/collections/${qcoll}/points/delete`, { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});
       }

@@ -232,6 +232,8 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
       next_action: controllingSnapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
       checkpoint_sequence: controllingSnapshot?.checkpoint_sequence || 0,
       checkpoint_at: controllingRun?.updatedAt || todo.updatedAt,
+      artifact_refs: controllingSnapshot?.artifact_refs || [],
+      artifact_counts: controllingSnapshot?.artifact_counts || {},
       child_progress: children.length ? {
         total: children.length,
         settled: children.filter((child) => ['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(child.status))).length,

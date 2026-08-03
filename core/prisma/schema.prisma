@@ -1077,6 +1077,7 @@ model Memory {
   id                                                          String               @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
   userId                                                      String               @map("user_id") @db.Uuid
   orgId                                                       String?              @map("org_id") @db.Uuid
+  pipelineVersion                                             Int                  @default(1) @map("pipeline_version")
   content                                                     String
   memoryType                                                  MemoryType?          @default(fact) @map("memory_type")
   title                                                       String?              @db.VarChar(500)
@@ -1693,6 +1694,9 @@ model HqCapabilityRequest {
 /// Represents threads, files, web pages, conversations
 model KnowledgeDocument {
   id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // which ingestion pipeline produced this row — makes selective re-ingestion possible.
+  // NOT processing_version, which is a retry counter on the job.
+  pipelineVersion    Int                  @default(1) @map("pipeline_version")
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid
   sourceArtifactId   String?              @map("source_artifact_id") @db.Uuid
@@ -1757,6 +1761,7 @@ model KnowledgeDocument {
 /// Chunks, sections, paragraphs, messages within documents
 model KnowledgeSegment {
   id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pipelineVersion    Int                  @default(1) @map("pipeline_version")
   documentId         String               @map("document_id") @db.Uuid
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid

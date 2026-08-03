@@ -189,11 +189,21 @@ export class NativeHqEngine {
     }
     if (appliedInstructions.some((item) => item.todo)) {
       const activation = await activateEligibleFirstLifeWork({
-        prisma, runtime, expansionTrigger: 'user_instruction',
+        prisma, runtime, expansionTrigger: 'user_instruction', proposalOrigin: 'user_instruction',
       });
       for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
         eventType: 'todo_created', title: `Promoted by the new instruction: ${promoted.title}`,
         summary: 'The instruction now owns an available execution slot and is eligible for semantic playbook selection.',
+        details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'user_instruction' },
+      });
+    }
+    if (!appliedInstructions.some((item) => item.todo)) {
+      const activation = await activateEligibleFirstLifeWork({
+        prisma, runtime, expansionTrigger: 'user_instruction', proposalOrigin: 'user_instruction',
+      });
+      for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
+        eventType: 'todo_created', title: `Resumed retained instruction: ${promoted.title}`,
+        summary: 'The retained instruction now owns an available execution slot and is eligible for semantic playbook selection.',
         details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'user_instruction' },
       });
     }

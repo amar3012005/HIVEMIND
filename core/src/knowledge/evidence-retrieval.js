@@ -53,12 +53,22 @@ export class EvidenceRetrievalService {
     const base = { orgId, archivedAt: null };
     const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
     const teamTags = (accessContext?.teamIds || []).map((id) => `scope-key:team:${id}`);
+    // THE UPLOAD WRITER EMITS `scope-key:org:<orgId>`, NOT `scope-key:organization`.
+    // Verified on a real upload with targetScope=organization, whose tags are
+    // {..., scope-key:org:1380251c-f707-4aee-98a4-dd93b63b4a00, ...}. Matching only the
+    // bare literal meant every org-shared document fell through to the owner-only branch:
+    // a colleague could not see it at all, so org-wide sharing did not work — and under a
+    // `personal` lens the NOT-guard below missed the real tag, so the owner saw their own
+    // org document labelled personal. Both forms are accepted here, which is exactly what
+    // appendDocumentAccess on the .amr agent already does (`scope-key:org:${ORG}` OR the
+    // legacy `scope-key:organization`), so central and remote now answer identically.
+    const orgTags = [`scope-key:org:${orgId}`, 'scope-key:organization'];
 
     // An EXPLICIT lens NARROWS — it never widens. Mirrors matchesScopeFilter on the
     // memory side (persisted-retrieval.js), which does an exact scope equality check,
     // so both lanes answer the same question for the same request. Without this an
     // ?scope=personal question kept org documents in the evidence half of the answer.
-    if (scopeFilter === 'organization') return { ...base, tags: { has: 'scope-key:organization' } };
+    if (scopeFilter === 'organization') return { ...base, tags: { hasSome: orgTags } };
     if (scopeFilter === 'project') {
       const tags = projectId ? [`scope-key:project:${projectId}`] : projectTags;
       // No project in scope + a project lens = nothing is in scope. Fail closed rather
@@ -73,7 +83,7 @@ export class EvidenceRetrievalService {
       // are owner-only elsewhere, so they belong here and nowhere else.
       return { ...base, OR: [
         { tags: { has: `scope-key:personal:${userId}` } },
-        { AND: [{ userId }, { NOT: { tags: { has: 'scope-key:organization' } } }] },
+        { AND: [{ userId }, { NOT: { tags: { hasSome: orgTags } } }] },
       ] };
     }
     if (scopeFilter) console.warn(`[EvidenceRetrieval] unknown scopeFilter '${scopeFilter}' — using full accessible set`);
@@ -83,7 +93,7 @@ export class EvidenceRetrievalService {
       ...base,
       OR: [
         { userId },                                              // own uploads + untagged
-        { tags: { has: 'scope-key:organization' } },
+        { tags: { hasSome: orgTags } },
         { tags: { has: `scope-key:personal:${userId}` } },
         ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
         ...(teamTags.length ? [{ tags: { hasSome: teamTags } }] : []),

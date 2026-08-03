@@ -698,7 +698,14 @@ const TOOL_HANDLERS = {
         ? {
             OR: [
               { userId: ctx.userId },
-              { tags: { has: 'scope-key:organization' } },
+              // The upload writer emits `scope-key:org:<orgId>` (document-first-ingestion.js:
+              // metadata.scope === 'organization' -> `org:${orgId}`), so the bare literal
+              // `scope-key:organization` is NEVER written by that path. Matching only the
+              // literal made every org-shared upload invisible to colleagues through the
+              // agent's KB tool — fail-closed, so no leak, but org-wide sharing did not work.
+              // Both forms accepted, matching evidence-retrieval.js and the .amr agent's
+              // appendDocumentAccess, so all three paths answer identically.
+              { tags: { hasSome: [`scope-key:org:${ctx.orgId}`, 'scope-key:organization'] } },
               { tags: { has: `scope-key:personal:${ctx.userId}` } },
               ...(authorizedProjectTags.length ? [{ tags: { hasSome: authorizedProjectTags } }] : []),
             ],

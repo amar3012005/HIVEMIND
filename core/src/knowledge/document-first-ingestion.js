@@ -3368,7 +3368,11 @@ Every item must include a non-empty content field and one or more valid support_
       // only (no batch peers → no duplicate intra-doc edges).
       if (String(process.env.KB_UNIFIED_EXTRACT ?? 'true').toLowerCase() !== 'false' && String(process.env.KB_UNIFIED_EXTRACT ?? '') !== '0') {
         const docTitle = metadata.documentTitle || metadata.filename || '';
-        const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
+        // Extraction windows are independent LLM calls; the only shared state is uBudget,
+        // mutated only between awaits (single-threaded), so the cap stays hard at any width.
+        // 4 -> 8: with promote=69.7s dominated by these calls, and embed/persist now
+        // parallel (630s->2.3s, 325s->3.9s), this is the remaining serial-ish stage.
+        const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 8));
         const _docChars = (fullText || '').length;
         // DOC_CAP SCALES WITH THE DOCUMENT. It was a FLAT 24, which made it the binding
         // constraint on every long document: the window loop below exits on BUDGET, not on

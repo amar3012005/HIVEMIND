@@ -1799,8 +1799,30 @@ if (process.env.DOCLING_URL) {
               }
               console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
             }
-            // ── Tier 1: text-native PDF (non-smart) → fast pdf-parse, no OCR ──
-            if (!smart && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+            // ── Tier 1: TEXT-NATIVE PDF → fast pdf-parse, no OCR ──────────────────
+            // Was `if (!smart && ...)`. Uploads always pass smart:true (FORMAT_PROFILES
+            // pdf.smart), so this tier COULD NEVER FIRE for a real upload and every PDF —
+            // including ones with a perfectly good text layer — went to Docling.
+            //
+            // What Docling actually bought for that: measured today, three PDFs, three
+            // times `chunks=0`, costing 18s, 33s and 606s before falling back. The 606s
+            // case then fell through to a vision pass that inflated an 11-page paper to
+            // 246KB. `smart` was meant to buy table/structure enrichment; on PDFs it buys
+            // nothing here.
+            //
+            // Figure-rich and image-heavy PDFs already routed to vision ABOVE this point,
+            // so reaching here with a text layer means fast-pdf IS the right answer:
+            // ~800ms, already computed, and it keeps page markers for page-aware chunks.
+            // Docling remains the engine for DOCX/PPTX/ODT/RTF/EPUB, where it parses
+            // ZIP+XML natively and vision physically cannot read the format.
+            // Reversible: KB_PDF_TEXTLAYER_FIRST=false restores docling-for-smart.
+            const _textLayerFirst = String(process.env.KB_PDF_TEXTLAYER_FIRST ?? 'true').toLowerCase() !== 'false';
+            if ((!smart || _textLayerFirst) && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+              if (smart && _textLayerFirst) {
+                console.log(`[docling-adapter] ${filename}: text layer present `
+                  + `(${fast.text.length} chars / ${fast.pages}p) → fast-pdf, SKIPPING docling `
+                  + `(measured: docling returns chunks=0 on text PDFs and costs 18-606s)`);
+              }
               // Page-aware chunking: pdf-parse v2 inserts `-- N of M --` page markers.
               // Split by page → smaller mid-page chunks (~1500 chars) so segments
               // map cleanly to pages. Heading derived from first line of each page.

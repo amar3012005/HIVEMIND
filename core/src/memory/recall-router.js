@@ -878,6 +878,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
       projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
+      scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
       documentIds: docIds,
       depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
     });
@@ -891,6 +892,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
       projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
+      scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
       depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
     });
     return { items, reason: 'sparse-rescue' };

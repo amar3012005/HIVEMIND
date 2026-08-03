@@ -49,17 +49,44 @@ export class EvidenceRetrievalService {
    * Mirrors the accessibleDocument shape in agent/tool-registry.js rather than adding a
    * second scope implementation.
    */
-  _accessibleDocumentWhere({ userId, orgId, projectId = null, accessContext = null }) {
+  _accessibleDocumentWhere({ userId, orgId, projectId = null, accessContext = null, scopeFilter = null }) {
+    const base = { orgId, archivedAt: null };
     const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
-    if (projectId) return { orgId, archivedAt: null, tags: { has: `scope-key:project:${projectId}` } };
+    const teamTags = (accessContext?.teamIds || []).map((id) => `scope-key:team:${id}`);
+
+    // An EXPLICIT lens NARROWS — it never widens. Mirrors matchesScopeFilter on the
+    // memory side (persisted-retrieval.js), which does an exact scope equality check,
+    // so both lanes answer the same question for the same request. Without this an
+    // ?scope=personal question kept org documents in the evidence half of the answer.
+    if (scopeFilter === 'organization') return { ...base, tags: { has: 'scope-key:organization' } };
+    if (scopeFilter === 'project') {
+      const tags = projectId ? [`scope-key:project:${projectId}`] : projectTags;
+      // No project in scope + a project lens = nothing is in scope. Fail closed rather
+      // than silently falling back to everything the caller can see.
+      return { ...base, tags: { hasSome: tags.length ? tags : ['scope-key:project:__none__'] } };
+    }
+    if (scopeFilter === 'team') {
+      return { ...base, tags: { hasSome: teamTags.length ? teamTags : ['scope-key:team:__none__'] } };
+    }
+    if (scopeFilter === 'personal') {
+      // Owned by the caller, or explicitly tagged personal to them. Untagged documents
+      // are owner-only elsewhere, so they belong here and nowhere else.
+      return { ...base, OR: [
+        { tags: { has: `scope-key:personal:${userId}` } },
+        { AND: [{ userId }, { NOT: { tags: { has: 'scope-key:organization' } } }] },
+      ] };
+    }
+    if (scopeFilter) console.warn(`[EvidenceRetrieval] unknown scopeFilter '${scopeFilter}' — using full accessible set`);
+
+    if (projectId) return { ...base, tags: { has: `scope-key:project:${projectId}` } };
     return {
-      orgId,
-      archivedAt: null,
+      ...base,
       OR: [
         { userId },                                              // own uploads + untagged
         { tags: { has: 'scope-key:organization' } },
         { tags: { has: `scope-key:personal:${userId}` } },
         ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
+        ...(teamTags.length ? [{ tags: { hasSome: teamTags } }] : []),
       ],
     };
   }
@@ -92,6 +119,10 @@ export class EvidenceRetrievalService {
     deliver = null,
     projectId = null,         // scope: pin to one project when the caller has one
     accessContext = null,     // scope: { projectIds, teamIds, orgRole } from the session
+    scopeFilter = null,       // scope: an EXPLICIT lens the caller asked for
+                              // (personal|project|team|organization). Memories enforce
+                              // this via matchesScopeFilter; evidence must too, or a
+                              // personal-scoped question answers from org documents.
     documentId = null,        // legacy single-doc filter (kept for backwards compat)
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
@@ -202,7 +233,7 @@ export class EvidenceRetrievalService {
           orgId,
           document: docIdSet
             ? { archivedAt: null }
-            : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext }),
+            : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
         },
         include: {
           document: {
@@ -297,7 +328,7 @@ export class EvidenceRetrievalService {
                 // not a second implementation that can drift from it
                 document: docIdSet
                   ? { archivedAt: null }
-                  : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext }),
+                  : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },

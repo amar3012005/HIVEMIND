@@ -493,7 +493,24 @@ function routesFor(ctx) {
         console.warn(`[embedded-agent] memories mirror failed id=${r.id} org=${org}: ${e.message} `
           + `— memory IS in the shard and recallable; provenance/lexical parity is degraded for it`);
       }
-      for (const rel of (b.rels || [])) if (rel?.fromId && rel?.toId) amr.addEdge(rel);
+      for (const rel of (b.rels || [])) {
+        if (!rel?.fromId || !rel?.toId) continue;
+        amr.addEdge(rel);
+
+        // SQL MIRROR for edges, same reason as the memories mirror in /v1/write: the external agent
+        // inserts into relationships while this one only called amr.addEdge, so hm.relationships held
+        // ZERO rows globally while the shard reported 43 edges for a single org. Anything that reads
+        // relationships from SQL (relations-summary, central joins, the byod-shaped /v1/stats) saw
+        // nothing for amr_embedded. Non-fatal: the shard edge is already written above.
+        try {
+          await db().query(
+            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
+            [rel.id, org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+        } catch (e) {
+          console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
+        }
+      }
       return { ok: true };
     },
     '/v1/recall': async (b) => Array.isArray(b.vector)
@@ -504,7 +521,27 @@ function routesFor(ctx) {
     '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
     '/v1/stats': async (b) => amr.stats(b.filter || {}),
     '/v1/graph': async (b) => amr.graph(b.filter || {}, b.limit || 500),
-    '/v1/edge': async (b) => { if (b.rel?.fromId && b.rel?.toId) amr.addEdge(b.rel); return { ok: true }; },
+    '/v1/edge': async (b) => {
+      const rel = b.rel;
+      if (rel?.fromId && rel?.toId) {
+        amr.addEdge(rel);
+
+        // SQL MIRROR for edges, same reason as the memories mirror in /v1/write: the external agent
+        // inserts into relationships while this one only called amr.addEdge, so hm.relationships held
+        // ZERO rows globally while the shard reported 43 edges for a single org. Anything that reads
+        // relationships from SQL (relations-summary, central joins, the byod-shaped /v1/stats) saw
+        // nothing for amr_embedded. Non-fatal: the shard edge is already written above.
+        try {
+          await db().query(
+            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
+            [rel.id, org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+        } catch (e) {
+          console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
+        }
+      }
+      return { ok: true };
+    },
     '/v1/update-tags': async (b) => { if (b.id && Array.isArray(b.tags)) amr.updateTags(b.id, b.tags); return { ok: true }; },
     '/v1/bump-recall': async (b) => {
       const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];

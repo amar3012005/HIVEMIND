@@ -6,6 +6,7 @@ import { HqScheduleStore } from './schedule-store.js';
 import { drainHqWorkOrders } from './work-dispatcher.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
 import { employeesSidecarUrl, warmRuntimeOrigin } from '../runtime-transport/client.js';
+import { recordRuntimeMetric } from './runtime-metrics.js';
 
 function artifactCountSummary(artifacts = []) {
   const counts = artifacts.reduce((result, artifact) => {
@@ -24,13 +25,27 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
   const schedule = await store.leaseNext(leaseOwner);
   if (!schedule) return null;
   const cycleStartedAt = Date.now();
-  const observed = (status, extra = {}) => logger.info?.('[hq-runtime] cycle transport metric', {
-    schedule_id: schedule.id,
-    trigger_type: schedule.trigger_type,
-    status,
-    latency_ms: Date.now() - cycleStartedAt,
-    ...extra,
-  });
+  const observed = async (status, extra = {}) => {
+    const latency = Date.now() - cycleStartedAt;
+    logger.info?.('[hq-runtime] cycle transport metric', {
+      schedule_id: schedule.id,
+      trigger_type: schedule.trigger_type,
+      status,
+      latency_ms: latency,
+      ...extra,
+    });
+    await recordRuntimeMetric(prisma, {
+      orgId: schedule.org_id,
+      runId: extra.run_id || schedule.payload?.run_id || null,
+      metric: 'hq_cycle_latency', value: latency, unit: 'ms', source: 'hq-runtime-scheduler',
+      metadata: {
+        schedule_id: schedule.id,
+        cycle_id: extra.cycle_id || null,
+        trigger_type: schedule.trigger_type,
+        status,
+      },
+    });
+  };
   let cycle = null;
   try {
     const runtime = await getHqRuntime({ prisma, orgId: schedule.org_id });
@@ -46,7 +61,7 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
       }
       const result = await runtimePlaybooks.resumeEvent(runId, runtime.orgId, providerEvent);
       await store.complete(schedule.id);
-      observed('COMPLETED', { runtime_playbook_event: true });
+      await observed('COMPLETED', { runtime_playbook_event: true, run_id: runId });
       return { scheduleId: schedule.id, cycleId: null, status: 'COMPLETED', decision: result };
     }
     cycle = await createHqCycle({
@@ -86,10 +101,10 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
       data: { status: 'COMPLETED', decision, completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null },
     });
     await store.complete(schedule.id);
-    observed('COMPLETED', { cycle_id: cycle.id });
+    await observed('COMPLETED', { cycle_id: cycle.id });
     return { scheduleId: schedule.id, cycleId: cycle.id, status: 'COMPLETED', decision };
   } catch (error) {
-    observed('FAILED', { cycle_id: cycle?.id || null, error: String(error?.message || error).slice(0, 300) });
+    await observed('FAILED', { cycle_id: cycle?.id || null, error: String(error?.message || error).slice(0, 300) });
     logger.error('[hq-runtime] cycle failed:', error.message);
     if (cycle) {
       await prisma.hqCycle.update({

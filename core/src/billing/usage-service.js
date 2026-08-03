@@ -43,7 +43,7 @@ export class UsageService {
     const rows = await this.prisma.$queryRawUnsafe(
       `UPDATE hivemind.usage_events SET state = 'settled', settled_at = NOW()
        WHERE org_id = $1::uuid AND idempotency_key = $2 AND state = 'reserved'
-       RETURNING id, metric, quantity`, orgId, idempotencyKey,
+       RETURNING id, metric, quantity, api_key_id, source, metadata`, orgId, idempotencyKey,
     );
     if (!rows[0]) return { settled: false, duplicate: true };
     const event = rows[0];
@@ -53,7 +53,7 @@ export class UsageService {
       `INSERT INTO hivemind.usage_projection_receipts (usage_event_id) VALUES ($1::uuid)
        ON CONFLICT DO NOTHING RETURNING usage_event_id`, event.id,
     );
-    if (receipt[0]) await this._applyProjection(orgId, event.metric, Number(event.quantity));
+    if (receipt[0]) await this._applyProjection(orgId, event.metric, Number(event.quantity), event);
     return { settled: true, event };
   }
 
@@ -78,7 +78,7 @@ export class UsageService {
     );
   }
 
-  async _applyProjection(orgId, metric, quantity) {
+  async _applyProjection(orgId, metric, quantity, event = {}) {
     const entry = Object.entries((await import('./metric-registry.js')).USAGE_METRICS).find(([, value]) => value.metric === metric)?.[1];
     if (!entry) return;
     const month = new Date().toISOString().slice(0, 7);
@@ -89,6 +89,20 @@ export class UsageService {
       await tx.$executeRawUnsafe(`INSERT INTO "OrgUsageDaily" ("orgId", "day", "${d}", "updatedAt") VALUES ($1::uuid, $2::date, $3, NOW()) ON CONFLICT ("orgId", "day") DO UPDATE SET "${d}" = "OrgUsageDaily"."${d}" + $3, "updatedAt" = NOW()`, orgId, day, quantity);
       if (c) await tx.$executeRawUnsafe(`INSERT INTO hivemind.org_usage_cumulative (org_id, "${c}") VALUES ($1::uuid, $2) ON CONFLICT (org_id) DO UPDATE SET "${c}" = hivemind.org_usage_cumulative."${c}" + $2, updated_at = NOW()`, orgId, quantity);
     });
+    if (metric === 'tokens') {
+      const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+      await this.usageTracker?.recordKeyUsage?.(
+        orgId,
+        quantity,
+        event.api_key_id || null,
+        metadata.model || null,
+        metadata.feature || event.source || null,
+        {
+          promptTokens: Number(metadata.prompt_tokens || 0),
+          completionTokens: Number(metadata.completion_tokens || 0),
+        },
+      );
+    }
     this.usageTracker?._invalidateCache?.(orgId);
   }
 }

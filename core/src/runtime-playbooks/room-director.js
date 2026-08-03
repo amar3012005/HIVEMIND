@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from 'node:crypto';
 import { employeesSidecarUrl, runtimeRequestJson } from '../runtime-transport/client.js';
+import { recordRuntimeMetric } from '../hq-runtime/runtime-metrics.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -164,10 +165,11 @@ export class RuntimeRoomDirector {
       });
       throw error;
     }
-    return body;
+    return { ...body, __runtime_transport: response.transport_metrics || null };
   }
 
   async execute(request) {
+    const startedAt = Date.now();
     if (!request.room_id) throw new Error('runtime_room_id_required');
     const roomPhase = usesRoomPhase(request);
     const envelope = roomPhase ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
@@ -185,7 +187,9 @@ export class RuntimeRoomDirector {
       );
     }
     turnId = turnId || `runtime-turn-${randomUUID()}`;
-    const body = await this.transport({
+    let body;
+    try {
+      body = await this.transport({
       schema_version: requestContract,
       room_id: request.room_id,
       turn_id: turnId,
@@ -200,6 +204,26 @@ export class RuntimeRoomDirector {
       room_goal: room.goal || null,
       task_tag: room.room_tag || null,
       write_policy: request.authority_granted === true ? 'authorized' : 'deny',
+      });
+    } catch (error) {
+      await recordRuntimeMetric(this.prisma, {
+        orgId: request.org_id, runId: request.run_id, stageId: request.stage_id,
+        metric: 'room_completion_latency', value: Date.now() - startedAt, unit: 'ms',
+        source: 'runtime-room-director',
+        metadata: { status: 'FAILED', classification: error?.classification || null, code: error?.code || null },
+      });
+      throw error;
+    }
+    await recordRuntimeMetric(this.prisma, {
+      orgId: request.org_id, runId: request.run_id, stageId: request.stage_id,
+      metric: 'room_transport_latency',
+      value: Number(body?.__runtime_transport?.latency_ms || Date.now() - startedAt),
+      unit: 'ms', source: 'runtime-room-director',
+      metadata: {
+        status: 'RESPONSE',
+        connection_reused: body?.__runtime_transport?.connection_reused === true,
+        origin: body?.__runtime_transport?.origin || null,
+      },
     });
     const result = body?.result;
     if (result?.contract !== resultContract) {
@@ -215,6 +239,12 @@ export class RuntimeRoomDirector {
       .filter((id, index, values) => values.indexOf(id) !== index);
     if (duplicateIds.length) throw new Error(`runtime_room_artifact_duplicate:${duplicateIds[0]}`);
     const gaps = asArray(result.gaps).map(String).filter(Boolean);
+    await recordRuntimeMetric(this.prisma, {
+      orgId: request.org_id, runId: request.run_id, stageId: request.stage_id,
+      metric: 'room_completion_latency', value: Date.now() - startedAt, unit: 'ms',
+      source: 'runtime-room-director',
+      metadata: { status: gaps.length ? 'COMPLETED_WITH_GAPS' : 'COMPLETED', artifact_count: artifacts.length },
+    });
     return { artifacts, gaps, warnings: gaps, turn_id: turnId };
   }
 }

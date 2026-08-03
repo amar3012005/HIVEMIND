@@ -2655,6 +2655,23 @@ model OrganizationEntitlement {
   @@map("organization_entitlements")
 }
 
+/// Immutable platform-wide cap snapshots. The newest version per plan is the
+/// runtime catalog overlay; code defaults remain the restore target.
+model PlanCatalogVersion {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planId    String   @map("plan_id") @db.VarChar(50)
+  version   Int
+  limits    Json     @default("{}")
+  action    String   @db.VarChar(32)
+  operator  String   @db.VarChar(160)
+  requestId String?  @map("request_id") @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([planId, version])
+  @@index([planId, createdAt])
+  @@map("plan_catalog_versions")
+}
+
 /// Platform-owned commercial offer. Codes are represented only by a keyed digest.
 model Promotion {
   id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

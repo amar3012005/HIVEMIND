@@ -1,11 +1,12 @@
 import { getPlan } from './plans.js';
+import { resolveCatalogPlan } from './plan-catalog-service.js';
 
 export function normalizeReferralCode(value) {
   return String(value || '').trim().toUpperCase();
 }
 
-export function mergeEntitlementPlan(planId, limits) {
-  const base = getPlan(planId);
+export function mergeEntitlementPlan(planId, limits, basePlan = null) {
+  const base = basePlan || getPlan(planId);
   const overrides = normalizeLimitOverrides(planId, limits);
   return { ...base, limits: { ...base.limits, ...overrides } };
 }
@@ -98,13 +99,15 @@ export async function getEffectiveEntitlement(prisma, orgId, now = new Date()) {
 
 export async function getEffectivePlan(prisma, orgId) {
   const fallback = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+  const fallbackPlanId = fallback?.plan || 'free';
   // Promotions are the authoritative commercial overlay. Keep the legacy
   // time-row resolver beneath this branch while existing referrals migrate.
   const { getEffectivePromotionEntitlement } = await import('./promotion-service.js');
   const promotion = await getEffectivePromotionEntitlement(prisma, orgId);
   if (promotion?.status === 'active' && promotion.version) {
+    const basePlan = await resolveCatalogPlan(prisma, promotion.version.planId);
     return {
-      plan: mergeEntitlementPlan(promotion.version.planId, promotion.version.limits),
+      plan: mergeEntitlementPlan(promotion.version.planId, promotion.version.limits, basePlan),
       entitlement: {
         id: promotion.grant.id,
         source: promotion.grant.source,
@@ -123,7 +126,7 @@ export async function getEffectivePlan(prisma, orgId) {
   }
   if (promotion && ['manual_review', 'expired', 'suspended', 'revoked'].includes(promotion.status)) {
     return {
-      plan: getPlan('free'),
+      plan: await resolveCatalogPlan(prisma, 'free'),
       entitlement: {
         id: promotion.grant.id,
         source: promotion.grant.source,
@@ -134,8 +137,9 @@ export async function getEffectivePlan(prisma, orgId) {
     };
   }
   const entitlement = await getEffectiveEntitlement(prisma, orgId);
-  if (!entitlement) return { plan: getPlan(fallback?.plan || 'free'), entitlement: null };
-  return { plan: mergeEntitlementPlan(entitlement.planId, entitlement.limits), entitlement };
+  if (!entitlement) return { plan: await resolveCatalogPlan(prisma, fallbackPlanId), entitlement: null };
+  const basePlan = await resolveCatalogPlan(prisma, entitlement.planId);
+  return { plan: mergeEntitlementPlan(entitlement.planId, entitlement.limits, basePlan), entitlement };
 }
 
 // Canonical commercial read used by Billing, Usage, feature admission, and

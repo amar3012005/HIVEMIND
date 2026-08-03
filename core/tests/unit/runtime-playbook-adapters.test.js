@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGmailRuntimeAdapter } from '../../src/runtime-playbooks/adapters/gmail.js';
+import { createTaraOutreachRuntimeAdapter } from '../../src/runtime-playbooks/adapters/tara-outreach.js';
 import { createTenantRecordsAdapter } from '../../src/runtime-playbooks/adapters/tenant-records.js';
 import { runtimePlaybookReplyWake } from '../../src/connectors/providers/gmail/gmail-watcher-service.js';
 
@@ -113,6 +114,58 @@ test('Gmail adapter persists an uncertain outcome for a provider timeout instead
   assert.equal(result.artifacts.length, 1);
   assert.equal(result.artifacts[0].key, 'action_uncertain');
   assert.equal(result.artifacts[0].data.input_ref, 'draft-artifact-1');
+});
+
+test('TARA Outreach adapter starts one exact authorized call and retains its provider correlation', async () => {
+  const requests = [];
+  const adapter = createTaraOutreachRuntimeAdapter({
+    prisma: {}, baseUrl: 'http://control.test', apiKey: 'internal-test-key',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return new Response(JSON.stringify({ target: {
+        id: 'target-1',
+        resultRef: { sessionId: 'session-1', taraCallLegId: 'call-leg-1' },
+      } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  const contract = {
+    id: 'call-contract-1', key: 'call_contract', source_refs: ['source:instruction'],
+    data: { campaign_ref: 'campaign-1', target_ref: 'target-1', phone: '+49123456789' },
+  };
+  const result = await adapter.execute({
+    config: { action: 'deliver', input_key: 'call_contract', output_key: 'call_receipt' },
+    inputs: { 'artifacts.call_contract': [contract] },
+  }, context());
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'http://control.test/internal/hyper/outreach/runtime-call/start');
+  assert.equal(requests[0].options.headers['X-API-Key'], 'internal-test-key');
+  assert.equal(result.artifacts[0].key, 'call_receipt');
+  assert.equal(result.artifacts[0].data.input_ref, contract.id);
+  assert.equal(result.artifacts[0].data.provider_receipt_id, 'call-leg-1');
+  assert.equal(result.artifacts[0].data.correlation_ref, 'session-1');
+  const monitored = await adapter.monitor({
+    config: { input_key: 'call_receipt', output_key: 'call_subscription' },
+    inputs: { 'artifacts.call_receipt': result.artifacts },
+  }, context());
+  assert.equal(monitored.artifacts[0].data.correlation_ref, 'session-1');
+});
+
+test('TARA Outreach adapter does not dial an ambiguous multi-recipient exact-call batch', async () => {
+  let requestCount = 0;
+  const adapter = createTaraOutreachRuntimeAdapter({
+    prisma: {}, baseUrl: 'http://control.test', apiKey: 'internal-test-key',
+    fetchImpl: async () => { requestCount += 1; throw new Error('must_not_run'); },
+  });
+  const result = await adapter.execute({
+    config: { action: 'deliver', input_key: 'call_contract', rejection_key: 'call_rejection' },
+    inputs: { 'artifacts.call_contract': [
+      { id: 'contract-1', data: { campaign_ref: 'campaign-1' } },
+      { id: 'contract-2', data: { campaign_ref: 'campaign-1' } },
+    ] },
+  }, context());
+  assert.equal(requestCount, 0);
+  assert.equal(result.artifacts.length, 2);
+  assert.equal(result.artifacts.every((artifact) => artifact.key === 'call_rejection'), true);
 });
 
 test('reply watcher produces one exact generic playbook event correlation', () => {

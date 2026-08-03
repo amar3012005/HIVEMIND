@@ -53,7 +53,7 @@ import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
-import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement } from './hq-runtime/repository.js';
+import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
@@ -1034,6 +1034,43 @@ function outreachModule() {
     _outreachModule = createOutreachModule({
       prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
       requireSession, recordOutboundAction, sidecarBaseUrl: HYPER_SIDECAR_BASE_URL, taraProviderFor,
+      onRuntimeCallResult: async ({ orgId, runId, target, result }) => {
+        const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: runId, orgId } }).catch(() => null);
+        const trigger = run?.trigger && typeof run.trigger === 'object' ? run.trigger : {};
+        if (!run || !trigger.runtime_id || !trigger.runtime_epoch) return;
+        const correlationRef = String(target?.resultRef?.sessionId || result?.session_id || '');
+        const eventType = String(target?.resultRef?.callStatus || '') === 'failed' ? 'call.failed' : 'call.completed';
+        await scheduleHqWake({
+          prisma,
+          runtimeId: trigger.runtime_id,
+          orgId,
+          runtimeEpoch: trigger.runtime_epoch,
+          idempotencyKey: `runtime-tara-result:${run.id}:${target.id}:${target.updatedAt?.toISOString?.() || target.resultRef?.analyzedAt || eventType}`,
+          triggerType: 'runtime_playbook_event',
+          dueAt: new Date(),
+          payload: {
+            run_id: run.id,
+            event: {
+              id: `tara-result:${run.id}:${target.id}:${target.resultRef?.analyzedAt || eventType}`,
+              type: eventType,
+              data: {
+                correlation_ref: correlationRef,
+                campaign_ref: target.campaignId,
+                target_ref: target.id,
+                call_id: target.resultRef?.callId || null,
+                call_status: target.resultRef?.callStatus || null,
+                outcome: target.resultRef?.callOutcome || null,
+                duration_ms: target.resultRef?.durationMs || 0,
+                turn_count: target.resultRef?.turnCount || 0,
+                summary: target.resultRef?.summary || null,
+                sentiment: target.resultRef?.sentiment || null,
+                tara_learnings: target.resultRef?.taraLearnings || [],
+                next_step: target.resultRef?.nextStep || null,
+              },
+            },
+          },
+        });
+      },
     });
     _outreachModule.startDrain();
   }
@@ -10107,7 +10144,8 @@ Write the persona now.`;
     // /v1/outreach-campaigns/* (create/get/start/stop/patch/generate/execute).
     if (pathname.includes('outreach-campaigns')
         || pathname === '/internal/hyper/outreach/propose'
-        || pathname === '/internal/hyper/outreach/calls/reconcile') {
+        || pathname === '/internal/hyper/outreach/calls/reconcile'
+        || pathname === '/internal/hyper/outreach/runtime-call/start') {
       if (await outreachModule().handle(req, res, pathname)) return true;
     }
 

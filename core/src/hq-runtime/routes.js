@@ -547,6 +547,17 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             subject: artifact.data?.subject || null,
             body: artifact.data?.body || null,
           }));
+          const calls = run.artifacts.filter((artifact) => artifact.artifactKey === 'call_contract').map((artifact) => ({
+            id: artifact.artifactId,
+            target_ref: artifact.data?.target_ref || null,
+            prospect: artifact.data?.prospect || null,
+            phone: artifact.data?.phone || null,
+            goal: artifact.data?.goal || null,
+            opener: artifact.data?.opener || null,
+            strategy: artifact.data?.strategy || null,
+            language: artifact.data?.language || null,
+            voice_style: artifact.data?.voice_style || null,
+          }));
           const todo = todoById.get(String(run.trigger?.todo_id || ''));
           const campaign = campaignsByRun.get(run.id) || null;
           return {
@@ -558,6 +569,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             preference: resolveAuthorityPreference(runtime.authorityPolicy, stage.authority_policy_key),
             kind: 'external_action',
             messages,
+            calls,
             campaign: campaign ? {
               id: campaign.id,
               name: campaign.name,

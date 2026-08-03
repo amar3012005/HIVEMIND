@@ -2360,6 +2360,34 @@ class Director:
             ),
         ))
 
+    async def _compose_outreach_call(
+        self, record: Dict[str, Any], sender_company: str,
+    ) -> Dict[str, Any]:
+        """Use the same call planner as the human START OUTREACH CALLS action."""
+        from ..api_outreach import GenerateRequest, _Prospect, generate
+
+        return await generate(GenerateRequest(
+            channel="call",
+            turn_id=self.turn_id,
+            sender_email=self.sender_email,
+            sender_company=sender_company,
+            company_context=self.company_brief[:6000],
+            user_id=self.user_id,
+            org_id=self.org_id,
+            prospect=_Prospect(
+                lead_id=str(record.get("memory_id") or "") or None,
+                company=str(record.get("company") or record.get("prospect") or ""),
+                email=str(record.get("email") or "") or None,
+                phone=str(record.get("phone") or "") or None,
+                website=str(record.get("website") or "") or None,
+                address=str(record.get("address") or "") or None,
+                source_url=str(record.get("source_url") or record.get("website") or "") or None,
+                fit_reason=str(record.get("fit_reason") or "") or None,
+                outreach_angle=str(record.get("outreach_angle") or "") or None,
+                notes=str(record.get("note") or record.get("notes") or "") or None,
+            ),
+        ))
+
     @staticmethod
     def _tool_result_succeeded(output: str) -> bool:
         text = str(output or "").strip()
@@ -2468,6 +2496,8 @@ class Director:
             str(row.get("type") or "") == "email_drafts" and int(row.get("minimum") or 0) > 0
             for row in requirements
         )
+        call_brief_work = "call_brief" in phase_expected
+        call_analysis_work = "call_analysis" in phase_expected
         if prospect_work and not plan.get("places_query") and not any(
             str(call.get("name") or "") == "places_search"
             for call in planned_calls if isinstance(call, dict)
@@ -2632,6 +2662,8 @@ class Director:
                 "never describe future work as completed. Return useful detail, not process narration."
             )
             generated_email_drafts: List[Dict[str, str]] = []
+            generated_call_briefs: List[Dict[str, Any]] = []
+            generated_call_analyses: List[Dict[str, Any]] = []
             if draft_work:
                 # Runtime uses the same per-prospect Outreach Intelligence composer
                 # as the human-facing Email Campaign action. HQ never authors copy:
@@ -2748,6 +2780,111 @@ class Director:
                         "connector_hits": [], "memory_hits": len(generated_email_drafts),
                     })
                 text = json.dumps({"email_drafts": generated_email_drafts}, ensure_ascii=False)
+            elif call_brief_work:
+                phase_context = self.room_phase.get("context") if isinstance((self.room_phase or {}).get("context"), dict) else {}
+                phase_request = phase_context.get("request") if isinstance(phase_context.get("request"), dict) else {}
+                instruction = str((self.room_phase or {}).get("instruction") or self.user_message)
+                exact_targets = [row for row in (phase_request.get("exact_targets") or []) if isinstance(row, dict)]
+                phones = list(dict.fromkeys(
+                    re.sub(r"[\s()/-]", "", str(row.get("value") or "").strip())
+                    for row in exact_targets
+                    if re.fullmatch(r"\+[1-9]\d{6,14}", re.sub(r"[\s()/-]", "", str(row.get("value") or "").strip()))
+                ))
+                if not phones:
+                    phones = list(dict.fromkeys(
+                        re.sub(r"[\s()/-]", "", match)
+                        for match in re.findall(r"\+[1-9][\d\s()/-]{6,20}", instruction)
+                        if re.fullmatch(r"\+[1-9]\d{6,14}", re.sub(r"[\s()/-]", "", match))
+                    ))
+                labels = {
+                    re.sub(r"[\s()/-]", "", str(row.get("value") or "").strip()): str(row.get("label") or "").strip()
+                    for row in exact_targets if isinstance(row, dict)
+                }
+                company_match = re.search(
+                    r"(?:^|\n)Company:\s*([^\n—–]+)", self.company_brief or "", re.I,
+                )
+                sender_company = company_match.group(1).strip(" .,-") if company_match else "Our company"
+                retained_by_phone = {
+                    re.sub(r"[\s()/-]", "", str(row.get("phone") or "")): row
+                    for row in self._retained_prospect_rows if str(row.get("phone") or "").strip()
+                }
+                for phone in phones:
+                    retained = retained_by_phone.get(phone) or {}
+                    prospect = {
+                        **retained,
+                        "company": retained.get("company") or labels.get(phone) or phone,
+                        "phone": phone,
+                        "notes": "\n".join(filter(None, [str(retained.get("notes") or "").strip(), instruction])).strip(),
+                    }
+                    brief = await self._compose_outreach_call(prospect, sender_company)
+                    if brief.get("error") or not str(brief.get("goal") or "").strip():
+                        continue
+                    generated_call_briefs.append({
+                        "phone": phone,
+                        "prospect": str(prospect.get("company") or phone).strip()[:300],
+                        "goal": str(brief.get("goal") or "").strip()[:300],
+                        "opener": str(brief.get("opener") or "").strip()[:400],
+                        "context": str(brief.get("context") or "").strip()[:800],
+                        "language": str(brief.get("language") or "en").strip()[:8],
+                        "strategy": str(brief.get("strategy") or "").strip()[:200],
+                        "voice_style": str(brief.get("voice_style") or "").strip()[:40],
+                        "personal_notes": str(prospect.get("notes") or "").strip()[:800],
+                        "instruction": instruction[:5000],
+                        "source_ref": "runtime-request:exact-phone",
+                    })
+                if generated_call_briefs:
+                    successful_tools["outreach_call_compose"] += len(generated_call_briefs)
+                    grounded_artifacts.append({
+                        "kind": "call_briefs", "source": "room_worker",
+                        "record_count": len(generated_call_briefs), "records": generated_call_briefs,
+                    })
+                    await self.emit({
+                        "t": "gather", "sources": ["your-leads", "company-memory"],
+                        "tool": "outreach_call_compose", "query": str(order.get("title") or "")[:160],
+                        "connector_hits": [], "memory_hits": len(generated_call_briefs),
+                    })
+                text = json.dumps({"call_briefs": generated_call_briefs}, ensure_ascii=False)
+            elif call_analysis_work:
+                phase_context = self.room_phase.get("context") if isinstance((self.room_phase or {}).get("context"), dict) else {}
+                prior_artifacts = phase_context.get("prior_artifacts") if isinstance(phase_context.get("prior_artifacts"), dict) else {}
+                call_event = prior_artifacts.get("event") if isinstance(prior_artifacts.get("event"), dict) else {}
+                response = await self._groq([
+                    {"role": "system", "content": (
+                        _now_block()
+                        + "You are the Outreach Room reviewing a completed TARA call. Return JSON only with call_analyses. "
+                          "Use only the supplied provider event, transcript summary, insight, and retained call context. Each analysis "
+                          "must contain terminal_state (call_completed or call_failed), summary, outcome, sentiment, objections, "
+                          "tara_learnings, and next_action. Do not claim a meeting, lead, or success unless the provider evidence says so."
+                    )},
+                    {"role": "user", "content": json.dumps({
+                        "instruction": str((self.room_phase or {}).get("instruction") or self.user_message),
+                        "company_context": self.company_brief[:6000],
+                        "provider_event": call_event,
+                        "prior_artifacts": prior_artifacts,
+                    }, ensure_ascii=False, default=str)[:28000]},
+                ], model=self.persona_model, temp=0.15, bucket="worker", force_text=True,
+                   schema={
+                       "type": "object", "properties": {"call_analyses": {"type": "array", "items": {
+                           "type": "object", "properties": {
+                               "terminal_state": {"type": "string", "enum": ["call_completed", "call_failed"]},
+                               "summary": {"type": "string"}, "outcome": {"type": "string"},
+                               "sentiment": {"type": "string"}, "objections": {"type": "array", "items": {"type": "string"}},
+                               "tara_learnings": {"type": "array", "items": {"type": "string"}},
+                               "next_action": {"type": "string"},
+                           },
+                           "required": ["terminal_state", "summary", "outcome", "sentiment", "objections", "tara_learnings", "next_action"],
+                           "additionalProperties": False,
+                       }}}, "required": ["call_analyses"], "additionalProperties": False,
+                   }, max_tokens=1400)
+                parsed = _first_json_object(str((response or {}).get("content") or "")) or {}
+                generated_call_analyses = [row for row in (parsed.get("call_analyses") or []) if isinstance(row, dict)][:20]
+                if generated_call_analyses:
+                    grounded_artifacts.append({
+                        "kind": "call_analyses", "source": "room_worker",
+                        "record_count": len(generated_call_analyses), "records": generated_call_analyses,
+                        "source_refs": [str(call_event.get("id") or call_event.get("event_id") or "tara-call-event")],
+                    })
+                text = json.dumps({"call_analyses": generated_call_analyses}, ensure_ascii=False)
             else:
                 response = await self._groq([
                     {"role": "system", "content": _now_block() + f"You are {owner_name}, {lane}. {persona}"},
@@ -2960,6 +3097,14 @@ class Director:
             record for artifact in deliverables if artifact.get("kind") == "email_drafts"
             for record in (artifact.get("records") or []) if isinstance(record, dict)
         ]
+        call_brief_records = [
+            record for artifact in deliverables if artifact.get("kind") == "call_briefs"
+            for record in (artifact.get("records") or []) if isinstance(record, dict)
+        ]
+        call_analysis_records = [
+            record for artifact in deliverables if artifact.get("kind") == "call_analyses"
+            for record in (artifact.get("records") or []) if isinstance(record, dict)
+        ]
         drafts_by_company = {
             str(record.get("prospect_company") or "").strip().casefold(): record
             for record in draft_records if str(record.get("prospect_company") or "").strip()
@@ -3067,6 +3212,57 @@ class Director:
                     "external_ref": None,
                 })
 
+        if "call_brief" in expected:
+            for record in call_brief_records:
+                phone = re.sub(r"[\s()/-]", "", str(record.get("phone") or ""))
+                goal = str(record.get("goal") or "").strip()
+                if not re.fullmatch(r"\+[1-9]\d{6,14}", phone) or not goal:
+                    continue
+                call_id = artifact_id("call_brief", phone)
+                artifacts.append({
+                    "id": call_id,
+                    "key": "call_brief",
+                    "status": "READY",
+                    "data": {
+                        "phone": phone,
+                        "prospect": str(record.get("prospect") or phone).strip()[:300],
+                        "goal": goal[:300],
+                        "opener": str(record.get("opener") or "").strip()[:400],
+                        "context": str(record.get("context") or "").strip()[:800],
+                        "language": str(record.get("language") or "en").strip()[:8],
+                        "strategy": str(record.get("strategy") or "").strip()[:200],
+                        "voice_style": str(record.get("voice_style") or "").strip()[:40],
+                        "personal_notes": str(record.get("personal_notes") or "").strip()[:800],
+                        "instruction": str(record.get("instruction") or request.get("instruction") or "").strip()[:5000],
+                        "room_turn_id": str(getattr(self, "turn_id", "") or "") or None,
+                    },
+                    "source_refs": [str(record.get("source_ref") or "runtime-request:exact-phone")],
+                    "external_ref": None,
+                })
+
+        if "call_analysis" in expected:
+            event = inputs.get("event") if isinstance(inputs.get("event"), dict) else {}
+            event_ref = str(event.get("id") or event.get("event_id") or "tara-call-event")
+            for index, record in enumerate(call_analysis_records):
+                terminal_state = str(record.get("terminal_state") or "").strip()
+                if terminal_state not in {"call_completed", "call_failed"}:
+                    continue
+                artifacts.append({
+                    "id": artifact_id("call_analysis", f"{event_ref}:{index}"),
+                    "key": "call_analysis",
+                    "status": "READY",
+                    "data": {
+                        "terminal_state": terminal_state,
+                        "summary": str(record.get("summary") or "").strip()[:4000],
+                        "outcome": str(record.get("outcome") or "").strip()[:500],
+                        "sentiment": str(record.get("sentiment") or "").strip()[:120],
+                        "objections": [str(value)[:500] for value in (record.get("objections") or [])[:20]],
+                        "tara_learnings": [str(value)[:500] for value in (record.get("tara_learnings") or [])[:20]],
+                        "next_action": str(record.get("next_action") or "").strip()[:1000],
+                    },
+                    "source_refs": [event_ref],
+                    "external_ref": None,
+                })
         gaps = [str((gap or {}).get("why") or (gap or {}).get("criterion") or gap)
                 for gap in (work_order_result.get("gaps") or []) if gap]
         produced_keys = {artifact["key"] for artifact in artifacts}

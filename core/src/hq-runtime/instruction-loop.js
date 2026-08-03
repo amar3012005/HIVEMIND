@@ -60,6 +60,20 @@ function cleanLocation(value) {
 export function interpretHqInstruction(body, company = {}) {
   const text = String(body || '').trim();
   const location = cleanLocation(company.location || company.city || company.profile?.location || '');
+  const exactTargets = [];
+  const seenTargets = new Set();
+  const retainTarget = (type, value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized || seenTargets.has(`${type}:${normalized}`)) return;
+    seenTargets.add(`${type}:${normalized}`);
+    exactTargets.push({ type, value: normalized });
+  };
+  for (const match of text.matchAll(/\+[1-9][\d\s()/-]{6,20}/g)) {
+    const phone = String(match[0]).replace(/[\s()/-]/g, '');
+    if (/^\+[1-9]\d{6,14}$/.test(phone)) retainTarget('phone', phone);
+  }
+  for (const match of text.matchAll(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g)) retainTarget('email', match[0]);
+  for (const match of text.matchAll(/https?:\/\/[^\s<>()]+/gi)) retainTarget('url', match[0].replace(/[.,;!?]+$/, ''));
   const base = {
     intent: 'operating_instruction',
     location: location || null,
@@ -74,7 +88,7 @@ export function interpretHqInstruction(body, company = {}) {
     requested_action: 'complete_requested_outcome',
     requested_terminal_outcome: 'completed_as_requested',
     external_action_requested: false,
-    exact_targets: [],
+    exact_targets: exactTargets,
     execution_mode: 'single_outcome',
   };
   return { ...base, work_units: [{

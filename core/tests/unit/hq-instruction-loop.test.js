@@ -21,6 +21,19 @@ test('offline instruction fallback preserves one complete objective without sema
   assert.match(result.work_units[0].objective, /getting me clients in Hannover/);
 });
 
+test('offline instruction fallback preserves explicit provider targets without semantic routing', () => {
+  const result = interpretHqInstruction(
+    'Call Amar on +91 63018 05656 and send the record to owner@example.test at https://example.test/brief.',
+    {},
+  );
+  assert.deepEqual(result.exact_targets, [
+    { type: 'phone', value: '+916301805656' },
+    { type: 'email', value: 'owner@example.test' },
+    { type: 'url', value: 'https://example.test/brief' },
+  ]);
+  assert.deepEqual(result.work_units[0].exact_targets, result.exact_targets);
+});
+
 test('offline instruction fallback adds only retained company location', () => {
   const result = interpretHqInstruction('Find qualified prospects for our company', { location: 'Berlin, Germany' });
   assert.equal(result.location, 'Berlin, Germany');

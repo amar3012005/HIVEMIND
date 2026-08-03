@@ -18681,6 +18681,27 @@ exit \$RC
               const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
               const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers, ...statsNoise };
               const relMemScope = { orgId, deletedAt: null, OR: tiers, ...statsNoise };
+              // REMOTE: central memories/relationships hold nothing for .amr orgs, so these counts
+              // read 0 and the FE showed empty counters. The agent's /v1/stats counts its OWN
+              // memories + relationships tables — which only became populated for amr_embedded once
+              // the embedded agent started writing the SQL mirror.
+              // KNOWN DIFFERENCE, stated rather than hidden: the agent has no tag-exclusion filter,
+              // so the remote count does NOT subtract the noise tags central excludes
+              // (tara-*, governance, hyper-room, ...). Remote totals can therefore read slightly
+              // higher than the Memories page. Fixing that means teaching /v1/stats a tag filter.
+              if (orgIsRemote(orgId)) {
+                const rs = await amrStats(orgId, statsCtx?.orgRole === 'guest' ? { user_id: userId } : {});
+                if (rs) {
+                  return jsonResponse(res, {
+                    memories: rs.memories || 0,
+                    relations: rs.relationships || 0,
+                    scope: 'all',
+                    storage_mode: 'amr',
+                    noise_filtered: false,
+                  });
+                }
+                console.warn(`[memory/stats] amr stats unavailable for org ${orgId} — falling through to central (will read 0)`);
+              }
               const [memTotal, relTotal] = await Promise.all([
                 prisma.memory.count({ where: memWhere }),
                 prisma.relationship.count({ where: { OR: [{ fromMemory: relMemScope }, { toMemory: relMemScope }] } }),
@@ -20358,6 +20379,45 @@ exit \$RC
           // Rich graph: memories + documents + entities + typed relationships
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/intelligent')) return;
+            // REMOTE: this is the endpoint the FE MemoryGraph page actually calls
+            // (apiClient.getIntelligentGraph -> /v1/proxy/graph/intelligent). Its four central reads
+            // (memories, relationships, evidence links, entity mentions) all return 0 rows for an
+            // .amr org, so the page rendered BLANK. /api/graph was already routed — this one was
+            // simply missed, which is why the graph looked broken only on that page.
+            // Same agent mapping as /api/graph, shaped with this endpoint's `counts` field.
+            // Enrichment (entity mentions, evidence links) is not available from the agent graph, so
+            // those counts are reported as 0 with enrichment:false rather than silently implied.
+            if (orgIsRemote(orgId)) {
+              try {
+                const gLimit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
+                const g = await amrGraph(orgId, { limit: gLimit, filter: { user_id: userId } });
+                if (g) {
+                  const nodes = (g.nodes || []).map((n) => ({
+                    id: n.id, label: n.title || (n.content || '').slice(0, 60), title: n.title,
+                    content: n.content, tags: n.tags || [], kind: 'memory',
+                    group: n.memory_type || 'memory', memory_type: n.memory_type, createdAt: n.created_at,
+                    importanceScore: n.confidence != null ? Number(n.confidence) : null,
+                    recallCount: n.recall_count ?? 0,
+                    strength: typeof n.strength === 'number' ? n.strength : (n.strength != null ? Number(n.strength) : 1.0),
+                    documentDate: n.document_date || null,
+                  }));
+                  const edges = (g.edges || []).map((e) => ({
+                    source: e.from_id, target: e.to_id, type: e.type || 'Mentions', confidence: e.confidence || 1,
+                  }));
+                  return jsonResponse(res, {
+                    nodes, edges,
+                    counts: {
+                      memories: nodes.length, documents: 0, entities: 0,
+                      relationships: edges.length, evidence_links: 0, mentions: 0,
+                    },
+                    meta: { source: 'agent', storage_mode: 'amr', enrichment: false },
+                  });
+                }
+                console.warn(`[graph/intelligent] agent graph unavailable for org ${orgId} — the central build will return an empty graph`);
+              } catch (e) {
+                console.warn(`[graph/intelligent] agent graph failed for org ${orgId}: ${e.message} — the central build will return an empty graph`);
+              }
+            }
             try {
               const limit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
               const entityFilter = url.searchParams.get('entity') || null;

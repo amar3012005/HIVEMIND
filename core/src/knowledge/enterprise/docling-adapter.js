@@ -208,9 +208,13 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
       }
       const data = await resultRes.json();
       const doc = data.document || data;
+      // docling-serve returns md_content / text_content — NOT markdown / text. Reading
+      // the wrong field made EVERY docling parse look empty (chars=0, chunks=0, no error),
+      // so every PDF silently fell through to fast-pdf (letter-spaced) or vision. Verified
+      // by calling /v1/convert/file directly: md_len 28237, text_len 0 on an 11-page PDF.
       return {
-        markdown: collapseLetterSpacing(data.markdown || doc.markdown || ''),
-        text: collapseLetterSpacing(data.text || doc.text || ''),
+        markdown: collapseLetterSpacing(data.md_content || doc.md_content || data.markdown || doc.markdown || ''),
+        text: collapseLetterSpacing(data.text_content || doc.text_content || data.md_content || doc.md_content || data.text || doc.text || ''),
         json: doc,
         tables: extractTablesFromDocling(doc),
         pages: Array.isArray(data.pages) ? data.pages.length : (doc.num_pages || 1),
@@ -233,13 +237,16 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     const data = await res.json();
     const doc = data.document || data;
 
+    // SYNC path had the same defect as async: export_to_markdown/export_to_text are
+    // PYTHON methods that never exist across HTTP, so it always fell to data.markdown —
+    // a field docling-serve does not send. md_content / text_content are the real ones.
     return {
       markdown: collapseLetterSpacing(typeof doc.export_to_markdown === 'function'
         ? doc.export_to_markdown() || ''
-        : data.markdown || ''),
+        : (data.md_content || doc.md_content || data.markdown || '')),
       text: collapseLetterSpacing(typeof doc.export_to_text === 'function'
         ? doc.export_to_text() || ''
-        : data.text || ''),
+        : (data.text_content || doc.text_content || data.md_content || doc.md_content || data.text || '')),
       json: doc,
       tables: extractTablesFromDocling(doc),
       pages: Array.isArray(data.pages) ? data.pages.length : (doc.num_pages || 1),

@@ -30,6 +30,15 @@ import {
   normalizeReferralCode,
   redeemReferral,
 } from './billing/entitlements.js';
+import {
+  amendEntitlementGrant,
+  createPromotion,
+  findPromotionForCode,
+  grantPromotionToOrganization,
+  listPromotions,
+  normalizePromotionCode,
+  redeemPromotion,
+} from './billing/promotion-service.js';
 import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
@@ -115,6 +124,9 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
   .map(o => o.trim())
   .filter(Boolean)
   .concat([
+    // Dedicated commercial control surface. This is explicit rather than a
+    // wildcard so normal tenant CORS policy cannot expand by accident.
+    'https://admin.hivemind.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -1107,6 +1119,9 @@ const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const PLATFORM_UNLOCK_MAX_ATTEMPTS = 5;
 const PLATFORM_UNLOCK_WINDOW_MS = 15 * 60 * 1000;
 const platformUnlockAttempts = new Map();
+const PROMOTION_ATTEMPT_MAX = 20;
+const PROMOTION_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
+const promotionAttempts = new Map();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -1353,18 +1368,30 @@ function secretsMatch(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function makePlatformAdminCookie() {
+function normalizePlatformOperator(value) {
+  const operator = String(value || '').trim().replace(/\s+/g, ' ');
+  return /^[A-Za-z0-9 .,'_-]{2,80}$/.test(operator) ? operator : null;
+}
+
+function makePlatformAdminCookie(operator) {
   const expiresAt = Math.floor(Date.now() / 1000) + PLATFORM_ADMIN_TTL_SECONDS;
-  const signature = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}`).digest('base64url');
-  return `${PLATFORM_ADMIN_COOKIE}=${expiresAt}.${signature}; HttpOnly; Path=/; SameSite=Strict; Secure; Max-Age=${PLATFORM_ADMIN_TTL_SECONDS}`;
+  const operatorToken = Buffer.from(operator).toString('base64url');
+  const signature = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}:${operatorToken}`).digest('base64url');
+  return `${PLATFORM_ADMIN_COOKIE}=${expiresAt}.${operatorToken}.${signature}; HttpOnly; Path=/; SameSite=Strict; Secure; Max-Age=${PLATFORM_ADMIN_TTL_SECONDS}`;
+}
+
+function getPlatformAdminSession(req) {
+  const raw = parseCookies(req)[PLATFORM_ADMIN_COOKIE] || '';
+  const [expiresAt, operatorToken, signature] = raw.split('.');
+  if (!expiresAt || !operatorToken || !signature || Number(expiresAt) <= Math.floor(Date.now() / 1000)) return null;
+  const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}:${operatorToken}`).digest('base64url');
+  if (!secretsMatch(signature, expected)) return null;
+  const operator = normalizePlatformOperator(Buffer.from(operatorToken, 'base64url').toString('utf8'));
+  return operator ? { operator, expiresAt: Number(expiresAt), sessionId: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32) } : null;
 }
 
 function hasPlatformAdminCookie(req) {
-  const raw = parseCookies(req)[PLATFORM_ADMIN_COOKIE] || '';
-  const [expiresAt, signature] = raw.split('.');
-  if (!expiresAt || !signature || Number(expiresAt) <= Math.floor(Date.now() / 1000)) return false;
-  const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}`).digest('base64url');
-  return secretsMatch(signature, expected);
+  return Boolean(getPlatformAdminSession(req));
 }
 
 function platformUnlockClient(req) {
@@ -1383,6 +1410,24 @@ function recordPlatformUnlockFailure(req) {
   const attempt = platformUnlockAttempts.get(client);
   platformUnlockAttempts.set(client, attempt && attempt.startedAt + PLATFORM_UNLOCK_WINDOW_MS > now
     ? { ...attempt, count: attempt.count + 1 }
+    : { startedAt: now, count: 1 });
+}
+
+function promotionAttemptKey(req) {
+  return platformUnlockClient(req);
+}
+
+function promotionAttemptLimited(req) {
+  const attempt = promotionAttempts.get(promotionAttemptKey(req));
+  return Boolean(attempt && attempt.startedAt + PROMOTION_ATTEMPT_WINDOW_MS > Date.now() && attempt.count >= PROMOTION_ATTEMPT_MAX);
+}
+
+function recordPromotionAttempt(req, accepted) {
+  const key = promotionAttemptKey(req);
+  if (accepted) return promotionAttempts.delete(key);
+  const now = Date.now(); const previous = promotionAttempts.get(key);
+  promotionAttempts.set(key, previous && previous.startedAt + PROMOTION_ATTEMPT_WINDOW_MS > now
+    ? { ...previous, count: previous.count + 1 }
     : { startedAt: now, count: 1 });
 }
 
@@ -2639,13 +2684,14 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
     const body = await parseBody(req).catch(() => ({}));
-    if (!secretsMatch(body?.passkey, ADMIN_SECRET)) {
+    const operator = normalizePlatformOperator(body?.operator_name);
+    if (!secretsMatch(body?.passkey, ADMIN_SECRET) || !operator) {
       recordPlatformUnlockFailure(req);
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
     platformUnlockAttempts.delete(platformUnlockClient(req));
     return jsonResponse(res, { ok: true, expires_in_seconds: PLATFORM_ADMIN_TTL_SECONDS }, 200, {
-      'Set-Cookie': makePlatformAdminCookie(),
+      'Set-Cookie': makePlatformAdminCookie(operator),
     });
   }
 
@@ -2705,6 +2751,151 @@ const server = http.createServer(async (req, res) => {
       .slice(0, 250)
       .map(({ line }) => line);
     return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane } });
+  }
+
+  // ─── Platform Commercial: canonical promotions and pilot grants ───────────
+  // This namespace is deliberately separate from tenant billing routes. It is
+  // protected by the short-lived platform passkey session and every mutation is
+  // append-only audited with the named operator embedded in signed session data.
+  if (pathname === '/admin/api/platform/promotions' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (req.method === 'GET') return jsonResponse(res, { promotions: await listPromotions(prisma) });
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      // Stripe-backed offers remain drafts until Stripe has accepted the server-
+      // generated code. That prevents an active offer which cannot be redeemed.
+      const wantsStripeDiscount = String(body.billing_mode || '').toLowerCase() === 'stripe_discount';
+      const created = await createPromotion({ prisma, input: { ...body, status: wantsStripeDiscount ? 'draft' : body.status } });
+      if (wantsStripeDiscount) {
+        try {
+          const billingMod = await import('./billing/stripe.js');
+          const stripeTerms = await billingMod.createManagedPromotionCode({
+            code: created.plaintextCode,
+            name: created.promotion.internal_name,
+            terms: created.promotion.version.commercial_terms,
+          });
+          const commercialTerms = {
+            ...created.promotion.version.commercial_terms,
+            stripe_coupon_id: stripeTerms.couponId,
+            stripe_promotion_code_id: stripeTerms.promotionCodeId,
+          };
+          await prisma.$transaction(async (tx) => {
+            await tx.promotionVersion.update({ where: { id: created.promotion.version.id }, data: { commercialTerms } });
+            await tx.promotion.update({ where: { id: created.promotion.id }, data: { status: 'active' } });
+          });
+          created.promotion.status = 'active';
+          created.promotion.version.commercial_terms = commercialTerms;
+        } catch (stripeError) {
+          await audit({ eventType: 'commercial.promotion_stripe_setup_failed', eventCategory: 'billing', action: 'update', resourceType: 'promotion', resourceId: created.promotion.id,
+            metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: stripeError.message.slice(0, 240) }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+          return jsonResponse(res, { error: 'Stripe promotion setup failed; the offer remains a draft.' }, 502);
+        }
+      }
+      await audit({
+        eventType: 'commercial.promotion_created', eventCategory: 'billing', action: 'create',
+        resourceType: 'promotion', resourceId: created.promotion.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, promotion: created.promotion },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
+      });
+      return jsonResponse(res, { promotion: created.promotion, ...(created.plaintextCode ? { code: created.plaintextCode } : {}) }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+
+  const adminPromotionRevoke = pathname.match(/^\/admin\/api\/platform\/promotions\/([0-9a-f-]{36})\/revoke$/i);
+  if (adminPromotionRevoke && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const promotion = await prisma?.promotion.updateMany({ where: { id: adminPromotionRevoke[1], status: { in: ['draft', 'active'] } }, data: { status: 'revoked' } });
+    if (!promotion?.count) return jsonResponse(res, { error: 'Not found' }, 404);
+    await audit({ eventType: 'commercial.promotion_revoked', eventCategory: 'billing', action: 'update', resourceType: 'promotion', resourceId: adminPromotionRevoke[1],
+      metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+    return jsonResponse(res, { ok: true });
+  }
+
+  if (pathname === '/admin/api/platform/pilots' && req.method === 'GET') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const grants = await prisma.entitlementGrant.findMany({ orderBy: { startsAt: 'desc' }, take: 500 });
+    const orgIds = [...new Set(grants.map((grant) => grant.orgId))];
+    const grantIds = grants.map((grant) => grant.id);
+    const [orgs, versions] = await Promise.all([
+      orgIds.length ? prisma.organization.findMany({ where: { id: { in: orgIds } }, select: { id: true, name: true, plan: true, accountType: true, hostingMode: true, memoryStorageMode: true } }) : [],
+      grantIds.length ? prisma.entitlementVersion.findMany({ where: { grantId: { in: grantIds } }, orderBy: { version: 'desc' } }) : [],
+    ]);
+    const byOrg = new Map(orgs.map((org) => [org.id, org]));
+    return jsonResponse(res, { pilots: grants.map((grant) => {
+      const version = versions.find((row) => row.grantId === grant.id);
+      const expired = grant.endsAt && grant.endsAt <= new Date();
+      return { grant_id: grant.id, organization: byOrg.get(grant.orgId) || null, status: expired && grant.fallbackAction === 'manual_review' ? 'manual_review' : grant.status,
+        starts_at: grant.startsAt, ends_at: grant.endsAt, fallback_action: grant.fallbackAction,
+        version: version ? { plan: version.planId, limits: version.limits, account_type: version.accountType, storage_mode: version.storageMode, number: version.version } : null };
+    }) });
+  }
+
+  if (pathname === '/admin/api/platform/organizations' && req.method === 'GET') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const organizations = await prisma.organization.findMany({
+      orderBy: { createdAt: 'desc' }, take: 500,
+      select: { id: true, name: true, plan: true, accountType: true, hostingMode: true, memoryStorageMode: true, createdAt: true },
+    });
+    return jsonResponse(res, { organizations });
+  }
+
+  if (pathname === '/admin/api/platform/pilots/grant' && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const result = await grantPromotionToOrganization({ prisma, promotionId: body.promotion_id, orgId: body.organization_id, requestId: req.headers['x-request-id'] || null });
+      await audit({ organizationId: result.grant.orgId, eventType: 'commercial.pilot_granted', eventCategory: 'billing', action: 'create', resourceType: 'entitlement_grant', resourceId: result.grant.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, promotion_id: result.promotion.id }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { grant: result.grant, version: result.entitlementVersion, redemption: result.redemption }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 409);
+    }
+  }
+
+  const adminPilotAmend = pathname.match(/^\/admin\/api\/platform\/pilots\/([0-9a-f-]{36})\/entitlement$/i);
+  if (adminPilotAmend && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const result = await amendEntitlementGrant({ prisma, grantId: adminPilotAmend[1], patch: body });
+      await audit({ organizationId: result.grant.orgId, eventType: 'commercial.entitlement_amended', eventCategory: 'billing', action: 'update', resourceType: 'entitlement_grant', resourceId: result.grant.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, transition_reason: result.version.transitionReason }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { grant: result.grant, version: result.version });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, /not found/i.test(error.message) ? 404 : 400);
+    }
+  }
+
+  if (pathname === '/admin/api/platform/redemptions' && req.method === 'GET') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const redemptions = await prisma.promotionRedemption.findMany({ orderBy: { redeemedAt: 'desc' }, take: 500 });
+    const [promotionIds, orgIds, userIds] = [
+      [...new Set(redemptions.map((row) => row.promotionId))], [...new Set(redemptions.map((row) => row.orgId))], [...new Set(redemptions.map((row) => row.redeemedByUserId))],
+    ];
+    const [promotions, organizations, users] = await Promise.all([
+      promotionIds.length ? prisma.promotion.findMany({ where: { id: { in: promotionIds } }, select: { id: true, internalName: true, codeHint: true } }) : [],
+      orgIds.length ? prisma.organization.findMany({ where: { id: { in: orgIds } }, select: { id: true, name: true } }) : [],
+      userIds.length ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, email: true } }) : [],
+    ]);
+    const byId = (rows) => new Map(rows.map((row) => [row.id, row]));
+    const promotionById = byId(promotions); const orgById = byId(organizations); const userById = byId(users);
+    return jsonResponse(res, { redemptions: redemptions.map((row) => ({ id: row.id, redeemed_at: row.redeemedAt, code_hint: row.codeHint,
+      promotion: promotionById.get(row.promotionId) || null, organization: orgById.get(row.orgId) || null,
+      redeemed_by: userById.get(row.redeemedByUserId)?.email || 'Unknown', grant_id: row.entitlementGrantId, terms: row.termsSnapshot })) });
   }
 
   if (pathname === '/admin/api/logs' && req.method === 'GET') {
@@ -3580,25 +3771,34 @@ const server = http.createServer(async (req, res) => {
     }
     const referralCode = normalizeReferralCode(body.referralCode);
     let referralCampaign = null;
+    let signupPromotion = null;
     if (referralCode) {
-      referralCampaign = await prisma.referralCampaign.findUnique({ where: { code: referralCode } }).catch(() => null);
+      const signupUser = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
+      signupPromotion = await findPromotionForCode({ prisma, code: referralCode, email: signupUser?.email || '', orgId: null }).catch(() => null);
+      referralCampaign = signupPromotion ? null : await prisma.referralCampaign.findUnique({ where: { code: referralCode } }).catch(() => null);
       const now = new Date();
-      if (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now)
+      if (!signupPromotion && (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now)
         || (referralCampaign.endsAt && referralCampaign.endsAt <= now)
-        || (referralCampaign.maxRedemptions != null && referralCampaign.redemptionCount >= referralCampaign.maxRedemptions)) {
-        return jsonResponse(res, { error: 'invalid or inactive referral code' }, 400);
+        || (referralCampaign.maxRedemptions != null && referralCampaign.redemptionCount >= referralCampaign.maxRedemptions))) {
+        return jsonResponse(res, { error: 'promotion unavailable' }, 400);
       }
     }
     const referralOffer = referralCampaign ? buildReferralOffer(referralCampaign) : null;
-    const provisionPlan = requestedPlan;
+    const provisionPlan = signupPromotion?.version.basePlan || requestedPlan;
 
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
     const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
     // Persist the user's hosting choice from onboarding (managed = we host; self_host = their agent box).
-    const hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
+    let hostingMode = (body.deployment === 'selfhost' || body.deployment === 'self_hosted' || body.hosting_mode === 'self_host')
       ? 'self_host' : 'managed';
-    const memoryStorageMode = memoryStorageModeFor(provisionPlan, hostingMode);
+    let memoryStorageMode = memoryStorageModeFor(provisionPlan, hostingMode);
+    let accountType = provisionPlan === 'enterprise' ? (hostingMode === 'self_host' ? 'enterprise_self_hosted' : 'enterprise_managed') : 'personal';
+    if (signupPromotion) {
+      hostingMode = signupPromotion.version.hostingMode;
+      memoryStorageMode = signupPromotion.version.storageMode;
+      accountType = signupPromotion.version.accountType;
+    }
     const orgId = crypto.randomUUID();
     const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     const needsEmbeddedAmr = hostingMode === 'managed' && memoryStorageMode === 'amr_embedded';
@@ -3619,9 +3819,13 @@ const server = http.createServer(async (req, res) => {
             zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
             name: body.name,
             slug,
-            plan: requestedPlan,
+            // The promotion was verified before this transaction and is
+            // redeemed atomically below, so provisional org metadata must not
+            // momentarily describe a free workspace as a paid pilot.
+            plan: provisionPlan,
             hostingMode,
             memoryStorageMode,
+            accountType,
           },
         });
         await tx.userOrganization.create({
@@ -3641,9 +3845,16 @@ const server = http.createServer(async (req, res) => {
         if (enterpriseViaAccessCode) {
           await activateOffer({ tx, orgId: newOrg.id, offer: buildStandardOffer('enterprise'), source: 'enterprise_access_code' });
         }
-        return { org: newOrg };
+        let promotion = null;
+        if (signupPromotion) {
+          const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
+          promotion = await redeemPromotion({ prisma, tx, orgId: newOrg.id, userId: current.session.userId, email: signupUser?.email || '', code: referralCode,
+            requestId: req.headers['x-request-id'] || null, applyProfile: true });
+        }
+        return { org: newOrg, promotion };
       });
       org = created.org;
+      signupPromotion = created.promotion || signupPromotion;
     } catch (error) {
       if (needsEmbeddedAmr) {
         try { unregisterEmbeddedAmrOrg(orgId, regFile); }
@@ -3698,11 +3909,12 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: org.plan || requestedPlan,
+        plan: signupPromotion?.promotion?.version?.base_plan || org.plan || provisionPlan,
         hosting_mode: org.hostingMode || hostingMode,
         memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode),
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
         referral: referralOffer ? { code: referralOffer.code, phase: 'pending_payment', offer: referralOffer } : null,
+        promotion: signupPromotion?.termsSnapshot || null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -10856,12 +11068,25 @@ Write the persona now.`;
   if (pathname === '/v1/referrals/preview' && req.method === 'GET') {
     const current = await requireSession(req, res);
     if (!current) return;
+    if (promotionAttemptLimited(req)) return jsonResponse(res, { valid: false }, 429);
     const code = normalizeReferralCode(url.searchParams.get('code'));
+    const user = await prisma?.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
+    const promotion = code ? await findPromotionForCode({ prisma, code, email: user?.email, orgId: current.session.orgId }).catch(() => null) : null;
+    if (promotion) {
+      recordPromotionAttempt(req, true);
+      const offer = promotion.version;
+      return jsonResponse(res, { valid: true, promotion: {
+        name: promotion.promotion.internalName, code_hint: promotion.promotion.codeHint,
+        base_plan: offer.basePlan, limits: offer.limits, account_type: offer.accountType,
+        storage_mode: offer.storageMode, ends_at: promotion.promotion.endsAt,
+      } });
+    }
     const campaign = code ? await prisma?.referralCampaign.findUnique({ where: { code } }).catch(() => null) : null;
     const now = new Date();
     const valid = Boolean(campaign?.active && (!campaign.startsAt || campaign.startsAt <= now) && (!campaign.endsAt || campaign.endsAt > now)
       && (campaign.maxRedemptions == null || campaign.redemptionCount < campaign.maxRedemptions));
-    if (!valid) return jsonResponse(res, { valid: false }, 404);
+    if (!valid) { recordPromotionAttempt(req, false); return jsonResponse(res, { valid: false }, 404); }
+    recordPromotionAttempt(req, true);
     return jsonResponse(res, {
       valid: true,
       campaign: {
@@ -10877,53 +11102,54 @@ Write the persona now.`;
     if (!current) return;
     const membership = await getOrgMembership(current.session.userId, current.session.orgId);
     if (!membership || !effectiveRoles(membership).includes('org_owner')) return jsonResponse(res, { error: 'organization owner required' }, 403);
+    if (promotionAttemptLimited(req)) return jsonResponse(res, { error: 'promotion unavailable' }, 429);
     const body = await parseBody(req).catch(() => ({}));
     try {
+      const user = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
+      const promotion = await redeemPromotion({ prisma, orgId: current.session.orgId, userId: current.session.userId, email: user?.email || '', code: body.code, requestId: req.headers['x-request-id'] || null });
+      await audit({ organizationId: current.session.orgId, userId: current.session.userId, eventType: 'commercial.promotion_redeemed', eventCategory: 'billing', action: 'create',
+        resourceType: 'promotion_redemption', resourceId: promotion.redemption.id, metadata: { promotion_id: promotion.promotion.id }, ..._reqMeta(req) });
+      recordPromotionAttempt(req, true);
+      return jsonResponse(res, { ok: true, promotion: promotion.termsSnapshot });
+    } catch (promotionError) {
+      // Existing codes remain redeemable during migration. Do not disclose
+      // whether a new promotion failed eligibility versus did not exist.
+      try {
       const result = await redeemReferral({ prisma, orgId: current.session.orgId, userId: current.session.userId, code: body.code });
+      recordPromotionAttempt(req, true);
       return jsonResponse(res, { ok: true, referral: { code: result.terms.code, phase: 'onboarding', runway_starts_at: result.runwayStartsAt.toISOString(), terms: result.terms } });
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 409);
+      } catch {
+        recordPromotionAttempt(req, false);
+        return jsonResponse(res, { error: 'promotion unavailable' }, 409);
+      }
     }
   }
 
-  // Platform-admin-only campaign management. Campaign terms are server data;
-  // the browser can redeem a code but cannot create or alter an offer.
+  // Legacy adapter: existing scripts keep their path, but all new records are
+  // created through PromotionService rather than a second campaign model.
   if (pathname === '/v1/admin/referrals' && (req.method === 'GET' || req.method === 'POST')) {
     if (!isAdminAuthorized(req, url)) return jsonResponse(res, { error: 'admin authorization required' }, 403);
     if (req.method === 'GET') {
-      const campaigns = await prisma.referralCampaign.findMany({ orderBy: { createdAt: 'desc' } });
+      const campaigns = await listPromotions(prisma);
       return jsonResponse(res, { campaigns });
     }
     const body = await parseBody(req).catch(() => ({}));
-    const code = normalizeReferralCode(body.code);
     const onboardingPlan = String(body.onboarding_plan || 'enterprise').toLowerCase();
     const runwayPlan = String(body.runway_plan || 'enterprise').toLowerCase();
-    if (!code || !body.name || !PLANS[onboardingPlan] || !PLANS[runwayPlan]) {
+    if (!body.code || !body.name || !PLANS[onboardingPlan] || !PLANS[runwayPlan]) {
       return jsonResponse(res, { error: 'code, name, and valid onboarding/runway plans are required' }, 400);
     }
-    const onboardingDays = Number(body.onboarding_days || 14);
-    if (!Number.isInteger(onboardingDays) || onboardingDays < 1 || onboardingDays > 90) return jsonResponse(res, { error: 'onboarding_days must be 1..90' }, 400);
-    if (!/^[A-Z0-9][A-Z0-9_-]{2,63}$/.test(code)) return jsonResponse(res, { error: 'code must be 3..64 letters, numbers, underscores, or hyphens' }, 400);
-    const maxRedemptions = body.max_redemptions == null ? null : Number(body.max_redemptions);
-    if (maxRedemptions != null && (!Number.isSafeInteger(maxRedemptions) || maxRedemptions < 1)) {
-      return jsonResponse(res, { error: 'max_redemptions must be a positive integer' }, 400);
-    }
-    const startsAt = body.starts_at ? new Date(body.starts_at) : null;
-    const endsAt = body.ends_at ? new Date(body.ends_at) : null;
-    if ((startsAt && Number.isNaN(startsAt.getTime())) || (endsAt && Number.isNaN(endsAt.getTime()))
-      || (startsAt && endsAt && startsAt >= endsAt)) {
-      return jsonResponse(res, { error: 'starts_at and ends_at must be valid and ordered dates' }, 400);
-    }
     try {
-      const campaign = await prisma.referralCampaign.create({ data: {
-        code, name: String(body.name).slice(0, 160), active: body.active !== false,
-        maxRedemptions, startsAt, endsAt,
-        onboardingDays, onboardingPlan, onboardingLimits: normalizeLimitOverrides(onboardingPlan, body.onboarding_limits),
-        runwayPlan, runwayLimits: normalizeLimitOverrides(runwayPlan, body.runway_limits),
+      const created = await createPromotion({ prisma, input: {
+        internal_name: body.name, code: body.code, base_plan: onboardingPlan, limits: body.onboarding_limits,
+        account_type: onboardingPlan === 'enterprise' ? 'enterprise_managed' : 'personal',
+        billing_mode: 'entitlement_only', commercial_terms: { kind: 'trial', trial_days: Number(body.onboarding_days || 14) },
+        max_redemptions: body.max_redemptions, starts_at: body.starts_at, ends_at: body.ends_at,
+        fallback_action: ['free', 'pro', 'scale'].includes(runwayPlan) ? runwayPlan : 'manual_review',
       } });
-      return jsonResponse(res, { campaign }, 201);
+      return jsonResponse(res, { campaign: created.promotion, code: created.plaintextCode }, 201);
     } catch (error) {
-      return jsonResponse(res, { error: error.message }, 409);
+      return jsonResponse(res, { error: error.message }, 400);
     }
   }
 
@@ -10998,11 +11224,14 @@ Write the persona now.`;
         },
         entitlement: entitlement ? {
           source: entitlement.source, phase: entitlement.phase, effective_from: entitlement.effectiveFrom,
-          effective_until: entitlement.effectiveUntil,
+          effective_until: entitlement.effectiveUntil, status: entitlement.status || 'active',
+          grant_id: entitlement.grantId || null, account_type: entitlement.accountType || org.accountType || null,
+          hosting_mode: entitlement.hostingMode || org.hostingMode, storage_mode: entitlement.storageMode || org.memoryStorageMode,
         } : null,
         organization: {
           id: org.id,
           plan: org.plan,
+          account_type: org.accountType || 'personal',
           hosting_mode: org.hostingMode,
           memory_storage_mode: org.memoryStorageMode,
         },
@@ -11149,6 +11378,21 @@ Write the persona now.`;
       const targetPlanId = String(body.plan || '').trim();
       const targetPlan = plansMod.PLANS[targetPlanId];
       if (!targetPlan || targetPlanId === 'free') return jsonResponse(res, { error: 'invalid checkout plan' }, 400);
+      const referralCode = normalizeReferralCode(body.referral_code);
+      const checkoutUser = referralCode
+        ? await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null)
+        : null;
+      const checkoutPromotion = referralCode
+        ? await findPromotionForCode({ prisma, code: referralCode, email: checkoutUser?.email || '', orgId }).catch(() => null)
+        : null;
+      if (referralCode && checkoutPromotion) {
+        if (checkoutPromotion.version.basePlan !== targetPlanId) {
+          return jsonResponse(res, { error: 'This offer applies to a different plan' }, 409);
+        }
+        if (checkoutPromotion.promotion.billingMode === 'contract') {
+          return jsonResponse(res, { error: 'This offer is managed by your Singulance commercial contact' }, 409);
+        }
+      }
 
       if (!billingMod.isEnabled()) {
         if (!dummyCheckoutAllowed(orgId)) {
@@ -11156,8 +11400,13 @@ Write the persona now.`;
         }
         const now = new Date();
         let offer = buildStandardOffer(targetPlanId, now);
-        const referralCode = normalizeReferralCode(body.referral_code);
+        // Entitlement-only promotions are redeemed through the owner-safe
+        // redemption operation. The dummy checkout keeps legacy referrals for
+        // local payment testing, but does not fabricate a paid Stripe discount.
         if (referralCode) {
+          if (checkoutPromotion) {
+            return jsonResponse(res, { error: 'Redeem this promotion from Billing before checkout' }, 409);
+          }
           const campaign = await prisma.referralCampaign.findUnique({ where: { code: referralCode } });
           if (!campaign || !campaign.active || (campaign.startsAt && campaign.startsAt > now)
             || (campaign.endsAt && campaign.endsAt <= now)) {
@@ -11200,17 +11449,26 @@ Write the persona now.`;
       }
 
       try {
+        const stripePromotionCodeId = checkoutPromotion?.promotion.billingMode === 'stripe_discount'
+          ? checkoutPromotion.version.commercialTerms?.stripe_promotion_code_id
+          : null;
+        if (checkoutPromotion?.promotion.billingMode === 'stripe_discount' && !stripePromotionCodeId) {
+          return jsonResponse(res, { error: 'This promotion is not ready for checkout' }, 409);
+        }
         const session = await billingMod.createCheckoutSession({
           customerId,
           priceId,
           orgId,
           userId,
+          promotionCodeId: stripePromotionCodeId,
+          promotionId: checkoutPromotion?.promotion.id || null,
+          promotionVersionId: checkoutPromotion?.version.id || null,
         });
         audit({
           organizationId: orgId, userId,
           eventType: 'billing.checkout_started', eventCategory: 'billing', action: 'create',
           resourceType: 'subscription', resourceId: session.id,
-          metadata: { plan: targetPlanId, price_id: priceId }, ..._reqMeta(req),
+          metadata: { plan: targetPlanId, price_id: priceId, promotion_id: checkoutPromotion?.promotion.id || null }, ..._reqMeta(req),
         });
         return jsonResponse(res, { checkout_url: session.url, session_id: session.id });
       } catch (err) {

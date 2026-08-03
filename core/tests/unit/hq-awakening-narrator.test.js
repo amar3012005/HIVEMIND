@@ -3,15 +3,16 @@ import assert from 'node:assert/strict';
 import { fallbackAwakeningNarration } from '../../src/hq-runtime/awakening-narrator.js';
 import { compactCompanyOperatingContext, summarizeBaselineResult, summarizeGrowthPlanResult } from '../../src/hq-runtime/native-engine.js';
 
-test('HQ awakening fallback is specific to loaded company facts', () => {
+test('HQ awakening fallback acknowledges durable facts without diagnosing or recommending', () => {
   const narration = fallbackAwakeningNarration({
     company: { company: 'Boozit', website: 'https://boozit.example', location: 'Landshut, Germany' },
     objective: 'Build a qualified venue pipeline', capabilities: ['google-maps'], restart: false,
   });
   assert.match(narration, /Boozit at https:\/\/boozit\.example/);
   assert.match(narration, /Landshut, Germany/);
-  assert.match(narration, /Build a qualified venue pipeline/);
   assert.match(narration, /google-maps/);
+  assert.match(narration, /inspect the company identity/);
+  assert.doesNotMatch(narration, /Build a qualified venue pipeline/);
 });
 
 test('baseline acknowledgement names concrete platform and performance metrics', () => {

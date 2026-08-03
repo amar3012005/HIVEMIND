@@ -19,9 +19,8 @@ export function fallbackAwakeningNarration({ company, objective, capabilities, r
   const facts = factsFor(company);
   const identity = facts.website ? `${facts.name} at ${facts.website}` : facts.name;
   const place = facts.location ? ` in ${facts.location}` : '';
-  const focus = clean(objective, 260) || facts.positioning || facts.icp || 'the company objective';
-  const access = capabilities.length ? ` I can already use ${capabilities.slice(0, 4).join(', ')}.` : ' I will identify the evidence and access that are still missing.';
-  return `${restart ? 'I am rebuilding the current position for' : 'I have come online to operate'} ${identity}${place}. The first thing that matters is an accurate reading of ${focus}, not activity for its own sake.${access}`;
+  const access = capabilities.length ? ` I can inspect ${capabilities.slice(0, 4).join(', ')}.` : ' I will record which evidence is available and which is not observed.';
+  return `${restart ? 'I am rebuilding the current evidence for' : 'I have come online to take responsibility for'} ${identity}${place}.${access} I will inspect the company identity, current activity, retained work, and available operating evidence before proposing a direction.`;
 }
 
 export async function narrateAwakening({ company, objective, capabilities = [], restart = false, fallbackApiKey, onDelta = null }) {
@@ -35,7 +34,7 @@ export async function narrateAwakening({ company, objective, capabilities = [], 
         max_completion_tokens: 140,
         reasoning: { enabled: false, exclude: true },
         messages: [
-          { role: 'system', content: 'Write a two-sentence maximum first-person HQ Runtime awakening. Use only supplied facts. It should feel freshly specific and operational, but never claim consciousness, expose hidden reasoning, or invent information. State what this company is, one real tension or unknown, and the immediate next move. No markdown or headings.' },
+          { role: 'system', content: 'Write a two-sentence maximum first-person HQ Runtime activation acknowledgement. Use only supplied durable onboarding facts. Acknowledge responsibility for the company and state which evidence will be inspected next. Do not diagnose, recommend, rank priorities, claim results, claim consciousness, expose hidden reasoning, or invent information. No markdown or headings.' },
           { role: 'user', content: JSON.stringify({ event: restart ? 'runtime_restart' : 'first_activation', company: factsFor(company), objective: clean(objective, 700), available_capabilities: capabilities.slice(0, 12) }) },
         ],
       }),

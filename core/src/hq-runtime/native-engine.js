@@ -285,7 +285,19 @@ export class NativeHqEngine {
       try {
         const baseline = await this.toolkits.invoke('growth_baseline', 'collect', {
           mode: 'full_all', scheduleRuntimeWake: false,
-        }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
+        }, {
+          prisma,
+          orgId: runtime.orgId,
+          userId: runtime.ownerUserId,
+          baselineRunId: cycle.id,
+          onObservation: async (observation) => event(prisma, runtime, cycle, {
+            eventType: 'baseline_observation',
+            title: observation.source_key,
+            summary: observation.status,
+            evidenceRefs: [observation.artifact_id],
+            details: observation,
+          }),
+        });
         const acknowledged = summarizeBaselineResult(baseline);
         await event(prisma, runtime, cycle, {
           eventType: 'tool_result', title: 'I have established the current position',

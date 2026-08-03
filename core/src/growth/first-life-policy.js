@@ -1,12 +1,17 @@
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-const policyUrl = new URL('./fixtures/first-life-policy.v2.json', import.meta.url);
-let cachedPolicy = null;
+const CURRENT_POLICY_VERSION = 3;
+const cachedPolicies = new Map();
 
-export async function loadFirstLifePolicy() {
-  if (!cachedPolicy) cachedPolicy = JSON.parse(await readFile(policyUrl, 'utf8'));
-  return structuredClone(cachedPolicy);
+export async function loadFirstLifePolicy(version = CURRENT_POLICY_VERSION) {
+  const selectedVersion = Number(version || CURRENT_POLICY_VERSION);
+  if (![1, 2, 3].includes(selectedVersion)) throw new Error(`first_life_policy_version_unavailable:${selectedVersion}`);
+  if (!cachedPolicies.has(selectedVersion)) {
+    const policyUrl = new URL(`./fixtures/first-life-policy.v${selectedVersion}.json`, import.meta.url);
+    cachedPolicies.set(selectedVersion, JSON.parse(await readFile(policyUrl, 'utf8')));
+  }
+  return structuredClone(cachedPolicies.get(selectedVersion));
 }
 
 function policyRunId(policy, context) {

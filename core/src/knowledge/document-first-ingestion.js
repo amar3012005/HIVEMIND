@@ -1035,64 +1035,55 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       console.warn(`[kb-unified] input unusable (single_char_ratio=${_singleCharRatio.toFixed(2)} `
         + `words4=${_wordish} chars=${_wc.length}) — ONE pass, no re-sample. Fix the parse tier, not the prompt.`);
     }
-    let sparseOnly = true;
+    // A SUCCESSFUL EXTRACTION IS NEVER RE-ASKED. Only an EXCEPTION retries.
+    //
+    // The old loop re-sampled whenever a window "under-delivered" against
+    // `expected = round(maxFacts * 0.6)`. That retry could not work, by construction:
+    //   - it re-sent the SAME window with the SAME prompt and the SAME maxFacts
+    //     (the sparse branch left `degraded` false), and _extractUnified calls the model
+    //     at temperature 0 — so a deterministic question got the deterministic answer.
+    //     Measured live: both attempts returned identical facts, every time.
+    //   - it re-generated the WHOLE fact list, not the missing ones: the entire window
+    //     as input, every fact as output. Full token cost for one perceived miss.
+    //   - results were never unioned — `best` took whichever attempt had the higher
+    //     COUNT, so a fact found only by the losing attempt was discarded. With model
+    //     fallback the attempts can differ, which made this a way to LOSE a real fact.
+    // ~95s of a measured 139s extraction stage went into this. Accuracy comes from using
+    // a model that extracts correctly the first time, not from asking twice.
+    //
+    // Capacity is still estimated — but ONLY to report a shortfall, never to re-sample.
+    // A window whose facts we failed to capture must say so out loud (the verbatim text
+    // is still in segments, so evidence recall can answer it and synthesis cannot);
+    // silence there is the silent-partial-completion shape this pipeline keeps producing.
     for (let attempt = 1; attempt <= (_inputUnusable ? 1 : attempts); attempt++) {
       try {
-        const degraded = attempt > 1 && !sparseOnly;
+        // attempt > 1 is only ever reached from the catch below, i.e. after a real
+        // failure — so a second pass is always the degraded/compact one.
+        const degraded = attempt > 1;
         const claims = await this._extractUnified(window, {
           ...options,
           maxFacts: degraded ? Math.min(maxFacts, 2) : maxFacts,
           compact: degraded,
         });
         if (claims.length > best.length) best = claims;
-        // GATE THE RETRY ON WHAT THE WINDOW ACTUALLY HOLDS, NOT ON 60% OF A BUDGET.
-        // `expected` is Math.round(maxFacts * 0.6) — an arbitrary fraction of the CAP, with
-        // no relation to how many facts the text contains. Measured cost: one gpt-oss-120b
-        // call is ~19s, and on an academic paper 5 of 6 windows "under-delivered" against
-        // expected=6 and each paid a SECOND 19s call — ~95s of a 139s extraction stage,
-        // to re-ask a question the model had already answered correctly. Prose with 3 real
-        // facts per 2500 chars is not a failed extraction.
-        //
-        // Estimate capacity from fact-BEARING sentences: ones carrying a number, a unit, or
-        // a mid-sentence proper noun. Deterministic, no extra call. Retry only when the
-        // model returned materially less than the text plausibly holds.
         const _sentences = String(window?.content || '')
           .split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter((x) => x.length >= 25);
         const _factBearing = _sentences.filter((x) =>
           /\d/.test(x) || /\b(?:kW|kWh|EUR|€|%|Mio|Nr\.)\b/i.test(x) || /\s\p{Lu}\p{Ll}{2,}/u.test(x)).length;
         const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
-        const _worthRetrying = Math.min(expected, Math.ceil(_capacity * 0.6));
-        const _retriesLeft = attempt < attempts;
-        if (claims.length >= _worthRetrying || !_retriesLeft) {
-          // Two DIFFERENT outcomes reach this branch and they must not log the same line:
-          // (a) the gate judged a sparse result plausible and SKIPPED a retry — a real saving;
-          // (b) every attempt was used and the result is still sparse — nothing was saved.
-          // The first version of this log claimed "saved one ~19s call" in both cases, and the
-          // first live run printed it for a window that returned 0 facts after exhausting its
-          // attempts. A total extraction loss reported as "PLAUSIBLE" is precisely the
-          // silent-partial-completion shape this pipeline keeps producing, so a result far
-          // below what the text holds is a WARN naming the consequence, never an info line.
-          const _why = _retriesLeft
-            ? 'retry skipped by the capacity gate (saved one call)'
-            : `all ${attempts} attempts used`;
-          if (best.length < Math.ceil(_capacity * 0.5)) {
-            this.logger.warn?.(`[kb-unified] EXTRACTION SHORTFALL: kept ${best.length} facts from a window `
-              + `holding ${_factBearing}/${_sentences.length} fact-bearing sentences (capacity≈${_capacity}) `
-              + `— ${_why}. Those facts are absent from the MEMORY lane; the verbatim text is still in `
-              + `segments, so evidence recall can answer them and synthesis cannot.`);
-          } else if (claims.length < expected) {
-            this.logger.info?.(`[kb-unified] sparse but PLAUSIBLE (${claims.length} facts, `
-              + `capacity≈${_capacity} from ${_factBearing}/${_sentences.length} fact-bearing sentences) `
-              + `— ${_why}`);
-          }
-          return best;
+        if (best.length < Math.ceil(_capacity * 0.5)) {
+          this.logger.warn?.(`[kb-unified] EXTRACTION SHORTFALL: kept ${best.length} facts from a window `
+            + `holding ${_factBearing}/${_sentences.length} fact-bearing sentences (capacity≈${_capacity}) `
+            + `— single pass, no re-ask. Those facts are absent from the MEMORY lane; the verbatim `
+            + `text is still in segments, so evidence recall can answer them and synthesis cannot. `
+            + `If this fires often, change the MODEL or the prompt — re-sampling cannot fix it.`);
+        } else if (claims.length < expected) {
+          this.logger.info?.(`[kb-unified] ${claims.length} facts (capacity≈${_capacity} from `
+            + `${_factBearing}/${_sentences.length} fact-bearing sentences) — plausible, single pass`);
         }
-        sparseOnly = true;
-        this.logger.warn?.(`[kb-unified] sparse extraction (${claims.length}/${expected}, `
-          + `capacity≈${_capacity}); re-sampling at full budget (${attempt}/${attempts})`);
+        return best;
       } catch (error) {
         lastError = error;
-        sparseOnly = false;
         if (attempt === attempts) throw error;
         this.logger.warn?.(`[kb-unified] extraction failed; retrying degraded (${attempt}/${attempts}): ${error.message}`);
       }

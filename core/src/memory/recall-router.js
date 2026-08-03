@@ -1388,24 +1388,25 @@ export class RecallRouter {
       canonical_entities: mergedCanonicalEntities,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
-    // RESERVE THE FINAL STAGE'S SLICE. Stages draw on one shared latency_budget_ms
-    // (1500ms for mode=fact, 3000ms otherwise) greedily, in order, each taking
-    // `Math.min(itsCap, remaining)` — and the cross-encoder is LAST. One hop alone is
-    // capped at 2300ms, which is more than the entire fact-mode budget, so the reranker
-    // could be starved by construction. Measured with attribution in place: it was skipped
-    // with 17ms / 36ms / 47ms / 58ms / 84ms left, i.e. the memory lane was delivering
-    // ALGORITHMIC order rather than cross-encoded order, silently.
+    // THE RERANKER GETS A FLOOR, NOT A SLICE OF SOMEONE ELSE'S BUDGET.
     //
-    // This is also the one place where .amr/byod are STRUCTURALLY less accurate than
-    // hybrid on identical code: their evidence lanes are a NETWORK hop, so they burn more
-    // of the shared budget before the reranker is reached, and lose it more often. Equal
-    // code cannot give equal accuracy while upstream stages may spend the last stage's slice.
+    // Stages draw on one shared latency_budget_ms (1500ms for mode=fact) greedily, in order,
+    // and the cross-encoder is LAST — so it was routinely starved: measured skips with 17 /
+    // 36 / 47 / 58 / 84ms left, meaning the memory lane delivered ALGORITHMIC order, silently.
+    // This hits .amr/byod HARDER than hybrid, because their evidence lanes are a NETWORK hop
+    // that burns more of the shared budget first. Equal code, unequal accuracy.
     //
-    // Upstream stages now size against stageBudget() — remaining MINUS the reserve — while
-    // the reranker itself still sees the true remainder. 450ms default covers a warm rerank
-    // (~270ms measured) with margin; a cold one (~829ms) may still degrade, and now says so.
+    // MY FIRST ATTEMPT AT THIS WAS WRONG AND BROKE PRODUCTION: I had every upstream stage
+    // size against `remaining - 450ms`. Recall went to 0/5 on three consecutive canary runs,
+    // because the late RETRIEVAL hops were then handed ~1ms and fetched nothing. Ranking an
+    // empty set perfectly is worthless — retrieval must never fund ranking. Rolled back.
+    //
+    // There is no free option: the reranker can only have time if the request takes longer or
+    // retrieval takes less. Retrieval is strictly more important, so the reranker is allowed a
+    // bounded OVERRUN instead — it sees at least RERANK_RESERVE_MS even when the budget is
+    // spent. Worst case is ~450ms of extra tail latency on requests that already exhausted
+    // their budget; nothing upstream is shortened.
     const RERANK_RESERVE_MS = Number(process.env.RERANK_RESERVE_MS || 450);
-    const stageBudget = () => Math.max(1, remainingBudget() - RERANK_RESERVE_MS);
     let cutoffReason = null;
     let explicitSourceDocuments = [];
     let explicitSourceHydration = null;
@@ -1419,7 +1420,7 @@ export class RecallRouter {
           documentId: options.source_document_id || null,
           title: options.source_title || null,
         }),
-        Math.min(350, stageBudget()),
+        Math.min(350, remainingBudget()),
         [],
       );
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
@@ -1492,7 +1493,7 @@ export class RecallRouter {
             : inspectMemories([]),
           prisma: this.prisma,
         }),
-        Math.min(2_300, stageBudget()),
+        Math.min(2_300, remainingBudget()),
         { items: [], reason: 'timeout' },
       ))
       : null;
@@ -1501,7 +1502,7 @@ export class RecallRouter {
     const t1 = Date.now();
     let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
-      Math.min(HOP1_TIMEOUT_MS, stageBudget()),
+      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
     // Project-scope fallback: if user has a project active but recall came
@@ -1527,7 +1528,7 @@ export class RecallRouter {
       };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
-        Math.min(HOP1_TIMEOUT_MS, stageBudget()),
+        Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
         [],
       );
       projectFallbackFired = memories.length > 0;
@@ -1554,7 +1555,7 @@ export class RecallRouter {
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
-        Math.min(HOP2_TIMEOUT_MS, stageBudget()),
+        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
         { items: [], reason: 'timeout' },
       ),
       !isLiveExpansionEligible({
@@ -1566,7 +1567,7 @@ export class RecallRouter {
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
-            Math.min(HOP3_TIMEOUT_MS, stageBudget()),
+            Math.min(HOP3_TIMEOUT_MS, remainingBudget()),
             { items: [], reason: 'timeout' },
           ),
     ]);
@@ -1585,7 +1586,7 @@ export class RecallRouter {
             clusterIndex:   this.clusterIndex,
             organizationId: ctx.orgId,
           }),
-          Math.min(350, stageBudget()),
+          Math.min(350, remainingBudget()),
           rankedMemories,
         );
       } catch (boostErr) {
@@ -1670,7 +1671,7 @@ export class RecallRouter {
       // read — which IS the answer for explain/full — is never starved to a
       // 0ms wait by earlier hops). Hydration typically completes in ~50ms.
       const fullSource = recallPlan.mode === 'full';
-      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, stageBudget()));
+      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, remainingBudget()));
       const hydrated = await withTimeout(explicitSourceHydration, hydrationBudget, { timed_out: true });
       if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
       else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
@@ -1690,7 +1691,7 @@ export class RecallRouter {
       ? Math.min(options.limit || recallPlan.max_memories, 50)
       : RECALL_DELIVER_LIMIT;
     try {
-      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, stageBudget()), null);
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
       if (recallPlan.operation !== 'timeline' && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
@@ -1716,7 +1717,7 @@ export class RecallRouter {
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
-    const rerankBudget = remainingBudget();
+    const rerankBudget = Math.max(remainingBudget(), RERANK_RESERVE_MS);
     // `> 1` means a 2ms budget still fires a rerank that cannot possibly land, and
     // withTimeout's fallback is a VALUE — so the cross-encoder silently vanishes from the
     // memory lane with no log, the same invisible degrade that made deliverHybrid look
@@ -1768,7 +1769,7 @@ export class RecallRouter {
         evidence: evidenceWithLineage,
         deliverN,
         evidenceN: HOP2_DOC_LIMIT,
-        budgetMs: remainingBudget(),
+        budgetMs: Math.max(remainingBudget(), RERANK_RESERVE_MS),
         structuredIntent: options.structured_intent === true,
       }).catch(() => null);
       if (v2 && Array.isArray(v2.memories)) {

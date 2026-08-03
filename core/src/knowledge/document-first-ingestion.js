@@ -1013,8 +1013,25 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // and set compact, so a thin first pass could only ever be followed by a
     // thinner second one. Shrink only after a real failure; re-sample at full
     // budget when the completion was fine but under-delivered.
+    // DON'T PAY FOR A RETRY WHEN THE INPUT IS THE PROBLEM. The re-sample below fires
+    // whenever a window under-delivers, on the assumption the model was unlucky. That is
+    // right for good text and pure waste for damaged text: on a PDF whose fast-pdf output
+    // was letter-spaced ("S O L V I S  G E M E I N W O H L"), EVERY window logged
+    // "sparse extraction (0/6)" and every one paid a second LLM call — 12 calls to extract
+    // zero facts. Detect unusable input first and take the single pass.
+    const _wc = String(window?.content || '');
+    const _tokens = _wc.split(/\s+/).filter(Boolean);
+    const _singleCharRatio = _tokens.length ? _tokens.filter((t) => t.length === 1).length / _tokens.length : 0;
+    const _letterSpaced = _tokens.length >= 20 && _singleCharRatio > 0.45;
+    const _wordish = (_wc.match(/\p{L}{4,}/gu) || []).length;
+    const _tooFewWords = _wc.length > 400 && _wordish < 12;
+    const _inputUnusable = _letterSpaced || _tooFewWords;
+    if (_inputUnusable) {
+      console.warn(`[kb-unified] input unusable (single_char_ratio=${_singleCharRatio.toFixed(2)} `
+        + `words4=${_wordish} chars=${_wc.length}) — ONE pass, no re-sample. Fix the parse tier, not the prompt.`);
+    }
     let sparseOnly = true;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (let attempt = 1; attempt <= (_inputUnusable ? 1 : attempts); attempt++) {
       try {
         const degraded = attempt > 1 && !sparseOnly;
         const claims = await this._extractUnified(window, {

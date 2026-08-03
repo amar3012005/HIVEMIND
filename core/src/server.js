@@ -1867,6 +1867,14 @@ if (process.env.DOCLING_URL) {
 
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
+        // Text-bearing and not image-heavy → neither OCR nor picture description is
+        // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
+        const _hasTextLayer = ext === 'pdf' && !!(fast && !fast.error && fast.text && fast.text.length > 200);
+        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!fast?.isImageHeavy);
+        if (ext === 'pdf' && !_doclingHeavyOk) {
+          console.log(`[docling-adapter] ${filename}: text layer present (${fast.text.length} chars / ${fast.pages}p) → docling WITHOUT ocr/picture-description`);
+        }
+        const _tDoclingStart = Date.now();
         const [parseResult, chunkResult] = await Promise.all([
           // Pass the format profile through so the adapter can skip passes this
           // format has nothing to gain from (slides need picture description, not
@@ -1874,8 +1882,16 @@ if (process.env.DOCLING_URL) {
           // formats, which the adapter treats as "run everything" — unchanged.
           parseWithDocling(tempPath, filename, {
             smart: useSmart,
-            picture_descriptions,
-            ocr: profile ? profile.ocr : undefined,
+            // OCR AND PICTURE DESCRIPTION ARE THE ENTIRE COST. `pdf` was the only format
+            // with both unconditionally on, and both are wasted when the PDF already
+            // carries a text layer: OCR rasterises and re-reads pages whose text we can
+            // read directly, and picture-description runs a vision model per embedded
+            // image. Measured: 606s on a 46MB PDF that then returned chunks=0.
+            // `fast` is the fast-pdf probe already run above (~800ms) — it knows whether
+            // a text layer exists and whether the doc is image-heavy. Use it instead of a
+            // static per-format guess.
+            picture_descriptions: _doclingHeavyOk ? picture_descriptions : false,
+            ocr: _doclingHeavyOk ? (profile ? profile.ocr : undefined) : false,
             tables: profile ? profile.tables : undefined,
           }),
           // chunkWithDocling REMOVED. It was a SECOND full Docling conversion of the same
@@ -1924,6 +1940,16 @@ if (process.env.DOCLING_URL) {
         // flattened text. My previous fix keyed on parseResult.error alone and so
         // still lost them. Fall back only when there is genuinely nothing usable
         // from EITHER call.
+        const _doclingMs = Date.now() - _tDoclingStart;
+        // Docling returning NOTHING after minutes is the worst outcome: the time is spent
+        // AND the pipeline must re-parse. A 606s run that yielded chunks=0 was previously
+        // invisible except as a mysteriously slow upload.
+        if (usableChunks === 0 && usableChars < 200) {
+          console.warn(`[docling-adapter] TIER FAILED EMPTY: ${filename} spent ${_doclingMs}ms in docling and returned `
+            + `chars=${usableChars} chunks=${usableChunks} — falling back. Time wasted, not an error path.`);
+        } else if (_doclingMs > 120_000) {
+          console.warn(`[docling-adapter] SLOW: ${filename} ${_doclingMs}ms in docling (chars=${usableChars} chunks=${usableChunks})`);
+        }
         const parseFailed = usableChunks === 0
           && (Boolean(parseResult?.error) || usableChars < 200);
         if (parseResult?.error && usableChunks > 0) {
@@ -1932,6 +1958,31 @@ if (process.env.DOCLING_URL) {
         }
         if (parseFailed && ext === 'pdf') {
           try {
+            // PREFER VISION OVER FAST-PDF ON FALLBACK. fast-pdf is measurably worse:
+            // on a real 46MB PDF it emitted letter-spaced display text
+            // ("S O L V I S  G E M E I N W O H L") plus page furniture, the extractor
+            // logged "sparse extraction (0/6)" on every window, and the document produced
+            // 240 SEGMENTS AND ZERO MEMORIES. Vision on the same class of document gave
+            // clean markdown with headings and pages in 74s. Try vision first; keep
+            // fast-pdf as the last resort so a missing vision key still degrades rather
+            // than fails.
+            if (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) {
+              try {
+                const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+                const vfb = await parsePdfWithGroqVision(tempPath);
+                if (!vfb.error && vfb.text.length > 200) {
+                  console.warn(`[docling-adapter] tier=docling failed/empty → VISION fallback for ${filename} (chars=${vfb.text.length})`);
+                  return {
+                    text: vfb.text, markdown: vfb.markdown, json: null,
+                    tables: [], pages: vfb.pages, confidence: null, error: null,
+                    hybridChunks: [], chunkerError: null, engine: 'docling-fallback-vision',
+                  };
+                }
+                console.warn(`[docling-adapter] vision fallback also empty (${vfb.error || 'no text'}) → fast-pdf`);
+              } catch (vErr) {
+                console.warn(`[docling-adapter] vision fallback threw: ${vErr.message} → fast-pdf`);
+              }
+            }
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fb = await fastPdfExtract(tempPath);
             if (!fb.error && fb.text.length > 200) {

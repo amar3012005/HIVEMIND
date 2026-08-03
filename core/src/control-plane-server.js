@@ -12,6 +12,7 @@ import {
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { createSignupAdmission, invitationCodeMatches, verifySignupAdmission } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
@@ -1123,6 +1124,9 @@ const platformUnlockAttempts = new Map();
 const PROMOTION_ATTEMPT_MAX = 20;
 const PROMOTION_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
 const promotionAttempts = new Map();
+const SIGNUP_ADMISSION_TTL_SECONDS = 15 * 60;
+const PERSONAL_SIGNUP_INVITATION_CODE = String(process.env.PERSONAL_INVITATION_CODE || '').trim();
+const SIGNUP_ADMISSION_SECRET = process.env.HIVEMIND_SIGNUP_ADMISSION_SECRET || CONFIG.sessionSecret || ADMIN_SECRET;
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -1367,6 +1371,22 @@ function secretsMatch(left, right) {
   const a = Buffer.from(String(left || ''));
   const b = Buffer.from(String(right || ''));
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function signupAdmissionFromRequest(url) {
+  const ticket = url.searchParams.get('signup_ticket');
+  if (!ticket) return null;
+  const verify = (accountType) => verifySignupAdmission({ ticket, accountType, secret: SIGNUP_ADMISSION_SECRET });
+  return verify('personal') || verify('enterprise');
+}
+
+async function platformUserExists({ sub, email }) {
+  if (!prisma) return false;
+  const user = await prisma.user.findFirst({
+    where: { OR: [{ zitadelUserId: sub }, ...(email ? [{ email }] : [])] },
+    select: { id: true },
+  });
+  return Boolean(user);
 }
 
 function normalizePlatformOperator(value) {
@@ -3130,9 +3150,12 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
     }
     const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+    const admission = signupAdmissionFromRequest(url);
+    if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: returnToValue,
       provider: 'google',
+      signupAdmission: admission,
     });
     // Encode return_to in the state itself as a fallback (base64 suffix after UUID)
     // Format: <stateId>.<base64_return_to> — Google passes this back unchanged
@@ -3231,8 +3254,13 @@ const server = http.createServer(async (req, res) => {
 
       // Upsert user — use Google sub as zitadel user id (with prefix to avoid collision)
       console.log(`[google-auth] Upserting user...`);
+      const googleSub = `google:${userInfo.id}`;
+      const existingPlatformUser = await platformUserExists({ sub: googleSub, email: userInfo.email });
+      if (!existingPlatformUser && !authState.signupAdmission) {
+        return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
+      }
       const user = await upsertUserFromZitadel({
-        sub: `google:${userInfo.id}`,
+        sub: googleSub,
         zitadelUserId: userInfo.sub,
         email: userInfo.email,
         name: userInfo.name,
@@ -3430,12 +3458,29 @@ const server = http.createServer(async (req, res) => {
     if (envId) opts.idpId = envId;
     else opts.idpHint = h;
   };
+  if (pathname === '/auth/signup-admission' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const accountType = String(body.account_type || '').trim().toLowerCase();
+    const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
+    const accepted = accountType === 'personal'
+      ? invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
+      : accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code));
+    if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
+    return jsonResponse(res, {
+      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
+      expires_in_seconds: SIGNUP_ADMISSION_TTL_SECONDS,
+    });
+  }
+
   if (pathname === '/auth/login' && req.method === 'GET') {
     if (!zitadelClient) {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
     }
+    const admission = signupAdmissionFromRequest(url);
+    if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
-      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect
+      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
+      signupAdmission: admission,
     });
     const authorizeOptions = {};
     if (url.searchParams.get('login_hint')) {
@@ -3450,8 +3495,11 @@ const server = http.createServer(async (req, res) => {
     if (!zitadelClient) {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
     }
+    const admission = signupAdmissionFromRequest(url);
+    if (!admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
-      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect
+      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
+      signupAdmission: admission,
     });
     const authorizeOptions = { prompt: 'create' };
     if (url.searchParams.get('login_hint')) {
@@ -3479,6 +3527,10 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const { userInfo } = await zitadelClient.exchangeAndResolveUser(code);
+      const existingPlatformUser = await platformUserExists({ sub: userInfo.sub, email: userInfo.email });
+      if (!existingPlatformUser && !authState.signupAdmission) {
+        return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
+      }
       const user = await upsertUserFromZitadel(userInfo);
       const { org } = await resolveCurrentOrg(user.id);
 
@@ -3776,6 +3828,15 @@ const server = http.createServer(async (req, res) => {
     // code is an allow-list (see billing/access-codes.js), never "any non-empty
     // string" — that would let anyone self-provision a paid enterprise workspace.
     const requestedPlanInput = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
+    const signupAdmission = verifySignupAdmission({
+      ticket: body.signup_ticket,
+      accountType: requestedPlanInput === 'enterprise' ? 'enterprise' : 'personal',
+      secret: SIGNUP_ADMISSION_SECRET,
+    });
+    const existingMembershipCount = await prisma.userOrganization.count({ where: { userId: current.session.userId, isActive: true } });
+    if (!isAdminAuthorized(req, url) && existingMembershipCount === 0 && !signupAdmission) {
+      return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_required' }, 403);
+    }
     const enterpriseAccessCode = normalizeEnterpriseAccessCode(body.enterprise_access_code);
     let enterpriseViaAccessCode = false;
     let requestedPlan;

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 import { syncCampaignConnectionState } from './zernio-execution.js';
+import { appendHqEvent } from '../hq-runtime/repository.js';
 
 function webhookError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
@@ -79,12 +80,51 @@ async function processAcceptedEvent({ prisma, eventId, providerProfileId, eventT
     const candidates = externalCandidates(payload);
     const action = candidates.length ? await prisma.campaignAction.findFirst({
       where: { externalId: { in: candidates }, campaign: { orgId: profile.orgId } },
-      include: { campaign: true },
+      include: { campaign: true, assets: true },
     }) : null;
     if (action) {
       const eventData = safeProviderEvent(eventType, payload);
       if (eventType === 'post.published') {
         await prisma.campaignAction.update({ where: { id: action.id }, data: { status: 'SUCCEEDED', lastError: null, executedAt: action.executedAt || new Date() } });
+        if (action.campaign.sourceType === 'runtime_playbook' && action.campaign.sourceId) {
+          const run = await prisma.runtimePlaybookRun.findFirst({
+            where: { id: action.campaign.sourceId, orgId: profile.orgId }, select: { id: true, trigger: true, playbookId: true, playbookVersion: true },
+          }).catch(() => null);
+          const trigger = run?.trigger && typeof run.trigger === 'object' ? run.trigger : {};
+          if (trigger.runtime_id && trigger.runtime_epoch) {
+            const platform = String(payload?.account?.platform || payload?.post?.platform || action.channel || 'social').toLowerCase();
+            await appendHqEvent({
+              prisma, runtimeId: trigger.runtime_id, orgId: profile.orgId, runtimeEpoch: trigger.runtime_epoch,
+              cycleId: trigger.cycle_id || null,
+              idempotencyKey: `campaign-published:${eventId}:${action.id}`,
+              eventType: 'external_action_committed',
+              title: `Congratulations! Your ${platform} post was published.`,
+              summary: 'The channel provider confirmed publication and Runtime retained the provider event.',
+              details: {
+                runtime_playbook_run_id: run.id,
+                playbook_id: run.playbookId,
+                playbook_version: run.playbookVersion,
+                stage_id: 'provider_publication',
+                item_count: 1,
+                items: [{
+                  id: `campaign-published:${eventId}:${action.id}`,
+                  presentation_type: 'social_post', provider: 'zernio', channel: action.channel,
+                  status: 'published', headline: `Congratulations! Your ${platform} post was published.`,
+                  note: 'The channel provider confirmed publication.',
+                  payload: { ...(action.payload || {}), account_name: action.campaign.name },
+                  assets: (action.assets || []).map((asset) => ({
+                    id: asset.id, status: asset.status, metadata: asset.metadata || {}, mimeType: asset.mimeType,
+                    content_url: asset.deletedAt ? null : `/v1/campaigns/${action.campaignId}/assets/${asset.id}/content`,
+                  })),
+                  scheduled_at: action.scheduledAt || null,
+                  external_ref: action.externalId || null,
+                }],
+                provider_event_id: eventId,
+              },
+              evidenceRefs: [action.id, String(eventId)],
+            }).catch(() => {});
+          }
+        }
       } else if (eventType === 'post.failed' || eventType === 'post.cancelled') {
         await prisma.campaignAction.update({ where: { id: action.id }, data: { status: 'FAILED', lastError: String(eventData.error || `Provider reported ${eventType}`).slice(0, 1000) } });
       } else if (eventType === 'post.partial') {

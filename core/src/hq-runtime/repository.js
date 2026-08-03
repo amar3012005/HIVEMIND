@@ -127,9 +127,9 @@ export async function activateHqAfterOnboarding({ prisma, orgId, userId, objecti
   return { runtime: await getHqRuntime({ prisma, orgId }), schedule: null, onboardedAt };
 }
 
-export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = null, cycleId = null, eventType, title, summary, details = {}, skillRef = null, toolRef = null, workOrderId = null, evidenceRefs = [], visibility = 'USER' }) {
+export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = null, cycleId = null, eventType, title, summary, details = {}, idempotencyKey = null, skillRef = null, toolRef = null, workOrderId = null, evidenceRefs = [], visibility = 'USER' }) {
   if (!runtimeId || !orgId) throw new Error('hq_event_tenant_required');
-  const persisted = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     // Runtime events can arrive concurrently from the scheduler, a Room result,
     // and provider callbacks. Lock the Runtime row and reconcile against the
     // append-only ledger before assigning the next sequence.
@@ -143,6 +143,18 @@ export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = n
     if (!locked.length || (runtimeEpoch && String(locked[0].epoch) !== String(runtimeEpoch))) {
       throw new Error('hq_runtime_event_epoch_conflict');
     }
+    if (idempotencyKey) {
+      const existing = await tx.$queryRawUnsafe(
+        `SELECT id
+           FROM hivemind.hq_runtime_events
+          WHERE runtime_id = $1::uuid
+            AND event_type = $2
+            AND details->>'idempotency_key' = $3
+          LIMIT 1`,
+        runtimeId, eventType, idempotencyKey,
+      );
+      if (existing.length) return { event: await tx.hqRuntimeEvent.findUnique({ where: { id: existing[0].id } }), created: false };
+    }
     const rows = await tx.$queryRawUnsafe(
       `SELECT COALESCE(MAX(sequence), 0) AS max_sequence
          FROM hivemind.hq_runtime_events
@@ -155,12 +167,13 @@ export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = n
       where: { id: runtimeId },
       data: { eventSequence: sequence, version: { increment: 1 } },
     });
-    return tx.hqRuntimeEvent.create({
-      data: { runtimeId, orgId, cycleId, sequence, eventType, title, summary, details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
+    const event = await tx.hqRuntimeEvent.create({
+      data: { runtimeId, orgId, cycleId, sequence, eventType, title, summary, details: idempotencyKey ? { ...details, idempotency_key: idempotencyKey } : details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
     });
+    return { event, created: true };
   });
-  publishHqRuntimeEvent(persisted).catch(() => {});
-  return persisted;
+  if (result.created) publishHqRuntimeEvent(result.event).catch(() => {});
+  return result.event;
 }
 
 export async function transitionHqRuntime({ prisma, runtimeId, orgId, runtimeEpoch = null, from, to, data = {} }) {

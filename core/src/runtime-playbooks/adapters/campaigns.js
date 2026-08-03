@@ -142,7 +142,27 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
         try {
           const launched = await approveCampaign({ prisma, orgId: context.orgId, userId, id });
           const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
-          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, { outcome: 'launched', approval_id: launched.approval.id, action_count: launched.launch.action_count })] };
+          const externalActionMarkers = (campaign.actions || []).map((campaignAction) => ({
+            id: `campaign-action:${campaignAction.id}:${campaignAction.externalId || 'scheduled'}`,
+            presentation_type: 'social_post',
+            provider: 'campaigns',
+            channel: campaignAction.channel,
+            status: campaignAction.status === 'SUCCEEDED' ? 'published' : 'scheduled',
+            headline: campaignAction.status === 'SUCCEEDED'
+              ? `Congratulations! Your ${campaignAction.channel} post was published.`
+              : `Your ${campaignAction.channel} post is scheduled.`,
+            note: campaignAction.status === 'SUCCEEDED'
+              ? 'The channel adapter confirmed publication.'
+              : 'The campaign launch was accepted and this action entered its governed schedule.',
+            payload: campaignAction.payload || {},
+            assets: campaignAction.assets || [],
+            scheduled_at: campaignAction.scheduledAt || null,
+            external_ref: campaignAction.externalId || null,
+          }));
+          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, {
+            outcome: 'launched', approval_id: launched.approval.id, action_count: launched.launch.action_count,
+            external_action_markers: externalActionMarkers,
+          })] };
         } catch (error) {
           const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
           return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, { outcome: 'blocked', reason: String(error?.message || error).slice(0, 1000) })], warnings: [String(error?.message || error)] };

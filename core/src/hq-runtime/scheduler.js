@@ -7,6 +7,7 @@ import { drainHqWorkOrders } from './work-dispatcher.js';
 import { createProductionRuntimePlaybookService } from '../runtime-playbooks/service.js';
 import { employeesSidecarUrl, warmRuntimeOrigin } from '../runtime-transport/client.js';
 import { recordRuntimeMetric } from './runtime-metrics.js';
+import { projectExternalActionEvent } from './external-action-marker.js';
 
 function artifactCountSummary(artifacts = []) {
   const counts = artifacts.reduce((result, artifact) => {
@@ -141,6 +142,19 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
       const accepted = artifactCountSummary(artifacts);
+      const externalAction = phase === 'ACCEPTED'
+        ? projectExternalActionEvent({ run, stage, artifacts })
+        : null;
+      if (externalAction) {
+        await appendHqEvent({
+          prisma,
+          runtimeId: trigger.runtime_id,
+          orgId: run.orgId,
+          runtimeEpoch: trigger.runtime_epoch,
+          cycleId: trigger.cycle_id || null,
+          ...externalAction,
+        });
+      }
       await appendHqEvent({
         prisma,
         runtimeId: trigger.runtime_id,

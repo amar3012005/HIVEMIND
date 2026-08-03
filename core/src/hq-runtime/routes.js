@@ -13,6 +13,8 @@ import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork } from './first-life-control.js';
 import { normalizeAuthorityPolicy, resolveAuthorityPreference } from './contracts.js';
+import { subscribeHqRuntimeEvents } from './event-bus.js';
+import { recordRuntimeMetric } from './runtime-metrics.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
@@ -470,8 +472,12 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         let cursor = eventCursor(url.searchParams.get('after'), req.headers['last-event-id']);
+        const connectedAt = Date.now();
+        const reconnected = cursor > 0n;
         let closed = false;
         let writing = false;
+        let writeQueued = false;
+        let unsubscribe = async () => {};
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
         res.flushHeaders?.();
         res.write('retry: 3000\n\n');
@@ -491,18 +497,47 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             writing = false;
           }
         };
-        await writeAvailable();
-        const poll = setInterval(() => writeAvailable().catch((error) => {
-          logger.warn('[hq-runtime] event stream delivery query failed:', {
-            runtime_id: runtime.id, org_id: orgId, cursor: String(cursor), message: error.message,
+        const queueWrite = () => {
+          if (closed || writeQueued) return;
+          writeQueued = true;
+          setImmediate(() => {
+            writeQueued = false;
+            if (writing) {
+              queueWrite();
+              return;
+            }
+            writeAvailable().catch((error) => logger.warn('[hq-runtime] event stream delivery query failed:', {
+              runtime_id: runtime.id, org_id: orgId, cursor: String(cursor), message: error.message,
+            }));
           });
-        }), 1000);
+        };
+        unsubscribe = await subscribeHqRuntimeEvents(runtime.id, (notice) => {
+          const sequence = eventCursor(notice?.sequence);
+          if (sequence <= cursor) return;
+          if (writing || sequence !== cursor + 1n || !notice?.event) {
+            queueWrite();
+            return;
+          }
+          cursor = sequence;
+          res.write(`id: ${sequence}\nevent: hq_event\ndata: ${JSON.stringify(notice.event)}\n\n`);
+        });
+        // Subscribe before catch-up so an event committed during hydration cannot
+        // fall between the initial query and the live notification boundary.
+        await writeAvailable();
         const heartbeat = setInterval(() => { if (!closed) res.write(': keepalive\n\n'); }, 15000);
         const close = (reason, error = null) => {
           if (closed) return;
           closed = true;
-          clearInterval(poll);
           clearInterval(heartbeat);
+          unsubscribe().catch(() => {});
+          recordRuntimeMetric(prisma, {
+            orgId,
+            metric: 'sse_connection_duration',
+            value: Date.now() - connectedAt,
+            unit: 'ms',
+            source: 'hq-runtime-sse',
+            metadata: { reason, reconnected, final_cursor: String(cursor) },
+          });
           const expected = ['ABORT_ERR', 'ECONNRESET'].includes(String(error?.code || '').toUpperCase())
             || ['AbortError'].includes(String(error?.name || ''))
             || /aborted|socket hang up/i.test(String(error?.message || ''));
@@ -513,6 +548,14 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         req.on('close', () => close('client_closed'));
         req.on('error', (error) => close('request_error', error));
         res.on('error', (error) => close('response_error', error));
+        recordRuntimeMetric(prisma, {
+          orgId,
+          metric: reconnected ? 'sse_reconnect' : 'sse_connect',
+          value: 1,
+          unit: 'count',
+          source: 'hq-runtime-sse',
+          metadata: { cursor: String(cursor) },
+        });
         return true;
       }
 

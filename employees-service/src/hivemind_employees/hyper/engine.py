@@ -1293,6 +1293,7 @@ class Director:
         # synthesis — grows as context accumulates); debate = persona sub-calls;
         # web = compound web-search sub-calls. director_iters = per-loop-call totals.
         self.tok_by: Dict[str, int] = {"director": 0, "debate": 0, "web": 0}
+        self.model_usage: Dict[str, Dict[str, int]] = {}
         self.director_iters: List[int] = []
         self._last_tok = 0
         # Population-Sim (additional, opt-in). Default off — the main flow is untouched.
@@ -1414,6 +1415,29 @@ class Director:
         }
 
     # ── LLM ───────────────────────────────────────────────────────────
+    def _record_model_usage(self, model: Any, usage: Dict[str, Any], bucket: str) -> int:
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        completion = int(usage.get("completion_tokens", 0) or 0)
+        total = int(usage.get("total_tokens", 0) or (prompt + completion))
+        cached = int(((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+        self.tokens += total
+        self.tok_by[bucket] = self.tok_by.get(bucket, 0) + total
+        self._last_tok = total
+        self.io["input"] += prompt
+        self.io["output"] += completion
+        self.io["cached"] += cached
+        key = str(model or "unknown")[:128]
+        row = self.model_usage.setdefault(key, {
+            "model": key, "total_tokens": 0, "prompt_tokens": 0,
+            "completion_tokens": 0, "cached_tokens": 0, "requests": 0,
+        })
+        row["total_tokens"] += total
+        row["prompt_tokens"] += prompt
+        row["completion_tokens"] += completion
+        row["cached_tokens"] += cached
+        row["requests"] += 1
+        return total
+
     async def _groq(
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
@@ -1484,13 +1508,7 @@ class Director:
             j = await _cerebras_chat(body, timeout=httpx.Timeout(_to, connect=5.0), cache_key=_ck)
             if j is not None:
                 u = j.get("usage") or {}
-                t = int(u.get("total_tokens", 0) or 0)
-                self.tokens += t
-                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
-                self._last_tok = t
-                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
-                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
-                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+                self._record_model_usage(body.get("model"), u, bucket)
                 return (j.get("choices") or [{}])[0].get("message") or None
             if self.strict_model_provider:
                 log.error("[hyper-engine] strict provider unavailable model=%s room_kind=%s", body.get("model"), self.room_kind)
@@ -1507,16 +1525,7 @@ class Director:
             j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if j is not None:
                 u = j.get("usage") or {}
-                t = int(u.get("total_tokens", 0) or 0)
-                self.tokens += t
-                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
-                self._last_tok = t
-                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
-                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
-                # Provider prompt-cache hits (OpenRouter passes prompt_tokens_details
-                # through). Prod runs OpenRouter-PRIMARY, so without this the seal's
-                # tokens_cached was always 0 — cache savings were invisible.
-                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+                self._record_model_usage(body.get("model"), u, bucket)
                 return (j.get("choices") or [{}])[0].get("message") or None
             return None
         max_attempts = 3
@@ -1566,13 +1575,7 @@ class Director:
                     break  # non-retryable Groq status → fall through to OpenRouter
                 j = r.json()
                 u = j.get("usage") or {}
-                t = int(u.get("total_tokens", 0) or 0)
-                self.tokens += t
-                self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
-                self._last_tok = t
-                self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
-                self.io["output"] += int(u.get("completion_tokens", 0) or 0)
-                self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+                self._record_model_usage(body.get("model"), u, bucket)
                 return j["choices"][0]["message"]
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 log.warning("[hyper-engine] groq transport error (attempt %d): %s", attempt, exc)
@@ -1589,13 +1592,7 @@ class Director:
         j = await _openrouter_chat(body, timeout=httpx.Timeout(max(45.0, _to), connect=5.0))
         if j is not None:
             u = j.get("usage") or {}
-            t = int(u.get("total_tokens", 0) or 0)
-            self.tokens += t
-            self.tok_by[bucket] = self.tok_by.get(bucket, 0) + t
-            self._last_tok = t
-            self.io["input"] += int(u.get("prompt_tokens", 0) or 0)
-            self.io["output"] += int(u.get("completion_tokens", 0) or 0)
-            self.io["cached"] += int(((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)) or 0)
+            self._record_model_usage(body.get("model"), u, bucket)
             return j["choices"][0]["message"]
         return None
 
@@ -5332,6 +5329,8 @@ class Director:
                     user_id=self.user_id, org_id=self.org_id, model="hyperagents-director",
                     total_tokens=int(self.tokens or 0), prompt_tokens=int(self.io.get("input", 0) or 0),
                     completion_tokens=int(self.io.get("output", 0) or 0), feature="hyperagents-room",
+                    entries=list(self.model_usage.values()),
+                    idempotency_key=f"hyper-room:{self.turn_id or 'unknown'}",
                 )
                 return {"cost_tokens": self.tokens, "final_text": final_text, "transcript": self.transcript,
                         "gather_count": 0, "tool_calls": 1, "sim_report": None,
@@ -5344,6 +5343,8 @@ class Director:
                 user_id=self.user_id, org_id=self.org_id, model="hyperagents-director",
                 total_tokens=int(self.tokens or 0), prompt_tokens=int(self.io.get("input", 0) or 0),
                 completion_tokens=int(self.io.get("output", 0) or 0), feature="hyperagents-room",
+                entries=list(self.model_usage.values()),
+                idempotency_key=f"hyper-room:{self.turn_id or 'unknown'}",
             )
             return {"cost_tokens": self.tokens, "final_text": error, "transcript": self.transcript,
                     "gather_count": 0, "tool_calls": 1, "sim_report": None,
@@ -5522,6 +5523,8 @@ class Director:
                 prompt_tokens=int(self.io.get("input", 0) or 0),
                 completion_tokens=int(self.io.get("output", 0) or 0),
                 feature="hyperagents-room",
+                entries=list(self.model_usage.values()),
+                idempotency_key=f"hyper-room:{self.turn_id or 'unknown'}",
             )
         except Exception:
             pass
@@ -5536,6 +5539,7 @@ class Director:
             "debate_rounds": self._round_seq,
             "web_calls": self._web_calls,
             "io": dict(self.io),
+            "model_usage": list(self.model_usage.values()),
             "gathered_emails": sorted(self.gathered_emails),
             "gather_facts": list(self.blackboard),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)

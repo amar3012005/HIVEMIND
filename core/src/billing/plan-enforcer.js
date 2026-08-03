@@ -451,7 +451,17 @@ export class PlanEnforcer {
       const key = opts.idempotencyKey || opts.idempotency_key || crypto.randomUUID();
       this.usageService.record({ orgId, userId: opts.userId || currentUser() || null, apiKeyId: opts.apiKeyId || currentApiKey() || null,
         type, quantity: amount, source: opts.feature || opts.source || 'product', idempotencyKey: key,
-        providerReceipt: opts.providerReceipt || null, metadata: { surface: opts.surface || null } }).catch(() => {});
+        providerReceipt: opts.providerReceipt || null,
+        metadata: {
+          ...(opts.metadata && typeof opts.metadata === 'object' ? opts.metadata : {}),
+          surface: opts.surface || null,
+          model: opts.model || null,
+          feature: opts.feature || null,
+          prompt_tokens: Number(opts.promptTokens || opts.prompt_tokens || 0),
+          completion_tokens: Number(opts.completionTokens || opts.completion_tokens || 0),
+          cached_tokens: Number(opts.cachedTokens || opts.cached_tokens || 0),
+          request_count: Number(opts.requestCount || opts.request_count || 1),
+        } }).catch(() => {});
       return;
     }
 
@@ -463,7 +473,10 @@ export class PlanEnforcer {
         // litellm-client gateway. apiKeyId is read from opts or the current request's ALS context, so
         // existing recordUsage(orgId,'tokens',n) call sites attribute to the request key with no change.
         const _key = opts.apiKeyId ?? (() => { try { return currentApiKey(); } catch { return null; } })();
-        this.usageTracker.recordKeyUsage?.(orgId, amount, _key, opts.model || null, opts.feature || null).catch(() => {});
+        this.usageTracker.recordKeyUsage?.(orgId, amount, _key, opts.model || null, opts.feature || null, {
+          promptTokens: Number(opts.promptTokens || opts.prompt_tokens || 0),
+          completionTokens: Number(opts.completionTokens || opts.completion_tokens || 0),
+        }).catch(() => {});
       }
       if (type === 'searches') this.usageTracker.recordQuery(orgId).catch(() => {});
       // Upload count is retained as internal anti-abuse telemetry only; it is not a plan limit.

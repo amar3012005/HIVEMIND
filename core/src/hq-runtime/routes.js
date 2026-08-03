@@ -176,9 +176,6 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
     const children = run ? playbookRuns.filter((candidate) => candidate.parentRunId === run.id)
       .sort((left, right) => Number(left.position ?? 0) - Number(right.position ?? 0)) : [];
     const activeChild = children.find((child) => !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(child.status))) || null;
-    const plannedChildCount = run
-      ? run.artifacts.filter((artifact) => artifact.artifactKey === 'call_brief').length
-      : 0;
     const controllingRun = activeChild || run;
     const controllingSnapshot = controllingRun ? projectRuntimePlaybookSnapshot(controllingRun) : snapshot;
     const context = todo.context && typeof todo.context === 'object' ? todo.context : {};
@@ -197,8 +194,8 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
       next_action: controllingSnapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
       checkpoint_sequence: controllingSnapshot?.checkpoint_sequence || 0,
       checkpoint_at: controllingRun?.updatedAt || todo.updatedAt,
-      child_progress: run ? {
-        total: plannedChildCount || children.length || null,
+      child_progress: children.length ? {
+        total: children.length,
         settled: children.filter((child) => ['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(child.status))).length,
         current_recipient: activeChild?.context?.target?.label || activeChild?.context?.target?.value || activeChild?.itemKey || null,
         current_run_id: activeChild?.id || null,

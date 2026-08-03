@@ -23364,7 +23364,7 @@ ${injectionText}`;
             const memoryId = url.searchParams.get('memoryId') || body?.memoryId;
             if (!memoryId) return jsonResponse(res, { error: 'memoryId query parameter is required' }, 400);
             try {
-              const evidenceLinks = await evidenceRetrieval.getMemoryEvidence(memoryId);
+              const evidenceLinks = await evidenceRetrieval.getMemoryEvidence(memoryId, orgId);
               return jsonResponse(res, { success: true, memoryId, evidenceLinks, count: evidenceLinks.length });
             } catch (err) {
               console.error('[evidence/memory] Failed:', err.message);

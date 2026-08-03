@@ -97,6 +97,43 @@ async function ensureSchema() {
     END $$;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
+
+    -- PROVENANCE (parity with the central hivemind schema). These two tables existed ONLY
+    -- centrally, hard-FK'd to hivemind.memories / knowledge_documents / knowledge_segments, so
+    -- for an .amr org whose memories live HERE the rows could never be written and the ingestion
+    -- path skipped them behind its not-orgIsRemote guards. Consequence on screen: the Memories
+    -- "Evidence - source segments and citations" tab was permanently empty for those tenants, and
+    -- "which model extracted this claim" was unanswerable.
+    -- Same columns and cascade semantics as central, FK'd to THIS schema's rows, so integrity is
+    -- preserved rather than traded away by dropping the central FKs.
+    CREATE TABLE IF NOT EXISTS memory_evidence_links (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id uuid NOT NULL,
+      memory_id uuid NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      document_id uuid REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+      segment_id uuid REFERENCES knowledge_segments(id) ON DELETE CASCADE,
+      link_type text NOT NULL DEFAULT 'supports',
+      confidence double precision,
+      excerpt text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (memory_id, segment_id, link_type)
+    );
+    CREATE INDEX IF NOT EXISTS mevl_org_idx ON memory_evidence_links(org_id);
+    CREATE INDEX IF NOT EXISTS mevl_mem_idx ON memory_evidence_links(memory_id);
+    CREATE INDEX IF NOT EXISTS mevl_doc_idx ON memory_evidence_links(document_id);
+
+    CREATE TABLE IF NOT EXISTS memory_derivations (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id uuid NOT NULL,
+      memory_id uuid NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      derivation_method text,
+      derivation_agent text,
+      confidence double precision,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS mder_org_idx ON memory_derivations(org_id);
+    CREATE INDEX IF NOT EXISTS mder_mem_idx ON memory_derivations(memory_id);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
     CREATE INDEX IF NOT EXISTS memories_latest_idx  ON memories(org_id, is_latest) WHERE deleted_at IS NULL;
     CREATE INDEX IF NOT EXISTS memories_created_idx ON memories(org_id, created_at) WHERE deleted_at IS NULL;
@@ -708,6 +745,61 @@ function routesFor(ctx) {
     },
 
     // KB doc DELETE + cascade — amr branch only (findByTags/remove path).
+  // Provenance writes (parity with central). Batched upsert-ish inserts; ON CONFLICT DO NOTHING so
+    // a re-ingest of the same document is idempotent, matching skipDuplicates on the central path.
+      '/v1/kb-provenance': async (b) => {
+      const links = Array.isArray(b.evidence_links) ? b.evidence_links : [];
+      const ders = Array.isArray(b.derivations) ? b.derivations : [];
+      let linked = 0, derived = 0;
+      for (const l of links) {
+        if (!l?.memory_id) continue;
+        try {
+          await db().query(
+            `INSERT INTO memory_evidence_links (org_id, memory_id, document_id, segment_id, link_type, confidence, excerpt)
+             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (memory_id, segment_id, link_type) DO NOTHING`,
+            [org, l.memory_id, l.document_id || null, l.segment_id || null, l.link_type || 'supports',
+             l.confidence ?? null, l.excerpt || null]);
+          linked += 1;
+        } catch (e) { console.warn(`[kb-provenance] link failed mem=${l.memory_id}: ${e.message}`); }
+      }
+      for (const d of ders) {
+        if (!d?.memory_id) continue;
+        try {
+          await db().query(
+            `INSERT INTO memory_derivations (org_id, memory_id, derivation_method, derivation_agent, confidence, metadata)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
+            [org, d.memory_id, d.derivation_method || null, d.derivation_agent || null,
+             d.confidence ?? null, JSON.stringify(d.metadata || {})]);
+          derived += 1;
+        } catch (e) { console.warn(`[kb-provenance] derivation failed mem=${d.memory_id}: ${e.message}`); }
+      }
+      return { ok: true, linked, derived };
+    },
+
+    // Read back the evidence for ONE memory, shaped like the central getMemoryEvidence result so the
+    // FE's Evidence tab renders identically regardless of storage mode.
+      '/v1/memory-evidence': async (b) => {
+      if (!b.memory_id) return { evidenceLinks: [] };
+      const { rows } = await db().query(
+        `SELECT l.link_type, l.confidence, l.excerpt, l.segment_id, l.document_id,
+                s.content, s.segment_type, s.segment_index, s.start_page, s.end_page, s.metadata,
+                coalesce(d.metadata->>'title', d.filename) AS document_title
+           FROM memory_evidence_links l
+           LEFT JOIN knowledge_segments s ON s.id = l.segment_id
+           LEFT JOIN knowledge_documents d ON d.id = l.document_id
+          WHERE l.org_id=$1 AND l.memory_id=$2
+          ORDER BY s.segment_index ASC NULLS LAST`,
+        [org, b.memory_id]);
+      return { evidenceLinks: rows.map((r) => ({
+        type: 'segment', linkType: r.link_type, confidence: r.confidence, excerpt: r.excerpt,
+        segment: r.segment_id ? {
+          id: r.segment_id, content: r.content, segmentType: r.segment_type,
+          segmentIndex: r.segment_index, startPage: r.start_page, endPage: r.end_page, metadata: r.metadata,
+        } : null,
+        document: r.document_id ? { id: r.document_id, title: r.document_title } : null,
+      })) };
+    },
+
     '/v1/kb-doc-delete': async (b) => {
       let doc = null;
       if (b.document_id) {

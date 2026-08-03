@@ -9,7 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
-import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -639,7 +639,19 @@ export class EvidenceRetrievalService {
    * @param {string} memoryId
    * @returns {Promise<Array>} linked evidence segments
    */
-  async getMemoryEvidence(memoryId) {
+  async getMemoryEvidence(memoryId, orgId = null) {
+    // ROUTED. memory_evidence_links is a CENTRAL table; for an .amr/byod org the memory and its
+    // provenance live on the agent, so a central query returned [] and the FE's Evidence tab was
+    // permanently empty for those tenants. The agent returns the same shape.
+    if (orgId && orgIsRemote(orgId)) {
+      const remote = await amrMemoryEvidence(orgId, memoryId);
+      if (remote === null) {
+        console.warn(`[EvidenceRetrieval] memory-evidence lane DOWN for remote org ${orgId} — `
+          + `returning empty, which is NOT the same as "no evidence exists".`);
+        return [];
+      }
+      return remote;
+    }
     const links = await this.db.memoryEvidenceLink.findMany({
       where: { memoryId },
       include: {

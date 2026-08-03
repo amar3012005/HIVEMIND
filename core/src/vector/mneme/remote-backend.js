@@ -228,6 +228,19 @@ export async function remoteKbHydrate(orgId, ids, access) {
   catch (e) { console.warn(`[mneme/remote] kb-hydrate failed org=${orgId}: ${e.message}`); return []; }
 }
 
+// PROVENANCE for remote orgs. memory_evidence_links / memory_derivations are central tables
+// hard-FK'd to hivemind.memories, so for an .amr org they can only live on the agent, next to the
+// memories they describe. Null on failure (never []) so a caller can tell a dead lane from an
+// empty one.
+export async function remoteKbProvenance(orgId, payload = {}) {
+  try { return await _call(orgId, '/v1/kb-provenance', payload); }
+  catch (e) { console.warn(`[mneme/remote] kb-provenance FAILED org=${orgId}: ${e.message} — provenance for this document is LOST (memories still land)`); return null; }
+}
+export async function remoteMemoryEvidence(orgId, memoryId) {
+  try { const out = await _call(orgId, '/v1/memory-evidence', { memory_id: memoryId }); return out?.evidenceLinks || []; }
+  catch (e) { console.warn(`[mneme/remote] memory-evidence FAILED org=${orgId}: ${e.message}`); return null; }
+}
+
 // KB doc LIST for remote org — returns central-shaped { documents, pagination } or null on failure.
 export async function remoteKbDocs(orgId, opts = {}) {
   try { return await _call(orgId, '/v1/kb-docs', { limit: opts.limit, offset: opts.offset, access: opts.access }); }

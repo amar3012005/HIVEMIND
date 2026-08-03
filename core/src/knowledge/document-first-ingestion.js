@@ -15,7 +15,7 @@ import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
-import { orgIsRemote, amrKbDoc, amrKbSegment } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance } from '../vector/mneme/driver.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -1166,10 +1166,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         idByIdx[i] = id;
         factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: fact.memory_type, tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null, support_segment_ids: fact.support_segment_ids, support_quotes: fact.support_quotes });
         embedPending.push({ id, fact: fact.f, memory_type: fact.memory_type, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
-        if (!orgIsRemote(orgId)) {
-          evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
-          derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
-        }
+        // Collected for EVERY storage mode now. These used to be gathered only for central orgs
+        // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
+        // now carry the same two tables in their own schema, so the rows are written next to the
+        // memories they describe (see the flush below, which routes central vs agent).
+        evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
+        derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
@@ -4029,13 +4031,38 @@ Every item must include a non-empty content field and one or more valid support_
     // RESIDENCY: memoryEvidenceLink + memoryDerivation are CENTRAL-only provenance tables FK'd to the
     // memory. For a remote (self-host) org the memory is on the agent, so these createMany throw + are
     // pointless. Skip for remote — segment↔memory traceability for self-host is the agent's concern.
-    if (evidenceLinkRows.length && !orgIsRemote(orgId)) {
-      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinkRows, skipDuplicates: true })
-        .catch((e) => this.logger.warn?.(`[kb] evidence-link batch failed: ${e.message}`));
-    }
-    if (derivationRows.length && !orgIsRemote(orgId)) {
-      await this.db.memoryDerivation.createMany({ data: derivationRows, skipDuplicates: true })
-        .catch((e) => this.logger.warn?.(`[kb] derivation batch failed: ${e.message}`));
+    // ROUTED, not skipped. Previously both writes were guarded by !orgIsRemote, so .amr/byod orgs
+    // got no provenance at all — the FE's "Evidence - source segments and citations" tab was
+    // permanently empty for them and derivations were unanswerable. The agents now hold the same
+    // two tables, so remote rows go to the agent (snake_case wire shape) and central rows to Prisma.
+    if (orgIsRemote(orgId)) {
+      if (evidenceLinkRows.length || derivationRows.length) {
+        const res = await amrKbProvenance(orgId, {
+          evidence_links: evidenceLinkRows.map((r) => ({
+            memory_id: r.memoryId, document_id: r.documentId, segment_id: r.segmentId,
+            link_type: r.linkType, confidence: r.confidence, excerpt: r.excerpt,
+          })),
+          derivations: derivationRows.map((r) => ({
+            memory_id: r.memoryId, derivation_method: r.derivationMethod,
+            derivation_agent: r.derivationAgent, confidence: r.confidence, metadata: r.metadata,
+          })),
+        });
+        if (!res) {
+          this.logger.warn?.(`[kb] provenance NOT written for remote org ${orgId} — the agent call failed. `
+            + `Memories and segments landed; the Evidence tab will be empty for this document.`);
+        } else {
+          console.log(`[kb-provenance] remote org=${String(orgId).slice(0, 8)} linked=${res.linked} derived=${res.derived}`);
+        }
+      }
+    } else {
+      if (evidenceLinkRows.length) {
+        await this.db.memoryEvidenceLink.createMany({ data: evidenceLinkRows, skipDuplicates: true })
+          .catch((e) => this.logger.warn?.(`[kb] evidence-link batch failed: ${e.message}`));
+      }
+      if (derivationRows.length) {
+        await this.db.memoryDerivation.createMany({ data: derivationRows, skipDuplicates: true })
+          .catch((e) => this.logger.warn?.(`[kb] derivation batch failed: ${e.message}`));
+      }
     }
 
     if (entityLinkTargets.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {

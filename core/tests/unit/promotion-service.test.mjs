@@ -63,4 +63,14 @@ describe('PromotionService normalization', () => {
     assert.equal(result.status, 'manual_review');
     assert.equal(result.grant.id, 'grant-id');
   });
+
+  it('keeps a suspended or revoked grant authoritative over legacy plan projections', async () => {
+    for (const status of ['suspended', 'revoked']) {
+      const result = await getEffectivePromotionEntitlement({
+        entitlementGrant: { findFirst: async () => ({ id: `${status}-grant`, status, startsAt: new Date('2026-07-01T00:00:00.000Z'), endsAt: null, fallbackAction: 'manual_review' }) },
+      }, 'org-id', new Date('2026-08-02T00:00:00.000Z'));
+      assert.equal(result.status, status);
+      assert.equal(result.version, null);
+    }
+  });
 });

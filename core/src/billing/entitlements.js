@@ -121,15 +121,15 @@ export async function getEffectivePlan(prisma, orgId) {
       },
     };
   }
-  if (promotion?.status === 'manual_review') {
+  if (promotion && ['manual_review', 'expired', 'suspended', 'revoked'].includes(promotion.status)) {
     return {
       plan: getPlan('free'),
       entitlement: {
         id: promotion.grant.id,
         source: promotion.grant.source,
-        phase: 'manual_review',
+        phase: promotion.status,
         planId: 'free', limits: {}, effectiveFrom: promotion.grant.startsAt,
-        effectiveUntil: promotion.grant.endsAt, status: 'manual_review', grantId: promotion.grant.id,
+        effectiveUntil: promotion.grant.endsAt, status: promotion.status, grantId: promotion.grant.id,
       },
     };
   }

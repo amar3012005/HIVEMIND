@@ -272,8 +272,16 @@ export async function grantPromotionToOrganization({ prisma, promotionId, orgId,
 }
 
 export async function getEffectivePromotionEntitlement(prisma, orgId, now = new Date()) {
-  const grant = await prisma.entitlementGrant.findFirst({ where: { orgId, startsAt: { lte: now }, status: 'active' }, orderBy: { startsAt: 'desc' } });
+  // A terminal grant status is authoritative over legacy entitlement projections.
+  // Otherwise a suspended pilot could fall through to an older paid-plan row.
+  const grant = await prisma.entitlementGrant.findFirst({
+    where: { orgId, startsAt: { lte: now }, status: { in: ['active', 'suspended', 'revoked'] } },
+    orderBy: { startsAt: 'desc' },
+  });
   if (!grant) return null;
+  if (grant.status === 'suspended' || grant.status === 'revoked') {
+    return { grant, status: grant.status, version: null };
+  }
   if (grant.endsAt && grant.endsAt <= now) return { grant, status: grant.fallbackAction === 'manual_review' ? 'manual_review' : 'expired', version: null };
   const version = await prisma.entitlementVersion.findFirst({ where: { grantId: grant.id, effectiveFrom: { lte: now }, OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: now } }] }, orderBy: { version: 'desc' } });
   return version ? { grant, version, status: 'active' } : null;
@@ -295,7 +303,9 @@ export async function amendEntitlementGrant({ prisma, grantId, patch, now = new 
     if (!FALLBACKS.has(fallbackAction)) throw new Error('invalid fallback action');
     const status = patch.status === undefined ? grant.status : String(patch.status).toLowerCase();
     if (!['active', 'suspended', 'revoked'].includes(status)) throw new Error('invalid grant status');
-    await tx.entitlementVersion.update({ where: { id: previous.id }, data: { effectiveUntil: now } });
+    // Versions are immutable commercial history. The resolver selects the highest
+    // effective version, so a successor supersedes its predecessor without
+    // rewriting the earlier grant terms.
     const next = await tx.entitlementVersion.create({ data: { grantId, version: previous.version + 1, planId, limits, ...profile,
       commercialTerms: previous.commercialTerms, effectiveFrom: now, transitionReason: String(patch.reason || 'admin_adjustment').slice(0, 80) } });
     const updated = await tx.entitlementGrant.update({ where: { id: grantId }, data: { endsAt, fallbackAction,

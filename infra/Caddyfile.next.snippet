@@ -5,6 +5,12 @@ next.singulancelabs.com {
 	reverse_proxy localhost:2388
 }
 
+# Platform-commercial surface. It intentionally serves the same immutable
+# frontend image, whose host gate renders only the passkey-protected admin UI.
+admin.hivemind.singulancelabs.com {
+	reverse_proxy localhost:2388
+}
+
 b2b-next.singulancelabs.com {
 	reverse_proxy localhost:2188
 }

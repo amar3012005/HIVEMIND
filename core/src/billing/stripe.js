@@ -80,7 +80,7 @@ export async function ensureCustomer(prisma, org, ownerEmail) {
  * the user is redirected to. The webhook handler is what finalises the
  * subscription state after payment succeeds.
  */
-export async function createCheckoutSession({ customerId, priceId, orgId, userId }) {
+export async function createCheckoutSession({ customerId, priceId, orgId, userId, promotionCodeId = null, promotionId = null, promotionVersionId = null }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
@@ -93,15 +93,50 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: returnSuccess,
     cancel_url: returnCancel,
-    allow_promotion_codes: true,
+    // A managed promotion is server-selected after eligibility has been checked.
+    // Never expose arbitrary Stripe promotion codes when a tenant-bound offer applies.
+    ...(promotionCodeId
+      ? { discounts: [{ promotion_code: promotionCodeId }] }
+      : { allow_promotion_codes: true }),
     billing_address_collection: 'auto',
     automatic_tax: { enabled: true },
     customer_update: { address: 'auto', name: 'auto' },
     subscription_data: {
       metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '' },
     },
-    metadata: { hivemind_org_id: orgId },
+    metadata: {
+      hivemind_org_id: orgId,
+      ...(promotionId ? { hivemind_promotion_id: promotionId } : {}),
+      ...(promotionVersionId ? { hivemind_promotion_version_id: promotionVersionId } : {}),
+    },
   });
+}
+
+/**
+ * Creates a platform-managed Stripe coupon and promotion code. The plaintext
+ * code is supplied only at creation time and is never persisted in HIVEMIND.
+ */
+export async function createManagedPromotionCode({ code, name, terms = {} }) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  const kind = String(terms.kind || '').toLowerCase();
+  const couponData = { duration: 'once', name: String(name || 'HIVEMIND promotion').slice(0, 40) };
+  if (kind === 'percentage_discount') {
+    couponData.percent_off = Number(terms.percent_off);
+  } else if (kind === 'fixed_discount') {
+    couponData.amount_off = Number(terms.amount_off_cents);
+    couponData.currency = String(terms.currency || 'EUR').toLowerCase();
+  } else {
+    throw new Error('Stripe promotions require a percentage or fixed discount');
+  }
+  const coupon = await stripe.coupons.create(couponData);
+  const promotionCode = await stripe.promotionCodes.create({
+    coupon: coupon.id,
+    code: String(code).toUpperCase(),
+    active: true,
+    metadata: { hivemind_managed: 'true' },
+  });
+  return { couponId: coupon.id, promotionCodeId: promotionCode.id };
 }
 
 /**

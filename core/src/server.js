@@ -300,7 +300,7 @@ const { createTaraGrokRuntime } = await import('./tara/grok-runtime.js');
 // Phase 1: Document-Backed Memory Architecture
 const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
 const { EvidenceRetrievalService } = await import('./knowledge/evidence-retrieval.js');
-const { parseWithDocling, chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+const { parseWithDocling, chunkWithDocling, collapseLetterSpacing } = await import('./knowledge/enterprise/docling-adapter.js');
 
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
@@ -1844,10 +1844,20 @@ if (process.env.DOCLING_URL) {
                 console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
               console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              // COLLAPSE LETTER-SPACING. collapseLetterSpacing() has always existed in
+              // docling-adapter.js and was applied ONLY to Docling's own responses — never
+              // to fast-pdf. Measured consequence on a 46 MB PDF that fell back here:
+              // segments read "S O L V I S  G E M E I N W O H L - B I L A N Z", the
+              // extractor returned 0-1 facts per window ("sparse extraction (0/6)"), and the
+              // document produced 240 SEGMENTS AND ZERO MEMORIES. Letter-spaced text also
+              // defeats both embeddings and lexical matching, so recall could not reach it
+              // either. The fix existed; it was simply not wired to this tier.
+              const _ft = collapseLetterSpacing(fast.text || '');
               return {
-                text: fast.text, markdown: fast.text, json: null,
+                text: _ft, markdown: _ft, json: null,
                 tables: [], pages: fast.pages, confidence: null, error: null,
-                hybridChunks, chunkerError: null, engine: 'pdf-parse',
+                hybridChunks: hybridChunks.map((c) => ({ ...c, text: collapseLetterSpacing(c.text || '') })),
+                chunkerError: null, engine: 'pdf-parse',
               };
             }
           } catch (tierErr) {
@@ -1926,8 +1936,9 @@ if (process.env.DOCLING_URL) {
             const fb = await fastPdfExtract(tempPath);
             if (!fb.error && fb.text.length > 200) {
               console.warn(`[docling-adapter] tier=docling failed/empty → falling back to fast-pdf for ${filename}`);
+              const _fbt = collapseLetterSpacing(fb.text || '');
               return {
-                text: fb.text, markdown: fb.text, json: null,
+                text: _fbt, markdown: _fbt, json: null,
                 tables: [], pages: fb.pages, confidence: null, error: null,
                 hybridChunks: chunkResult?.chunks?.length ? chunkResult.chunks : [],
                 chunkerError: chunkResult?.error || null,

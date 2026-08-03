@@ -305,6 +305,37 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   return { id: room.id, participantIds, created: true };
 }
 
+async function findOrCreateHumanGeneralRoom(session, company, participantIds = []) {
+  const existing = await prisma.$queryRawUnsafe(
+    `SELECT id, participant_ids
+       FROM "hivemind"."hyper_rooms"
+      WHERE org_id = $1::uuid
+        AND archived_at IS NULL
+        AND agent_connectors->>'_human_instruction_home' = 'true'
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    session.orgId,
+  ).catch(() => []);
+  if (existing?.[0]?.id) {
+    return { id: existing[0].id, participantIds: existing[0].participant_ids || [], created: false };
+  }
+
+  const companyName = String(company?.company || company?.name || 'Company').trim() || 'Company';
+  const normalizedParticipants = Array.from(new Set(participantIds.filter(Boolean))).slice(0, 5);
+  const room = await createHyperRoomWithinPlan({
+    orgId: session.orgId,
+    userId: session.userId,
+    name: `${companyName} - General`.slice(0, 120),
+    template: 'auto',
+    participantIds: normalizedParticipants,
+    goal: 'Handle direct company instructions through the normal Room Director, planning, discussion, tools, and synthesis.',
+    roomTag: 'general',
+    agentConnectors: { _human_instruction_home: true },
+    permanentLeadId: normalizedParticipants.slice().sort()[0] || null,
+  });
+  return { id: room.id, participantIds: normalizedParticipants, created: true };
+}
+
 async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles, invitedAt }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
@@ -9393,11 +9424,10 @@ Write the persona now.`;
     }
 
     // POST /v1/hyper/tasks/open { task_id } — submit an onboarding task as an
-    // ordinary human instruction to the permanent General Room. Its Director
-    // owns classification, planning, discussion, tools, and final synthesis.
-    // dashboard task. First click provisions a room named after the task with
-    // the task detail as its goal and marks the task in the persisted state;
-    // later clicks return the same room. Polsia: click a task → its workroom.
+    // ordinary human instruction to the permanent human General Room. This is
+    // deliberately separate from the General domain home that hosts HQ Runtime.
+    // Its Director owns classification, planning, discussion, tools, and final
+    // synthesis; later clicks return the same durable work room.
     if (pathname === '/v1/hyper/tasks/open' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -9420,14 +9450,14 @@ Write the persona now.`;
         const kickoff = buildCompanyTaskInstruction(task);
         if (!kickoff) return jsonResponse(res, { error: 'task instruction is empty' }, 409);
         const participantIds = (company.team || []).map((member) => member.id).filter(Boolean).slice(0, 5);
-        const domainRooms = await ensureDomainRooms({
+        await ensureDomainRooms({
           prisma,
           orgId: current.session.orgId,
           userId: current.session.userId,
           participantIds,
           company,
         });
-        const generalRoom = domainRooms.find((candidate) => candidate.room_tag === 'general');
+        const generalRoom = await findOrCreateHumanGeneralRoom(current.session, company, participantIds);
         if (!generalRoom?.id) return jsonResponse(res, { error: 'general room unavailable' }, 503);
         task.room_id = generalRoom.id;
         task.room_tag = 'general';
@@ -9439,7 +9469,7 @@ Write the persona now.`;
         let created = false;
         // Version the human-General route so a task previously opened in a
         // specialist room cannot suppress its first General Room turn.
-        const idempotencyKey = `task-human-v2-${row.id}-${task.id}`.slice(0, 64);
+        const idempotencyKey = `task-human-v3-${row.id}-${task.id}`.slice(0, 64);
         const kickTurn = await prisma.$transaction(async (tx) => {
           const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
           if (prior) return prior;

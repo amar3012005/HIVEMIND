@@ -4,7 +4,7 @@ import { MCPConnectorRegistry } from './registry.js';
 import { MCPConnectorJobStore } from './job-store.js';
 import { MCPConnectorRunner } from './runner.js';
 import { getMcpAdapter } from './adapters/index.js';
-import { enrichEndpointWithToken, createConnectSession } from './nango-service.js';
+import { enrichEndpointWithToken, createConnectSession, getConnectionId } from './nango-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = path.join(__dirname, '../../../data/mcp-connectors.json');
@@ -48,6 +48,12 @@ function buildJobSummary(jobs = []) {
   };
 }
 
+function mcpHealthMode(endpoint) {
+  // Catalog entries declare this explicitly. Custom endpoints are assumed to
+  // be real MCP servers unless their owner opts out of status probing.
+  return endpoint?.mcp_health || (endpoint?.mode === 'connect_only' ? 'not_applicable' : 'probe');
+}
+
 export class MCPIngestionService {
   constructor({
     ingestionPipeline,
@@ -83,6 +89,26 @@ export class MCPIngestionService {
       console.warn(`[Nango] token resolution failed for ${endpoint.name}:`, err.message);
       return endpoint;
     }
+  }
+
+  async _connectionState(endpoint, { user_id, org_id } = {}) {
+    if (endpoint.transport === 'internal') {
+      const provider = endpoint.native_provider || endpoint.adapter_type;
+      if (!this.db || !provider || !user_id) return 'unknown';
+      const { ConnectorStore } = await import('../framework/connector-store.js');
+      const token = await new ConnectorStore(this.db)
+        .getAccessToken(user_id, provider)
+        .catch(() => null);
+      return token ? 'connected' : 'not_connected';
+    }
+
+    if (!endpoint.nango_provider) return 'not_required';
+    if (!this.db || !user_id) return 'unknown';
+    const connectionId = await getConnectionId(
+      { userId: user_id, orgId: org_id, providerKey: endpoint.nango_provider },
+      { db: this.db },
+    );
+    return connectionId ? 'connected' : 'not_connected';
   }
 
   registerEndpoint(endpoint) {
@@ -196,12 +222,57 @@ export class MCPIngestionService {
   }
 
   async listEndpointStatuses(scope) {
-    const endpoints = this.listEndpoints(scope);
+    const endpoints = this.listEndpoints(scope)
+      .filter(endpoint => mcpHealthMode(endpoint) === 'probe');
     const jobs = this.jobStore.list(scope, { limit: 500 });
     const statuses = await Promise.all(endpoints.map(async endpoint => {
       const endpointJobs = jobs.filter(job => job.endpoint_name === endpoint.name);
       const summary = buildJobSummary(endpointJobs);
       const isInternal = endpoint.transport === 'internal';
+      const checked_at = new Date().toISOString();
+
+      let connectionState;
+      try {
+        connectionState = await this._connectionState(endpoint, scope);
+      } catch (error) {
+        return {
+          name: endpoint.name,
+          label: endpoint.label || endpoint.name,
+          transport: endpoint.transport,
+          adapter_type: endpoint.adapter_type || null,
+          url: endpoint.url || null,
+          updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'error',
+          healthy: false,
+          tool_count: null,
+          resource_count: null,
+          prompt_count: null,
+          ...summary,
+          tools: [], resources: [], prompts: [],
+          error: 'Connector connection state is unavailable',
+        };
+      }
+
+      if (connectionState === 'not_connected') {
+        return {
+          name: endpoint.name,
+          label: endpoint.label || endpoint.name,
+          transport: endpoint.transport,
+          adapter_type: endpoint.adapter_type || null,
+          url: endpoint.url || null,
+          updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'not_connected',
+          healthy: false,
+          tool_count: null,
+          resource_count: null,
+          prompt_count: null,
+          ...summary,
+          tools: [], resources: [], prompts: [], error: null,
+        };
+      }
+
       const authed = isInternal ? endpoint : await this._resolveAuthenticatedEndpoint(endpoint, scope);
 
       try {
@@ -210,10 +281,13 @@ export class MCPIngestionService {
           : await this.runner.inspect(authed);
         return {
           name: endpoint.name,
+          label: endpoint.label || endpoint.name,
           transport: endpoint.transport,
           adapter_type: endpoint.adapter_type || null,
           url: endpoint.url || null,
           updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'healthy',
           healthy: true,
           tool_count: inspection.tools?.length || 0,
           resource_count: inspection.resources?.length || 0,
@@ -227,10 +301,13 @@ export class MCPIngestionService {
       } catch (error) {
         return {
           name: endpoint.name,
+          label: endpoint.label || endpoint.name,
           transport: endpoint.transport,
           adapter_type: endpoint.adapter_type || null,
           url: endpoint.url || null,
           updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'error',
           healthy: false,
           tool_count: 0,
           resource_count: 0,
@@ -247,7 +324,8 @@ export class MCPIngestionService {
     return {
       total: statuses.length,
       healthy: statuses.filter(status => status.healthy).length,
-      unhealthy: statuses.filter(status => !status.healthy).length,
+      unhealthy: statuses.filter(status => status.state === 'error').length,
+      not_connected: statuses.filter(status => status.state === 'not_connected').length,
       statuses
     };
   }

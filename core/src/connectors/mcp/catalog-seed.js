@@ -37,6 +37,7 @@ export const MCP_CATALOG = [
     nango_provider: 'google-maps',
     token_inject: { kind: 'env', var: 'GOOGLE_MAPS_API_KEY', format: 'raw' },
     mode: 'live',
+    mcp_health: 'probe',
     supports_ingestion: false,
     supports_live_tools: true,
     category: 'geo',
@@ -49,6 +50,7 @@ export const MCP_CATALOG = [
     args: ['-y', '@modelcontextprotocol/server-github'],
     nango_provider: 'github',
     token_inject: { kind: 'env', var: 'GITHUB_PERSONAL_ACCESS_TOKEN', format: 'raw' },
+    mcp_health: 'probe',
     category: 'code',
   },
   {
@@ -63,6 +65,7 @@ export const MCP_CATALOG = [
     url: 'https://mcp.notion.com/mcp',
     nango_provider: 'notion',
     // default Authorization: Bearer header (token_inject omitted → buildHeaders default)
+    mcp_health: 'probe',
     category: 'productivity',
   },
   {
@@ -73,6 +76,7 @@ export const MCP_CATALOG = [
     args: ['-y', '@hubspot/mcp-server'],
     nango_provider: 'hubspot',
     token_inject: { kind: 'env', var: 'PRIVATE_APP_ACCESS_TOKEN', format: 'raw' },
+    mcp_health: 'probe',
     category: 'crm',
   },
   {
@@ -90,6 +94,7 @@ export const MCP_CATALOG = [
     native_provider: 'slack',
     supports_ingestion: false,
     supports_live_tools: true,
+    mcp_health: 'probe',
     default_project: 'connector-slack',
     default_tags: ['slack', 'live'],
     category: 'comms',
@@ -101,6 +106,7 @@ export const MCP_CATALOG = [
     url: 'https://mcp.airtable.com/mcp',
     nango_provider: 'airtable',
     // default Authorization: Bearer header (token_inject omitted → buildHeaders default)
+    mcp_health: 'probe',
     category: 'data',
   },
   {
@@ -109,6 +115,7 @@ export const MCP_CATALOG = [
     transport: 'sse',
     url: 'https://mcp.linear.app/sse',
     nango_provider: 'linear',
+    mcp_health: 'probe',
     category: 'project',
   },
   // ── Google Workspace + Salesforce (Nango connect mappings) ───────────────
@@ -118,12 +125,12 @@ export const MCP_CATALOG = [
   // nango_provider. Gmail/Docs ingestion runs in the first-party connector;
   // these entries are connect-only (the MCP runner is on-demand, never
   // auto-invoked for them). Matches the working reference deployment.
-  { name: 'gmail',           label: 'Gmail',           transport: 'streamable-http', url: 'https://gmail.googleapis.com',            nango_provider: 'gmail',           category: 'google_workspace' },
-  { name: 'google-drive',    label: 'Google Drive',    transport: 'streamable-http', url: 'https://www.googleapis.com/drive',        nango_provider: 'google-drive',    category: 'google_workspace' },
-  { name: 'google-calendar', label: 'Google Calendar', transport: 'streamable-http', url: 'https://www.googleapis.com/calendar',     nango_provider: 'google-calendar', category: 'google_workspace' },
-  { name: 'google-docs',     label: 'Google Docs',     transport: 'streamable-http', url: 'https://docs.googleapis.com',             nango_provider: 'google-docs',     category: 'google_workspace' },
-  { name: 'google-gemini',   label: 'Google Gemini',   transport: 'streamable-http', url: 'https://generativelanguage.googleapis.com', nango_provider: 'google-gemini', category: 'google_workspace' },
-  { name: 'salesforce',      label: 'Salesforce',      transport: 'streamable-http', url: 'https://api.salesforce.com',              nango_provider: 'salesforce',      category: 'crm' },
+  { name: 'gmail',           label: 'Gmail',           transport: 'streamable-http', url: 'https://gmail.googleapis.com',            nango_provider: 'gmail',           category: 'google_workspace', mode: 'connect_only', mcp_health: 'not_applicable' },
+  { name: 'google-drive',    label: 'Google Drive',    transport: 'streamable-http', url: 'https://www.googleapis.com/drive',        nango_provider: 'google-drive',    category: 'google_workspace', mode: 'connect_only', mcp_health: 'not_applicable' },
+  { name: 'google-calendar', label: 'Google Calendar', transport: 'streamable-http', url: 'https://www.googleapis.com/calendar',     nango_provider: 'google-calendar', category: 'google_workspace', mode: 'connect_only', mcp_health: 'not_applicable' },
+  { name: 'google-docs',     label: 'Google Docs',     transport: 'streamable-http', url: 'https://docs.googleapis.com',             nango_provider: 'google-docs',     category: 'google_workspace', mode: 'connect_only', mcp_health: 'not_applicable' },
+  { name: 'google-gemini',   label: 'Google Gemini',   transport: 'streamable-http', url: 'https://generativelanguage.googleapis.com', nango_provider: 'google-gemini', category: 'google_workspace', mode: 'connect_only', mcp_health: 'not_applicable' },
+  { name: 'salesforce',      label: 'Salesforce',      transport: 'streamable-http', url: 'https://api.salesforce.com',              nango_provider: 'salesforce',      category: 'crm', mode: 'connect_only', mcp_health: 'not_applicable' },
 ];
 
 /**

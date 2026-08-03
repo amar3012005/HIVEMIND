@@ -228,6 +228,7 @@ const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 const { UsageTracker, setUsageTracker } = await import('./billing/usage-tracker.js');
 const { PlanStore } = await import('./billing/plan-store.js');
 const { PlanEnforcer, planLimitBody } = await import('./billing/plan-enforcer.js');
+const { UsageService } = await import('./billing/usage-service.js');
 
 // Audit logging (Scale / Enterprise plans)
 const { AuditLogger } = await import('./audit/audit-logger.js');
@@ -373,6 +374,8 @@ const usageTracker = prisma ? new UsageTracker(prisma) : null;
 if (usageTracker) setUsageTracker(usageTracker); // expose to deep chokepoints via meter* helpers
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
+const usageService = (prisma && planEnforcer && usageTracker) ? new UsageService({ prisma, planEnforcer, usageTracker }) : null;
+planEnforcer?.setUsageService(usageService);
 
 // One durable settlement marker prevents a completed/retried/polled Web job
 // from being billed twice. Provider receipts remain on the job attempt manifest;
@@ -386,7 +389,7 @@ async function settleWebIntelUsage({ orgId, userId, jobId, planMetric }) {
     metric: `plan:${planMetric}`,
     metadata: { plan_metric: planMetric },
   });
-  if (settled.settled && planEnforcer) planEnforcer.recordUsage(orgId, planMetric, 1);
+  if (settled.settled && planEnforcer) planEnforcer.recordUsage(orgId, planMetric, 1, { userId, feature: 'web-intel', idempotencyKey: `web-job:${jobId}:${planMetric}` });
   return settled.settled;
 }
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
@@ -8708,7 +8711,7 @@ exit \$RC
       // completion in this request to the org's HIVEMIND API key. principal.keyId is set by
       // resolveKeyAccess (persisted keys) + the file-store path; master/test/consumer principals
       // have no keyId → null → org-level (system) attribution, which is correct for those.
-      enterOrgContext(principal.orgId, principal.keyId || null);
+      enterOrgContext(principal.orgId, principal.keyId || null, principal.userId || null);
       const orgId = principal.orgId || DEFAULT_ORG;
 
       // ── Container Tag (multi-tenant namespace) resolution ──
@@ -21553,6 +21556,12 @@ exit \$RC
 
         case '/api/billing/usage':
           if (req.method === 'GET') {
+            try {
+              const { resolveTenantAccess } = await import('./auth/tenant-access.js');
+              await resolveTenantAccess(prisma, principal, { resource: 'billing', action: 'read' });
+            } catch {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!planEnforcer) {
               // Fallback to legacy usage tracker if plan enforcer unavailable
               if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
@@ -21562,7 +21571,14 @@ exit \$RC
               return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
             }
             const usageSummary = await planEnforcer.getUsageSummary(orgId);
-            return jsonResponse(res, usageSummary);
+            const memberUsage = usageService && userId
+              ? await usageService.getMemberSummary(orgId, userId).catch(() => [])
+              : [];
+            return jsonResponse(res, {
+              ...usageSummary,
+              member_usage: memberUsage,
+              usage_contract: 'usage-event-ledger-v1',
+            });
           }
           break;
 
@@ -21576,6 +21592,12 @@ exit \$RC
 
         case '/api/billing/usage/daily':
           if (req.method === 'GET') {
+            try {
+              const { resolveTenantAccess } = await import('./auth/tenant-access.js');
+              await resolveTenantAccess(prisma, principal, { resource: 'billing', action: 'read' });
+            } catch {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!usageTracker) return jsonResponse(res, { error: 'Billing not available' }, 503);
             const days = Math.max(1, Math.min(120, parseInt(url.searchParams.get('days'), 10) || 30));
             const series = await usageTracker.getDailyUsage(orgId, days);

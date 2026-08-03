@@ -11,7 +11,8 @@
  *   maxUsers, knowledgeBasePagesPerMonth
  */
 
-import { currentApiKey } from '../db/prisma.js';
+import crypto from 'node:crypto';
+import { currentApiKey, currentUser } from '../db/prisma.js';
 import { getOrgCounts } from '../memory/org-counts.js';
 import { countQuotaHyperRooms } from '../employees/domain-rooms.js';
 
@@ -100,7 +101,10 @@ export class PlanEnforcer {
 
     // In-memory counters: orgId -> billable usage counters for the current month.
     this._counters = new Map();
+    this.usageService = null;
   }
+
+  setUsageService(service) { this.usageService = service; }
 
   // ── helpers ──────────────────────────────────────────────────────────
 
@@ -439,6 +443,16 @@ export class PlanEnforcer {
       if (type === 'hyperAgentRuns') c.hyperAgentRuns = (c.hyperAgentRuns || 0) + amount;
       if (type === 'connectors') c.connectors += amount;
       if (type === 'kbPages') c.kbPages = (c.kbPages || 0) + amount;
+    }
+
+    // New work uses the ledger. The legacy tracker remains the projection
+    // backend only for processes that have not yet initialized the service.
+    if (this.usageService) {
+      const key = opts.idempotencyKey || opts.idempotency_key || crypto.randomUUID();
+      this.usageService.record({ orgId, userId: opts.userId || currentUser() || null, apiKeyId: opts.apiKeyId || currentApiKey() || null,
+        type, quantity: amount, source: opts.feature || opts.source || 'product', idempotencyKey: key,
+        providerReceipt: opts.providerReceipt || null, metadata: { surface: opts.surface || null } }).catch(() => {});
+      return;
     }
 
     // Durable recording via UsageTracker (async — fire-and-forget)

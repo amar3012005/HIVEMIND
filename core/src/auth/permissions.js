@@ -63,8 +63,10 @@ export const PERMISSIONS = {
     read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead']),
   },
   billing: {
-    read:   new Set(['org_owner', 'org_admin']),
-    manage: new Set(['org_owner']),
+    // Shared allowance is visible to every active member; commercial records
+    // and mutations remain an owner/admin responsibility.
+    read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead', 'member', 'viewer', 'service_account', 'guest']),
+    manage: new Set(['org_owner', 'org_admin']),
   },
   webhook: {
     manage: new Set(['org_owner', 'org_admin']),

@@ -1125,6 +1125,9 @@ const PROMOTION_ATTEMPT_MAX = 20;
 const PROMOTION_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
 const promotionAttempts = new Map();
 const SIGNUP_ADMISSION_TTL_SECONDS = 15 * 60;
+const SIGNUP_ADMISSION_ATTEMPT_MAX = 10;
+const SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const signupAdmissionAttempts = new Map();
 const PERSONAL_SIGNUP_INVITATION_CODE = String(process.env.PERSONAL_INVITATION_CODE || '').trim();
 const SIGNUP_ADMISSION_SECRET = process.env.HIVEMIND_SIGNUP_ADMISSION_SECRET || CONFIG.sessionSecret || ADMIN_SECRET;
 
@@ -1448,6 +1451,21 @@ function recordPromotionAttempt(req, accepted) {
   if (accepted) return promotionAttempts.delete(key);
   const now = Date.now(); const previous = promotionAttempts.get(key);
   promotionAttempts.set(key, previous && previous.startedAt + PROMOTION_ATTEMPT_WINDOW_MS > now
+    ? { ...previous, count: previous.count + 1 }
+    : { startedAt: now, count: 1 });
+}
+
+function signupAdmissionLimited(req) {
+  const attempt = signupAdmissionAttempts.get(platformUnlockClient(req));
+  return Boolean(attempt && attempt.startedAt + SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS > Date.now()
+    && attempt.count >= SIGNUP_ADMISSION_ATTEMPT_MAX);
+}
+
+function recordSignupAdmissionAttempt(req, accepted) {
+  const key = platformUnlockClient(req);
+  if (accepted) return signupAdmissionAttempts.delete(key);
+  const now = Date.now(); const previous = signupAdmissionAttempts.get(key);
+  signupAdmissionAttempts.set(key, previous && previous.startedAt + SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS > now
     ? { ...previous, count: previous.count + 1 }
     : { startedAt: now, count: 1 });
 }
@@ -3459,12 +3477,16 @@ const server = http.createServer(async (req, res) => {
     else opts.idpHint = h;
   };
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
+    if (signupAdmissionLimited(req)) {
+      return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
+    }
     const body = await parseBody(req);
     const accountType = String(body.account_type || '').trim().toLowerCase();
     const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
     const accepted = accountType === 'personal'
       ? invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
       : accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code));
+    recordSignupAdmissionAttempt(req, accepted);
     if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
     return jsonResponse(res, {
       signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),

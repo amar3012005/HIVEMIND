@@ -9,7 +9,7 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
-import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbHydrate } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate } from '../vector/mneme/driver.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -147,24 +147,32 @@ export class EvidenceRetrievalService {
     try {
       // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
       if (orgIsRemote(orgId)) {
-        const queryVector = await this.qdrantClient.generateEmbedding(query);
-        if (!queryVector) return [];
-        // amrKbRecall returns [{segment_id, document_id, content, score}]
-        const hits = await amrKbRecall(orgId, queryVector, {
-          // The agent hard-caps `Math.min(limit || 20, 100)` (byod/agent/server.mjs).
-          // Clamp here and SAY SO — a silent clamp is the defect class this repo keeps
-          // shipping (a green number that quietly means "less than you asked for").
-          limit: (() => {
-            if (_depth > 100) console.warn(`[EvidenceRetrieval] .amr depth ${_depth} clamped to agent max 100 (org=${orgId})`);
-            return Math.min(_depth, 100);
-          })(),
+        const access = { userId, projectId, accessContext, scopeFilter };
+        const filter = {
           documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
           documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
-          scoreThreshold: effectiveThreshold,
-        });
-        if (!hits || !hits.length) return [];
-        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id));
-        // Build a score lookup from the recall hits.
+          access,
+        };
+        // Exact terms and embeddings are complementary. Start the lexical lane
+        // immediately so a part number still returns when embedding is unavailable.
+        const lexicalPromise = amrKbLexicalRemote(orgId, query, filter, _depth);
+        const queryVector = await this.qdrantClient.generateEmbedding(query);
+        const vectorPromise = queryVector
+          ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold })
+          : Promise.resolve([]);
+        const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
+        const byId = new Map();
+        for (const hit of vectorHits || []) byId.set(hit.segment_id, { ...hit, _lexical: false });
+        for (const hit of lexicalHits || []) {
+          const current = byId.get(hit.segment_id);
+          const score = Math.max(0.7, Number(hit.score) || 0);
+          if (!current || score > (Number(current.score) || 0)) byId.set(hit.segment_id, { ...hit, score, _lexical: true });
+          else current._lexical = true;
+        }
+        const hits = [...byId.values()];
+        if (!hits.length) return [];
+        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access);
+        // Build a score lookup from the merged vector and lexical hits.
         const scoreMap = new Map(hits.map((h) => [h.segment_id, h.score]));
         const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
         const remoteResults = hits
@@ -181,13 +189,14 @@ export class EvidenceRetrievalService {
               content: s.content,
               snippet: this._extractSnippet(s.content, query),
               score,
-              document: { id: s.document_id },
+              ...(h._lexical ? { _lexical: true } : {}),
+              document: { id: s.document_id, title: s.title || h.title || null },
               metadata: {
                 segmentType: s.segment_type,
                 segmentIndex: s.segment_index,
-                wordCount: null,
-                startPage: null,
-                endPage: null,
+                wordCount: s.word_count ?? h.word_count ?? null,
+                startPage: s.start_page ?? h.start_page ?? null,
+                endPage: s.end_page ?? h.end_page ?? null,
               },
             };
           })
@@ -469,7 +478,7 @@ export class EvidenceRetrievalService {
       // A requested project must therefore fail closed rather than match an
       // org-wide same-name file.
       if (projectId) return [];
-      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId, projectId } });
       return (listed?.documents || [])
         .filter((document) => !document.userId || document.userId === userId)
         .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))

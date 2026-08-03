@@ -208,17 +208,21 @@ export async function remoteKbSegment(orgId, segment, vector) {
   catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteKbRecall(orgId, vector, opts = {}) {
-  try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, documentIds: opts.documentIds, scoreThreshold: opts.scoreThreshold }); return out?.results || []; }
+  try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, documentIds: opts.documentIds, scoreThreshold: opts.scoreThreshold, access: opts.access }); return out?.results || []; }
   catch (e) { console.warn(`[mneme/remote] kb-recall failed org=${orgId}: ${e.message}`); return []; }
 }
-export async function remoteKbHydrate(orgId, ids) {
-  try { const out = await _call(orgId, '/v1/kb-hydrate', { ids }); return out?.segments || []; }
+export async function remoteKbLexical(orgId, text, filter = {}, limit = 20) {
+  try { const out = await _call(orgId, '/v1/kb-lexical', { text, filter, limit }); return out?.results || []; }
+  catch (e) { console.warn(`[mneme/remote] kb-lexical failed org=${orgId}: ${e.message}`); return []; }
+}
+export async function remoteKbHydrate(orgId, ids, access) {
+  try { const out = await _call(orgId, '/v1/kb-hydrate', { ids, access }); return out?.segments || []; }
   catch (e) { console.warn(`[mneme/remote] kb-hydrate failed org=${orgId}: ${e.message}`); return []; }
 }
 
 // KB doc LIST for remote org — returns central-shaped { documents, pagination } or null on failure.
 export async function remoteKbDocs(orgId, opts = {}) {
-  try { return await _call(orgId, '/v1/kb-docs', { limit: opts.limit, offset: opts.offset }); }
+  try { return await _call(orgId, '/v1/kb-docs', { limit: opts.limit, offset: opts.offset, access: opts.access }); }
   catch (e) { console.warn(`[mneme/remote] kb-docs failed org=${orgId}: ${e.message}`); return null; }
 }
 
@@ -230,8 +234,8 @@ export async function remoteKbDocDelete(orgId, { documentId, filename } = {}) {
 }
 
 // KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount } or null.
-export async function remoteKbDocDetail(orgId, documentId) {
-  try { const out = await _call(orgId, '/v1/kb-doc-detail', { documentId }); return out?.error ? null : out; }
+export async function remoteKbDocDetail(orgId, documentId, access) {
+  try { const out = await _call(orgId, '/v1/kb-doc-detail', { documentId, access }); return out?.error ? null : out; }
   catch (e) { console.warn(`[mneme/remote] kb-doc-detail failed org=${orgId} id=${documentId}: ${e.message}`); return null; }
 }
 

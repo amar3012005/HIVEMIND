@@ -3081,6 +3081,9 @@ Every item must include a non-empty content field and one or more valid support_
             segmentType: segment.segmentType,
             segmentIndex: segment.segmentIndex,
             previousSegmentId: segment.previousSegmentId || null,
+            startPage: segment.startPage || null,
+            endPage: segment.endPage || null,
+            wordCount: segment.wordCount || null,
             metadata: segment.metadata || {},
             createdAt: segment.createdAt || new Date().toISOString(),
           }, Array.isArray(embedding) ? embedding : []);

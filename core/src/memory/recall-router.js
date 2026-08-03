@@ -1705,12 +1705,20 @@ export class RecallRouter {
     // non-deterministic. The budget here is a real latency contract, so it is NOT extended
     // (unlike deliverHybrid's arbitrary 1200ms floor); it is only made visible, and a
     // budget too small to fit one attempt skips the call instead of wasting it.
-    const _rrInnerMem = Number(process.env.RERANK_TIMEOUT_MS || 2500);
-    const _canRerank = rerankBudget >= Math.min(_rrInnerMem, 1500);
+    // Gate on the MEASURED warm latency, not on the timeout ceiling. The first version of
+    // this gate required min(RERANK_TIMEOUT_MS, 1500)ms and therefore skipped calls with
+    // 630ms / 523ms / 350ms left that would have completed comfortably — a warm rerank is
+    // ~270ms against the live endpoint (829ms cold). The withTimeout below is still bounded
+    // by the remaining budget, so attempting with less than the ceiling risks nothing: a
+    // slow call degrades exactly as before, and now says so.
+    const _rrMinMem = Number(process.env.RERANK_MIN_BUDGET_MS || 400);
+    const _canRerank = rerankBudget >= _rrMinMem;
     if (!_canRerank && rerankBudget > 1) {
       console.warn(`[recall-router] SKIPPING memory-lane cross-encoder: only ${rerankBudget}ms of budget `
-        + `left (needs ~${Math.min(_rrInnerMem, 1500)}ms) — delivering algorithmic order. Ranking quality `
-        + `is degraded for this request; upstream stages spent the budget.`);
+        + `left (needs >=${_rrMinMem}ms; warm rerank ~270ms) — delivering algorithmic order. The memory `
+        + `lane is NOT cross-encoded for this request. Upstream stages spent the budget: `
+        + `latency_budget_ms=${recallPlan.latency_budget_ms} for mode=${recallPlan.mode || 'n/a'}, and one `
+        + `hop alone is capped at 2300ms, so the final stage can be starved by construction.`);
     }
     let deliverMemories = _canRerank
       ? await withTimeout(

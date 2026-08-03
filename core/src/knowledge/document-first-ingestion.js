@@ -3372,56 +3372,14 @@ Every item must include a non-empty content field and one or more valid support_
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
         });
-        // WHOLE-DOCUMENT SUMMARY — one per document, brief but covering the whole thing.
-        // generateDocumentSummary() walks every section (up to 14) and quotes ~220 chars of
-        // each, so it reflects the entire document rather than its first page. It existed
-        // ONLY on the legacy chunker path (document-chunker.js:516): 35 of 515 memories in
-        // org 1380251c carry the `document-summary` tag and ZERO new canonical uploads do.
-        // Without it "what is this document about" has nothing to retrieve.
-        // It also feeds entityContext below — that P2 change read metadata.documentSummary,
-        // which nothing set, so it was inert until this landed.
-        let _docSummaryText = null;
-        try {
-          const { generateDocumentSummary } = await import('./document-chunker.js');
-          _docSummaryText = generateDocumentSummary(fullText, {
-            title: docTitle, pages: metadata?.pageCount || null, ...(metadata || {}),
-          });
-          if (_docSummaryText) {
-            metadata = { ...(metadata || {}), documentSummary: _docSummaryText };
-            // Anchor on ANY real segment: _ingestUnifiedWindow returns [] on a null
-            // segmentId, and promotableSegments can be empty after the boilerplate filter.
-            const _sumSegId = promotableSegments[0]?.id
-              || (Array.isArray(segments) ? segments[0]?.id : null) || null;
-            if (!_sumSegId) {
-              console.warn(`[kb-summary] no segment to anchor on (promotable=${promotableSegments.length} segments=${Array.isArray(segments) ? segments.length : 'n/a'}) — skipping`);
-            }
-            const _sum = _sumSegId === null ? null : await this._ingestUnifiedWindow(
-              { segmentId: _sumSegId, content: _docSummaryText, heading: null, page: null },
-              { userId, orgId, documentId, metadata, docTitle,
-                preExtractedFacts: [{
-                  content: _docSummaryText,
-                  title: `Document: ${docTitle}`,
-                  // `summary` not `fact`: recall must be able to prefer a distilled overview
-                  // for a document-level question and rank it BELOW atoms for a detail one.
-                  memory_type: 'summary',
-                  importance: 0.9,
-                  source_quote: String(fullText || '').slice(0, 120),
-                  tags: ['document-summary', 'kb-canonical'],
-                  // the persist path maps these; a summary asserts no entities or edges of
-                  // its own — the atoms it summarises carry those.
-                  entities: [],
-                  relations: [],
-                  support_segment_ids: [],
-                  support_quotes: [],
-                }] },
-            );
-            if (_sum?.[0]) console.log(`[kb-summary] document summary memory created id=${_sum[0].id} chars=${_docSummaryText.length}`);
-            else if (_sumSegId) console.warn(`[kb-summary] NOT persisted despite segment ${String(_sumSegId).slice(0, 8)} (promotable=${promotableSegments.length} chars=${_docSummaryText.length}) — a document-level question has nothing to retrieve`);
-          }
-        } catch (error) {
-          console.warn(`[kb-summary] failed: ${error.message} @ ${(error.stack || '').split('\n')[1]?.trim()}`);
-        }
-
+        // NOTE: a whole-document summary memory ALREADY EXISTS on this path —
+        // memory_type 'summary', ~1200 chars of LLM prose, tagged `document-summary` +
+        // `doc-id:<uuid>`, verified on p3d-probe.pdf. I added a second one here from
+        // generateDocumentSummary() and dedup correctly rejected it; the block is removed
+        // rather than left as a fallback (no second path). What misled me: the summary has
+        // NO row in memory_evidence_links, so a join on document_id shows zero summaries.
+        // If you need document->summary traceability, add the evidence link — do not add a
+        // second generator.
         const uFacts = [];
         const extraEvidenceLinks = [];
         for (const claim of curated) {

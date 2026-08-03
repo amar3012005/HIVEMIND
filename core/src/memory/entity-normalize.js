@@ -172,3 +172,27 @@ export function canonicalizeEntityAliases(tagList) {
   const merged = ents.filter((e) => !dropped.has(e)).map((e) => `entity:${e}`);
   return [...rest, ...merged];
 }
+
+
+/**
+ * Match-time variants of a normalized entity slug/key: diacritics folded
+ * (NFD strip + ß→ss) and ONE trailing German/English plural added/stripped
+ * (length-guarded). For MATCHING only — display names are never rewritten.
+ * Shared by the canonical-entity persister's exact-reuse prepass (the LIVE
+ * KB upload path) and EntityResolver's dedup guard, so the two cannot drift.
+ */
+export function entityMatchVariants(key) {
+  const k0 = String(key || '');
+  const out = new Set(k0 ? [k0] : []);
+  if (!k0) return [];
+  const folded = k0.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+  out.add(folded);
+  for (const k of [k0, folded]) {
+    if (k.length >= 6) {
+      if (k.endsWith('en')) out.add(k.slice(0, -2));
+      if (k.endsWith('n') || k.endsWith('s') || k.endsWith('e')) out.add(k.slice(0, -1));
+      out.add(`${k}n`); out.add(`${k}en`); out.add(`${k}s`);
+    }
+  }
+  return [...out].filter((v) => v && v.length >= 2);
+}

@@ -16,7 +16,7 @@
 //     compatibility/fallback linkage for recall.
 
 import { EntityResolver } from './entity-resolver.js';
-import { normalizeEntity } from './entity-normalize.js';
+import {normalizeEntity, entityMatchVariants } from './entity-normalize.js';
 
 // V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
 const _ontoCache = new Map(); // orgId → { value, expiresAt }
@@ -140,9 +140,15 @@ export async function persistCanonicalLinks({
         for (const surface of [row.canonicalName, ...(row.aliases || [])]) {
           const slug = normalizeEntity(surface);
           if (!slug) continue;
-          const seen = existingBySlug.get(slug);
-          if (seen && seen !== row.id) existingBySlug.set(slug, 'AMBIGUOUS');
-          else if (!seen) existingBySlug.set(slug, row.id);
+          // Index the slug AND its diacritic/plural variants, so a NEW encounter of
+          // 'wärmepumpen' reuses the existing 'Wärmepumpe' instead of minting a
+          // sibling canonical. Without this, only byte-identical slugs reused — the
+          // exact fragmentation the 2026-08-03 backfill had to merge (7 losers).
+          for (const key of entityMatchVariants(slug)) {
+            const seen = existingBySlug.get(key);
+            if (seen && seen !== row.id) existingBySlug.set(key, 'AMBIGUOUS');
+            else if (!seen) existingBySlug.set(key, row.id);
+          }
         }
       }
     } catch (err) {

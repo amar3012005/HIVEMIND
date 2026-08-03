@@ -98,9 +98,50 @@ export async function getEffectiveEntitlement(prisma, orgId, now = new Date()) {
 
 export async function getEffectivePlan(prisma, orgId) {
   const fallback = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+  // Promotions are the authoritative commercial overlay. Keep the legacy
+  // time-row resolver beneath this branch while existing referrals migrate.
+  const { getEffectivePromotionEntitlement } = await import('./promotion-service.js');
+  const promotion = await getEffectivePromotionEntitlement(prisma, orgId);
+  if (promotion?.status === 'active' && promotion.version) {
+    return {
+      plan: mergeEntitlementPlan(promotion.version.planId, promotion.version.limits),
+      entitlement: {
+        id: promotion.grant.id,
+        source: promotion.grant.source,
+        phase: 'promotion',
+        planId: promotion.version.planId,
+        limits: promotion.version.limits,
+        effectiveFrom: promotion.version.effectiveFrom,
+        effectiveUntil: promotion.grant.endsAt,
+        status: promotion.status,
+        grantId: promotion.grant.id,
+        accountType: promotion.version.accountType,
+        hostingMode: promotion.version.hostingMode,
+        storageMode: promotion.version.storageMode,
+      },
+    };
+  }
+  if (promotion && ['manual_review', 'expired', 'suspended', 'revoked'].includes(promotion.status)) {
+    return {
+      plan: getPlan('free'),
+      entitlement: {
+        id: promotion.grant.id,
+        source: promotion.grant.source,
+        phase: promotion.status,
+        planId: 'free', limits: {}, effectiveFrom: promotion.grant.startsAt,
+        effectiveUntil: promotion.grant.endsAt, status: promotion.status, grantId: promotion.grant.id,
+      },
+    };
+  }
   const entitlement = await getEffectiveEntitlement(prisma, orgId);
   if (!entitlement) return { plan: getPlan(fallback?.plan || 'free'), entitlement: null };
   return { plan: mergeEntitlementPlan(entitlement.planId, entitlement.limits), entitlement };
+}
+
+// Canonical commercial read used by Billing, Usage, feature admission, and
+// external adapters. The legacy name remains for compatibility.
+export async function resolveEffectiveEntitlement(prisma, orgId) {
+  return getEffectivePlan(prisma, orgId);
 }
 
 export async function claimReferralOffer({ tx, orgId, userId, offer, now = new Date() }) {

@@ -63,6 +63,9 @@ model Organization {
   // Captured at onboarding so the dashboard can gate self-host orgs into the connect-your-agent flow
   // before showing the workspace — independent of whether the agent has registered yet.
   hostingMode                  String?            @default("managed") @map("hosting_mode") @db.VarChar(20)
+  // Commercial profile is explicit. Hosting/storage remain the data-plane
+  // settings; promotions may only select compatible combinations.
+  accountType                  String             @default("personal") @map("account_type") @db.VarChar(32)
   // Memory plane is independent from billing plan: personal managed workspaces use embedded .amr,
   // enterprise stays on the relational/vector hybrid unless explicitly migrated.
   memoryStorageMode            String             @default("hybrid") @map("memory_storage_mode") @db.VarChar(32)
@@ -2650,6 +2653,115 @@ model OrganizationEntitlement {
 
   @@index([orgId, effectiveFrom, effectiveUntil])
   @@map("organization_entitlements")
+}
+
+/// Platform-owned commercial offer. Codes are represented only by a keyed digest.
+model Promotion {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  legacyCampaignId  String?  @unique @map("legacy_campaign_id") @db.Uuid
+  internalName      String   @map("internal_name") @db.VarChar(160)
+  codeHash          String?  @unique @map("code_hash") @db.Char(64)
+  codeHint          String?  @map("code_hint") @db.VarChar(16)
+  visibility        String   @default("code") @db.VarChar(24)
+  status            String   @default("active") @db.VarChar(24)
+  billingMode       String   @default("entitlement_only") @map("billing_mode") @db.VarChar(32)
+  maxRedemptions    Int?     @map("max_redemptions")
+  redemptionCount   Int      @default(0) @map("redemption_count")
+  perEmailMax       Int      @default(1) @map("per_email_max")
+  startsAt          DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt            DateTime? @map("ends_at") @db.Timestamptz(6)
+  notes             String?  @db.Text
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("promotions")
+}
+
+/// Immutable terms snapshot. Material offer changes create a new version.
+model PromotionVersion {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId     String   @map("promotion_id") @db.Uuid
+  version         Int
+  basePlan        String   @map("base_plan") @db.VarChar(50)
+  limits          Json     @default("{}")
+  accountType     String   @map("account_type") @db.VarChar(32)
+  hostingMode     String   @map("hosting_mode") @db.VarChar(24)
+  storageMode     String   @map("storage_mode") @db.VarChar(32)
+  commercialTerms Json     @default("{}") @map("commercial_terms")
+  fallbackAction  String   @default("manual_review") @map("fallback_action") @db.VarChar(32)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, version])
+  @@map("promotion_versions")
+}
+
+model PromotionEligibility {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId     String   @map("promotion_id") @db.Uuid
+  eligibilityType String   @map("eligibility_type") @db.VarChar(24)
+  valueHash       String?  @map("value_hash") @db.Char(64)
+  valueHint       String?  @map("value_hint") @db.VarChar(160)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, eligibilityType, valueHash])
+  @@map("promotion_eligibilities")
+}
+
+/// One durable commercial access grant per offer activation; its history is versions.
+model EntitlementGrant {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  promotionId    String?   @map("promotion_id") @db.Uuid
+  source         String    @db.VarChar(48)
+  status         String    @default("active") @db.VarChar(24)
+  startsAt       DateTime  @default(now()) @map("starts_at") @db.Timestamptz(6)
+  endsAt         DateTime? @map("ends_at") @db.Timestamptz(6)
+  fallbackAction String    @default("manual_review") @map("fallback_action") @db.VarChar(32)
+  suspendedAt    DateTime? @map("suspended_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, startsAt])
+  @@map("entitlement_grants")
+}
+
+model EntitlementVersion {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  grantId          String    @map("grant_id") @db.Uuid
+  version          Int
+  planId           String    @map("plan_id") @db.VarChar(50)
+  limits           Json      @default("{}")
+  accountType      String    @map("account_type") @db.VarChar(32)
+  hostingMode      String    @map("hosting_mode") @db.VarChar(24)
+  storageMode      String    @map("storage_mode") @db.VarChar(32)
+  commercialTerms  Json      @default("{}") @map("commercial_terms")
+  effectiveFrom    DateTime  @default(now()) @map("effective_from") @db.Timestamptz(6)
+  effectiveUntil   DateTime? @map("effective_until") @db.Timestamptz(6)
+  transitionReason String    @map("transition_reason") @db.VarChar(80)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([grantId, version])
+  @@index([grantId, effectiveFrom])
+  @@map("entitlement_versions")
+}
+
+model PromotionRedemption {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId        String   @map("promotion_id") @db.Uuid
+  promotionVersionId String   @map("promotion_version_id") @db.Uuid
+  entitlementGrantId String   @map("entitlement_grant_id") @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  redeemedByUserId   String   @map("redeemed_by_user_id") @db.Uuid
+  emailHash          String   @map("email_hash") @db.Char(64)
+  codeHint           String?  @map("code_hint") @db.VarChar(16)
+  termsSnapshot      Json     @map("terms_snapshot")
+  requestId          String?  @map("request_id") @db.VarChar(128)
+  redeemedAt         DateTime @default(now()) @map("redeemed_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, orgId])
+  @@index([promotionId, emailHash])
+  @@index([orgId, redeemedAt])
+  @@map("promotion_redemptions")
 }
 
 /// Provider-neutral checkout intent. The browser can request an offer but only

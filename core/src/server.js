@@ -2037,6 +2037,22 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           // Use the existing Qdrant client's embedding pipeline
           return qdrantClient.generateEmbedding(String(text).slice(0, 8000));
         },
+        // BATCHED upsert: Qdrant accepts many points per PUT. The single-point path
+        // below, called once per segment with wait=true, was ~1/3 of a 630s embed stage.
+        storeVectors: async ({ collectionName, points }) => {
+          const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
+          const qKey = process.env.QDRANT_API_KEY || '';
+          const hdrs = { 'Content-Type': 'application/json' };
+          if (qKey) hdrs['api-key'] = qKey;
+          const CHUNK = Math.max(1, Number(process.env.QDRANT_UPSERT_BATCH || 64));
+          for (let i = 0; i < points.length; i += CHUNK) {
+            const slice = points.slice(i, i + CHUNK);
+            const r = await fetch(`${qUrl}/collections/${collectionName}/points?wait=true`, {
+              method: 'PUT', headers: hdrs, body: JSON.stringify({ points: slice }),
+            });
+            if (!r.ok) throw new Error(`Qdrant batch upsert ${r.status}: ${await r.text()}`);
+          }
+        },
         storeVector: async ({ collectionName, id, vector, payload }) => {
           // qdrantClient has no .upsert() method — call REST endpoint directly
           const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';

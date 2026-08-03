@@ -3153,59 +3153,92 @@ Every item must include a non-empty content field and one or more valid support_
     // lives in the org container alongside memory, separated by layer=evidence.
     const legacyEvidence = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
 
-    for (const segment of segments) {
-      const segOrgId = callerOrgId || segment.orgId;
-      try {
-        const embedding = await this.embeddingService.embed(segment.content);
-
-        if (orgIsRemote(segOrgId)) {
-          // Remote path: push segment row + vector to the agent. No central DB or Qdrant write.
-          await amrKbSegment(segOrgId, {
-            id: segment.id,
-            userId: segment.userId,
-            documentId: segment.documentId,
-            content: segment.content,
-            contentHash: segment.contentHash,
-            segmentType: segment.segmentType,
-            segmentIndex: segment.segmentIndex,
-            previousSegmentId: segment.previousSegmentId || null,
-            startPage: segment.startPage || null,
-            endPage: segment.endPage || null,
-            wordCount: segment.wordCount || null,
-            metadata: segment.metadata || {},
-            createdAt: segment.createdAt || new Date().toISOString(),
-          }, Array.isArray(embedding) ? embedding : []);
-        } else {
-          const collectionName = PER_TENANT
-            ? await resolveCollectionForOrg(segment.orgId)
-            : legacyEvidence;
-
-          // Store evidence vector. In per-tenant mode the org container holds both
-          // memory + evidence — layer=evidence keeps it out of memory recall.
-          await this.embeddingService.storeVector({
-            collectionName,
-            id: segment.id,
-            vector: embedding,
-            payload: {
-              segment_id: segment.id,
-              document_id: segment.documentId,
-              user_id: segment.userId,
-              org_id: segment.orgId,
-              segment_type: segment.segmentType,
-              layer: 'evidence',
-              content_preview: segment.content.slice(0, 200)
-            }
-          });
-
-          await this.db.knowledgeSegment.update({
-            where: { id: segment.id },
-            data: { vectorStored: true }
-          });
+    // THE 630-SECOND BUG. This loop was fully sequential with THREE network round trips
+    // per segment — embed (remote API) + storeVector (Qdrant upsert with wait=true, ONE
+    // point per call) + a per-row DB update. 45 segments = 135 serial round trips.
+    // Measured on a 173KB/11-page PDF: seg=630863ms / embed=630626ms. Because _msSeg
+    // WRAPS _msEmbed, that reads as "segmentation is slow" — segmentation was 237ms.
+    // Everything here is independent per segment, so: embed with bounded concurrency,
+    // upsert vectors in ONE batched Qdrant call, and flip vectorStored with ONE
+    // updateMany. Same fix as the persist loop (325s -> 6s), one function over.
+    const _tEmb = Date.now();
+    const _conc = Math.max(1, Number(process.env.KB_EMBED_CONCURRENCY || 8));
+    const _isRemote = orgIsRemote(callerOrgId || segments[0]?.orgId);
+    const _vectorRows = [];       // central: collected for one batched upsert
+    const _embeddedIds = [];      // central: for one updateMany
+    let _failed = 0;
+    let _qi = 0;
+    await Promise.all(Array.from({ length: Math.min(_conc, segments.length) }, async () => {
+      while (_qi < segments.length) {
+        const segment = segments[_qi++];
+        const segOrgId = callerOrgId || segment.orgId;
+        try {
+          const embedding = await this.embeddingService.embed(segment.content);
+          if (_isRemote) {
+            await amrKbSegment(segOrgId, {
+              id: segment.id, userId: segment.userId, documentId: segment.documentId,
+              content: segment.content, contentHash: segment.contentHash,
+              segmentType: segment.segmentType, segmentIndex: segment.segmentIndex,
+              previousSegmentId: segment.previousSegmentId || null,
+              startPage: segment.startPage || null, endPage: segment.endPage || null,
+              wordCount: segment.wordCount || null, metadata: segment.metadata || {},
+              createdAt: segment.createdAt || new Date().toISOString(),
+            }, Array.isArray(embedding) ? embedding : []);
+          } else {
+            _vectorRows.push({
+              orgId: segment.orgId,
+              point: {
+                id: segment.id, vector: embedding,
+                payload: {
+                  segment_id: segment.id, document_id: segment.documentId,
+                  user_id: segment.userId, org_id: segment.orgId,
+                  segment_type: segment.segmentType, layer: 'evidence',
+                  content_preview: segment.content.slice(0, 200),
+                },
+              },
+            });
+            _embeddedIds.push(segment.id);
+          }
+        } catch (error) {
+          _failed += 1;
+          console.error(`[DocumentFirstIngestion] Failed to embed segment ${segment.id}:`, error.message);
         }
+      }
+    }));
+
+    if (!_isRemote && _vectorRows.length) {
+      // ONE upsert per collection instead of one per segment.
+      const byCollection = new Map();
+      for (const row of _vectorRows) {
+        const collectionName = PER_TENANT ? await resolveCollectionForOrg(row.orgId) : legacyEvidence;
+        if (!byCollection.has(collectionName)) byCollection.set(collectionName, []);
+        byCollection.get(collectionName).push(row.point);
+      }
+      for (const [collectionName, points] of byCollection) {
+        try {
+          if (typeof this.embeddingService.storeVectors === 'function') {
+            await this.embeddingService.storeVectors({ collectionName, points });
+          } else {
+            // no batch API on this service — at least issue them concurrently
+            await Promise.all(points.map((point) => this.embeddingService.storeVector({
+              collectionName, id: point.id, vector: point.vector, payload: point.payload,
+            })));
+          }
+        } catch (error) {
+          console.error(`[DocumentFirstIngestion] batched vector upsert failed (${collectionName}): ${error.message}`);
+        }
+      }
+      // ONE update instead of 45.
+      try {
+        await this.db.knowledgeSegment.updateMany({
+          where: { id: { in: _embeddedIds } }, data: { vectorStored: true },
+        });
       } catch (error) {
-        console.error(`[DocumentFirstIngestion] Failed to embed segment ${segment.id}:`, error);
+        console.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
       }
     }
+    console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
+      + `failed=${_failed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
   }
 
   /**

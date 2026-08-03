@@ -435,6 +435,64 @@ function routesFor(ctx) {
       const r = b.record || {};
       if (!r.id) return { ok: false, error: 'record.id required' };
       amr.write(r, Array.isArray(b.vector) ? b.vector : undefined);
+      // SQL MIRROR — ported verbatim from the external agent's /v1/write.
+      // The embedded agent wrote ONLY to the AMR shard, while the external agent also inserts
+      // into hm.memories. Same endpoint, different persistence — which is why hm.memories held
+      // 17 rows for byod and ZERO for all 7 amr_embedded orgs, why provenance rows could not
+      // satisfy their memory_id FK, and why embedded lexical had to use amr.lexical() while byod
+      // could use content_tsv. The shard stays the recall index; this row is the relational
+      // mirror everything else joins against.
+      // NON-FATAL BY DESIGN: the shard write above has already succeeded, so a SQL failure must
+      // never cost a memory. Worst case we are back to today's behaviour (no provenance), which
+      // is why this is safe to add to a live write path.
+      try {
+  await db().query(
+        `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
+           cognitive_layer_role, confidence, created_at, valid_from, valid_to, document_date, project, project_ids,
+           metadata, scope, primary_team_id, recall_count, strength, vector_synced)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17,$18::jsonb,$19,$20::uuid,coalesce($21::int,0),coalesce($22::real,1.0),false)
+         ON CONFLICT (id) DO UPDATE SET
+           content=EXCLUDED.content,
+           -- title/tags/confidence: the 2-phase write (engine row, THEN vector
+           -- re-upsert) carries null title / bare tags / null confidence on the
+           -- 2nd write. Plain EXCLUDED CLOBBERED the title, the ts: date tag, and
+           -- the importance score. COALESCE title+confidence (keep the scored
+           -- value) and UNION tags (so ts:/entity:/filename: from BOTH writes
+           -- survive) instead of overwriting.
+           title=COALESCE(NULLIF(EXCLUDED.title,''), memories.title),
+           tags=(SELECT ARRAY(SELECT DISTINCT x FROM unnest(memories.tags || EXCLUDED.tags) AS x)),
+           confidence=COALESCE(EXCLUDED.confidence, memories.confidence),
+           memory_type=COALESCE(EXCLUDED.memory_type, memories.memory_type),
+           is_latest=EXCLUDED.is_latest, layer=EXCLUDED.layer, cognitive_layer_role=EXCLUDED.cognitive_layer_role,
+           scope=COALESCE(EXCLUDED.scope, memories.scope),
+           primary_team_id=COALESCE(EXCLUDED.primary_team_id, memories.primary_team_id),
+           -- Provenance preservation: memory rows are written in two phases — the
+           -- engine creates the row (with valid_from / document_date / metadata),
+           -- then the vector store re-upserts the SAME id to attach the embedding
+           -- (carrying null/empty for those fields). Plain EXCLUDED assignment let
+           -- the second write CLOBBER provenance. COALESCE/merge keeps the existing
+           -- value when the incoming one is null/empty, so the date + source
+           -- metadata survive the vector-add upsert (and any later partial write).
+           valid_from=COALESCE(EXCLUDED.valid_from, memories.valid_from),
+           valid_to=COALESCE(EXCLUDED.valid_to, memories.valid_to),
+           document_date=COALESCE(EXCLUDED.document_date, memories.document_date),
+           project=EXCLUDED.project, project_ids=EXCLUDED.project_ids,
+           metadata=(memories.metadata || EXCLUDED.metadata),
+           -- recall reinforcement is owned by /v1/bump-recall + decay, NOT the
+           -- ingest upsert — keep the existing values so a re-ingest / 2-phase
+           -- vector write never resets a memory's accumulated recall_count/strength.
+           recall_count=memories.recall_count, strength=memories.strength,
+           vector_synced=false, deleted_at=NULL`,
+        [r.id, org, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
+         r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
+         r.createdAt || null, r.validFrom || null, r.validTo || null, r.documentDate || null, r.project || null,
+         r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null,
+         r.recallCount ?? 0, r.strength ?? 1.0]
+      );
+      } catch (e) {
+        console.warn(`[embedded-agent] memories mirror failed id=${r.id} org=${org}: ${e.message} `
+          + `— memory IS in the shard and recallable; provenance/lexical parity is degraded for it`);
+      }
       for (const rel of (b.rels || [])) if (rel?.fromId && rel?.toId) amr.addEdge(rel);
       return { ok: true };
     },

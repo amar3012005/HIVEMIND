@@ -1062,11 +1062,28 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           /\d/.test(x) || /\b(?:kW|kWh|EUR|€|%|Mio|Nr\.)\b/i.test(x) || /\s\p{Lu}\p{Ll}{2,}/u.test(x)).length;
         const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
         const _worthRetrying = Math.min(expected, Math.ceil(_capacity * 0.6));
-        if (claims.length >= _worthRetrying || attempt === attempts) {
-          if (claims.length < expected) {
+        const _retriesLeft = attempt < attempts;
+        if (claims.length >= _worthRetrying || !_retriesLeft) {
+          // Two DIFFERENT outcomes reach this branch and they must not log the same line:
+          // (a) the gate judged a sparse result plausible and SKIPPED a retry — a real saving;
+          // (b) every attempt was used and the result is still sparse — nothing was saved.
+          // The first version of this log claimed "saved one ~19s call" in both cases, and the
+          // first live run printed it for a window that returned 0 facts after exhausting its
+          // attempts. A total extraction loss reported as "PLAUSIBLE" is precisely the
+          // silent-partial-completion shape this pipeline keeps producing, so a result far
+          // below what the text holds is a WARN naming the consequence, never an info line.
+          const _why = _retriesLeft
+            ? 'retry skipped by the capacity gate (saved one call)'
+            : `all ${attempts} attempts used`;
+          if (best.length < Math.ceil(_capacity * 0.5)) {
+            this.logger.warn?.(`[kb-unified] EXTRACTION SHORTFALL: kept ${best.length} facts from a window `
+              + `holding ${_factBearing}/${_sentences.length} fact-bearing sentences (capacity≈${_capacity}) `
+              + `— ${_why}. Those facts are absent from the MEMORY lane; the verbatim text is still in `
+              + `segments, so evidence recall can answer them and synthesis cannot.`);
+          } else if (claims.length < expected) {
             this.logger.info?.(`[kb-unified] sparse but PLAUSIBLE (${claims.length} facts, `
               + `capacity≈${_capacity} from ${_factBearing}/${_sentences.length} fact-bearing sentences) `
-              + `— no retry, saved one ~19s call`);
+              + `— ${_why}`);
           }
           return best;
         }
@@ -3554,7 +3571,9 @@ Every item must include a non-empty content field and one or more valid support_
         // Keep every distinct candidate and let cross-window consolidation dedup.
         const _dynamicCap = Math.max(8, extractedCandidates.length);
         const _tCurate = Date.now();
-        const curated = await this._curateDocumentClaims(extractedCandidates, {
+        // `let`: the duplicate-claim collapse below narrows this list, and every downstream
+        // reader (persist pool, 5b relations, counts) must see the narrowed one.
+        let curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
         });
@@ -3572,9 +3591,33 @@ Every item must include a non-empty content field and one or more valid support_
         const uFacts = [];
         const extraEvidenceLinks = [];
         // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x
-        // (embed + entity pass + writes) = promote 325s of a 398s ingest. Claims are
-        // distinct post-consolidation/curation, and _ingestUnifiedWindow's own dedup is
-        // content-keyed in the store, so 3 parallel persists cannot double-write.
+        // (embed + entity pass + writes) = promote 325s of a 398s ingest.
+        //
+        // The first version of this comment asserted that claims are distinct after
+        // curation and that the store's content-keyed dedup made parallel persists safe.
+        // MEASURED FALSE: one 11-page document produced 24 memory rows with only 22
+        // distinct md5(content) — two exact duplicates. Store-side dedup compares against
+        // rows already COMMITTED, so two identical claims running in different workers each
+        // find nothing and both insert. Window overlap (overlapSize 200) makes identical
+        // claims from adjacent windows routine, so this is the normal case, not a rare race.
+        //
+        // Collapse identical claims BEFORE the pool: deterministic, independent of insert
+        // ordering, and it fixes the cause rather than adding a post-hoc cleanup. Keyed on
+        // the claim text as extracted — the «title : heading» prefix is applied inside
+        // _persistOne, so keying after it would compare already-decorated strings.
+        const _seenClaim = new Set();
+        const _curatedUnique = curated.filter((c) => {
+          const k = String(c?.f || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          if (!k) return true;
+          if (_seenClaim.has(k)) return false;
+          _seenClaim.add(k);
+          return true;
+        });
+        if (_curatedUnique.length !== curated.length) {
+          console.log(`[kb-persist] collapsed ${curated.length - _curatedUnique.length} `
+            + `duplicate claim(s) before persist (${curated.length} -> ${_curatedUnique.length})`);
+        }
+        curated = _curatedUnique;
         const _persistPool = Math.max(1, Number(process.env.KB_PERSIST_CONCURRENCY || 3));
         const _tPersist = Date.now();
         let _ci = 0;

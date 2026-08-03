@@ -1189,9 +1189,29 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         }));
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
     }
+    // ROUTED, like the batch flush further down. I broke this once: after making the collection
+    // above unconditional, this site still wrote to CENTRAL Prisma for remote orgs, whose memory
+    // ids do not exist in hivemind.memories — so every .amr upload threw
+    // "Foreign key constraint violated: memory_evidence_links_memory_id_fkey", which aborted the
+    // window and produced 53 segments and ZERO memories. Collect everywhere, write where the
+    // memories actually live.
     if (evidenceLinks.length) {
-      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
-      await this.db.memoryDerivation.createMany({ data: derivations, skipDuplicates: true });
+      if (orgIsRemote(orgId)) {
+        const res = await amrKbProvenance(orgId, {
+          evidence_links: evidenceLinks.map((r) => ({
+            memory_id: r.memoryId, document_id: r.documentId, segment_id: r.segmentId,
+            link_type: r.linkType, confidence: r.confidence, excerpt: r.excerpt,
+          })),
+          derivations: derivations.map((r) => ({
+            memory_id: r.memoryId, derivation_method: r.derivationMethod,
+            derivation_agent: r.derivationAgent, confidence: r.confidence, metadata: r.metadata,
+          })),
+        });
+        if (!res) this.logger.warn?.(`[kb-unified] provenance not written for remote org ${orgId} — memories still landed`);
+      } else {
+        await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
+        await this.db.memoryDerivation.createMany({ data: derivations, skipDuplicates: true });
+      }
     }
     // Intra-window typed edges (from the SAME structured call — coherent, no recall race).
     for (let i = 0; i < facts.length; i++) {
@@ -3643,7 +3663,9 @@ Every item must include a non-empty content field and one or more valid support_
           const memory = persisted?.[0];
           if (!memory) return;
           uFacts.push(memory);
-          if (!orgIsRemote(orgId)) {
+          // Collected for every mode; the flush below routes. Guarding the COLLECTION meant
+          // remote orgs silently lost the 2nd..Nth supporting segment for a multi-segment claim.
+          {
             for (let index = 1; index < (claim.support_segment_ids || []).length; index++) {
               extraEvidenceLinks.push({
                 memoryId: memory.id, documentId,
@@ -3700,7 +3722,15 @@ Every item must include a non-empty content field and one or more valid support_
             console.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
           }
         }
-        if (extraEvidenceLinks.length) {
+        if (extraEvidenceLinks.length && orgIsRemote(orgId)) {
+          await amrKbProvenance(orgId, {
+            evidence_links: extraEvidenceLinks.map((r) => ({
+              memory_id: r.memoryId, document_id: r.documentId, segment_id: r.segmentId,
+              link_type: r.linkType, confidence: r.confidence, excerpt: r.excerpt,
+            })),
+            derivations: [],
+          });
+        } else if (extraEvidenceLinks.length) {
           await this.db.memoryEvidenceLink.createMany({ data: extraEvidenceLinks, skipDuplicates: true });
         }
         // Cross-window consolidation — a long document (e.g. a 12-page proposal)

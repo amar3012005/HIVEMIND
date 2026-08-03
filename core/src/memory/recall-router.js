@@ -490,17 +490,44 @@ async function deliverHybrid({ query, memories = [], evidence = [], deliverN, ev
 
   let ordered = deduped;
   let usedCrossEncoder = false;
+  // TWO NESTED TIMEOUTS, AND THE OUTER ONE WAS SHORTER THAN THE INNER CALL.
+  // rerank() runs with its own RERANK_TIMEOUT_MS (default 2500) plus one retry, but this
+  // wrapper capped it at `Math.min(Math.max(budgetMs || 0, 1200), 3000)` — a floor of
+  // 1200ms. Measured against the live endpoint: a COLD rerank is ~1207ms (warm ~200ms).
+  // So on any request that arrived with little budget left, the outer timeout pre-empted a
+  // perfectly healthy reranker.
+  //
+  // And it did so INVISIBLY: withTimeout's third argument is a fallback VALUE, so a timeout
+  // RESOLVES TO null rather than throwing — the catch below never ran, the reranker's own
+  // "[reranker] degraded" warn never ran either (its promise was still in flight), and the
+  // only symptom was `DEGRADED: no cross-encoder` with no stated cause. That is what made
+  // recall look non-deterministic: 3 degradations in 40 minutes and a canary flapping
+  // 4/5 -> 5/5 on the one cross-lingual question, with nothing in the log to explain it.
+  //
+  // The floor is now the inner timeout plus margin, so this wrapper can never kill an
+  // attempt the reranker itself would have completed. It stays a real ceiling — a
+  // pathological rerank still degrades — but every degrade is now attributed.
+  const _rrInner = Number(process.env.RERANK_TIMEOUT_MS || 2500);
+  const _rrBudget = Math.max(budgetMs || 0, _rrInner + 500);
+  const _rrStart = Date.now();
   try {
     const rr = await withTimeout(
       rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
-      Math.min(Math.max(budgetMs || 0, 1200), 3000),
+      _rrBudget,
       null,
     );
     if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
       ordered = rr.map((x) => x._u); usedCrossEncoder = true;
+    } else if (rr === null) {
+      console.warn(`[recall-hybrid] cross-encoder TIMED OUT after ${Date.now() - _rrStart}ms `
+        + `(budget=${_rrBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
+        + `interleave. This is the silent path that made recall look non-deterministic.`);
+    } else {
+      console.warn(`[recall-hybrid] cross-encoder returned no usable scores after `
+        + `${Date.now() - _rrStart}ms (rows=${Array.isArray(rr) ? rr.length : 'n/a'}) — see [reranker].`);
     }
   } catch (error) {
-    console.warn(`[recall-hybrid] cross-encoder threw: ${error.message}`);
+    console.warn(`[recall-hybrid] cross-encoder threw after ${Date.now() - _rrStart}ms: ${error.message}`);
   }
 
   // FALLBACK MUST NOT COMPARE LANES BY SCORE. Lexical evidence scores are synthetic
@@ -1672,7 +1699,20 @@ export class RecallRouter {
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
     const rerankBudget = remainingBudget();
-    let deliverMemories = rerankBudget > 1
+    // `> 1` means a 2ms budget still fires a rerank that cannot possibly land, and
+    // withTimeout's fallback is a VALUE — so the cross-encoder silently vanishes from the
+    // memory lane with no log, the same invisible degrade that made deliverHybrid look
+    // non-deterministic. The budget here is a real latency contract, so it is NOT extended
+    // (unlike deliverHybrid's arbitrary 1200ms floor); it is only made visible, and a
+    // budget too small to fit one attempt skips the call instead of wasting it.
+    const _rrInnerMem = Number(process.env.RERANK_TIMEOUT_MS || 2500);
+    const _canRerank = rerankBudget >= Math.min(_rrInnerMem, 1500);
+    if (!_canRerank && rerankBudget > 1) {
+      console.warn(`[recall-router] SKIPPING memory-lane cross-encoder: only ${rerankBudget}ms of budget `
+        + `left (needs ~${Math.min(_rrInnerMem, 1500)}ms) — delivering algorithmic order. Ranking quality `
+        + `is degraded for this request; upstream stages spent the budget.`);
+    }
+    let deliverMemories = _canRerank
       ? await withTimeout(
         rerank(query, rankedMemories, { topN: deliverN }),
         rerankBudget,

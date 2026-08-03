@@ -89,7 +89,7 @@ export class UsageService {
       await tx.$executeRawUnsafe(`INSERT INTO "OrgUsageDaily" ("orgId", "day", "${d}", "updatedAt") VALUES ($1::uuid, $2::date, $3, NOW()) ON CONFLICT ("orgId", "day") DO UPDATE SET "${d}" = "OrgUsageDaily"."${d}" + $3, "updatedAt" = NOW()`, orgId, day, quantity);
       if (c) await tx.$executeRawUnsafe(`INSERT INTO hivemind.org_usage_cumulative (org_id, "${c}") VALUES ($1::uuid, $2) ON CONFLICT (org_id) DO UPDATE SET "${c}" = hivemind.org_usage_cumulative."${c}" + $2, updated_at = NOW()`, orgId, quantity);
     });
-    if (metric === 'tokens') {
+    if (metric === 'llm_tokens') {
       const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
       await this.usageTracker?.recordKeyUsage?.(
         orgId,

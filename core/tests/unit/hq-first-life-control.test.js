@@ -119,6 +119,19 @@ test('a direct instruction can claim free capacity without pregranting external 
   assert.equal(direct.status, 'READY');
 });
 
+test('retained direct-instruction evaluation cannot promote autonomous proposals', async () => {
+  const direct = todo('direct-1', 'PROPOSED', -100, 'external');
+  direct.context.proposal_origin = 'user_instruction';
+  delete direct.context.first_life_policy_id;
+  const autonomous = todo('autonomous-1', 'PROPOSED', 1, 'internal', true);
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor([direct, autonomous]), runtime,
+    expansionTrigger: 'user_instruction', proposalOrigin: 'user_instruction',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['direct-1']);
+  assert.equal(autonomous.status, 'PROPOSED');
+});
+
 test('a direct external instruction preempts ordering but not an occupied external slot', async () => {
   const active = todo('active-1', 'WAITING_FOR_AUTHORITY', 1, 'external');
   const direct = todo('direct-1', 'PROPOSED', -100, 'external');

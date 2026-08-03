@@ -132,7 +132,7 @@ export async function projectCurrentFirstLife({ prisma, orgId }) {
   };
 }
 
-export async function activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger }) {
+export async function activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger, proposalOrigin = null }) {
   const policy = await loadFirstLifePolicy();
   if (!policy.expansion_triggers.includes(expansionTrigger)) return { promoted: [], reason: 'trigger_not_allowed' };
   return prisma.$transaction(async (tx) => {
@@ -169,7 +169,9 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
         && String(context.runtime_epoch || '') === String(runtime.epoch || '');
     });
     const directProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'user_instruction');
-    const proposals = expansionTrigger === 'user_start'
+    const proposals = proposalOrigin === 'user_instruction'
+      ? directProposals
+      : expansionTrigger === 'user_start'
       ? firstLifeProposals
       : policyConfigured ? [...directProposals, ...firstLifeProposals] : directProposals;
     const ownershipStatuses = new Set([

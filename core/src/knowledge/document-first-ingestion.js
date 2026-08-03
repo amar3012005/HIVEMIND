@@ -960,7 +960,29 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
       ],
     });
-    const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
+    let rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
+    // ATOMICITY. Measured on a real ingest: 23 of 29 claims were already single-sentence,
+    // avg 119 chars — so the extractor is close. The 6 multi-sentence ones are what make
+    // supersession ambiguous, because "latest" is only definable per (entity, attribute).
+    // Split on sentence boundaries and keep the parts that still carry a verb, preserving
+    // each part's grounding quote. Cheap, deterministic, no extra LLM call.
+    if (String(process.env.KB_ATOMIC_FACTS ?? 'true').toLowerCase() !== 'false') {
+      const split = [];
+      for (const f of rawFacts) {
+        const text = String(f?.content || f?.text || '').trim();
+        const parts = text.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/).map((t) => t.trim())
+          .filter((t) => t.length >= 12 && /\p{L}{3}/u.test(t));
+        if (parts.length > 1) {
+          for (const part of parts) split.push({ ...f, content: part, _atomized: true });
+        } else {
+          split.push(f);
+        }
+      }
+      if (split.length !== rawFacts.length) {
+        console.log(`[kb-atomic] ${rawFacts.length} claim(s) -> ${split.length} atomic fact(s)`);
+      }
+      rawFacts = split;
+    }
     // IMPORTANCE GATE REMOVED (default was 0.65). An importance threshold is incompatible
     // with the facts users actually ask for: "Peter Stahlgrimm age 58", a part number, a
     // kW rating all score LOW by any model's judgement and are exactly the answer. Measured
@@ -3350,6 +3372,43 @@ Every item must include a non-empty content field and one or more valid support_
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
         });
+        // WHOLE-DOCUMENT SUMMARY — one per document, brief but covering the whole thing.
+        // generateDocumentSummary() walks every section (up to 14) and quotes ~220 chars of
+        // each, so it reflects the entire document rather than its first page. It existed
+        // ONLY on the legacy chunker path (document-chunker.js:516): 35 of 515 memories in
+        // org 1380251c carry the `document-summary` tag and ZERO new canonical uploads do.
+        // Without it "what is this document about" has nothing to retrieve.
+        // It also feeds entityContext below — that P2 change read metadata.documentSummary,
+        // which nothing set, so it was inert until this landed.
+        let _docSummaryText = null;
+        try {
+          const { generateDocumentSummary } = await import('./document-chunker.js');
+          _docSummaryText = generateDocumentSummary(fullText, {
+            title: docTitle, pages: metadata?.pageCount || null, ...(metadata || {}),
+          });
+          if (_docSummaryText) {
+            metadata = { ...(metadata || {}), documentSummary: _docSummaryText };
+            const _sum = await this._ingestUnifiedWindow(
+              { segmentId: promotableSegments[0]?.id || null, content: _docSummaryText, heading: null, page: null },
+              { userId, orgId, documentId, metadata, docTitle,
+                preExtractedFacts: [{
+                  content: _docSummaryText,
+                  title: `Document: ${docTitle}`,
+                  // `summary` not `fact`: recall must be able to prefer a distilled overview
+                  // for a document-level question and rank it BELOW atoms for a detail one.
+                  memory_type: 'summary',
+                  importance: 0.9,
+                  source_quote: String(fullText || '').slice(0, 120),
+                  tags: ['document-summary', 'kb-canonical'],
+                }] },
+            );
+            if (_sum?.[0]) console.log(`[kb-summary] document summary memory created id=${_sum[0].id} chars=${_docSummaryText.length}`);
+            else console.warn('[kb-summary] summary memory NOT persisted — a document-level question has nothing to retrieve');
+          }
+        } catch (error) {
+          console.warn(`[kb-summary] failed: ${error.message}`);
+        }
+
         const uFacts = [];
         const extraEvidenceLinks = [];
         for (const claim of curated) {

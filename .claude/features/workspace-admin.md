@@ -32,3 +32,11 @@ All mutations retain the existing append-only audit path.
 The release has not yet run a signed-in browser matrix for multiple organizations
 or a live remote `.amr` storage canary. Keep personal cognition participation
 disabled until an individual consent control is exposed and verified.
+
+## Promotions Release Evidence
+
+Released `2026-08-03` from `0a280e53004bfe37e0fdba5859043433a79c3312`.
+
+- Pilot organization grants remain organization-scoped and append-only audited.
+- Active invitation and membership policy remains the prerequisite for every
+  commercial entitlement read or mutation.

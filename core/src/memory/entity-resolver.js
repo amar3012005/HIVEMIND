@@ -136,7 +136,22 @@ export class EntityResolver {
           take: 5,
         });
         if (candidates.length === 1) {
-          return { entity: candidates[0], confidence: 0.93, reason: 'name_alias_exact' };
+          // 0.96, ABOVE AUTO_LINK_FLOOR (0.95). This was 0.93 — below the floor — so an
+          // EXACT match auto-linked nothing and every hit went to the review queue instead.
+          // Effect in production: the first document to mention an entity took the CREATE
+          // path and linked fine; every later document mentioning the SAME entity resolved
+          // here, scored 0.93, and silently linked nothing. Entity linking therefore decayed
+          // to zero as an org's entity set saturated — measured on ten ingests of one file:
+          // 31, 35, 28, 19, 12, 12, 0, 1 links, with "+0 entities, 0 links, 1 queued for
+          // review" in the log. The graph quietly stopped growing on exactly the documents
+          // that reinforce known entities, which are the ones that matter most.
+          //
+          // This branch is not a guess: the query is scoped by organizationId AND entityKind,
+          // matches canonicalName case-insensitively or an exact alias, and requires EXACTLY
+          // ONE candidate. That is identity. Raising this score (rather than lowering the
+          // floor) keeps the floor meaningful — the 0.90 domain+name_fuzzy and 0.80/0.72
+          // jaccard branches below ARE guesses and must still go to review.
+          return { entity: candidates[0], confidence: 0.96, reason: 'name_alias_exact' };
         }
         // Fuzzy across all same-kind entities (cap 100, prefer recent)
         const fuzzyPool = await this.prisma.canonicalEntity.findMany({

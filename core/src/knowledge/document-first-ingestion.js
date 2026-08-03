@@ -3388,8 +3388,15 @@ Every item must include a non-empty content field and one or more valid support_
           });
           if (_docSummaryText) {
             metadata = { ...(metadata || {}), documentSummary: _docSummaryText };
-            const _sum = await this._ingestUnifiedWindow(
-              { segmentId: promotableSegments[0]?.id || null, content: _docSummaryText, heading: null, page: null },
+            // Anchor on ANY real segment: _ingestUnifiedWindow returns [] on a null
+            // segmentId, and promotableSegments can be empty after the boilerplate filter.
+            const _sumSegId = promotableSegments[0]?.id
+              || (Array.isArray(segments) ? segments[0]?.id : null) || null;
+            if (!_sumSegId) {
+              console.warn(`[kb-summary] no segment to anchor on (promotable=${promotableSegments.length} segments=${Array.isArray(segments) ? segments.length : 'n/a'}) — skipping`);
+            }
+            const _sum = _sumSegId === null ? null : await this._ingestUnifiedWindow(
+              { segmentId: _sumSegId, content: _docSummaryText, heading: null, page: null },
               { userId, orgId, documentId, metadata, docTitle,
                 preExtractedFacts: [{
                   content: _docSummaryText,
@@ -3409,7 +3416,7 @@ Every item must include a non-empty content field and one or more valid support_
                 }] },
             );
             if (_sum?.[0]) console.log(`[kb-summary] document summary memory created id=${_sum[0].id} chars=${_docSummaryText.length}`);
-            else console.warn('[kb-summary] summary memory NOT persisted — a document-level question has nothing to retrieve');
+            else if (_sumSegId) console.warn(`[kb-summary] NOT persisted despite segment ${String(_sumSegId).slice(0, 8)} (promotable=${promotableSegments.length} chars=${_docSummaryText.length}) — a document-level question has nothing to retrieve`);
           }
         } catch (error) {
           console.warn(`[kb-summary] failed: ${error.message} @ ${(error.stack || '').split('\n')[1]?.trim()}`);

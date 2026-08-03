@@ -67,6 +67,7 @@ docker image inspect "hivemind/fe:$RID-single" >/dev/null 2>&1 || docker tag "hi
 # Compose is the runtime source of truth. Pin only the selected service image,
 # under the shared release lock, before its named --no-deps recreation.
 RUNTIME_COMPOSE=/root/hivemind/infra/docker-compose.hetzner.yml
+NEXT_RUNTIME_COMPOSE=/root/hivemind-next/infra/docker-compose.next.yml
 cp "$RUNTIME_COMPOSE" "$RUNTIME_COMPOSE.bak-$RID"
 pin_runtime_image() {
   local service="$1" image="$2"
@@ -78,6 +79,12 @@ for s in "${SERVICES[@]}"; do case "$s" in
   core)          pin_runtime_image core "hivemind/core-api:$RID" ;;
   control-plane) pin_runtime_image control-plane "hivemind/control-plane:$RID" ;;
   employees)     pin_runtime_image employees "hivemind/employees:$RID" ;;
+  fe)
+    cp "$NEXT_RUNTIME_COMPOSE" "$NEXT_RUNTIME_COMPOSE.bak-$RID"
+    sed -i "/^  frontend:/,/^  [a-zA-Z0-9_-]*:/ s|^    image:.*|    image: hivemind/fe:$RID-single|" "$NEXT_RUNTIME_COMPOSE"
+    grep -A3 '^  frontend:' "$NEXT_RUNTIME_COMPOSE" | grep -Fq "image: hivemind/fe:$RID-single" \
+      || { echo "FATAL: failed to pin frontend to hivemind/fe:$RID-single"; exit 1; }
+    ;;
 esac; done
 
 # Env bump (backed up) + one-at-a-time recreates with health gates.

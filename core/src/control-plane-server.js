@@ -20,6 +20,7 @@ import { SEAM_SCHEMA_VERSION } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { registerEmbeddedAmrOrg, unregisterEmbeddedAmrOrg } from './storage/amr-registry.js';
 import { PLANS } from './billing/plans.js';
+import { createCatalogPlanVersion, listCatalogPlanHistory, listCatalogPlans } from './billing/plan-catalog-service.js';
 import {
   activateOffer,
   buildReferralOffer,
@@ -2751,6 +2752,30 @@ const server = http.createServer(async (req, res) => {
       .slice(0, 250)
       .map(({ line }) => line);
     return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane } });
+  }
+
+  if (pathname === '/admin/api/platform/plans' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (req.method === 'GET') {
+      const planId = url.searchParams.get('plan_id');
+      return jsonResponse(res, {
+        plans: await listCatalogPlans(prisma),
+        history: planId ? await listCatalogPlanHistory(prisma, planId) : [],
+      });
+    }
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const plan = await createCatalogPlanVersion({ prisma, planId: body.plan_id, limits: body.limits,
+        action: body.action, operator: operator.operator, requestId: req.headers['x-request-id'] || null });
+      await audit({ eventType: 'commercial.plan_catalog_version_created', eventCategory: 'billing', action: 'update', resourceType: 'plan_catalog', resourceId: plan.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, plan_id: plan.id, version: plan.catalogVersion?.version, change: plan.catalogVersion?.action },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { plan }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
   }
 
   // ─── Platform Commercial: canonical promotions and pilot grants ───────────
@@ -11186,6 +11211,7 @@ Write the persona now.`;
 
     const billingMod = await import('./billing/stripe.js');
     const plansMod = await import('./billing/plans.js');
+    const catalogPlans = await listCatalogPlans(prisma);
     const { UsageTracker } = await import('./billing/usage-tracker.js');
     const usageTracker = new UsageTracker(prisma);
 
@@ -11243,7 +11269,7 @@ Write the persona now.`;
         reminders: usageSummary.reminders || [],
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
-        all_plans: plansMod.getAllPlans().map(p => ({
+        all_plans: catalogPlans.map(p => ({
           id: p.id,
           name: p.name,
           price: p.price,

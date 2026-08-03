@@ -22,16 +22,11 @@ export class PlanStore {
   async getOrgPlan(orgId) {
     if (!this.prisma || !orgId) return getPlan('free');
 
-    const cached = this._cache.get(orgId);
-    if (cached && Date.now() < cached.expiresAt) return cached.plan;
-
     try {
       const { plan, entitlement } = await getEffectivePlan(this.prisma, orgId);
-      const transitionAt = entitlement?.effectiveUntil ? new Date(entitlement.effectiveUntil).getTime() : Infinity;
-      // Entitlements can be changed by a Stripe webhook in another process;
-      // keep their cache short while ordinary fallback plans remain cheap.
-      const ttl = entitlement ? 30_000 : 300_000;
-      this._cache.set(orgId, { plan, expiresAt: Math.min(Date.now() + ttl, transitionAt) });
+      // Plan catalog versions are platform-admin changes and must affect the
+      // next admission in every process. Do not retain an in-process cap cache.
+      this._cache.set(orgId, { plan, expiresAt: Date.now() });
       return plan;
     } catch {
       return getPlan('free');

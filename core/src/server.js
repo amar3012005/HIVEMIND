@@ -21843,8 +21843,8 @@ exit \$RC
 
         case '/api/billing/plans':
           if (req.method === 'GET') {
-            const { getAllPlans } = await import('./billing/plans.js');
-            return jsonResponse(res, { plans: getAllPlans() });
+            const { listCatalogPlans } = await import('./billing/plan-catalog-service.js');
+            return jsonResponse(res, { plans: await listCatalogPlans(prisma) });
           }
           break;
 

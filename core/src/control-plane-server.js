@@ -9437,7 +9437,9 @@ Write the persona now.`;
         });
         if (!room) return jsonResponse(res, { error: 'general room unavailable' }, 503);
         let created = false;
-        const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
+        // Version the human-General route so a task previously opened in a
+        // specialist room cannot suppress its first General Room turn.
+        const idempotencyKey = `task-human-v2-${row.id}-${task.id}`.slice(0, 64);
         const kickTurn = await prisma.$transaction(async (tx) => {
           const prior = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
           if (prior) return prior;

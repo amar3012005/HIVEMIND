@@ -80,6 +80,10 @@ export async function persistCanonicalLinks({
   organizationId,
   items = [],
   entityKind = 'entity',
+  // OWNER REQUIREMENT: filename + creation date are MANDATORY on every entity, so an entity row
+  // can always answer "which document did this come from, and when did we first see it". Passed in
+  // rather than derived here because only the ingestion path knows the upload's real filename.
+  sourceMeta = null,   // { filename, documentId, seenAt }
   logger = console,
 } = {}) {
   const out = { linked: 0, created: 0, review: 0, skipped: 0 };
@@ -180,7 +184,35 @@ export async function persistCanonicalLinks({
       logger.warn?.(`[canonical-entities] registry prefetch failed: ${err.message}`);
     }
 
-    const linkAll = async (entityId, memoryIds, confidence) => {
+    // Merge, never overwrite: an entity seen in a second document ACCUMULATES filenames and keeps the
+  // EARLIEST first_seen_at. Applied to reused entities too — otherwise only brand-new entities would
+  // carry provenance and the requirement would silently hold for a minority of rows.
+  const stampSource = async (entityId) => {
+    if (!entityId || entityId === 'AMBIGUOUS' || !sourceMeta?.filename) return;
+    try {
+      const row = await prisma.canonicalEntity.findUnique({ where: { id: entityId }, select: { metadata: true } });
+      const md = (row?.metadata && typeof row.metadata === 'object') ? { ...row.metadata } : {};
+      const files = Array.isArray(md.source_filenames) ? [...md.source_filenames] : [];
+      if (!files.includes(sourceMeta.filename)) files.push(sourceMeta.filename);
+      const docs = Array.isArray(md.source_document_ids) ? [...md.source_document_ids] : [];
+      if (sourceMeta.documentId && !docs.includes(sourceMeta.documentId)) docs.push(sourceMeta.documentId);
+      const seen = sourceMeta.seenAt || new Date().toISOString().slice(0, 10);
+      await prisma.canonicalEntity.update({
+        where: { id: entityId },
+        data: {
+          metadata: {
+            ...md,
+            source_filenames: files.slice(-25),
+            source_document_ids: docs.slice(-25),
+            first_seen_at: md.first_seen_at && md.first_seen_at <= seen ? md.first_seen_at : seen,
+            last_seen_at: seen,
+          },
+        },
+      });
+    } catch (e) { logger.warn?.(`[canonical-entities] source stamp failed for ${entityId}: ${e.message}`); }
+  };
+
+  const linkAll = async (entityId, memoryIds, confidence) => {
       for (const memoryId of memoryIds) {
         try {
           await prisma.memoryEntityLink.upsert({
@@ -202,6 +234,7 @@ export async function persistCanonicalLinks({
       const known = existingBySlug.get(slug);
       if (known && known !== 'AMBIGUOUS') {
         await linkAll(known, entry.memoryIds, 1.0);
+        await stampSource(known);
         continue;
       }
       const [firstMemoryId, ...restMemoryIds] = entry.memoryIds;
@@ -211,7 +244,17 @@ export async function persistCanonicalLinks({
           memoryId: firstMemoryId,
           organizationId,
           role: 'mentioned',
-          candidates: [{ name: entry.name, kind: entityKind }],
+          candidates: [{
+            name: entry.name,
+            kind: entityKind,
+            // Stored verbatim on CREATE by entity-resolver; stampSource below covers reuse.
+            metadata: sourceMeta?.filename ? {
+              source_filenames: [sourceMeta.filename],
+              ...(sourceMeta.documentId ? { source_document_ids: [sourceMeta.documentId] } : {}),
+              first_seen_at: sourceMeta.seenAt || new Date().toISOString().slice(0, 10),
+              last_seen_at: sourceMeta.seenAt || new Date().toISOString().slice(0, 10),
+            } : {},
+          }],
         });
       } catch (err) {
         out.skipped += entry.memoryIds.length;
@@ -220,6 +263,7 @@ export async function persistCanonicalLinks({
       }
       const r = results?.[0];
       if (!r) { out.skipped += entry.memoryIds.length; continue; }
+      if (r.entityId && r.action !== 'created') await stampSource(r.entityId);
       if (r.action === 'review') {
         // Ambiguous — queued for human review; do not fan links out for it.
         out.review += 1;

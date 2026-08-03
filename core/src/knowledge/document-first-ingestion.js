@@ -849,7 +849,14 @@ Output the JSON object and nothing else.`;
       // reuse existing entities, ambiguous fuzzy matches go to the review
       // queue. entity: tags above stay as the compatibility fallback.
       if (canonicalItems.length) {
-        persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items: canonicalItems, logger: this.logger })
+        persistCanonicalLinks({
+          prisma: this.db, organizationId: orgId, items: canonicalItems, logger: this.logger,
+          sourceMeta: {
+            filename: metadata?.filename || docTitle || null,
+            documentId: documentId || null,
+            seenAt: new Date().toISOString().slice(0, 10),
+          },
+        })
           .catch((e) => this.logger.warn?.(`[canonical-entities] ${e.message}`));
       }
       // Phase 2 enrichment — OFF the hot path, flag-gated (default off). Cross-doc
@@ -1244,7 +1251,15 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     }
     if (_canonItems.length) {
       try {
-        await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items: _canonItems, logger: this.logger });
+        await persistCanonicalLinks({
+          prisma: this.db, organizationId: orgId, items: _canonItems, logger: this.logger,
+          // Mandatory entity provenance: which file, which document, when first seen.
+          sourceMeta: {
+            filename: metadata.filename || docTitle || null,
+            documentId,
+            seenAt: new Date().toISOString().slice(0, 10),
+          },
+        });
       } catch (e) { this.logger.warn?.(`[canonical-entities] ${e.message}`); }
     }
     return factObjs;
@@ -3642,14 +3657,27 @@ Every item must include a non-empty content field and one or more valid support_
         const _persistPool = Math.max(1, Number(process.env.KB_PERSIST_CONCURRENCY || 3));
         const _tPersist = Date.now();
         let _ci = 0;
+        // ONE ingest-day stamp for the whole document, computed once. Deliberately NOT per-memory
+        // `new Date()`: memories of one document must all carry the same date, and a value that
+        // changes per row would make otherwise-identical content differ between rows.
+        const _ingestDay = new Date().toISOString().slice(0, 10);
         const _persistOne = async (claim) => {
-          // «docTitle : heading» — a memory must be self-contained when it leaves the
-          // document's context. Heading comes from the metadata-aware windows (P2).
+          // SUBJECT HEADER: «filename : heading». Owner requirement — a memory read outside its
+          // document must still say WHAT it came from. Note the source is metadata.filename FIRST:
+          // docTitle prefers metadata.documentTitle, which is a derived/LLM title, so the header
+          // could read as something the user never named. The filename is what they uploaded.
           if (claim?.f && String(process.env.KB_MEMORY_CONTEXT_PREFIX ?? 'true').toLowerCase() !== 'false') {
             const _h = (claim.heading || '').toString().slice(0, 80);
-            const _d = (docTitle || '').toString().slice(0, 80);
+            const _d = (metadata.filename || docTitle || '').toString().slice(0, 80);
             const _pfx = _d ? (`\u00ab${_d}${_h ? ' : ' + _h : ''}\u00bb `) : '';
             if (_pfx && !claim.f.startsWith('\u00ab')) claim.f = _pfx + claim.f;
+          }
+          // CREATION DATE IN THE TEXT. Owner requirement: every memory states when it was recorded,
+          // in the content itself and not only in the ts: tag — so the date survives into recall
+          // output, chat context and any export, where tags do not travel. Idempotent: re-running
+          // never stacks a second stamp.
+          if (claim?.f && !/\(recorded \d{4}-\d{2}-\d{2}\)\s*$/.test(claim.f)) {
+            claim.f = `${claim.f.replace(/\s+$/, '')} (recorded ${_ingestDay})`;
           }
           const sourceWindow = {
             segmentId: claim.segmentId,

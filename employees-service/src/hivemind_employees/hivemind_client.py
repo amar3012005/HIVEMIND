@@ -233,6 +233,28 @@ async def list_prospects_emulated(*, user_id: Optional[str], org_id: Optional[st
         return {"error": str(exc)[:200], "records": []}
 
 
+async def get_tara_call_emulated(*, reference: str, user_id: Optional[str], org_id: Optional[str],
+                                 api_key: str = "") -> Dict[str, Any]:
+    """Read exact tenant-scoped TARA turns and insight by durable reference."""
+    if not org_id or not reference:
+        return {"found": False, "error": "reference and org_id are required"}
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL") or "http://hm-control:3000").rstrip("/")
+    headers = {"X-API-Key": key, "X-HM-Org-Id": str(org_id)}
+    safe_reference = str(reference).replace("tara-call:", "", 1).strip()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            response = await client.get(f"{base}/internal/hyper/tara/calls/{safe_reference}", headers=headers)
+        if response.status_code == 404:
+            return {"found": False}
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[tara.call.get] failed: %s", exc)
+        return {"found": False, "error": str(exc)[:200]}
+
+
 async def list_tagged_emulated(*, tags: str, user_id: Optional[str], org_id: Optional[str],
                                api_key: str = "", limit: int = 6) -> list:
     """Guaranteed tag-filtered memory lane (same pattern as the org-canon lane) —

@@ -41,6 +41,7 @@ from ..hivemind_client import (
     connector_exec_emulated,
     connector_inspect_emulated,
     google_exec_emulated,
+    get_tara_call_emulated,
     list_prospects_emulated,
     org_members_emulated,
     recall_emulated,
@@ -2680,6 +2681,8 @@ class Director:
                 ]
                 phase_context = self.room_phase.get("context") if isinstance((self.room_phase or {}).get("context"), dict) else {}
                 phase_request = phase_context.get("request") if isinstance(phase_context.get("request"), dict) else {}
+                supplied_inputs = phase_context.get("supplied_inputs") if isinstance(phase_context.get("supplied_inputs"), dict) else {}
+                prior_phase_artifacts = phase_context.get("prior_artifacts") if isinstance(phase_context.get("prior_artifacts"), dict) else {}
                 exact_recipients = list(dict.fromkeys(
                     str(row.get("value") or "").strip().casefold()
                     for row in (phase_request.get("exact_targets") or [])
@@ -2687,6 +2690,15 @@ class Director:
                     and str(row.get("type") or "").strip().casefold() == "email"
                     and str(row.get("value") or "").strip()
                 ))
+                supplied_email = str(supplied_inputs.get("verified_email") or "").strip().casefold()
+                if supplied_email and _EMAIL_RE.fullmatch(supplied_email):
+                    exact_recipients.append(supplied_email)
+                for artifact in (prior_phase_artifacts.get("artifacts.call_brief") or []):
+                    data = artifact.get("data") if isinstance(artifact, dict) and isinstance(artifact.get("data"), dict) else {}
+                    retained_email = str(data.get("verified_email") or "").strip().casefold()
+                    if retained_email and _EMAIL_RE.fullmatch(retained_email):
+                        exact_recipients.append(retained_email)
+                exact_recipients = list(dict.fromkeys(exact_recipients))
                 # Exact addresses are capability data, not lifecycle routing.
                 # Retain them from the natural instruction when an upstream
                 # semantic interpreter omitted the optional exact_targets field.
@@ -2785,11 +2797,18 @@ class Director:
                 phase_request = phase_context.get("request") if isinstance(phase_context.get("request"), dict) else {}
                 instruction = str((self.room_phase or {}).get("instruction") or self.user_message)
                 exact_targets = [row for row in (phase_request.get("exact_targets") or []) if isinstance(row, dict)]
+                supplied_inputs = phase_context.get("supplied_inputs") if isinstance(phase_context.get("supplied_inputs"), dict) else {}
                 phones = list(dict.fromkeys(
                     re.sub(r"[\s()/-]", "", str(row.get("value") or "").strip())
                     for row in exact_targets
                     if re.fullmatch(r"\+[1-9]\d{6,14}", re.sub(r"[\s()/-]", "", str(row.get("value") or "").strip()))
                 ))
+                phones.extend(
+                    normalized for normalized in (
+                        re.sub(r"[\s()/-]", "", str(value or ""))
+                        for value in supplied_inputs.values()
+                    ) if re.fullmatch(r"\+[1-9]\d{6,14}", normalized) and normalized not in phones
+                )
                 if not phones:
                     phones = list(dict.fromkeys(
                         re.sub(r"[\s()/-]", "", match)
@@ -2829,6 +2848,8 @@ class Director:
                         "strategy": str(brief.get("strategy") or "").strip()[:200],
                         "voice_style": str(brief.get("voice_style") or "").strip()[:40],
                         "personal_notes": str(prospect.get("notes") or "").strip()[:800],
+                        "lead_ref": str(prospect.get("id") or prospect.get("lead_id") or "").strip() or None,
+                        "verified_email": str(prospect.get("email") or "").strip() or None,
                         "instruction": instruction[:5000],
                         "source_ref": "runtime-request:exact-phone",
                     })
@@ -2848,18 +2869,30 @@ class Director:
                 phase_context = self.room_phase.get("context") if isinstance((self.room_phase or {}).get("context"), dict) else {}
                 prior_artifacts = phase_context.get("prior_artifacts") if isinstance(phase_context.get("prior_artifacts"), dict) else {}
                 call_event = prior_artifacts.get("event") if isinstance(prior_artifacts.get("event"), dict) else {}
+                call_event_data = call_event.get("data") if isinstance(call_event.get("data"), dict) else call_event
+                transcript_ref = str(call_event_data.get("transcript_ref") or call_event_data.get("call_id") or call_event_data.get("correlation_ref") or "").strip()
+                exact_call = await get_tara_call_emulated(
+                    reference=transcript_ref,
+                    user_id=self.user_id,
+                    org_id=self.org_id,
+                ) if transcript_ref else {"found": False}
+                exact_call_ref = str((exact_call or {}).get("call", {}).get("id") or "").strip()
+                exact_insight_ref = str((exact_call or {}).get("insight", {}).get("id") or "").strip()
                 response = await self._groq([
                     {"role": "system", "content": (
                         _now_block()
-                        + "You are the Outreach Room reviewing a completed TARA call. Return JSON only with call_analyses. "
+                        + "You are the responsible Company Room reviewing a completed TARA call. Return JSON only with call_analyses. "
                           "Use only the supplied provider event, transcript summary, insight, and retained call context. Each analysis "
                           "must contain terminal_state (call_completed or call_failed), summary, outcome, sentiment, objections, "
-                          "tara_learnings, and next_action. Do not claim a meeting, lead, or success unless the provider evidence says so."
+                          "tara_learnings, lead_notes, safe_generalized_learning, and a structured next_action. Read the exact turns, "
+                          "not just the callback summary. If the recipient requests a written summary, next_action.action_type must be "
+                          "send_summary and requires_authority must be true. Do not claim a meeting, lead, or success unless the provider evidence says so."
                     )},
                     {"role": "user", "content": json.dumps({
                         "instruction": str((self.room_phase or {}).get("instruction") or self.user_message),
                         "company_context": self.company_brief[:6000],
                         "provider_event": call_event,
+                        "exact_call": exact_call,
                         "prior_artifacts": prior_artifacts,
                     }, ensure_ascii=False, default=str)[:28000]},
                 ], model=self.persona_model, temp=0.15, bucket="worker", force_text=True,
@@ -2870,19 +2903,30 @@ class Director:
                                "summary": {"type": "string"}, "outcome": {"type": "string"},
                                "sentiment": {"type": "string"}, "objections": {"type": "array", "items": {"type": "string"}},
                                "tara_learnings": {"type": "array", "items": {"type": "string"}},
-                               "next_action": {"type": "string"},
+                               "lead_notes": {"type": "string"},
+                               "safe_generalized_learning": {"type": "array", "items": {"type": "string"}},
+                               "next_action": {"type": "object", "properties": {
+                                   "action_type": {"type": "string"}, "reason": {"type": "string"},
+                                   "requires_authority": {"type": "boolean"}, "requires_information": {"type": "boolean"},
+                                   "requested_information": {"type": "array", "items": {"type": "string"}},
+                               }, "required": ["action_type", "reason", "requires_authority", "requires_information", "requested_information"], "additionalProperties": False},
                            },
-                           "required": ["terminal_state", "summary", "outcome", "sentiment", "objections", "tara_learnings", "next_action"],
+                           "required": ["terminal_state", "summary", "outcome", "sentiment", "objections", "tara_learnings", "lead_notes", "safe_generalized_learning", "next_action"],
                            "additionalProperties": False,
                        }}}, "required": ["call_analyses"], "additionalProperties": False,
                    }, max_tokens=1400)
                 parsed = _first_json_object(str((response or {}).get("content") or "")) or {}
                 generated_call_analyses = [row for row in (parsed.get("call_analyses") or []) if isinstance(row, dict)][:20]
                 if generated_call_analyses:
+                    analysis_source_refs = [
+                        str(call_event.get("id") or call_event.get("event_id") or "tara-call-event"),
+                        f"tara-call:{exact_call_ref}" if exact_call_ref else "",
+                        f"tara-insight:{exact_insight_ref}" if exact_insight_ref else "",
+                    ]
                     grounded_artifacts.append({
                         "kind": "call_analyses", "source": "room_worker",
                         "record_count": len(generated_call_analyses), "records": generated_call_analyses,
-                        "source_refs": [str(call_event.get("id") or call_event.get("event_id") or "tara-call-event")],
+                        "source_refs": list(dict.fromkeys(filter(None, analysis_source_refs))),
                     })
                 text = json.dumps({"call_analyses": generated_call_analyses}, ensure_ascii=False)
             else:
@@ -3233,6 +3277,8 @@ class Director:
                         "strategy": str(record.get("strategy") or "").strip()[:200],
                         "voice_style": str(record.get("voice_style") or "").strip()[:40],
                         "personal_notes": str(record.get("personal_notes") or "").strip()[:800],
+                        "lead_ref": str(record.get("lead_ref") or "").strip() or None,
+                        "verified_email": str(record.get("verified_email") or "").strip() or None,
                         "instruction": str(record.get("instruction") or request.get("instruction") or "").strip()[:5000],
                         "room_turn_id": str(getattr(self, "turn_id", "") or "") or None,
                     },
@@ -3243,6 +3289,12 @@ class Director:
         if "call_analysis" in expected:
             event = inputs.get("event") if isinstance(inputs.get("event"), dict) else {}
             event_ref = str(event.get("id") or event.get("event_id") or "tara-call-event")
+            analysis_refs = list(dict.fromkeys(
+                str(ref).strip()
+                for artifact in deliverables if artifact.get("kind") == "call_analyses"
+                for ref in (artifact.get("source_refs") or [])
+                if str(ref).strip()
+            ))
             for index, record in enumerate(call_analysis_records):
                 terminal_state = str(record.get("terminal_state") or "").strip()
                 if terminal_state not in {"call_completed", "call_failed"}:
@@ -3258,9 +3310,14 @@ class Director:
                         "sentiment": str(record.get("sentiment") or "").strip()[:120],
                         "objections": [str(value)[:500] for value in (record.get("objections") or [])[:20]],
                         "tara_learnings": [str(value)[:500] for value in (record.get("tara_learnings") or [])[:20]],
-                        "next_action": str(record.get("next_action") or "").strip()[:1000],
+                        "lead_notes": str(record.get("lead_notes") or "").strip()[:2000],
+                        "safe_generalized_learning": [str(value)[:500] for value in (record.get("safe_generalized_learning") or [])[:20]],
+                        "next_action": record.get("next_action") if isinstance(record.get("next_action"), dict) else {
+                            "action_type": "review", "reason": str(record.get("next_action") or "")[:1000],
+                            "requires_authority": False, "requires_information": False, "requested_information": [],
+                        },
                     },
-                    "source_refs": [event_ref],
+                    "source_refs": list(dict.fromkeys([event_ref, *analysis_refs])),
                     "external_ref": None,
                 })
         gaps = [str((gap or {}).get("why") or (gap or {}).get("criterion") or gap)

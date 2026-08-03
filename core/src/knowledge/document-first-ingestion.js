@@ -961,8 +961,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       ],
     });
     const rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    // Evidence capture is unconditional; promotion is deliberately stricter.
-    const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+    // IMPORTANCE GATE REMOVED (default was 0.65). An importance threshold is incompatible
+    // with the facts users actually ask for: "Peter Stahlgrimm age 58", a part number, a
+    // kW rating all score LOW by any model's judgement and are exactly the answer. Measured
+    // on org 1380251c: 0 of 485 memories held the 5 small facts under test; all 5 were in
+    // segments. Importance is query-dependent and cannot be known at ingest time.
+    // Env override honoured only if someone deliberately sets it ABOVE 0.
+    const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0);
     return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
   }
 
@@ -3218,7 +3223,17 @@ Every item must include a non-empty content field and one or more valid support_
       if (String(process.env.KB_UNIFIED_EXTRACT ?? 'true').toLowerCase() !== 'false' && String(process.env.KB_UNIFIED_EXTRACT ?? '') !== '0') {
         const docTitle = metadata.documentTitle || metadata.filename || '';
         const uConc = Math.max(1, Number(process.env.KB_UNIFIED_CONCURRENCY || 4));
-        const DOC_CAP = Number(process.env.KB_UNIFIED_DOC_CAP || 30); // rich-but-bounded total facts/doc
+        const _docChars = (fullText || '').length;
+        // DOC_CAP SCALES WITH THE DOCUMENT. It was a FLAT 24, which made it the binding
+        // constraint on every long document: the window loop below exits on BUDGET, not on
+        // windows, so a 62,867-char deck (~25 windows at 2500) had its budget reserved by
+        // ~3 windows and never sent windows ~6-25 to the LLM AT ALL. Measured: 16 memories
+        // from 7,584 words, and _dynamicCap reconciled exactly with the flat cap rather
+        // than with the document.
+        // 550 chars/fact is supermemory's measured density (83 memories from one ~15-page
+        // PDF = ~1.8 facts per 1k chars). Env override REMOVED deliberately: a flat number
+        // in .env silently defeats the formula — the exact class of bug that hid this.
+        const DOC_CAP = Math.min(400, Math.max(30, Math.ceil(_docChars / 550)));
         // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
         // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
         const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
@@ -3249,11 +3264,16 @@ Every item must include a non-empty content field and one or more valid support_
         let uWindows = targets;
         try {
           const { chunkText } = await import('./document-chunker.js');
-          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 0 }) || [])
+          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 })   // 0 meant a claim split across a boundary was seen whole by NEITHER window || [])
             .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
           if (uc.length) uWindows = uc.map((content, i) => ({
             segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
-            content, heading: null, page: null,
+            content,
+            // was `heading: null, page: null` — hardcoded, in TWO places, so the extractor
+            // saw window text + filename only. Subject-less claims and ungrounded
+            // importance both trace back to here.
+            heading: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.metadata?.heading || null,
+            page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
             maxFacts: Math.max(1, Math.min(UWMAX, Math.round((content.length / 1000) * UFPK))),
             scope: metadata.scope, visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
@@ -3275,7 +3295,17 @@ Every item must include a non-empty content field and one or more valid support_
             w.maxFacts = grant;
             let claims = [];
             try {
-              claims = await this._extractUnifiedReliable(w, { entityContext: '', maxFacts: w.maxFacts, docTitle });
+              claims = await this._extractUnifiedReliable(w, {
+                // entityContext was an EMPTY STRING. supermemory exposes this exact field
+                // publicly (<=1500 chars) as their anti-drift primitive; we had the
+                // parameter and passed nothing. Ground the window in its own section and
+                // document so a fact keeps its subject.
+                entityContext: [
+                  w.heading ? `Section: ${w.heading}` : '',
+                  docTitle ? `Document: ${docTitle}` : '',
+                  metadata?.documentSummary ? `About: ${String(metadata.documentSummary).slice(0, 600)}` : '',
+                ].filter(Boolean).join('\n').slice(0, 1500),
+                maxFacts: w.maxFacts, docTitle });
             } catch (error) {
               this.logger.warn?.(`[kb-unified] candidate extract failed: ${error.message}`);
             }
@@ -3291,6 +3321,16 @@ Every item must include a non-empty content field and one or more valid support_
           }
         });
         await Promise.all(uWorkers);
+        // NEVER exit a document silently. The tail-drop above survived because nothing
+        // reported it: a truncated document and a thin document produced identical logs.
+        console.log(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
+          + `budget_exhausted=${uBudget <= 0} doc_cap=${DOC_CAP} chars=${_docChars} `
+          + `candidates=${extractedCandidates.length}`);
+        if (wi < uWindows.length) {
+          console.warn(`[kb-unified] TAIL DROPPED: ${uWindows.length - wi} of ${uWindows.length} `
+            + `windows never sent to the LLM (budget ${DOC_CAP} exhausted). Facts in those `
+            + `windows do not exist in the memory layer.`);
+        }
         // Coverage: the per-doc memory cap must scale with how much distinct
         // signal the document actually holds. A flat cap of 6 truncated dense
         // multi-topic documents (a 10-section proposal dropped its bootstrapped
@@ -3299,7 +3339,11 @@ Every item must include a non-empty content field and one or more valid support_
         // rich document keeps its distinct claims while a thin one stays small.
         // Dedup (upstream curation + cross-window consolidation) prevents the
         // extra headroom from re-admitting duplicates. Env override wins.
-        const _dynamicCap = Math.min(30, Math.max(8, Math.ceil(extractedCandidates.length * 0.7)));
+        // The 70%-of-candidates cap discarded 30% of everything extracted, by a SECOND LLM's
+        // judgement, on top of a working extractor. Dedup is deterministic; "which facts
+        // matter" is not knowable at ingest time because the question has not been asked.
+        // Keep every distinct candidate and let cross-window consolidation dedup.
+        const _dynamicCap = Math.max(8, extractedCandidates.length);
         const curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
           maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
@@ -3310,8 +3354,8 @@ Every item must include a non-empty content field and one or more valid support_
           const sourceWindow = {
             segmentId: claim.segmentId,
             content: claim.source_window_content || claim.source_quote,
-            heading: null,
-            page: null,
+            heading: claim.heading || null,
+            page: claim.page || null,
           };
           const persisted = await this._ingestUnifiedWindow(sourceWindow, {
             userId, orgId, documentId, metadata, docTitle, preExtractedFacts: [claim],

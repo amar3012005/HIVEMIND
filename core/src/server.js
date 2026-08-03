@@ -1868,7 +1868,15 @@ if (process.env.DOCLING_URL) {
             ocr: profile ? profile.ocr : undefined,
             tables: profile ? profile.tables : undefined,
           }),
-          chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
+          // chunkWithDocling REMOVED. It was a SECOND full Docling conversion of the same
+          // file in the same Promise.all, and its output is discarded whenever
+          // KB_SEMANTIC_SEGMENTS is on (the default) because the semantic re-slice works
+          // from the clean markdown instead. Docling's HybridChunker also cuts MID-WORD
+          // ("visBruno7kW", "nschluss an SolvisMax"), which is why the re-slice exists.
+          // Halves Docling cost per file and removes two failure modes: chunkerError and
+          // the 180s chunker abort. hybridChunks still arrive on the parse response for the
+          // KB_SEMANTIC_SEGMENTS=false fallback path.
+          Promise.resolve({ chunks: [], skipped: 'single-conversion' }),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
         // Smart-mode timeout fallback: if the PARSE failed AND we still have a

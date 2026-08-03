@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HIVEMIND BYOD setup — runs on YOUR server. Stands up the .amr agent + Postgres (your memory data plane),
+# HIVEMIND BYOD setup — runs on YOUR server. Stands up the Postgres + Qdrant agent (your memory data plane),
 # validates your API key, and registers the agent so the central engine ships finished memories here.
 # The engine + dashboard stay central; your memory data (content + vectors + graph) lives in the .amr on
 # THIS box. Only query results traverse the link.
@@ -38,7 +38,7 @@ else
   # ── 1. WARM IN BACKGROUND ──────────────────────────────────────────────────────────────────────
   # Build the agent image + pull Postgres while you fetch/paste your key. This is the slow part; doing
   # it now means the agent starts instantly once the key is in.
-  log "warming up (building the .amr agent + pulling Postgres + Qdrant in the background while you grab your key)…"
+  log "warming up (building the data-plane agent + pulling Postgres + Qdrant in the background while you grab your key)…"
   : > .byod-warm.log
   ( $COMPOSE build agent >>.byod-warm.log 2>&1 && docker pull postgres:16-alpine >>.byod-warm.log 2>&1 && docker pull qdrant/qdrant:latest >>.byod-warm.log 2>&1 ) &
   WARM_PID=$!
@@ -101,10 +101,9 @@ else
 fi
 
 # ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
-# Zero-config: if no explicit AGENT_PUBLIC_URL, AUTO-DETECT a reachable address so the box connects
-# with no input. Priority: (1) host Tailscale IP (private mesh — best), (2) Tailscale tunnel container
-# if TS_AUTHKEY set, (3) the box's public IP. The agent binds 0.0.0.0:${AGENT_PORT} and is bearer-token
-# authed, so plain HTTP over a private tailnet (or a firewalled public IP) is the default link.
+# The control plane rejects cleartext public HTTP because it would expose memory
+# content and the bearer token. Operators must provide HTTPS, or an already
+# reachable private/Tailscale URL. Do not guess a public IP and register it.
 AGENT_PORT="${AGENT_PORT:-8787}"
 AGENT_URL="${AGENT_PUBLIC_URL:-}"
 # (1) Host already on Tailscale? Use its mesh IP — no authkey, no tunnel container needed.
@@ -112,19 +111,11 @@ if [ -z "$AGENT_URL" ] && command -v tailscale >/dev/null 2>&1; then
   TSIP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
   [ -n "${TSIP:-}" ] && { AGENT_URL="http://${TSIP}:${AGENT_PORT}"; log "auto-detected Tailscale IP → $AGENT_URL"; }
 fi
-# (2) Tailscale tunnel container (TS_AUTHKEY path) — legacy/explicit.
-if [ -z "$AGENT_URL" ] && [ -n "${TS_AUTHKEY:-}" ]; then
-  log "waiting for tailscale hostname…"; for i in $(seq 1 20); do
-    TSHOST="$($COMPOSE exec -T tunnel tailscale status --json 2>/dev/null | grep -oE '"DNSName":"[^"]+"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')" || true
-    [ -n "${TSHOST:-}" ] && break; sleep 3; done
-  [ -n "${TSHOST:-}" ] && AGENT_URL="http://${TSHOST}:${AGENT_PORT}"
-fi
-# (3) Public IP fallback — works when the box has a routable IP + ${AGENT_PORT} reachable.
-if [ -z "$AGENT_URL" ]; then
-  PUBIP="$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null || curl -fsS -m 5 https://ifconfig.me 2>/dev/null || true)"
-  [ -n "${PUBIP:-}" ] && { AGENT_URL="http://${PUBIP}:${AGENT_PORT}"; log "auto-detected public IP → $AGENT_URL (ensure port ${AGENT_PORT} is reachable)"; }
-fi
-[ -n "$AGENT_URL" ] || die "could not auto-detect a URL — set AGENT_PUBLIC_URL in .env (https://… with TLS) or join Tailscale"
+[ -n "$AGENT_URL" ] || die "set AGENT_PUBLIC_URL to an HTTPS reverse-proxy URL or a private/Tailscale URL reachable by the central engine"
+case "$AGENT_URL" in
+  https://*|http://100.*|http://10.*|http://192.168.*|http://172.1[6-9].*|http://172.2[0-9].*|http://172.3[0-1].*|http://*.ts.net*) ;;
+  *) die "AGENT_PUBLIC_URL must be https:// or an approved private/Tailscale http:// address" ;;
+esac
 
 # ── 8. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
 log "waiting for the agent to be ready…"
@@ -132,7 +123,7 @@ for i in $(seq 1 30); do
   if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT:-8787}/health" >/dev/null 2>&1; then break; fi
   sleep 1
 done
-log "registering the .amr agent with HIVEMIND ($AGENT_URL)…"
+log "registering the BYOD agent with HIVEMIND ($AGENT_URL)…"
 curl -fsS -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' \
   -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"agentUrl\":\"$AGENT_URL\",\"agentToken\":\"$AGENT_TOKEN\"}" >/dev/null \
   || die "registration failed"

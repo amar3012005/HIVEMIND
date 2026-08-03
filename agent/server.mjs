@@ -29,7 +29,7 @@ function tokenOk(header) {
 }
 const PORT = Number(process.env.AGENT_PORT || 8787);
 const DIM = Number(process.env.MNEME_DIM || 1024);
-const SCHEMA_VERSION = 1; // bump when the agent's local schema changes
+const SCHEMA_VERSION = 2; // v2 adds valid_to and indexed bi-temporal eligibility.
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -60,6 +60,7 @@ async function ensureSchema() {
       confidence real,
       created_at timestamptz NOT NULL DEFAULT now(),
       valid_from timestamptz,
+      valid_to timestamptz,
       document_date timestamptz,
       project text,
       project_ids text[] NOT NULL DEFAULT '{}',
@@ -76,7 +77,7 @@ async function ensureSchema() {
       deleted_at timestamptz,
       vector_synced boolean NOT NULL DEFAULT false,
       content_tsv tsvector GENERATED ALWAYS AS
-        (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))) STORED
+        (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content,''))) STORED
     );
     -- Self-host parity (added after the table shipped): idempotent backfill for
     -- existing boxes so scope/team + recall-reinforcement round-trip like central.
@@ -85,10 +86,23 @@ async function ensureSchema() {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS recall_count int NOT NULL DEFAULT 0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1.0;
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS valid_to timestamptz;
+    -- Existing agents created the generated vectors with the English stemmer.
+    -- Rebuild only when the stored expression differs; document text is untouched.
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'memories'::regclass AND attname = 'content_tsv' AND NOT attisdropped)
+         OR NOT EXISTS (SELECT 1 FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum WHERE a.attrelid='memories'::regclass AND a.attname='content_tsv' AND pg_get_expr(d.adbin, d.adrelid) LIKE '%simple%') THEN
+        ALTER TABLE memories DROP COLUMN IF EXISTS content_tsv;
+        ALTER TABLE memories ADD COLUMN content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content,''))) STORED;
+      END IF;
+    END $$;
     CREATE INDEX IF NOT EXISTS memories_org_idx     ON memories(org_id);
     CREATE INDEX IF NOT EXISTS memories_tags_idx    ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS memories_tsv_idx     ON memories USING gin(content_tsv);
     CREATE INDEX IF NOT EXISTS memories_latest_idx  ON memories(org_id, is_latest) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_created_idx ON memories(org_id, created_at) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS memories_valid_idx   ON memories(org_id, valid_from, valid_to) WHERE deleted_at IS NULL;
     CREATE TABLE IF NOT EXISTS relationships (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -128,11 +142,27 @@ async function ensureSchema() {
       metadata jsonb NOT NULL DEFAULT '{}',
       vector_synced boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now(),
-      content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content,''))) STORED
+      start_page int,
+      end_page int,
+      word_count int,
+      content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content,''))) STORED
     );
     CREATE INDEX IF NOT EXISTS kbseg_org_idx  ON knowledge_segments(org_id);
     CREATE INDEX IF NOT EXISTS kbseg_doc_idx  ON knowledge_segments(document_id);
     CREATE INDEX IF NOT EXISTS kbseg_tsv_idx  ON knowledge_segments USING gin(content_tsv);
+    ALTER TABLE knowledge_segments ADD COLUMN IF NOT EXISTS start_page int;
+    ALTER TABLE knowledge_segments ADD COLUMN IF NOT EXISTS end_page int;
+    ALTER TABLE knowledge_segments ADD COLUMN IF NOT EXISTS word_count int;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'knowledge_segments'::regclass AND attname = 'content_tsv' AND NOT attisdropped)
+         OR NOT EXISTS (SELECT 1 FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum WHERE a.attrelid='knowledge_segments'::regclass AND a.attname='content_tsv' AND pg_get_expr(d.adbin, d.adrelid) LIKE '%simple%') THEN
+        ALTER TABLE knowledge_segments DROP COLUMN IF EXISTS content_tsv;
+        ALTER TABLE knowledge_segments ADD COLUMN content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content,''))) STORED;
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS memories_tsv_idx ON memories USING gin(content_tsv);
+    CREATE INDEX IF NOT EXISTS kbseg_tsv_idx ON knowledge_segments USING gin(content_tsv);
     -- Meetings layer (self-host): full meeting rows live here, never central.
     CREATE TABLE IF NOT EXISTS meetings (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -164,6 +194,20 @@ async function ensureSchema() {
       deleted_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS meetings_org_idx ON meetings(org_id) WHERE deleted_at IS NULL;
+    CREATE TABLE IF NOT EXISTS meeting_segments (
+      session_id uuid NOT NULL,
+      org_id uuid NOT NULL,
+      user_id uuid NOT NULL,
+      idx int NOT NULL,
+      text text NOT NULL,
+      speakers jsonb,
+      start_ms int,
+      end_ms int,
+      meeting_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (session_id, idx)
+    );
+    CREATE INDEX IF NOT EXISTS meeting_segments_owner_idx ON meeting_segments(org_id, user_id, session_id);
     -- TARA call ledger (self-host): call rows + turns live here, never central.
     CREATE TABLE IF NOT EXISTS tara_calls (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -192,6 +236,38 @@ async function ensureSchema() {
   console.log('[hm-agent] postgres schema ready');
 }
 
+async function countDerivedMemoriesByDocumentIds(docIds = []) {
+  const ids = Array.from(new Set((docIds || []).filter(Boolean)));
+  if (!ids.length) return {};
+  const tagIds = ids.map((id) => `doc-id:${id}`);
+  const { rows } = await pg.query(
+    `SELECT doc_id::text AS document_id, count(DISTINCT memory_id)::int AS c
+       FROM (
+         SELECT m.metadata->'source_metadata'->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->'source_metadata'->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT m.metadata->>'document_id' AS doc_id, m.id AS memory_id
+           FROM memories m
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND (m.metadata->>'document_id') = ANY($2::text[])
+         UNION
+         SELECT regexp_replace(t.tag, '^doc-id:', '') AS doc_id, m.id AS memory_id
+           FROM memories m
+           CROSS JOIN LATERAL unnest(m.tags) AS t(tag)
+          WHERE m.org_id = $1::uuid
+            AND m.deleted_at IS NULL
+            AND t.tag = ANY($3::text[])
+       ) derived
+      GROUP BY doc_id`,
+    [ORG, ids, tagIds],
+  );
+  return Object.fromEntries((rows || []).map((row) => [row.document_id, Number(row.c) || 0]));
+}
+
 // ── Qdrant (vectors) ────────────────────────────────────────────────────────────────────────────
 const qFetch = (path, opts = {}, ms = 4000) => {
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
@@ -209,6 +285,15 @@ async function qdrantHealthy() {
 
 // Build a Qdrant payload filter from the engine's filter spec. org_id is always forced.
 function qdrantFilter(f = {}) {
+  if (Array.isArray(f.must)) {
+    const must = f.must.filter((condition) => condition?.key !== 'org_id');
+    must.unshift({ key: 'org_id', match: { value: ORG } });
+    return {
+      ...f,
+      must,
+      ...(Array.isArray(f.must_not) ? { must_not: f.must_not } : {}),
+    };
+  }
   const must = [{ key: 'org_id', match: { value: ORG } }];
   if (f.is_latest !== undefined) must.push({ key: 'is_latest', match: { value: !!f.is_latest } });
   if (f.layer) must.push({ key: 'layer', match: { value: f.layer } });
@@ -226,14 +311,73 @@ function payloadOf(rec) {
   return {
     memory_id: rec.id, org_id: ORG, user_id: rec.userId || null,
     content: rec.content || '', title: rec.title || null, tags: rec.tags || [],
+    project: rec.project || null, project_ids: rec.projectIds || [], scope: rec.scope || null,
+    primary_team_id: rec.primaryTeamId || null,
     memory_type: rec.memoryType || null, layer: rec.layer || 'memory',
     cognitive_layer_role: rec.cognitiveLayerRole || null,
     is_latest: rec.isLatest ?? true, created_at: rec.createdAt || null,
+    document_date: rec.documentDate || null, valid_from: rec.validFrom || null,
+    valid_to: rec.validTo || null,
   };
 }
 
 const send = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); });
+// OR semantics preserve a literal match when natural-language filler differs.
+// `simple` keeps the same lexemes for German and every other tenant language.
+function lexicalTsQuery(text) {
+  const tokens = [...new Set((String(text || '').normalize('NFKC').match(/[\p{L}\p{N}_]+/gu) || [])
+    .map((token) => token.toLocaleLowerCase())
+    .filter((token) => /\p{N}/u.test(token) || token.length >= 3))];
+  return tokens.join(' | ');
+}
+function appendDocumentAccess(conds, args, alias, access = {}) {
+  const userId = access.userId || access.user_id || null;
+  if (!userId) { conds.push('FALSE'); return; }
+  const add = (value) => { args.push(value); return `$${args.length}`; };
+  const tags = `${alias}.metadata->'tags'`;
+  const orgTag = `scope-key:org:${ORG}`;
+  const organizationTag = 'scope-key:organization';
+  const personalTag = `scope-key:personal:${userId}`;
+  const projectIds = access.projectId ? [access.projectId] : (access.accessContext?.projectIds || []);
+  const teamIds = access.accessContext?.teamIds || [];
+  const projectTags = projectIds.map((id) => `scope-key:project:${id}`);
+  const teamTags = teamIds.map((id) => `scope-key:team:${id}`);
+  const scope = access.scopeFilter || null;
+  if (scope === 'organization') {
+    const org = add(orgTag); const legacy = add(organizationTag);
+    conds.push(`(${tags} ? ${org} OR ${tags} ? ${legacy})`);
+  } else if (scope === 'project') {
+    if (!projectTags.length) { conds.push('FALSE'); return; }
+    conds.push(`${tags} ?| ${add(projectTags)}::text[]`);
+  } else if (scope === 'team') {
+    if (!teamTags.length) { conds.push('FALSE'); return; }
+    conds.push(`${tags} ?| ${add(teamTags)}::text[]`);
+  } else if (scope === 'personal') {
+    conds.push(`(${alias}.user_id=${add(userId)}::uuid OR ${tags} ? ${add(personalTag)})`);
+  } else {
+    const user = add(userId); const org = add(orgTag); const legacy = add(organizationTag); const personal = add(personalTag);
+    const clauses = [`${alias}.user_id=${user}::uuid`, `${tags} ? ${org}`, `${tags} ? ${legacy}`, `${tags} ? ${personal}`];
+    if (projectTags.length) clauses.push(`${tags} ?| ${add(projectTags)}::text[]`);
+    if (teamTags.length) clauses.push(`${tags} ?| ${add(teamTags)}::text[]`);
+    conds.push(`(${clauses.join(' OR ')})`);
+  }
+}
+const MAX_BODY_BYTES = 1024 * 1024; // vectors fit comfortably; unbounded bodies are a remote DoS risk.
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch { resolve({}); } });
+  req.on('error', reject);
+});
 
 const routes = {
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
@@ -243,9 +387,9 @@ const routes = {
     if (!r.id) return { ok: false, error: 'record.id required' };
     await pg.query(
       `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
-         cognitive_layer_role, confidence, created_at, valid_from, document_date, project, project_ids,
+         cognitive_layer_role, confidence, created_at, valid_from, valid_to, document_date, project, project_ids,
          metadata, scope, primary_team_id, recall_count, strength, vector_synced)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17::jsonb,$18,$19::uuid,coalesce($20::int,0),coalesce($21::real,1.0),false)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17,$18::jsonb,$19,$20::uuid,coalesce($21::int,0),coalesce($22::real,1.0),false)
        ON CONFLICT (id) DO UPDATE SET
          content=EXCLUDED.content,
          -- title/tags/confidence: the 2-phase write (engine row, THEN vector
@@ -269,6 +413,7 @@ const routes = {
          -- value when the incoming one is null/empty, so the date + source
          -- metadata survive the vector-add upsert (and any later partial write).
          valid_from=COALESCE(EXCLUDED.valid_from, memories.valid_from),
+         valid_to=COALESCE(EXCLUDED.valid_to, memories.valid_to),
          document_date=COALESCE(EXCLUDED.document_date, memories.document_date),
          project=EXCLUDED.project, project_ids=EXCLUDED.project_ids,
          metadata=(memories.metadata || EXCLUDED.metadata),
@@ -279,7 +424,7 @@ const routes = {
          vector_synced=false, deleted_at=NULL`,
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
-       r.createdAt || null, r.validFrom || null, r.documentDate || null, r.project || null,
+       r.createdAt || null, r.validFrom || null, r.validTo || null, r.documentDate || null, r.project || null,
        r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null,
        r.recallCount ?? 0, r.strength ?? 1.0]
     );
@@ -320,20 +465,32 @@ const routes = {
   '/v1/lexical': async (b) => {
     if (!b.text) return { results: [] };
     const f = b.filter || {};
-    const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ plainto_tsquery('english',$2)"];
-    const args = [ORG, b.text];
+    const tsQuery = lexicalTsQuery(b.text);
+    if (!tsQuery) return { results: [] };
+    const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)"];
+    const args = [ORG, tsQuery];
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
     if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
     if (f.must_not?.layer) { args.push(f.must_not.layer); conds.push(`layer<>$${args.length}`); }
+    const snapshot = f.valid_at || null;
+    if (f.known_at) { args.push(f.known_at); conds.push(`created_at<=$${args.length}::timestamptz`); }
+    if (snapshot) {
+      args.push(snapshot); conds.push(`(valid_from IS NULL OR valid_from<=$${args.length}::timestamptz)`);
+      args.push(snapshot); conds.push(`(valid_to IS NULL OR valid_to>$${args.length}::timestamptz)`);
+    }
     args.push(b.limit || 10);
     const { rows } = await pg.query(
       `SELECT id, content, title, tags, memory_type, layer, cognitive_layer_role, is_latest, created_at, user_id,
-              ts_rank(content_tsv, plainto_tsquery('english',$2)) AS score
+              project, project_ids, scope, primary_team_id, document_date, valid_from, valid_to,
+              ts_rank(content_tsv, to_tsquery('simple',$2)) AS score
        FROM memories WHERE ${conds.join(' AND ')} ORDER BY score DESC LIMIT $${args.length}`, args);
     return { results: rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
       memory_id: m.id, org_id: ORG, user_id: m.user_id, content: m.content, title: m.title, tags: m.tags,
+      project: m.project || null, project_ids: m.project_ids || [], scope: m.scope || null,
+      primary_team_id: m.primary_team_id || null,
       memory_type: m.memory_type, layer: m.layer, cognitive_layer_role: m.cognitive_layer_role,
-      is_latest: m.is_latest, created_at: m.created_at } })) };
+      is_latest: m.is_latest, created_at: m.created_at, document_date: m.document_date,
+      valid_from: m.valid_from, valid_to: m.valid_to } })) };
   },
 
   // Hydrate full rows by id (content stays on-box until requested).
@@ -438,7 +595,7 @@ const routes = {
     return { ok: true, bumped: r.rowCount };
   },
 
-  // Generic partial update: tags / is_latest / memory_type. Used by the central engine's
+  // Generic partial update: tags / is_latest / memory_type / valid_to. Used by the central engine's
   // updateMemory seam for remote orgs (entity-link type upgrades, supersession is_latest flips).
   '/v1/update': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
@@ -446,11 +603,18 @@ const routes = {
     if (Array.isArray(b.tags)) { args.push(b.tags); sets.push(`tags=$${args.length}`); }
     if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
     if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
+    if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
     if (!sets.length) return { ok: true };
     await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
-    if (Array.isArray(b.tags)) {
+    const payload = {
+      ...(Array.isArray(b.tags) ? { tags: b.tags } : {}),
+      ...(b.is_latest !== undefined ? { is_latest: !!b.is_latest } : {}),
+      ...(b.memory_type !== undefined ? { memory_type: b.memory_type } : {}),
+      ...(b.valid_to !== undefined ? { valid_to: b.valid_to } : {}),
+    };
+    if (Object.keys(payload).length > 0) {
       qFetch(`/collections/${QCOLL}/points/payload`, { method: 'POST',
-        body: JSON.stringify({ payload: { tags: b.tags }, points: [b.id] }) }).catch(() => {});
+        body: JSON.stringify({ payload, points: [b.id] }) }).catch(() => {});
     }
     return { ok: true };
   },
@@ -466,7 +630,7 @@ const routes = {
        ON CONFLICT (id) DO UPDATE SET filename=EXCLUDED.filename, content_type=EXCLUDED.content_type,
          status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata, deleted_at=NULL`,
       [d.id, ORG, d.userId || null, d.filename || null, d.contentType || null, d.status || 'ready',
-       d.checksum || null, JSON.stringify(d.metadata || {}), d.createdAt || null]);
+       d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null]);
     return { ok: true };
   },
 
@@ -476,13 +640,14 @@ const routes = {
     if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
     await pg.query(
       `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,
-         segment_index, previous_segment_id, metadata, vector_synced, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,false,coalesce($11::timestamptz,now()))
+         segment_index, previous_segment_id, metadata, start_page, end_page, word_count, vector_synced, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,false,coalesce($14::timestamptz,now()))
        ON CONFLICT (id) DO UPDATE SET content=EXCLUDED.content, content_hash=EXCLUDED.content_hash,
          segment_type=EXCLUDED.segment_type, segment_index=EXCLUDED.segment_index, metadata=EXCLUDED.metadata,
-         vector_synced=false`,
+         start_page=EXCLUDED.start_page, end_page=EXCLUDED.end_page, word_count=EXCLUDED.word_count, vector_synced=false`,
       [s.id, ORG, s.userId || null, s.documentId, s.content || null, s.contentHash || null, s.segmentType || 'chunk',
-       s.segmentIndex ?? 0, s.previousSegmentId || null, JSON.stringify(s.metadata || {}), s.createdAt || null]);
+       s.segmentIndex ?? 0, s.previousSegmentId || null, JSON.stringify(s.metadata || {}), s.startPage || null,
+       s.endPage || null, s.wordCount || null, s.createdAt || null]);
     if (Array.isArray(b.vector)) {
       const qr = await qFetch(`/collections/${QCOLL}/points`, { method: 'PUT', body: JSON.stringify({
         points: [{ id: s.id, vector: b.vector, payload: { segment_id: s.id, document_id: s.documentId, org_id: ORG, user_id: s.userId || null, layer: 'segment', content: s.content || '' } }], wait: true }) });
@@ -496,19 +661,81 @@ const routes = {
   '/v1/kb-recall': async (b) => {
     if (!Array.isArray(b.vector)) return { results: [] };
     const filter = { must: [{ key: 'org_id', match: { value: ORG } }, { key: 'layer', match: { value: 'segment' } }] };
+    const documentIds = Array.isArray(b.documentIds) ? [...new Set(b.documentIds.filter(Boolean))] : [];
     if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
+    else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
     const qr = await qFetch(`/collections/${QCOLL}/points/search`, { method: 'POST', body: JSON.stringify({
-      vector: b.vector, limit: Math.min(b.limit || 20, 100), with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
+      vector: b.vector, limit: Number(b.limit) || 20, with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
     if (!qr.ok) return { results: [] };
     const j = await qr.json();
-    return { results: (j.result || []).map((h) => ({ segment_id: h.payload?.segment_id || h.id, document_id: h.payload?.document_id, content: h.payload?.content || '', score: h.score })) };
+    const hitIds = (j.result || []).map((h) => h.payload?.segment_id || h.id).filter(Boolean);
+    if (!hitIds.length) return { results: [] };
+    const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL', 's.id = ANY($2::uuid[])'];
+    const args = [ORG, hitIds];
+    appendDocumentAccess(conds, args, 'd', b.access);
+    const { rows } = await pg.query(
+      `SELECT s.id AS segment_id, s.document_id, s.content, coalesce(d.metadata->>'title', d.filename) AS title,
+              s.start_page, s.end_page, s.word_count, s.segment_type, s.segment_index, s.metadata
+         FROM knowledge_segments s JOIN knowledge_documents d ON d.id=s.document_id
+        WHERE ${conds.join(' AND ')}`,
+      args,
+    );
+    const allowed = new Map(rows.map((row) => [row.segment_id, row]));
+    return { results: (j.result || []).map((h) => {
+      const id = h.payload?.segment_id || h.id;
+      const row = allowed.get(id);
+      return row ? { ...row, score: h.score } : null;
+    }).filter(Boolean) };
+  },
+
+  // Lexical evidence lane. It searches only segment rows, joins the owning active
+  // document, and returns the same core fields as kb-recall plus display metadata.
+  '/v1/kb-lexical': async (b) => {
+    const tsQuery = lexicalTsQuery(b.text);
+    if (!tsQuery) return { results: [] };
+    const f = b.filter || {};
+    const conds = [
+      's.org_id=$1',
+      'd.org_id=$1',
+      'd.deleted_at IS NULL',
+      "s.content_tsv @@ to_tsquery('simple',$2)",
+    ];
+    const args = [ORG, tsQuery];
+    const documentIds = Array.isArray(f.documentIds) ? [...new Set(f.documentIds.filter(Boolean))] : [];
+    if (f.documentId) { args.push(f.documentId); conds.push(`s.document_id=$${args.length}::uuid`); }
+    else if (documentIds.length) { args.push(documentIds); conds.push(`s.document_id = ANY($${args.length}::uuid[])`); }
+    appendDocumentAccess(conds, args, 'd', f.access);
+    args.push(Number(b.limit) || 20);
+    const { rows } = await pg.query(
+      `SELECT s.id AS segment_id, s.document_id, s.content,
+              ts_rank(s.content_tsv, to_tsquery('simple',$2)) AS score,
+              coalesce(d.metadata->>'title', d.filename) AS title,
+              s.start_page, s.end_page, s.word_count, s.segment_type, s.segment_index, s.metadata
+         FROM knowledge_segments s
+         JOIN knowledge_documents d ON d.id=s.document_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY score DESC, s.segment_index ASC LIMIT $${args.length}`,
+      args,
+    );
+    return { results: rows.map((row) => ({ ...row, score: Number(row.score) || 0 })) };
   },
 
   // Hydrate segment rows by id (full content + metadata for evidence display).
   '/v1/kb-hydrate': async (b) => {
     const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
     if (!ids.length) return { segments: [] };
-    const { rows } = await pg.query('SELECT id, document_id, content, content_hash, segment_type, segment_index, metadata, created_at FROM knowledge_segments WHERE org_id=$1 AND id = ANY($2)', [ORG, ids]);
+    const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL', 's.id = ANY($2::uuid[])'];
+    const args = [ORG, ids];
+    appendDocumentAccess(conds, args, 'd', b.access);
+    const { rows } = await pg.query(
+      `SELECT s.id, s.document_id, s.content, s.content_hash, s.segment_type, s.segment_index, s.metadata,
+              s.start_page, s.end_page, s.word_count, s.created_at,
+              coalesce(d.metadata->>'title', d.filename) AS title
+         FROM knowledge_segments s
+         JOIN knowledge_documents d ON d.id=s.document_id
+        WHERE ${conds.join(' AND ')}`,
+      args,
+    );
     return { segments: rows };
   },
 
@@ -524,6 +751,17 @@ const routes = {
     }
     await qFetch(`/collections/${QCOLL}/points/delete`, { method: 'POST', body: JSON.stringify({ points: [b.id] }) }).catch(() => {});
     return { ok: true, deleted };
+  },
+
+  // Clear ONLY the memory layer for this org (hard) — memories + their edges +
+  // memory vectors. Leaves KB, meetings, TARA, and all usage/billing untouched.
+  // Backs the dashboard "Clear all memories" action. Idempotent.
+  '/v1/clear-memories': async () => {
+    const m = await pg.query('DELETE FROM memories WHERE org_id=$1', [ORG]);
+    await pg.query('DELETE FROM relationships WHERE org_id=$1', [ORG]);
+    await qFetch(`/collections/${QCOLL}`, { method: 'DELETE' }).catch(() => {});
+    await ensureQdrant();
+    return { ok: true, deleted: m.rowCount };
   },
 
   // Bulk erase the whole org (account deletion saga). Drops + recreates the Qdrant collection.
@@ -544,6 +782,12 @@ const routes = {
   // Upsert a meeting row. All fields optional except org_id (forced server-side).
   '/v1/meeting-write': async (b) => {
     const m = b.meeting || {};
+    if (m.session_id) {
+      const existing = await pg.query(
+        'SELECT meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 AND meeting_id IS NOT NULL LIMIT 1',
+        [m.session_id, ORG, m.user_id]);
+      if (existing.rows[0]?.meeting_id) return { ok: true, id: existing.rows[0].meeting_id, existing: true };
+    }
     const id = m.id || (await pg.query('SELECT gen_random_uuid() AS id')).rows[0].id;
     const J = (v, def = '[]') => JSON.stringify(Array.isArray(v) ? v : (v != null && typeof v === 'object' && !Array.isArray(v) ? v : JSON.parse(def)));
     await pg.query(
@@ -581,7 +825,32 @@ const routes = {
        m.intelligence != null ? JSON.stringify(m.intelligence) : null,
        m.intelligence_status || null, m.created_at || null]);
     const { rows } = await pg.query('SELECT id, created_at FROM meetings WHERE id=$1', [id]);
+    if (m.session_id && m.user_id) {
+      await pg.query(
+        'UPDATE meeting_segments SET meeting_id=$1 WHERE session_id=$2 AND org_id=$3 AND user_id=$4 AND meeting_id IS NULL',
+        [id, m.session_id, ORG, m.user_id]);
+    }
     return { ok: true, id: rows[0]?.id, created_at: rows[0]?.created_at };
+  },
+
+  '/v1/meeting-segment-write': async (b) => {
+    const s = b.segment || {};
+    if (!s.session_id || !s.user_id || !Number.isInteger(s.idx) || !String(s.text || '').trim()) return { ok: false, error: 'invalid segment' };
+    await pg.query(
+      `INSERT INTO meeting_segments (session_id,org_id,user_id,idx,text,speakers,start_ms,end_ms)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
+       ON CONFLICT (session_id,idx) DO UPDATE SET text=EXCLUDED.text,speakers=EXCLUDED.speakers,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms`,
+      [s.session_id, ORG, s.user_id, s.idx, String(s.text).slice(0, 200000), s.speakers ? JSON.stringify(s.speakers) : null, s.start_ms ?? null, s.end_ms ?? null]);
+    return { ok: true };
+  },
+
+  '/v1/meeting-segment-list': async (b) => {
+    const f = b.filter || {};
+    if (!f.session_id || !f.user_id) return { segments: [] };
+    const { rows } = await pg.query(
+      'SELECT idx,text,speakers,start_ms,end_ms,meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 ORDER BY idx',
+      [f.session_id, ORG, f.user_id]);
+    return { segments: rows };
   },
 
   // List org's non-deleted meetings, newest first. Scope filter is simplified to
@@ -589,7 +858,7 @@ const routes = {
   // server applies the rich scope predicate for managed orgs).
   '/v1/meeting-list': async (b) => {
     const f = b.filter || {};
-    const limit = Math.min(Number(f.limit) || 40, 200);
+    const limit = Math.min(Number(f.limit) || 40, 5000);
     const { rows } = await pg.query(
       `SELECT id, user_id, org_id, project_id, title, summary, language, duration_sec,
               multi_speaker, speaker_count, action_items, decisions, key_points, questions,
@@ -617,6 +886,7 @@ const routes = {
   // Soft or hard delete a meeting row.
   '/v1/meeting-delete': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
+    await pg.query('DELETE FROM meeting_segments WHERE meeting_id=$1 AND org_id=$2', [b.id, ORG]);
     if (b.hard) {
       const r = await pg.query('DELETE FROM meetings WHERE id=$1 AND org_id=$2', [b.id, ORG]);
       return { ok: true, deleted: r.rowCount };
@@ -656,26 +926,29 @@ const routes = {
 
   // ── KB doc LIST (self-host READ) ─────────────────────────────────────────
   // Returns the org's knowledge_documents with per-doc segment_count and promoted_count.
-  // promoted_count = memories whose tags array contains 'filename:<filename>'.
+  // promoted_count = memories derived from the document by provenance or legacy doc-id tags.
   // Response: { documents: [...], pagination: { total, limit, offset, hasMore } }
   '/v1/kb-docs': async (b) => {
     const limit = Math.min(Number(b.limit) || 20, 200);
     const offset = Math.max(Number(b.offset) || 0, 0);
+    const conds = ['d.org_id=$1', 'd.deleted_at IS NULL'];
+    const args = [ORG];
+    appendDocumentAccess(conds, args, 'd', b.access);
+    args.push(limit); const limitArg = `$${args.length}`;
+    args.push(offset); const offsetArg = `$${args.length}`;
     const { rows: docs } = await pg.query(
-      `SELECT id, filename, content_type, status, metadata, created_at
-       FROM knowledge_documents
-       WHERE org_id=$1 AND deleted_at IS NULL
-       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-      [ORG, limit, offset]
+      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at
+       FROM knowledge_documents d WHERE ${conds.join(' AND ')}
+       ORDER BY d.created_at DESC LIMIT ${limitArg} OFFSET ${offsetArg}`,
+      args,
     );
     const { rows: totRow } = await pg.query(
-      'SELECT count(*)::int AS c FROM knowledge_documents WHERE org_id=$1 AND deleted_at IS NULL',
-      [ORG]
+      `SELECT count(*)::int AS c FROM knowledge_documents d WHERE ${conds.join(' AND ')}`,
+      args.slice(0, -2),
     );
     const total = totRow[0]?.c || 0;
     // Batch segment counts and promoted counts in two queries rather than N+1.
     const ids = docs.map((d) => d.id);
-    const filenames = docs.map((d) => d.filename).filter(Boolean);
     let segMap = {};
     let proMap = {};
     if (ids.length) {
@@ -684,26 +957,11 @@ const routes = {
         [ORG, ids]
       );
       for (const r of segs) segMap[r.document_id] = r.c;
-    }
-    if (filenames.length) {
-      // promoted = memories tagged 'filename:<filename>'
-      const tagPatterns = filenames.map((f) => `filename:${f}`);
-      const { rows: prows } = await pg.query(
-        `SELECT unnest(tags) AS tag, count(*)::int AS c
-         FROM memories
-         WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
-         GROUP BY tag`,
-        [ORG, tagPatterns]
-      );
-      for (const r of prows) {
-        if (typeof r.tag === 'string' && r.tag.startsWith('filename:')) {
-          const fn = r.tag.slice('filename:'.length);
-          proMap[fn] = (proMap[fn] || 0) + r.c;
-        }
-      }
+      proMap = await countDerivedMemoriesByDocumentIds(ids);
     }
     const documents = docs.map((d) => ({
       id: d.id,
+      userId: d.user_id,
       // Map agent columns to the central shape the FE expects:
       title: (d.metadata?.title) || d.filename || d.id,
       documentType: d.content_type || (d.metadata?.document_type) || null,
@@ -724,7 +982,7 @@ const routes = {
       metadata: d.metadata || {},
       // Counts:
       segmentCount: segMap[d.id] || 0,
-      promotedCount: d.filename ? (proMap[d.filename] || 0) : 0,
+      promotedCount: proMap[d.id] || 0,
     }));
     return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };
   },
@@ -734,9 +992,12 @@ const routes = {
   // Response: { document, segments, promotedMemories, segmentCount, promotedCount }
   '/v1/kb-doc-detail': async (b) => {
     if (!b.documentId) return { error: 'documentId required' };
-    const { rows: docRows } = await pg.query(
-      'SELECT id, filename, content_type, status, metadata, created_at FROM knowledge_documents WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL',
-      [b.documentId, ORG]
+      const detailConds = ['d.id=$1', 'd.org_id=$2', 'd.deleted_at IS NULL'];
+      const detailArgs = [b.documentId, ORG];
+      appendDocumentAccess(detailConds, detailArgs, 'd', b.access);
+      const { rows: docRows } = await pg.query(
+      `SELECT d.id, d.filename, d.content_type, d.status, d.metadata, d.created_at FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
+      detailArgs,
     );
     if (!docRows.length) return { error: 'not found' };
     const d = docRows[0];
@@ -755,15 +1016,15 @@ const routes = {
       metadata: s.metadata || {},
       createdAt: s.created_at,
     }));
-    // Promoted memories: tagged filename:<filename>.
+    // Promoted memories: prefer document-id provenance, with filename tag as legacy fallback.
     let promotedMemories = [];
-    if (d.filename) {
-      const tag = `filename:${d.filename}`;
+    {
+      const tags = [`doc-id:${d.id}`, ...(d.filename ? [`filename:${d.filename}`] : [])];
       const { rows: mems } = await pg.query(
         `SELECT id, title, content, memory_type, confidence, tags, created_at
-         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND $2 = ANY(tags)
+         FROM memories WHERE org_id=$1 AND deleted_at IS NULL AND tags && $2::text[]
          ORDER BY created_at DESC LIMIT 100`,
-        [ORG, tag]
+        [ORG, tags]
       );
       promotedMemories = mems.map((m) => ({
         id: m.id,
@@ -797,7 +1058,8 @@ const routes = {
       status: d.status,
       metadata: d.metadata || {},
     };
-    return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: promotedMemories.length };
+    const derivedCounts = await countDerivedMemoriesByDocumentIds([d.id]);
+    return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
   },
 
   // ── Per-memory edge counts (self-host READ) ───────────────────────────────
@@ -936,6 +1198,10 @@ const routes = {
         args.push(b.completion_tokens_inc); sets.push(`completion_tokens=completion_tokens+$${args.length}`);
       }
       if (typeof b.status === 'string') { args.push(b.status); sets.push(`status=$${args.length}`); }
+      if (b.metadata_merge && typeof b.metadata_merge === 'object') {
+        args.push(JSON.stringify(b.metadata_merge));
+        sets.push(`metadata = metadata || $${args.length}::jsonb`);
+      }
       if (!sets.length) return { ok: true };
       await pg.query(`UPDATE tara_calls SET ${sets.join(', ')} WHERE session_id=$1 AND org_id=$2`, args);
       return { ok: true };
@@ -985,7 +1251,8 @@ console.log(`[hm-agent] org=${ORG} store=pg-qdrant dim=${DIM}`);
 http.createServer(async (req, res) => {
   if (req.url === '/health') {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
-    return send(res, 200, { ok: true, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: await qdrantHealthy(), dim: DIM, schemaVersion: SCHEMA_VERSION });
+    const qdrantOk = await qdrantHealthy();
+    return send(res, pgOk && qdrantOk ? 200 : 503, { ok: pgOk && qdrantOk, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: qdrantOk, dim: DIM, schemaVersion: SCHEMA_VERSION });
   }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser
@@ -1001,5 +1268,5 @@ http.createServer(async (req, res) => {
   // agent also hard-scopes every query to ORG server-side regardless).
   if (req.headers['x-org-id'] && req.headers['x-org-id'] !== ORG) return send(res, 403, { error: 'org mismatch' });
   try { send(res, 200, await routes[req.url](await readBody(req))); }
-  catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, 500, { error: e.message }); }
+  catch (e) { console.error(`[hm-agent] ${req.url} failed:`, e.message); send(res, e.statusCode || 500, { error: e.message }); }
 }).listen(PORT, () => console.log(`[hm-agent] listening :${PORT} (org ${ORG})`));

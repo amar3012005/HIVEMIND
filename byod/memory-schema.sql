@@ -114,6 +114,7 @@ CREATE TABLE hivemind.knowledge_segments (
     embedding_dimension integer DEFAULT 1024,
     vector_stored boolean DEFAULT false NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, content)) STORED,
     created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
@@ -575,6 +576,9 @@ CREATE UNIQUE INDEX knowledge_documents_user_id_org_id_source_platform_sourc_key
 --
 
 CREATE INDEX knowledge_segments_content_hash_idx ON hivemind.knowledge_segments USING btree (content_hash);
+
+-- FTS is language-neutral so German identifiers and inflections remain recallable.
+CREATE INDEX knowledge_segments_content_tsv_idx ON hivemind.knowledge_segments USING gin (content_tsv);
 
 
 --
@@ -1168,4 +1172,3 @@ CREATE INDEX relationships_type_idx ON public.relationships USING btree (type);
 --
 -- PostgreSQL database dump complete
 --
-

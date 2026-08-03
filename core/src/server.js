@@ -11377,7 +11377,7 @@ exit \$RC
         // RESIDENCY: remote org — KB doc + segments + promoted memories live on the agent.
         if (orgIsRemote(orgId)) {
           try {
-            const remDetail = await amrKbDocDetail(orgId, documentId);
+            const remDetail = await amrKbDocDetail(orgId, documentId, { userId });
             if (!remDetail) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
             return jsonResponse(res, remDetail);
           } catch (remErr) {
@@ -23234,7 +23234,7 @@ ${injectionText}`;
               const remLimit = parseInt(url.searchParams.get('limit') || '20');
               const remOffset = parseInt(url.searchParams.get('offset') || '0');
               try {
-                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset });
+                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset, access: { userId } });
                 if (remResult) return jsonResponse(res, remResult);
                 return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
               } catch (remErr) {
@@ -23334,7 +23334,7 @@ ${injectionText}`;
               // Remote (self-host) orgs have NO central KB rows — list docs from the agent and
               // apply the same title/tag/platform match JS-side.
               if (orgId && orgIsRemote(orgId)) {
-                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0 });
+                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId } });
                 const q = query.toLowerCase();
                 const rMatches = (rOut?.documents || []).filter((doc) =>
                   (doc.title || '').toLowerCase().includes(q)

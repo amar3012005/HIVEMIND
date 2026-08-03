@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteClearMemories, remotePurge } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -248,7 +248,8 @@ export function amrLexicalRemote(orgId, text, filter, limit) {
 export function amrKbDoc(orgId, doc) { return orgIsRemote(orgId) ? remoteKbDoc(orgId, doc) : null; }
 export function amrKbSegment(orgId, segment, vector) { return orgIsRemote(orgId) ? remoteKbSegment(orgId, segment, vector) : null; }
 export function amrKbRecall(orgId, vector, opts) { return orgIsRemote(orgId) ? remoteKbRecall(orgId, vector, opts) : null; }
-export function amrKbHydrate(orgId, ids) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids) : null; }
+export function amrKbLexicalRemote(orgId, text, filter, limit) { return orgIsRemote(orgId) ? remoteKbLexical(orgId, text, filter, limit) : null; }
+export function amrKbHydrate(orgId, ids, access) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids, access) : null; }
 
 // KB doc LIST for remote org — returns the central-shaped { documents, pagination } response from the
 // agent's /v1/kb-docs route. null for non-remote (caller uses central Prisma). Async.
@@ -256,7 +257,7 @@ export function amrKbDocs(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDoc
 
 // KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount }
 // from the agent. null for non-remote (caller uses central Prisma). Async.
-export function amrKbDocDetail(orgId, documentId) { return orgIsRemote(orgId) ? remoteKbDocDetail(orgId, documentId) : null; }
+export function amrKbDocDetail(orgId, documentId, access) { return orgIsRemote(orgId) ? remoteKbDocDetail(orgId, documentId, access) : null; }
 
 // KB doc DELETE (full cascade on the agent) for remote orgs. null for non-remote.
 export function amrKbDocDelete(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDocDelete(orgId, opts) : null; }

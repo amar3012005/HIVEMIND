@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { assertHqTransition, normalizeAuthorityPolicy } from './contracts.js';
+import { publishHqRuntimeEvent } from './event-bus.js';
 
 export const FIRST_LIFE_OBJECTIVE = 'Derive company priorities from current evidence and the user operating requirements.';
 
@@ -128,7 +129,7 @@ export async function activateHqAfterOnboarding({ prisma, orgId, userId, objecti
 
 export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = null, cycleId = null, eventType, title, summary, details = {}, skillRef = null, toolRef = null, workOrderId = null, evidenceRefs = [], visibility = 'USER' }) {
   if (!runtimeId || !orgId) throw new Error('hq_event_tenant_required');
-  return prisma.$transaction(async (tx) => {
+  const persisted = await prisma.$transaction(async (tx) => {
     // Runtime events can arrive concurrently from the scheduler, a Room result,
     // and provider callbacks. Lock the Runtime row and reconcile against the
     // append-only ledger before assigning the next sequence.
@@ -158,6 +159,8 @@ export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = n
       data: { runtimeId, orgId, cycleId, sequence, eventType, title, summary, details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
     });
   });
+  publishHqRuntimeEvent(persisted).catch(() => {});
+  return persisted;
 }
 
 export async function transitionHqRuntime({ prisma, runtimeId, orgId, runtimeEpoch = null, from, to, data = {} }) {

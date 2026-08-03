@@ -4,6 +4,8 @@ const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://open
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
 export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'cerebras/gpt-oss-120b';
+export const DEFAULT_HQ_AWAKENING_MODEL = 'deepseek/deepseek-v4-flash-0731';
+export const DEFAULT_HQ_DISPATCH_MODEL = 'deepseek/deepseek-v4-flash-0731';
 
 const LEGACY_SYNTHESIS_DEFAULTS = new Set([
   'gpt-oss-120b',
@@ -80,6 +82,25 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     };
   }
 
+  if (requested.startsWith('deepseek/')) {
+    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    return {
+      provider: 'openrouter:deepseek',
+      url: OPENROUTER_CHAT_URL,
+      apiKey: process.env.OPENROUTER_API_KEY,
+      wireModel: requested,
+      providerPolicy: {
+        // Let OpenRouter choose the measured fastest compatible endpoint. The
+        // Employees Room stack has a separate provider policy; its blacklist
+        // must not leak into these small HQ calls.
+        sort: process.env.OPENROUTER_DEEPSEEK_SORT || 'throughput',
+        allow_fallbacks: true,
+        require_parameters: true,
+        data_collection: 'deny',
+      },
+    };
+  }
+
   if (!fallbackApiKey) throw new Error('chat_provider_not_configured:groq');
   return {
     provider: 'groq',
@@ -123,4 +144,86 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
     },
     body: JSON.stringify(body),
   });
+}
+
+function parseSseFrame(frame) {
+  const data = frame.split(/\r?\n/)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .join('\n');
+  if (!data || data === '[DONE]') return null;
+  try { return JSON.parse(data); } catch { return null; }
+}
+
+export async function chatCompletionStream(model, options = {}, {
+  fallbackApiKey,
+  fetchImpl = globalThis.fetch,
+  onContent = null,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
+  const route = resolveChatCompletionRoute(model, { fallbackApiKey });
+  let body;
+  try {
+    body = options.body ? JSON.parse(options.body) : {};
+  } catch {
+    throw new Error('chat_request_body_invalid');
+  }
+  body.model = route.wireModel;
+  body.stream = true;
+  body.stream_options = { ...(body.stream_options || {}), include_usage: true };
+  if (route.provider.startsWith('openrouter:')) {
+    if (body.max_completion_tokens != null) {
+      if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
+      delete body.max_completion_tokens;
+    }
+    body.provider = route.providerPolicy;
+  }
+
+  const response = await fetchImpl(route.url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${route.apiKey}`,
+      ...(route.provider.startsWith('openrouter:') ? {
+        'HTTP-Referer': 'https://singulancelabs.com',
+        'X-Title': 'SINGULANCE HIVEMIND',
+      } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body?.getReader) {
+    return { ok: response.ok, status: response.status, content: '', usage: {}, provider: null, model: route.wireModel };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let usage = {};
+  let provider = null;
+  let finishReason = null;
+  const consume = async (frame) => {
+    const payload = parseSseFrame(frame);
+    if (!payload) return;
+    const delta = String(payload?.choices?.[0]?.delta?.content || '');
+    if (delta) {
+      content += delta;
+      if (onContent) await onContent(delta, { content, payload });
+    }
+    if (payload.usage) usage = payload.usage;
+    if (payload.provider) provider = payload.provider;
+    if (payload?.choices?.[0]?.finish_reason) finishReason = payload.choices[0].finish_reason;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for (const frame of frames) await consume(frame);
+    if (done) break;
+  }
+  if (buffer.trim()) await consume(buffer);
+  return { ok: true, status: response.status, content, usage, provider, model: route.wireModel, finish_reason: finishReason };
 }

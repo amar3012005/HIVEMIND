@@ -3,14 +3,79 @@ import assert from 'node:assert/strict';
 
 import {
   chatCompletionFetch,
+  chatCompletionStream,
   DEFAULT_CHAT_PLANNER_MODEL,
   DEFAULT_CHAT_SYNTHESIS_MODEL,
+  DEFAULT_HQ_AWAKENING_MODEL,
+  DEFAULT_HQ_DISPATCH_MODEL,
   resolveChatCompletionRoute,
 } from '../../src/llm/chat-provider.js';
 
 test('chat model policy uses Gemini Flash-Lite planning and Cerebras 120B synthesis', () => {
   assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
   assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
+});
+
+test('HQ bounded language tasks use DeepSeek without changing Room synthesis policy', () => {
+  assert.equal(DEFAULT_HQ_AWAKENING_MODEL, 'deepseek/deepseek-v4-flash-0731');
+  assert.equal(DEFAULT_HQ_DISPATCH_MODEL, 'deepseek/deepseek-v4-flash-0731');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
+});
+
+test('DeepSeek HQ requests route directly to OpenRouter throughput selection', () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    const route = resolveChatCompletionRoute(DEFAULT_HQ_DISPATCH_MODEL);
+    assert.equal(route.provider, 'openrouter:deepseek');
+    assert.equal(route.wireModel, DEFAULT_HQ_DISPATCH_MODEL);
+    assert.equal(route.providerPolicy.sort, 'throughput');
+    assert.equal(route.providerPolicy.allow_fallbacks, true);
+    assert.equal(route.providerPolicy.ignore, undefined);
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
+test('OpenRouter streaming accumulates content deltas and final usage', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"provider":"Novita","choices":[{"delta":{"content":"I am "}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"ready."},"finish_reason":"stop"}],"usage":{"prompt_tokens":170,"completion_tokens":3}}\n\n',
+    'data: [DONE]\n\n',
+  ];
+  const deltas = [];
+  try {
+    const result = await chatCompletionStream(DEFAULT_HQ_AWAKENING_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Wake' }], max_completion_tokens: 140 }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        const sent = JSON.parse(options.body);
+        assert.equal(sent.stream, true);
+        assert.equal(sent.stream_options.include_usage, true);
+        assert.equal(sent.max_tokens, 140);
+        return new Response(new ReadableStream({
+          start(controller) {
+            chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
+            controller.close();
+          },
+        }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      },
+      onContent: (delta) => deltas.push(delta),
+    });
+    assert.equal(result.content, 'I am ready.');
+    assert.deepEqual(deltas, ['I am ', 'ready.']);
+    assert.equal(result.provider, 'Novita');
+    assert.equal(result.usage.prompt_tokens, 170);
+    assert.equal(result.finish_reason, 'stop');
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
 });
 
 test('GPT-OSS synthesis permits provider failover through OpenRouter when no direct Cerebras key exists', () => {

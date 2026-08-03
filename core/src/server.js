@@ -8893,14 +8893,30 @@ exit \$RC
       // context set above (master-key engine calls → null → sentinel). Best-effort: never 5xx a meter.
       if (pathname === '/api/usage/llm-report' && req.method === 'POST') {
         try {
-          const total = Number(body?.total_tokens || 0);
-          if (planEnforcer && orgId && total > 0) {
+          const supplied = Array.isArray(body?.entries) && body.entries.length
+            ? body.entries.slice(0, 16)
+            : [body || {}];
+          let recorded = 0;
+          for (let index = 0; index < supplied.length; index += 1) {
+            const entry = supplied[index] || {};
+            const promptTokens = Number(entry.prompt_tokens || 0);
+            const completionTokens = Number(entry.completion_tokens || 0);
+            const total = Number(entry.total_tokens || promptTokens + completionTokens || 0);
+            if (!planEnforcer || !orgId || !(total > 0)) continue;
+            const reportKey = String(body?.idempotency_key || '').slice(0, 150);
             planEnforcer.recordUsage(orgId, 'tokens', total, {
-              model: String(body?.model || 'hyperagents-director').slice(0, 128),
-              feature: String(body?.feature || 'hyperagents-room').slice(0, 64),
+              model: String(entry.model || body?.model || 'hyperagents-director').slice(0, 128),
+              feature: String(entry.feature || body?.feature || 'hyperagents-room').slice(0, 64),
+              promptTokens,
+              completionTokens,
+              cachedTokens: Number(entry.cached_tokens || 0),
+              requestCount: Number(entry.requests || 1),
+              idempotencyKey: reportKey ? `${reportKey}:${index}` : undefined,
+              metadata: { usage_report: 'room-turn.v2' },
             });
+            recorded += total;
           }
-          return jsonResponse(res, { ok: true, recorded: total }, 200);
+          return jsonResponse(res, { ok: true, recorded }, 200);
         } catch (e) {
           return jsonResponse(res, { ok: false, error: e.message }, 200);
         }

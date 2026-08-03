@@ -1,4 +1,4 @@
-import { chatCompletionFetch, DEFAULT_CHAT_SYNTHESIS_MODEL } from '../llm/chat-provider.js';
+import { chatCompletionFetch, DEFAULT_HQ_DISPATCH_MODEL } from '../llm/chat-provider.js';
 
 const providerAliases = {
   gmail: ['gmail', 'google-mail'],
@@ -153,10 +153,11 @@ export async function interpretHqInstructionSemantic(body, company = {}, availab
   const text = String(body || '').trim();
   if (!text) return fallback;
   try {
-    const response = await chatCompletionFetch(process.env.HQ_DISPATCH_MODEL || DEFAULT_CHAT_SYNTHESIS_MODEL, {
+    const response = await chatCompletionFetch(process.env.HQ_DISPATCH_MODEL || DEFAULT_HQ_DISPATCH_MODEL, {
       method: 'POST', signal: AbortSignal.timeout(15000),
       body: JSON.stringify({
         temperature: 0,
+        reasoning: { enabled: false, exclude: true },
         response_format: { type: 'json_object' }, max_completion_tokens: 1400,
         messages: [
           { role: 'system', content: 'Interpret one company operating instruction by meaning in any language without decomposing its lifecycle. Return JSON only with intent, title, objective, room_tag, location, target:{quantity,sector,audience}, acceptance_criteria, source_instruction, requested_action, requested_terminal_outcome, external_action_requested, exact_targets:[{type,value,label}], execution_mode, and exactly one work_units item preserving those same request fields. Copy source_instruction verbatim. Preserve every explicit recipient, phone number, account, URL, geography, audience, quantity, timing, and external-action restriction in exact_targets and objective. Select room_tag semantically from available_rooms. The Director-selected versioned playbook owns all stages, dependencies, artifacts, connectors, skills, and authority gates. If geography was not explicitly stated, use the supplied retained company location and do not infer a broader market from the company profile. If quantity was not specified, use null; do not invent one. Set external_action_requested when the requested terminal outcome requires an external action. Set execution_mode to single_outcome only for one bounded requested result; use operating_plan for broad preferences or multi-area focus that should shape the initial company plan.' },

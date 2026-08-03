@@ -47,13 +47,17 @@ def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str
 async def report_llm_usage(*, user_id: Optional[str], org_id: Optional[str], api_key: str = "",
                            model: str = "hyperagents-director", total_tokens: int = 0,
                            prompt_tokens: int = 0, completion_tokens: int = 0,
-                           feature: str = "hyperagents-room") -> None:
+                           feature: str = "hyperagents-room",
+                           entries: Optional[list] = None,
+                           idempotency_key: str = "") -> None:
     """Report the director's LLM token spend to HIVEMIND core so it records against the org's
     HIVEMIND API key (org_id + key from the emulation headers + model + feature). The director runs
     in this Python service — its LLM calls never touch core's JS metering chokepoint, so without this
     bridge HyperAgents spend is invisible to per-key accounting. Fire-and-forget: never raise into a
     room turn. No-op when there are no tokens or no org."""
-    if not org_id or not total_tokens or total_tokens <= 0:
+    normalized_entries = [entry for entry in (entries or [])
+                          if isinstance(entry, dict) and int(entry.get("total_tokens", 0) or 0) > 0]
+    if not org_id or (not normalized_entries and (not total_tokens or total_tokens <= 0)):
         return
     try:
         settings = get_settings()
@@ -69,6 +73,8 @@ async def report_llm_usage(*, user_id: Optional[str], org_id: Optional[str], api
                 "prompt_tokens": int(prompt_tokens or 0),
                 "completion_tokens": int(completion_tokens or 0),
                 "feature": feature,
+                "entries": normalized_entries,
+                "idempotency_key": str(idempotency_key or "")[:150],
             })
     except Exception:
         # Metering must never break a turn — swallow transport/auth errors silently.

@@ -78,7 +78,8 @@ async function rawFetch(url, options = {}) {
   const target = new URL(url);
   const state = stateFor(target.origin);
   const startedAt = Date.now();
-  if (state.requests > 0) state.reused += 1;
+  const reused = state.requests > 0;
+  if (reused) state.reused += 1;
   state.requests += 1;
   state.lastUsedAt = Date.now();
   try {
@@ -87,7 +88,7 @@ async function rawFetch(url, options = {}) {
     state.completed += 1;
     state.totalLatencyMs += latency;
     state.maxLatencyMs = Math.max(state.maxLatencyMs, latency);
-    return response;
+    return { response, metrics: { latency_ms: latency, connection_reused: reused, origin: target.origin } };
   } catch (error) {
     const latency = Date.now() - startedAt;
     state.failed += 1;
@@ -106,7 +107,7 @@ export async function warmRuntimeOrigin(baseUrl = employeesSidecarUrl(), { force
   if (state.warmup) return state.warmup;
   state.warmup = (async () => {
     try {
-      const response = await rawFetch(target, {
+      const { response } = await rawFetch(target, {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: AbortSignal.timeout(DEFAULT_HEADERS_TIMEOUT_MS),
@@ -131,13 +132,16 @@ export async function runtimeRequestJson(url, {
     await warmRuntimeOrigin(target.origin).catch(() => {});
   }
   let response;
+  let transportMetrics = null;
   try {
-    response = await rawFetch(target, {
+    const result = await rawFetch(target, {
       method,
       headers,
       body,
       signal: AbortSignal.timeout(Math.max(1_000, Number(timeoutMs) || DEFAULT_BODY_TIMEOUT_MS)),
     });
+    response = result.response;
+    transportMetrics = result.metrics;
   } catch (error) {
     const outcome = classifyRuntimeTransportOutcome({ error });
     throw new RuntimeTransportError(`runtime_transport_${outcome.code.toLowerCase()}`, outcome, error);
@@ -163,6 +167,7 @@ export async function runtimeRequestJson(url, {
     status: response.status,
     headers: response.headers,
     body: parsed,
+    transport_metrics: transportMetrics,
     ...classifyRuntimeTransportOutcome({ status: response.status }),
   };
 }

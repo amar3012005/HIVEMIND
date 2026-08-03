@@ -71,7 +71,7 @@ export class PostgresRuntimeStore {
     const run = await this.prisma.runtimePlaybookRun.findFirst({
       where: { id: runId, orgId },
       include: {
-        artifacts: { orderBy: { createdAt: 'asc' } },
+        artifacts: { where: { status: { not: 'SUPERSEDED' } }, orderBy: { createdAt: 'asc' } },
         authorities: { where: { status: 'GRANTED', revokedAt: null } },
       },
     });

@@ -43,7 +43,7 @@ export function projectRuntimePlaybookSnapshot(run, { turns = [] } = {}) {
 }
 
 export async function loadRuntimePlaybookSnapshot(prisma, runId, orgId) {
-  const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: runId, orgId }, include: { artifacts: { orderBy: { createdAt: 'asc' } }, checkpoints: { orderBy: { sequence: 'asc' } }, authorities: { orderBy: { grantedAt: 'asc' } } } });
+  const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: runId, orgId }, include: { artifacts: { where: { status: { not: 'SUPERSEDED' } }, orderBy: { createdAt: 'asc' } }, checkpoints: { orderBy: { sequence: 'asc' } }, authorities: { orderBy: { grantedAt: 'asc' } } } });
   if (!run) return null;
   const turns = await prisma.hyperTurn.findMany({ where: { runtimePlaybookRunId: run.id }, orderBy: [{ runtimeCheckpointSequence: 'asc' }, { runtimeAttempt: 'asc' }] }).catch(() => []);
   return projectRuntimePlaybookSnapshot(run, { turns });

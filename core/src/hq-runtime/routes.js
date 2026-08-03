@@ -533,7 +533,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
             where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 50,
             include: {
-              artifacts: { orderBy: { createdAt: 'asc' } },
+              artifacts: { where: { status: { not: 'SUPERSEDED' } }, orderBy: { createdAt: 'asc' } },
               checkpoints: { orderBy: { sequence: 'desc' }, take: 1 },
               authorities: { orderBy: { grantedAt: 'asc' } },
             },
@@ -758,7 +758,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runs = await prisma.runtimePlaybookRun.findMany({
           where: { orgId }, orderBy: { updatedAt: 'desc' }, take: 100,
           include: {
-            artifacts: { orderBy: { createdAt: 'asc' } },
+            artifacts: { where: { status: { not: 'SUPERSEDED' } }, orderBy: { createdAt: 'asc' } },
             checkpoints: { orderBy: { sequence: 'asc' } },
             authorities: { orderBy: { grantedAt: 'asc' } },
           },

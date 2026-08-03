@@ -1065,7 +1065,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
-      const entityTags = fact.entities.map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
+      const entityTags = (fact.entities || []).map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
       // ts: date tag (the previous-version rule) — derived from the doc's event
       // date (document_date) else ingest time. Put it in the fact's OWN tags so
       // BOTH the engine write AND the vector re-upsert carry it (the ingestMemory
@@ -3400,13 +3400,19 @@ Every item must include a non-empty content field and one or more valid support_
                   importance: 0.9,
                   source_quote: String(fullText || '').slice(0, 120),
                   tags: ['document-summary', 'kb-canonical'],
+                  // the persist path maps these; a summary asserts no entities or edges of
+                  // its own — the atoms it summarises carry those.
+                  entities: [],
+                  relations: [],
+                  support_segment_ids: [],
+                  support_quotes: [],
                 }] },
             );
             if (_sum?.[0]) console.log(`[kb-summary] document summary memory created id=${_sum[0].id} chars=${_docSummaryText.length}`);
             else console.warn('[kb-summary] summary memory NOT persisted — a document-level question has nothing to retrieve');
           }
         } catch (error) {
-          console.warn(`[kb-summary] failed: ${error.message}`);
+          console.warn(`[kb-summary] failed: ${error.message} @ ${(error.stack || '').split('\n')[1]?.trim()}`);
         }
 
         const uFacts = [];

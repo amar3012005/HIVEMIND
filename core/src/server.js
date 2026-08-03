@@ -12409,6 +12409,19 @@ exit \$RC
         case '/api/admin/entities/merge':
           // P3 #22 — manual entity merge tool
           if (req.method === 'POST') {
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/admin/entities/merge',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const { canonical_id, duplicate_ids } = body;
               if (!canonical_id || !Array.isArray(duplicate_ids) || !duplicate_ids.length) {
@@ -12446,6 +12459,19 @@ exit \$RC
         case '/api/admin/contradictions':
           // P3 #23 — review pending Contradicts edges
           if (req.method === 'GET') {
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/admin/contradictions',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
               const rows = await prisma.relationship.findMany({
@@ -15375,6 +15401,57 @@ exit \$RC
               // Resolve the cluster (doc + chunks + facts) per docId using same
               // strategies as DELETE handler.
               const out = {};
+              // REMOTE: every read below is central Prisma. `prisma.memory.findFirst` returns null for
+              // an .amr org, so the cluster collapsed to one id, the relationship grouping hit an empty
+              // central table and the fact count read 0 — the FE KnowledgeBase page showed "0 relations"
+              // against every document for those tenants.
+              // Built only from VERIFIED shapes: persistentMemoryStore.getMemory is already routed
+              // (remoteHydrate) so it yields the memory's tags, and the agent's /v1/mem-relationships
+              // already returns `by_type` and `counts` — so no aggregation is reimplemented here.
+              if (orgIsRemote(orgId)) {
+                const TYPE_SAMPLE = Math.max(1, Number(process.env.RELATIONS_SUMMARY_SAMPLE || 10));
+                for (const docId of reqIds.slice(0, 100)) {
+                  try {
+                    const seed = await persistentMemoryStore.getMemory(docId).catch(() => null);
+                    const docTag = (seed?.tags || []).find((t) => typeof t === 'string' && t.startsWith('doc-id:')) || null;
+                    let clusterIds = [docId];
+                    let factCount = 0;
+                    if (docTag) {
+                      const { memories: sibs } = await persistentMemoryStore.listMemories({
+                        user_id: userId, org_id: orgId, tags: [docTag], limit: 500, offset: 0,
+                      });
+                      const ids = (sibs || []).map((m) => m.id).filter(Boolean);
+                      if (ids.length) clusterIds = [...new Set([docId, ...ids])];
+                      factCount = (sibs || []).filter((m) => (m.tags || []).includes('distilled-from-kb')).length;
+                    }
+                    // Totals: ONE batched call, summing `out` only so an edge whose both ends sit
+                    // inside the cluster is not counted twice.
+                    const counts = await amrMemEdgeCounts(orgId, clusterIds).catch(() => null);
+                    let total = 0;
+                    if (counts) for (const id of clusterIds) total += Number(counts[id]?.out || 0);
+                    // byType needs one call per memory, so it is SAMPLED and SAID to be sampled. A
+                    // partial aggregate presented as complete is the failure shape this repo keeps
+                    // producing.
+                    const byType = {};
+                    const sample = clusterIds.slice(0, TYPE_SAMPLE);
+                    for (const id of sample) {
+                      const r = await amrMemRelationships(orgId, id).catch(() => null);
+                      for (const [t, arr] of Object.entries(r?.by_type || {})) {
+                        byType[t] = (byType[t] || 0) + (Array.isArray(arr) ? arr.length : 0);
+                      }
+                    }
+                    out[docId] = {
+                      total, byType, cluster_size: clusterIds.length, facts: factCount,
+                      storage_mode: 'amr',
+                      ...(clusterIds.length > sample.length
+                        ? { byType_sampled: true, byType_sample_size: sample.length } : {}),
+                    };
+                  } catch (e) {
+                    out[docId] = { total: 0, byType: {}, cluster_size: 0, facts: 0, storage_mode: 'amr', error: e.message };
+                  }
+                }
+                return jsonResponse(res, { summaries: out, count: Object.keys(out).length, storage_mode: 'amr' });
+              }
               for (const docId of reqIds.slice(0, 100)) {
                 let docMemory = null;
                 try {
@@ -21352,6 +21429,19 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/hygiene/stats')) {
               return;
             }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/hygiene/stats',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const total_memories = await prisma.memory.count({ where: { userId, orgId, isLatest: true } });
               const noise_estimate = await prisma.memory.count({ where: { userId, orgId, content: { contains: 'unsubscribe' } } });
@@ -21423,6 +21513,19 @@ exit \$RC
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/backfill')) {
               return;
+            }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/backfill',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
             }
             try {
               if (!smartIngestRouter || !persistentMemoryStore) {
@@ -21547,6 +21650,19 @@ exit \$RC
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/quality')) {
               return;
+            }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/quality',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
             }
             try {
               const qualityProject = url.searchParams.get('project') || null;

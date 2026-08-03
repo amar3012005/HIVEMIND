@@ -3593,18 +3593,26 @@ Every item must include a non-empty content field and one or more valid support_
         // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x
         // (embed + entity pass + writes) = promote 325s of a 398s ingest.
         //
-        // The first version of this comment asserted that claims are distinct after
-        // curation and that the store's content-keyed dedup made parallel persists safe.
-        // MEASURED FALSE: one 11-page document produced 24 memory rows with only 22
-        // distinct md5(content) — two exact duplicates. Store-side dedup compares against
-        // rows already COMMITTED, so two identical claims running in different workers each
-        // find nothing and both insert. Window overlap (overlapSize 200) makes identical
-        // claims from adjacent windows routine, so this is the normal case, not a rare race.
+        // CORRECTION (2026-08-03): an earlier version of this comment claimed a MEASURED
+        // duplicate-memory defect here ("24 rows, 22 distinct md5"). That measurement was
+        // WRONG — the query counted join rows over memory_evidence_links, and a memory
+        // legitimately carries several evidence links to the same document (see
+        // extraEvidenceLinks below), so one memory was counted more than once. Counting
+        // DISTINCT memories shows zero duplicates on every run measured (15/15, 22/22,
+        // 18/18). There was no defect to fix.
         //
-        // Collapse identical claims BEFORE the pool: deterministic, independent of insert
-        // ordering, and it fixes the cause rather than adding a post-hoc cleanup. Keyed on
-        // the claim text as extracted — the «title : heading» prefix is applied inside
-        // _persistOne, so keying after it would compare already-decorated strings.
+        // The collapse below is KEPT anyway, as a cheap invariant rather than a bug fix:
+        // window overlap (overlapSize 200) genuinely can hand two windows the same sentence,
+        // store-side dedup only sees COMMITTED rows, and the persist pool runs 3 claims
+        // concurrently — so identical claim text CAN race. It is deterministic, independent
+        // of insert ordering, and it logs when it collapses anything. In practice that log
+        // has never fired, which is consistent with the corrected measurement above.
+        //
+        // Keyed on the claim text as extracted: the «title : heading» prefix is applied
+        // inside _persistOne, so keying after it would compare already-decorated strings.
+        // If you are here because you suspect duplicate memories, verify with
+        //   select count(*), count(distinct md5(content)) from (select distinct m.id, m.content ...)
+        // and NOT with a plain join through memory_evidence_links.
         const _seenClaim = new Set();
         const _curatedUnique = curated.filter((c) => {
           const k = String(c?.f || '').toLowerCase().replace(/\s+/g, ' ').trim();

@@ -495,6 +495,68 @@ def test_deep_intensity_guarantees_visible_debate(monkeypatch):
     assert plan["needs_debate"] is True
 
 
+def test_general_standard_task_requires_visible_peer_review(monkeypatch):
+    director, _events = _director(message="Build an evidence-backed audience persona")
+    payload = {
+        "recall_queries": ["company audience and positioning"],
+        "connector_calls": [], "web_query": "market audience evidence",
+        "seo_audit_url": None, "seo_audit_scope": "none", "places_query": None,
+        "seo_task": "none", "needs_debate": False,
+        "method_skills": ["evidence-first"], "campaign_method_assignments": [],
+        "work_orders": [{
+            "kind": "analysis", "owner_lane": "Strategist",
+            "title": "Synthesize the audience evidence",
+            "objective": "Produce a grounded audience recommendation.",
+            "required_evidence": ["company context", "market evidence"],
+            "acceptance_criteria": ["Separate verified facts from assumptions"],
+        }],
+        "turn_mode": "task", "collaboration_intensity": "standard",
+        "response_depth": "focused", "evidence_mode": "standard",
+        "post_output_actions": [], "outreach_request": None,
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["needs_debate"] is True
+
+
+def test_runtime_work_order_does_not_inherit_human_room_debate(monkeypatch):
+    director, _events = _director(message="Prepare the bounded runtime artifact")
+    director.work_order = {
+        "contract": "hq-work-order.v2",
+        "work_order_id": "wo-general-1",
+        "objective": "Prepare one bounded artifact.",
+    }
+    payload = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "places_query": None,
+        "seo_task": "none", "needs_debate": True,
+        "method_skills": [], "campaign_method_assignments": [],
+        "work_orders": [{
+            "kind": "analysis", "owner_lane": "Builder",
+            "title": "Prepare artifact", "objective": "Prepare it.",
+            "required_evidence": [], "acceptance_criteria": ["Artifact returned"],
+        }],
+        "turn_mode": "task", "collaboration_intensity": "standard",
+        "response_depth": "focused", "evidence_mode": "standard",
+        "post_output_actions": [], "outreach_request": None,
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["needs_debate"] is False
+
+
 def test_director_keeps_explicit_post_output_action_independent_of_connection(monkeypatch):
     director, _events = _director(message="Can you write a mail to my founder with all details?")
     payload = {

@@ -71,6 +71,7 @@ _load()
 _TAG_TO_KIND = {
     "HQ": "hq",
     "CAMPAIGN": "campaign",
+    "ROOM_GENERAL": "general",
     "ROOM_SEO": "seo",
     "ROOM_MARKETING": "marketing",
     "ROOM_OUTREACH": "outreach",

@@ -4098,8 +4098,11 @@ class Director:
             "judgment or a material trade-off improves the answer; mechanical remediation of an already measured "
             "issue does not need debate. For deep work, true when strategy, sequencing, budget, channel, risk, or "
             "priority choices must be challenged. A new multi-channel launch, major strategy, or operating plan "
-            "therefore uses debate; only execution of an already approved, complete contract may skip it. Debate "
-            "is never a ritual.\n"
+            "therefore uses debate; only execution of an already approved, complete contract may skip it. In a "
+            "General collaborative Room, every standard or deep human task receives a visible peer review after "
+            "the bounded work orders finish: reviewers challenge unsupported claims, conflicting evidence, weak "
+            "assumptions, and the proposed recommendation before synthesis. Debate is never filler, and agreement "
+            "must be stated honestly rather than manufactured.\n"
             "- campaign_method_assignments: ONLY in a Campaign Room, assign up to four bounded jobs to "
             "Strategist, Builder, Skeptic, or Final Synthesizer. Each query describes the advertising method "
             "needed, such as 'organic X copy framework', 'campaign measurement', 'source verification', or "
@@ -4376,6 +4379,25 @@ class Director:
         plan["work_orders"] = work_orders
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         if intensity == "deep":
+            plan["needs_debate"] = True
+        # A General Room is the human collaborative surface. If a substantive
+        # human task has multiple agents, its specialist work must be reviewed
+        # visibly before synthesis; otherwise work-order status notes are easily
+        # mistaken for a debate even though no peer evaluated the findings.
+        # The review remains adaptive: agents choose what to challenge from the
+        # gathered evidence and may genuinely agree. Runtime/HQ work orders keep
+        # their separate evidence-contract path and never enter this branch.
+        collaborative_templates = {
+            "auto", "debate", "decision", "swarm", "council", "review",
+            "retrospective", "lean_coffee",
+        }
+        if (
+            not self.work_order
+            and self.room_kind == "general"
+            and intensity in {"standard", "deep"}
+            and len(self.participants) >= 2
+            and self.room_template in collaborative_templates
+        ):
             plan["needs_debate"] = True
         if intensity == "light":
             # Direct is a product contract, not a suggestion to the model. One

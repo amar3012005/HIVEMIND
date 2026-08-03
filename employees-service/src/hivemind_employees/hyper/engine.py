@@ -2917,6 +2917,19 @@ class Director:
                    }, max_tokens=1400)
                 parsed = _first_json_object(str((response or {}).get("content") or "")) or {}
                 generated_call_analyses = [row for row in (parsed.get("call_analyses") or []) if isinstance(row, dict)][:20]
+                call_brief_inputs = prior_artifacts.get("artifacts.call_brief")
+                call_brief_inputs = call_brief_inputs if isinstance(call_brief_inputs, list) else []
+                has_verified_email = any(
+                    str((brief.get("data") if isinstance(brief.get("data"), dict) else brief).get("verified_email") or "").strip()
+                    for brief in call_brief_inputs if isinstance(brief, dict)
+                )
+                for analysis in generated_call_analyses:
+                    next_action = analysis.get("next_action") if isinstance(analysis.get("next_action"), dict) else {}
+                    if str(next_action.get("action_type") or "").strip() == "send_summary" and not has_verified_email:
+                        next_action["requires_information"] = True
+                        requested = [str(value).strip() for value in (next_action.get("requested_information") or []) if str(value).strip()]
+                        next_action["requested_information"] = list(dict.fromkeys([*requested, "verified_email"]))
+                        analysis["next_action"] = next_action
                 if generated_call_analyses:
                     analysis_source_refs = [
                         str(call_event.get("id") or call_event.get("event_id") or "tara-call-event"),

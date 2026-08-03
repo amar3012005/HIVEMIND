@@ -19,6 +19,14 @@ const SIDECAR_MODELS = [
   'sourceMetadata', 'memoryVersion', 'memoryProject', 'codeMemoryMetadata',
   'derivationJob', 'memoryDerivation', 'memoryEvidenceLink', 'vectorEmbedding',
   'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',
+  // TENANT-DATA PLACEMENT, added 2026-08-03. document_tables/_rows hold the literal cell
+  // contents of a tenant's spreadsheets. They were absent here AND from ROUTED_MODELS, so
+  // for the 7 of 13 orgs on .amr those cells were written to CENTRAL Postgres — exactly
+  // what a BYOD tenant chose .amr to avoid. SidecarBackend is generic ({dir}/_<name>.json),
+  // so the store needs no change. NOTE: ROUTED_MODELS alone would have been a NO-OP —
+  // prisma-proxy's wrapModel falls back to real Prisma when the adapter lacks the model,
+  // so both lists must carry it or nothing routes.
+  'documentTable', 'documentTableRow',
 ];
 
 let _orgSet = null; // null until parsed; Set<orgId> or the sentinel '*'

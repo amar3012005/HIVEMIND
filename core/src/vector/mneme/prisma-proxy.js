@@ -19,6 +19,8 @@ export const ROUTED_MODELS = new Set([
   'memory', 'relationship', 'sourceMetadata', 'sourceArtifact', 'memoryVersion', 'memoryProject',
   'codeMemoryMetadata', 'derivationJob', 'memoryDerivation', 'memoryEvidenceLink',
   'vectorEmbedding', 'entityMention', 'memoryEntityLink', 'knowledgeDocument', 'knowledgeSegment',
+  // see SIDECAR_MODELS in driver.js — a tenant's spreadsheet CELLS must live with the tenant
+  'documentTable', 'documentTableRow',
 ]);
 
 // extract the org_id an operation is scoped to, from where (incl. relation filters) or data.

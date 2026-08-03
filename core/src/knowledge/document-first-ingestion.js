@@ -2902,10 +2902,17 @@ Every item must include a non-empty content field and one or more valid support_
             }
             const headingPath = _hstack.map((h) => h.title);
 
-            const found = String(src).indexOf(text, _cursor);
+            // chunkText returns `{ text: currentChunk.trim(), index }` — no offsets — and the
+            // .trim() means indexOf(fullChunk) MISSES. Measured: 90 of 93 segments got no
+            // offset and therefore no page. Anchor on a PREFIX instead: the chunk's interior
+            // is a verbatim substring of src, only its edges were trimmed.
+            const _anchor = text.slice(0, 60);
+            let found = _anchor.length >= 12 ? String(src).indexOf(_anchor, _cursor) : -1;
+            if (found < 0 && _anchor.length >= 12) found = String(src).indexOf(_anchor); // wrap once
+            if (found < 0) found = String(src).indexOf(text.slice(0, 24), _cursor);
             const startOffset = found >= 0 ? found : null;
             const endOffset = startOffset != null ? startOffset + text.length : null;
-            if (found >= 0) _cursor = found + Math.max(1, text.length - 200); // allow for overlap
+            if (found >= 0) _cursor = found + Math.max(1, text.length - 250); // allow for overlap
             const startPage = _pageAt(startOffset);
             const endPage = _pageAt(endOffset);
 
@@ -2938,9 +2945,10 @@ Every item must include a non-empty content field and one or more valid support_
           if (segments.length) {
             const _types = segments.reduce((acc, sg) => { acc[sg.segmentType] = (acc[sg.segmentType] || 0) + 1; return acc; }, {});
             const _withPage = segments.filter((sg) => sg.startPage != null).length;
+            const _withOffset = segments.filter((sg) => sg.startOffset != null).length;
             const _withHeading = segments.filter((sg) => sg.metadata?.heading_path?.length).length;
             console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
-              + `types=${JSON.stringify(_types)} with_page=${_withPage}/${segments.length} with_heading_path=${_withHeading}/${segments.length}`);
+              + `types=${JSON.stringify(_types)} with_offset=${_withOffset}/${segments.length} with_page=${_withPage}/${segments.length} with_heading_path=${_withHeading}/${segments.length}`);
             if (!_withPage) console.warn('[segments] no start_page on ANY segment — citations cannot name a page. Docling <!-- page N --> markers absent from this parse tier.');
             return segments;
           }

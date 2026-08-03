@@ -874,31 +874,36 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     if (docIds.length) reason = 'project-corpus';
   }
 
-  if (docIds.length > 0) {
-    const items = await evidenceService.retrieveEvidence({
-      query, userId: ctx.userId, orgId: ctx.orgId,
-      projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
-      scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
-      documentIds: docIds,
-      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
-    });
-    return { items, reason, docIds };
-  }
-
-  // Deepest dig: no doc scope → broad org/user sweep, but ONLY when hop-1 was
-  // sparse. A non-sparse org-wide query that hop-1 already answered keeps the
-  // Case-C skip (no extra latency / noise — preserves current behavior).
-  if (inspection.sparse) {
-    const items = await evidenceService.retrieveEvidence({
-      query, userId: ctx.userId, orgId: ctx.orgId,
-      projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
-      scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
-      depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
-    });
-    return { items, reason: 'sparse-rescue' };
-  }
-
-  return { items: [], reason: null };
+  // EVIDENCE IS A LANE, NOT A RESCUE.
+  //
+  // This used to be a three-way gate: run evidence only when hop-1 produced document
+  // anchors, else only when hop-1 was `sparse`, else return nothing. Both arms miss a
+  // plain question — no filename and no project means no anchors, and 15 loosely
+  // related memories count as "not sparse" — so the lane was never called and the
+  // verbatim layer could only ever CONFIRM what memories already found, never SUPPLY
+  // what they missed.
+  //
+  // Measured with the [recall-hybrid] counter: ev_in=0 on all five small-detail
+  // questions while the same queries hit 5/5 when the lane was called directly. The
+  // facts (a price, a part number, a kW rating, a surname, a meter model) exist in
+  // segments and in 0 of 485 memories.
+  //
+  // Now unconditional and parallel-safe: evidence lives in its own Qdrant collection,
+  // so this is max() not sum(). Noise is handled where it belongs — the score floor,
+  // and the single cross-encoder in deliverHybrid, which `sparse` was crudely
+  // approximating by refusing to look.
+  const items = await evidenceService.retrieveEvidence({
+    query, userId: ctx.userId, orgId: ctx.orgId,
+    projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
+    scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
+    ...(docIds.length > 0 ? { documentIds: docIds } : {}),
+    depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
+  });
+  return {
+    items,
+    reason: docIds.length > 0 ? reason : (inspection.sparse ? 'sparse' : 'always-on'),
+    ...(docIds.length > 0 ? { docIds } : {}),
+  };
 }
 
 // ── Hop 3 — Live workspace ─────────────────────────────────────────────────

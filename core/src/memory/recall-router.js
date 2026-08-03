@@ -489,16 +489,37 @@ async function deliverHybrid({ query, memories = [], evidence = [], deliverN, ev
   const deduped = pool.filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
 
   let ordered = deduped;
+  let usedCrossEncoder = false;
   try {
     const rr = await withTimeout(
       rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
-      Math.min(Math.max(budgetMs || 0, 400), 2000),
+      Math.min(Math.max(budgetMs || 0, 1200), 3000),
       null,
     );
-    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) ordered = rr.map((x) => x._u);
-    else console.warn('[recall-hybrid] cross-encoder returned no scores — keeping lane order');
+    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
+      ordered = rr.map((x) => x._u); usedCrossEncoder = true;
+    }
   } catch (error) {
-    console.warn(`[recall-hybrid] cross-encoder degraded, keeping lane order: ${error.message}`);
+    console.warn(`[recall-hybrid] cross-encoder threw: ${error.message}`);
+  }
+
+  // FALLBACK MUST NOT COMPARE LANES BY SCORE. Lexical evidence scores are synthetic
+  // (0.55-0.95), vector scores are real cosine (often <0.15), and memory scores come
+  // from an entirely different pipeline — they are incomparable magnitudes. Sorting the
+  // union by `score` therefore lets whichever lane happens to use the larger scale win
+  // outright. That is exactly what buried the German `E3DC Zähler` row behind keyword
+  // hits on the one question that needed semantics. When the cross-encoder is
+  // unavailable, INTERLEAVE the lanes instead so neither can dominate, and say so.
+  if (!usedCrossEncoder) {
+    const byLane = { memory: [], evidence: [] };
+    for (const c of deduped) byLane[c._kind]?.push(c);
+    const woven = [];
+    for (let i = 0; i < Math.max(byLane.memory.length, byLane.evidence.length); i += 1) {
+      if (byLane.evidence[i]) woven.push(byLane.evidence[i]);
+      if (byLane.memory[i]) woven.push(byLane.memory[i]);
+    }
+    ordered = woven;
+    console.warn(`[recall-hybrid] DEGRADED: no cross-encoder — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence instead of comparing incomparable scores`);
   }
 
   const outMem = []; const outEv = [];

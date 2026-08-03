@@ -993,6 +993,12 @@ const routes = {
       [ORG, doc.id]);
     const segIds = segRows.map((r) => r.id);
     await pg.query('DELETE FROM knowledge_segments WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]);
+    // Grids too. document_tables FKs knowledge_documents ON DELETE CASCADE, but the document row
+    // is SOFT-deleted here (deleted_at), so the cascade never fires — measured after a real
+    // delete: docs=0 but tables=1 / tablerows=3 left behind. This is the THIRD time tonight that
+    // adding a table meant its LIFECYCLE also had to be routed (derivations, evidence links, now
+    // grids). document_table_rows cascades off document_tables, which IS a hard delete.
+    await pg.query('DELETE FROM document_tables WHERE org_id=$1 AND document_id=$2', [ORG, doc.id]).catch(() => {});
     if (segIds.length) {
       await qFetch(`/collections/${QCOLL}/points/delete?wait=true`,
         { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});

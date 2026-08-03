@@ -5,3 +5,5 @@
 ## Recommended Action — owner, next step, decision threshold, and measurable signal
 ## Research Trail — source table, methods used, exclusions, and reproducibility notes
 ## Gaps to Confirm — unanswered questions and the cheapest next evidence to obtain
+
+Every factual row must reference a gathered source URL or provider identifier. Exact quantities must preserve the source's value, unit, period, and scope. Omit unsupported quantities and named citations instead of presenting them as provisional facts. Clearly separate source-backed findings, inference, and unresolved questions.

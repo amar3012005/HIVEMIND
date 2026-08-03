@@ -243,6 +243,12 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
       recommended: context.recommended === true,
       effect_class: context.effect_class || (context.external_action_requested === true ? 'external' : 'internal'),
       evidence_refs: Array.isArray(context.evidence_refs) ? context.evidence_refs : [],
+      expected_outcome: context.requested_terminal_outcome || context.deliverable || null,
+      success_measure: context.success_measure || null,
+      selection_reason: context.selection_reason || context.activation_condition || context.effect_basis || null,
+      required_capabilities: Array.isArray(todo.requiredCapabilities) ? todo.requiredCapabilities : [],
+      response_locale: context.response_locale || null,
+      readiness: status,
     };
   }).sort((left, right) => left.recommendation_rank - right.recommendation_rank
     || new Date(right.checkpoint_at) - new Date(left.checkpoint_at));
@@ -257,6 +263,8 @@ function projectGrowthBrief(baselineArtifact, planArtifact) {
   const queue = Array.isArray(plan.operating_queue) ? plan.operating_queue : [];
   const recommendation = queue.find((item) => String(item?.id || '') === String(plan.stage?.queue_item_id || '')) || queue[0] || null;
   const evidenceRefs = Array.isArray(primary?.evidence_refs) ? primary.evidence_refs : [];
+  const hypotheses = Array.isArray(plan.hypotheses) ? plan.hypotheses : [];
+  const hypothesis = hypotheses.find((item) => (item.evidence_refs || []).some((ref) => evidenceRefs.includes(ref))) || hypotheses[0] || null;
   return {
     baseline_id: baselineArtifact?.id || null,
     plan_id: planArtifact?.id || null,
@@ -267,14 +275,58 @@ function projectGrowthBrief(baselineArtifact, planArtifact) {
       statement: primary.statement || primary.description || null,
     } : null,
     evidence_refs: evidenceRefs,
-    confidence: primary?.confidence || plan.hypotheses?.[0]?.confidence || null,
+    confidence: hypothesis?.confidence || null,
+    material_unknowns: Array.isArray(primary?.unknowns) ? primary.unknowns : (Array.isArray(baseline.data_gaps) ? baseline.data_gaps : []),
+    supporting_evidence: Array.isArray(primary?.known_facts) ? primary.known_facts : [],
     recommended_motion: recommendation ? {
       todo_source_id: recommendation.id || null,
       title: recommendation.title || null,
       objective: recommendation.objective || null,
       room: recommendation.room_tag || recommendation.kind || null,
+      expected_outcome: recommendation.requested_terminal_outcome || recommendation.deliverable || null,
+      success_measure: recommendation.success_measure || null,
+      selection_reason: recommendation.effect_basis || null,
     } : null,
     captured_at: baselineArtifact?.createdAt || planArtifact?.createdAt || null,
+  };
+}
+
+export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, tasks, recognitionEvents }) {
+  if (!runtime) return null;
+  const recognition = (recognitionEvents || []).map((row) => ({
+    sequence: String(row.sequence),
+    source_key: row.details?.source_key || row.title,
+    status: row.details?.status || row.summary,
+    facts: row.details?.facts ?? null,
+    limitations: Array.isArray(row.details?.limitations) ? row.details.limitations : [],
+    artifact_id: row.details?.artifact_id || row.evidenceRefs?.[0] || null,
+    observed_at: row.createdAt?.toISOString?.() || row.createdAt,
+  }));
+  const opportunities = (firstLife?.items || []).map((item) => {
+    const task = (tasks || []).find((candidate) => String(candidate.id) === String(item.todo_id));
+    return { ...task, ...item, id: item.todo_id, todo_id: item.todo_id };
+  });
+  const recommendation = opportunities.find((item) => item.recommended)
+    || opportunities.find((item) => item.todo_id === firstLife?.recommended_todo_id)
+    || null;
+  const planningEvidenceMissing = runtime.blockedReason === 'planning_evidence'
+    || (firstLife?.status === 'NEEDS_ATTENTION' && !growthBrief && opportunities.length === 0);
+  let phase = 'ACKNOWLEDGED';
+  if (planningEvidenceMissing) phase = 'NEEDS_EVIDENCE';
+  else if (firstLife?.status === 'AWAITING_START' || firstLife?.status === 'REVIEW_LATER') phase = 'AWAITING_START';
+  else if (firstLife) phase = 'OPERATING';
+  else if (growthBrief) phase = 'PLANNING';
+  else if (recognition.length) phase = 'RECOGNIZING';
+  return {
+    epoch: runtime.epoch,
+    phase,
+    recognition,
+    growth_brief: growthBrief,
+    opportunities,
+    recommendation,
+    can_start: phase === 'AWAITING_START' && recommendation?.status === 'PROPOSED',
+    waiting_reason: planningEvidenceMissing ? 'planning_evidence'
+      : firstLife?.waiting_reason || null,
   };
 }
 
@@ -405,8 +457,24 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           payload: { instruction_id: instruction.id, source: 'runtime_invitation', fresh_start: freshStart },
           key: `runtime_launch:${instruction.id}`,
         });
+        const activationEvent = await appendHqEvent({
+          prisma,
+          runtimeId: runtime.id,
+          orgId,
+          runtimeEpoch: runtime.epoch,
+          eventType: 'activation_received',
+          title: 'Runtime activation received',
+          summary: 'The operating instruction and wake request are durable. Runtime will now inspect the persisted company evidence.',
+          details: {
+            instruction_id: instruction.id,
+            schedule_id: schedule?.id || null,
+            trigger_type: 'user_first_activation',
+            runtime_epoch: runtime.epoch,
+          },
+        });
         return jsonResponse(res, {
           runtime: asJsonRuntime(await getHqRuntime({ prisma, orgId })), instruction, schedule,
+          activation_event: asJsonEvent(activationEvent),
         }, 201);
       }
 
@@ -606,7 +674,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (!runtime) return jsonResponse(res, { work_orders: [], schedules: [] });
         await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
         const playbookService = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
-        const [workOrders, schedules, todos, capabilityRequests, instructions, playbookRuns, baselineArtifact, planArtifacts] = await Promise.all([
+        const [workOrders, schedules, todos, capabilityRequests, instructions, playbookRuns, baselineArtifact, planArtifacts, recognitionEvents] = await Promise.all([
           prisma.hyperWorkOrder.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 50 }),
           prisma.hqSchedule.findMany({ where: { orgId, runtimeEpoch: runtime.epoch, status: { in: ['PENDING', 'LEASED'] } }, orderBy: { dueAt: 'asc' }, take: 50 }),
           prisma.hqTodo.findMany({ where: { orgId, runtimeId: runtime.id, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
@@ -622,6 +690,11 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           }).catch(() => []) : Promise.resolve([]),
           prisma.sourceArtifact.findFirst({ where: { orgId, sourcePlatform: 'growth_baseline', artifactType: 'api_response' }, orderBy: { createdAt: 'desc' } }),
           prisma.sourceArtifact.findMany({ where: { orgId, sourcePlatform: 'growth_plan', artifactType: 'api_response' }, orderBy: { createdAt: 'desc' }, take: 12 }),
+          prisma.hqRuntimeEvent.findMany({
+            where: { orgId, runtimeId: runtime.id, eventType: 'baseline_observation' },
+            orderBy: { sequence: 'asc' },
+            take: 50,
+          }),
         ]);
         const todoById = new Map(todos.map((todo) => [todo.id, todo]));
         const campaignsByRun = new Map((playbookRuns.length ? await prisma.campaign.findMany({
@@ -713,11 +786,16 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           return !baselineArtifact?.id || baselineId === baselineArtifact.id;
         }) || null;
         const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns });
+        const growthBrief = projectGrowthBrief(baselineArtifact, currentPlanArtifact);
+        const firstLifeExperience = projectFirstLifeExperience({
+          runtime, firstLife, growthBrief, tasks: agentRuntimeTasks, recognitionEvents,
+        });
         return jsonResponse(res, {
           work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions,
           agent_runtime_tasks: agentRuntimeTasks,
           runtime_queue: agentRuntimeTasks,
-          growth_brief: projectGrowthBrief(baselineArtifact, currentPlanArtifact),
+          growth_brief: growthBrief,
+          first_life_experience: firstLifeExperience,
           playbook_approvals: playbookApprovals, playbook_runs: playbookRuns,
           playbook_inputs: playbookInputs,
           playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),

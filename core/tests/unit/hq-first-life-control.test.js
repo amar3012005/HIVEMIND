@@ -7,7 +7,7 @@ function todo(id, status, rank, effect, recommended = false) {
     id, runtimeId: 'runtime-1', orgId: 'org-1', status, priority: rank, position: rank,
     context: {
       first_life_policy_id: 'runtime.first-life-policy',
-      first_life_policy_version: 2,
+      first_life_policy_version: 3,
       runtime_epoch: 'epoch-1',
       recommendation_rank: rank,
       effect_class: effect,
@@ -43,7 +43,7 @@ function prismaFor(rows, authorityPolicy = { external_default: 'manual', interna
 
 const runtime = { id: 'runtime-1', orgId: 'org-1', epoch: 'epoch-1' };
 
-test('first start promotes the recommendation and at most one independent internal proposal', async () => {
+test('v3 first start promotes only the recommendation', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),
     todo('internal-1', 'PROPOSED', 2, 'internal'),
@@ -53,8 +53,20 @@ test('first start promotes the recommendation and at most one independent intern
   const result = await activateEligibleFirstLifeWork({
     prisma: prismaFor(rows), runtime, expansionTrigger: 'user_start',
   });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['external-1']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED', 'PROPOSED']);
+});
+
+test('v2 first start retains the historical companion-work policy', async () => {
+  const rows = [
+    todo('external-1', 'PROPOSED', 1, 'external', true),
+    todo('internal-1', 'PROPOSED', 2, 'internal'),
+  ];
+  rows.forEach((row) => { row.context.first_life_policy_version = 2; });
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'user_start',
+  });
   assert.deepEqual(result.promoted.map((item) => item.id), ['external-1', 'internal-1']);
-  assert.deepEqual(rows.map((item) => item.status), ['READY', 'READY', 'PROPOSED', 'PROPOSED']);
 });
 
 test('first start leaves an unbound proposal dormant instead of guessing a lifecycle', async () => {

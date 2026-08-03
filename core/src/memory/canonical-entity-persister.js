@@ -131,11 +131,36 @@ export async function persistCanonicalLinks({
     // genuinely new or ambiguous names.
     const existingBySlug = new Map();
     try {
-      const registry = await prisma.canonicalEntity.findMany({
-        where: { organizationId, entityKind },
-        select: { id: true, canonicalName: true, aliases: true },
-        take: 500,
-      });
+      // PAGE THE WHOLE REGISTRY. This was a single `take: 500` with no orderBy, which is a
+      // silent cap: org 1380251c holds 784 canonical entities of one kind, so ~36% of the
+      // registry was invisible to the reuse prepass and WHICH 500 you got was arbitrary.
+      // Any entity outside the slice fell through to EntityResolver, scored 0.93 exact
+      // (< AUTO_LINK_FLOOR), and went to the review queue — logging
+      // "+0 entities, 0 links, 1 queued for review" while the graph stopped growing.
+      // A cap that changes behaviour without saying so is the defect class this repo keeps
+      // shipping, so the ceiling is explicit, env-tunable, and WARNS when it truncates.
+      const _pageSize = 1000;
+      const _ceiling = Math.max(_pageSize, Number(process.env.ENTITY_REGISTRY_MAX || 20000));
+      const registry = [];
+      let _cursor = null;
+      for (;;) {
+        const page = await prisma.canonicalEntity.findMany({
+          where: { organizationId, entityKind },
+          select: { id: true, canonicalName: true, aliases: true },
+          orderBy: { id: 'asc' },
+          take: _pageSize,
+          ...(_cursor ? { skip: 1, cursor: { id: _cursor } } : {}),
+        });
+        registry.push(...page);
+        if (page.length < _pageSize) break;
+        if (registry.length >= _ceiling) {
+          logger.warn?.(`[canonical-entities] registry TRUNCATED at ${registry.length} of an unknown `
+            + `larger total (org ${String(organizationId).slice(0, 8)}, kind ${entityKind}) — entities beyond `
+            + `this point will be re-created as duplicates instead of reused. Raise ENTITY_REGISTRY_MAX.`);
+          break;
+        }
+        _cursor = page[page.length - 1].id;
+      }
       for (const row of registry) {
         for (const surface of [row.canonicalName, ...(row.aliases || [])]) {
           const slug = normalizeEntity(surface);

@@ -1,8 +1,13 @@
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { getSharedProfileStore } from '../memory/profile-store.js';
 import { researchCompanyWebsite, scrapePublicPages, searchCompanyMarket, verifiedSocialProfiles } from '../onboarding/company-research.js';
 import { requestZernio } from '../campaigns/zernio-execution.js';
 import { scheduleHqWake } from '../hq-runtime/repository.js';
+
+const recognitionSourceKeys = JSON.parse(readFileSync(
+  new URL('./fixtures/baseline-recognition.v1.json', import.meta.url), 'utf8',
+)).sources;
 
 function text(value, max = 1000) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -253,6 +258,40 @@ function baselineChecksum(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+async function persistBaselineObservation(prisma, { orgId, userId, baselineRunId, sourceKey, status, facts, limitations = [] }) {
+  const payload = {
+    kind: 'growth_baseline_observation',
+    baseline_run_id: baselineRunId,
+    source_key: sourceKey,
+    status,
+    facts,
+    limitations,
+    observed_at: new Date().toISOString(),
+  };
+  const checksum = baselineChecksum({ orgId, userId, baselineRunId, sourceKey, status, facts, limitations });
+  try {
+    return await prisma.sourceArtifact.create({ data: {
+      userId,
+      orgId,
+      artifactType: 'api_response',
+      sourcePlatform: 'growth_baseline_observation',
+      sourceId: `${baselineRunId}:${sourceKey}`,
+      contentType: 'application/json',
+      sizeBytes: Buffer.byteLength(JSON.stringify(payload)),
+      checksum,
+      storageLocation: `inline:growth_baseline_observation:${baselineRunId}:${sourceKey}`,
+      payload,
+      metadata: { baseline_run_id: baselineRunId, source_key: sourceKey, status },
+    } });
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+    return prisma.sourceArtifact.findFirst({
+      where: { userId, orgId, sourcePlatform: 'growth_baseline_observation', checksum },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+}
+
 export async function listGrowthBaselines({ prisma, orgId, limit = 12 }) {
   return prisma.sourceArtifact.findMany({
     where: { orgId, sourcePlatform: 'growth_baseline', artifactType: 'api_response' },
@@ -265,36 +304,124 @@ export async function listGrowthBaselines({ prisma, orgId, limit = 12 }) {
  * use an LLM: downstream Rooms can reason from this object, but cannot turn
  * absent social analytics into fabricated growth metrics.
  */
-export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, socialUrls = [], platforms = [], metrics = [], days = null, mode = 'refresh', includeWebsite = true, persist = true, scheduleRuntimeWake = true }) {
+export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, socialUrls = [], platforms = [], metrics = [], days = null, mode = 'refresh', includeWebsite = true, persist = true, scheduleRuntimeWake = true, baselineRunId = crypto.randomUUID(), onObservation = null }) {
   const profile = await getSharedProfileStore(prisma).getProfile(userId, orgId);
   const facts = factMap(profile);
   const website = text(websiteUrl || facts.get('company:website'), 1000);
-  if (!website || !/^https?:\/\//i.test(website)) {
-    throw Object.assign(new Error('A company website is required to establish a growth baseline'), {
-      status: 400, code: 'growth_baseline_website_required',
+  const hasWebsite = /^https?:\/\//i.test(website);
+  const companyName = facts.get('company') || (hasWebsite ? new URL(website).hostname : '');
+  if (!companyName) {
+    throw Object.assign(new Error('A consistent company identity is required to establish a growth baseline'), {
+      status: 400, code: 'growth_baseline_identity_required',
     });
   }
 
+  const observationRefs = [];
+  const observe = async (sourceKey, promise, project) => {
+    const value = await promise;
+    const observation = project(value);
+    if (persist) {
+      const artifact = await persistBaselineObservation(prisma, {
+        orgId, userId, baselineRunId, sourceKey, ...observation,
+      });
+      if (artifact) {
+        observationRefs.push(artifact.id);
+        if (typeof onObservation === 'function') await onObservation({
+          ...observation,
+          source_key: sourceKey,
+          artifact_id: artifact.id,
+          baseline_run_id: baselineRunId,
+        });
+      }
+    }
+    return value;
+  };
+
+  await observe(recognitionSourceKeys.company_identity, Promise.resolve({ profile }), () => ({
+    status: 'observed',
+    facts: {
+      name: companyName,
+      website: hasWebsite ? website : null,
+      location: facts.get('company:location') || null,
+      profile_fact_count: profile.length,
+    },
+  }));
+
   const requestedProfiles = knownSocialUrls(facts, socialUrls);
-  const companyName = facts.get('company') || new URL(website).hostname;
   const platformScope = (platforms || []).map((value) => String(value).toLowerCase()).filter(Boolean);
-  const runWebsite = Boolean(includeWebsite) && !platformScope.length;
-  const [websiteResearch, publicProfiles, connection, campaignCounts, social, market, outreach] = await Promise.all([
-    runWebsite ? researchCompanyWebsite(website, { maxPages: 5, includeCrawl: true }) : Promise.resolve({ provider: 'not_requested', pages: [], mapped: 0, error: null }),
-    runWebsite ? scrapePublicPages(requestedProfiles, { maxPages: 5 }) : Promise.resolve([]),
-    cachedZernioState(prisma, orgId),
-    // Campaign tables are additive and the generated Prisma client can lag a
-    // deployed migration, so avoid requiring prisma.campaign here.
-    prisma.$queryRawUnsafe(
+  const runWebsite = hasWebsite && Boolean(includeWebsite) && !platformScope.length;
+  const websitePromise = runWebsite
+    ? researchCompanyWebsite(website, { maxPages: 5, includeCrawl: true }).catch((error) => ({
+      provider: 'unavailable', pages: [], mapped: null, error: String(error?.message || error),
+    }))
+    : Promise.resolve({ provider: 'not_requested', pages: [], mapped: null, error: hasWebsite ? null : 'No company website was supplied.' });
+  const publicProfilesPromise = runWebsite
+    ? scrapePublicPages(requestedProfiles, { maxPages: 5 }).catch((error) => [{
+      url: null, status: 'limited', provider: 'public_profile_read', reason: String(error?.message || error),
+    }])
+    : Promise.resolve([]);
+  const connectionPromise = cachedZernioState(prisma, orgId);
+  const campaignPromise = prisma.$queryRawUnsafe(
       'SELECT status, COUNT(*)::int AS count FROM hivemind.campaigns WHERE org_id = $1::uuid GROUP BY status',
       orgId,
-    ).catch(() => []),
-    mode === 'full_all'
+    ).then((rows) => ({ available: true, rows })).catch((error) => ({ available: false, rows: [], limitation: error.message }));
+  const socialPromise = mode === 'full_all'
       ? detailedZernioTransfer(prisma, orgId, { platforms: platformScope, days })
-      : zernioSnapshot(prisma, orgId, { platforms: platformScope, days, metrics: metrics.length ? metrics : ['profile', 'followers', 'posts'] }),
-    runWebsite ? searchCompanyMarket(`${companyName} ${facts.get('industry') || ''} competitors market`, { limit: 6, location: facts.get('company:location') || '' }) : Promise.resolve([]),
-    outreachSummary(prisma, orgId),
+      : zernioSnapshot(prisma, orgId, { platforms: platformScope, days, metrics: metrics.length ? metrics : ['profile', 'followers', 'posts'] });
+  const safeSocialPromise = socialPromise.catch((error) => ({
+    status: 'PARTIAL', accounts: [], followers: [], posts: [], totals: null,
+    limitations: [String(error?.message || error)], platform_reports: {},
+  }));
+  const marketPromise = runWebsite
+    ? searchCompanyMarket(`${companyName} ${facts.get('industry') || ''} competitors market`, { limit: 6, location: facts.get('company:location') || '' }).catch(() => [])
+    : Promise.resolve([]);
+  const outreachPromise = outreachSummary(prisma, orgId);
+  const [websiteBundle, channelBundle, campaignResult, outreach, market] = await Promise.all([
+    observe(recognitionSourceKeys.website, Promise.all([websitePromise, publicProfilesPromise]), ([research, pages]) => {
+      const status = !hasWebsite ? 'not_observed' : research.error || research.provider === 'fallback' ? 'limited' : 'observed';
+      return {
+        status,
+        facts: {
+          website: hasWebsite ? website : null,
+          page_count: status === 'observed' && Number.isFinite(Number(research.mapped)) ? Number(research.mapped) : null,
+          observed_urls: (research.pages || []).map((page) => page.url),
+          public_profile_count: status === 'observed' ? pages.length : null,
+        },
+        limitations: [research.error].filter(Boolean),
+      };
+    }),
+    observe(recognitionSourceKeys.connected_channels, Promise.all([connectionPromise, safeSocialPromise]), ([connectionState, socialState]) => {
+      const accountMetricsAvailable = (socialState.accounts || []).some((account) => Boolean(
+        account.can_fetch_analytics || account.health?.canFetchAnalytics || account.health?.permissions?.canFetchAnalytics,
+      ));
+      return {
+        status: connectionState.status === 'UNPROVISIONED' ? 'not_observed'
+          : socialState.status === 'PARTIAL' ? 'limited' : 'observed',
+        facts: {
+          provider_status: connectionState.status,
+          channels: channelCoverage(connectionState),
+          accounts: socialState.accounts || [],
+          followers: accountMetricsAvailable ? (socialState.followers || []) : null,
+          totals: accountMetricsAvailable ? (socialState.totals || numericTotals(socialState.posts || [])) : null,
+        },
+        limitations: socialState.limitations || (socialState.limitation ? [socialState.limitation] : []),
+      };
+    }),
+    observe(recognitionSourceKeys.campaign_activity, campaignPromise, (result) => ({
+      status: result.available ? 'observed' : 'limited',
+      facts: { campaigns_by_status: result.available ? Object.fromEntries(result.rows.map((row) => [row.status, Number(row.count || 0)])) : null },
+      limitations: [result.limitation].filter(Boolean),
+    })),
+    observe(recognitionSourceKeys.lead_customer_activity, outreachPromise, (result) => ({
+      status: result.available ? 'observed' : 'limited',
+      facts: result.available ? { total: result.total, sent: result.sent, replies: result.replies, meetings: result.meetings } : null,
+      limitations: [result.limitation].filter(Boolean),
+    })),
+    marketPromise,
   ]);
+  const [websiteResearch, publicProfiles] = websiteBundle;
+  const [connection, social] = channelBundle;
+  const campaignCounts = campaignResult.rows;
 
   const discoveredProfiles = verifiedSocialProfiles(websiteResearch.pages || []).map((item) => item.url);
   const observedProfiles = publicProfileSummary(publicProfiles);
@@ -305,8 +432,10 @@ export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, soc
     : social.accounts.some((account) => account.can_fetch_analytics);
   const campaignSummary = Object.fromEntries(campaignCounts.map((row) => [row.status, Number(row.count || 0)]));
   const dataGaps = [
+    ...(!hasWebsite ? ['A company website was not observed.'] : []),
+    ...(websiteResearch.error ? [`Website evidence is limited: ${websiteResearch.error}`] : []),
     ...(metricsAvailable ? [] : ['Follower, impression, engagement, click, and profile-visit metrics are not available for the selected connected accounts.']),
-    ...(publicProfiles.filter((item) => item.status !== 'observed').map((item) => `Public profile could not be observed: ${item.url}`)),
+    ...(publicProfiles.filter((item) => item.status !== 'observed').map((item) => `Public profile could not be observed: ${item.url || item.reason || 'source unavailable'}`)),
     ...(social.limitations || []),
   ];
 
@@ -317,7 +446,7 @@ export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, soc
     scope: platformScope.length ? { type: 'platforms', platforms: platformScope, mode } : { type: 'company', mode },
     company: {
       name: companyName,
-      website,
+      website: hasWebsite ? website : null,
       location: facts.get('company:location') || null,
       positioning: facts.get('company:positioning') || null,
       icp: facts.get('company:icp') || null,
@@ -325,7 +454,7 @@ export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, soc
     website: {
       provider: websiteResearch.provider,
       pages_observed: (websiteResearch.pages || []).map((page) => ({ url: page.url, title: page.title || null, description: page.description || null })),
-      mapped_pages: websiteResearch.mapped || 0,
+      mapped_pages: Number.isFinite(Number(websiteResearch.mapped)) ? Number(websiteResearch.mapped) : null,
       limitation: websiteResearch.error || null,
     },
     social_presence: {
@@ -335,7 +464,7 @@ export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, soc
       accounts: social.accounts,
       followers: social.followers,
       recent_posts: social.posts,
-      totals: fullTransfer ? numericTotals(social.posts || []) : social.totals,
+      totals: metricsAvailable ? (fullTransfer ? numericTotals(social.posts || []) : social.totals) : null,
       analytics_window: social.period,
       ...(social.requested_metrics ? { requested_metrics: social.requested_metrics } : {}),
       ...(fullTransfer ? {
@@ -360,7 +489,12 @@ export async function runGrowthBaseline({ prisma, orgId, userId, websiteUrl, soc
       { type: 'firecrawl_public_social', status: observedProfiles.length ? 'available' : 'not_requested', count: observedProfiles.length },
       { type: 'zernio', status: social.status, analytics_available: metricsAvailable },
     ],
+    observation_refs: observationRefs,
   };
+  if (dataGaps.length) await observe(recognitionSourceKeys.explicit_limitations, Promise.resolve(dataGaps), (limitations) => ({
+    status: 'limited', facts: { count: limitations.length }, limitations,
+  }));
+  result.observation_refs = [...observationRefs];
   if (!persist) return result;
   const checksum = baselineChecksum({ orgId, userId, snapshot: result });
   const artifact = await prisma.sourceArtifact.create({ data: {

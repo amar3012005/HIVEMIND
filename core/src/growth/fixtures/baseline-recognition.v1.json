@@ -1,0 +1,11 @@
+{
+  "contract": "runtime.baseline-recognition.v1",
+  "sources": {
+    "company_identity": "company_identity",
+    "website": "website",
+    "connected_channels": "connected_channels",
+    "lead_customer_activity": "lead_customer_activity",
+    "campaign_activity": "campaign_activity",
+    "explicit_limitations": "explicit_limitations"
+  }
+}

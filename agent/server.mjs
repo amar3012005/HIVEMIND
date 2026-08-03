@@ -880,6 +880,14 @@ const routes = {
         [memIds, ORG]).catch(() => {});
       await pg.query('DELETE FROM relationships WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))',
         [ORG, memIds]).catch(() => {});
+      // Provenance must go with the memory. The memory row is SOFT-deleted (deleted_at), so the
+      // ON DELETE CASCADE on memory_id never fires — measured after a real document delete:
+      // evidence links vanished (they also cascade off the hard-deleted segments) but 25
+      // derivations were left behind, pointing at soft-deleted memories and unreadable forever.
+      await pg.query('DELETE FROM memory_derivations WHERE org_id=$1 AND memory_id = ANY($2::uuid[])',
+        [ORG, memIds]).catch(() => {});
+      await pg.query('DELETE FROM memory_evidence_links WHERE org_id=$1 AND memory_id = ANY($2::uuid[])',
+        [ORG, memIds]).catch(() => {});
       // Vectors last: a Postgres-only delete leaves orphan points that break recall while
       // looking exactly like a broken retriever.
       await qFetch(`/collections/${QCOLL}/points/delete?wait=true`,

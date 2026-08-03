@@ -873,6 +873,16 @@ function routesFor(ctx) {
       const fnTag = `filename:${doc.filename}`;
       const idTag = `doc-id:${doc.id}`;
       const memIds = amr.findByTags([fnTag, idTag], 100000).map((m) => m.id);
+      // Provenance is the SECOND source of truth for "which memories came from this
+      // document". Finding them only by the filename:/doc-id: tags missed any memory that
+      // does not carry them (measured: 24 of 27 derivations cleaned, 4 left behind), so union
+      // in whatever the evidence links themselves claim for this document.
+      try {
+        const { rows: _pv } = await db().query(
+          'SELECT DISTINCT memory_id FROM memory_evidence_links WHERE org_id=$1 AND document_id=$2',
+          [org, doc.id]);
+        for (const r of _pv) if (r.memory_id && !memIds.includes(r.memory_id)) memIds.push(r.memory_id);
+      } catch { /* table may not exist on an older agent — the tag path still applies */ }
       for (const id of memIds) amr.remove(id);
       if (memIds.length) {
         await db().query('UPDATE memories SET deleted_at=now(), is_latest=false WHERE id = ANY($1::uuid[]) AND org_id=$2 AND deleted_at IS NULL', [memIds, org]).catch(() => {});

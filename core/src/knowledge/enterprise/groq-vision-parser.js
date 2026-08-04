@@ -14,7 +14,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import crypto from 'crypto';
 
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
@@ -23,7 +24,8 @@ const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-
 const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'google/gemini-2.5-flash-lite';
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
 const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
-const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for convert
+const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for the rasteriser
+const execFileAsync = promisify(execFile);
 const OCR_MAX_TOKENS = Number(process.env.HIVEMIND_VISION_OCR_MAX_TOKENS || 2600);
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
@@ -55,16 +57,45 @@ export async function parsePdfWithGroqVision(pdfPath) {
   const workDir = path.join(os.tmpdir(), `vision-${crypto.randomUUID()}`);
   fs.mkdirSync(workDir, { recursive: true });
   try {
-    // Step 1: render each page to PNG
-    // `-density 150` then `convert PDF PNG` produces page-N.png files
+    // Step 1: render each page to PNG.
+    //
+    // POPPLER FIRST, ImageMagick only as a fallback. `convert whole.pdf page-%03d.png` rasterises
+    // the ENTIRE document through one pixel cache and dies on real uploads: measured on a 32-page
+    // 16MB PDF, "cache resources exhausted @ error/cache.c/OpenPixelCache" against ImageMagick's
+    // own ceilings (Memory 256MiB / Disk 1GiB — `identify -list resource`), which failed the whole
+    // vision tier and left the document unparsed. Raising those ceilings only moves the cliff to a
+    // slightly larger file; pdftoppm removes it, because poppler streams ONE PAGE AT A TIME with
+    // bounded memory regardless of document size.
+    //
+    // `-l MAX_PAGES` also stops us rasterising 200 pages just to slice them away below.
+    // Note: the ImageMagick path used `-trim`; pdftoppm has no equivalent, which is fine here —
+    // trimming whitespace borders does not change what the vision model can read.
+    // ASYNC, not execFileSync. The sync form BLOCKS THE EVENT LOOP for the whole render — up to the
+    // 180s timeout — and the ingestion worker cannot answer anything while blocked, including
+    // BullMQ's job-lock renewal. Observed together in one upload batch: the render error above and
+    // four `[kb-queue] worker error: could not renew lock for job …`. A lost lock means the job is
+    // considered stalled and re-run, so a blocking render does not just delay work, it duplicates it.
+    let rendered = false;
     try {
-      execFileSync('convert', [
-        '-density', PAGE_DENSITY, '-quality', '85', '-trim',
-        pdfPath,
-        path.join(workDir, 'page-%03d.png'),
-      ], { stdio: 'pipe', timeout: 180_000 });
-    } catch (renderErr) {
-      return { text: '', pages: 0, markdown: '', error: `Render failed: ${renderErr.message}` };
+      await execFileAsync('pdftoppm', [
+        '-r', String(PAGE_DENSITY), '-png', '-f', '1', '-l', String(MAX_PAGES),
+        pdfPath, path.join(workDir, 'page'),
+      ], { timeout: 180_000, maxBuffer: 1 << 20 });
+      rendered = true;
+    } catch (popplerErr) {
+      console.warn(`[groq-vision] pdftoppm failed (${popplerErr.message}) — falling back to ImageMagick`);
+    }
+    if (!rendered) {
+      try {
+        await execFileAsync('convert', [
+          '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
+          '-density', PAGE_DENSITY, '-quality', '85', '-trim',
+          pdfPath,
+          path.join(workDir, 'page-%03d.png'),
+        ], { timeout: 180_000, maxBuffer: 1 << 20 });
+      } catch (renderErr) {
+        return { text: '', pages: 0, markdown: '', error: `Render failed: ${renderErr.message}` };
+      }
     }
     const pages = fs.readdirSync(workDir)
       .filter(f => f.endsWith('.png'))

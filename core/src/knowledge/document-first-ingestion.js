@@ -504,8 +504,18 @@ subject+predicate identify the claim across paraphrases and languages (normalize
           if (idx >= targets.length) return;
           const m = targets[idx];
           try {
-            const parsed = await chatCompletion({
-              model, temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
+            // THE ONLY EXTRACTION CALL LEFT ON THE BARE HELPER. Every other one uses the
+            // fallback form, and this one paid for it: measured on a live upload batch,
+            // `model=openai/gpt-oss-20b … finish=error` then
+            // `[v5-claim-structuring] Failed to parse JSON response` — twice in one batch. The
+            // memories still existed (this step only ENRICHES them with subject/predicate), so the
+            // failure was invisible except in the log, and every affected memory silently lost the
+            // claim structure that supersession and "latest per (entity, attribute)" depend on.
+            const parsed = await chatCompletionWithFallback({
+              models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
+                || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b')
+                .split(',').map((x) => x.trim()).filter(Boolean)],
+              temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
               messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
             });
             const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';
@@ -2970,7 +2980,18 @@ Every item must include a non-empty content field and one or more valid support_
               : (doclingResult.hybridChunks || []).map(c => c.text).join('\n\n');
             return {
               success: true,
-              engine: parseOk ? 'docling' : 'docling-chunks-only',
+              // REPORT THE TIER THAT ACTUALLY RAN. This hardcoded 'docling', overwriting the
+              // adapter's own label — it emits at least eight (plain-text, groq-image, sheet-direct,
+              // csv-direct, groq-vision, pdf-parse, docling-fallback-vision/-fastpdf, seam:*).
+              // Verified on one upload batch: four documents logged `tier=fast-pdf` and every row
+              // recorded parse_engine='docling'. That makes "which path produced this document?"
+              // unanswerable from the data and corrupts any per-tier measurement taken from it — the
+              // "55 of 61 docling documents carry no heading_path" figure was mostly fast-pdf.
+              // Chunks-only is a property of THIS layer (parser failed, chunker did not), so it
+              // still qualifies whatever the adapter reported.
+              engine: parseOk
+                ? (doclingResult.engine || 'docling')
+                : `${doclingResult.engine || 'docling'}-chunks-only`,
               text: synthesizedText,
               // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise rebuild it
               // from the chunk headings we already fetched (chunks-only = parser failed, chunker

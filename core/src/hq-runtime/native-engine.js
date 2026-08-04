@@ -391,7 +391,9 @@ export class NativeHqEngine {
       }
       if (adminRun && !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(adminRun.status))) {
         const alreadyShown = await prisma.hqRuntimeEvent.findFirst({
-          where: { runtimeId: runtime.id, runtimeEpoch: runtime.epoch, eventType: 'decision_required', details: { path: ['admin_checkin_run_id'], equals: adminRun.id } },
+          // Runtime events are epoch-bounded by their parent Runtime reset. The
+          // event table itself intentionally carries no runtimeEpoch column.
+          where: { runtimeId: runtime.id, eventType: 'decision_required', details: { path: ['admin_checkin_run_id'], equals: adminRun.id } },
         }).catch(() => null);
         if (!alreadyShown) await event(prisma, runtime, cycle, {
           eventType: 'decision_required',

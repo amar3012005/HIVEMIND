@@ -108,7 +108,10 @@ export class ProfileDreamer {
     const _remoteDream = orgIsRemote(orgId);
     const _dreamExcl = ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge'];
     const raw = _remoteDream
-      ? ((await remoteList(orgId, { user_id: userId, memory_type: ['fact', 'decision', 'preference', 'goal'], is_latest: true }, null, RAW_TAKE))?.memories || [])
+      // Background pass: tolerate a shard error rather than aborting the dream. remoteList now THROWS
+      // on failure (an empty list was indistinguishable from an empty workspace), so tolerance here
+      // must be explicit.
+      ? ((await remoteList(orgId, { user_id: userId, memory_type: ['fact', 'decision', 'preference', 'goal'], is_latest: true }, null, RAW_TAKE).catch((e) => { console.warn(`[profile-dreamer] remote list unavailable org=${orgId}: ${e.message}`); return null; }))?.memories || [])
           // NOTE: self-host 'summary' company rows aren't tag-filterable through
           // remoteList; kept out of the remote lane to avoid pulling all
           // summaries. Central onboarding (the common path) gets company facts
@@ -172,7 +175,7 @@ export class ProfileDreamer {
       try {
         // Remote (self-host): pull conversation rows from the agent, mapped to the same fields.
         const tx = _remoteDream
-          ? ((await remoteList(orgId, { user_id: userId, memory_type: ['conversation'], is_latest: true }, null, TRANSCRIPT_TAKE))?.memories || [])
+          ? ((await remoteList(orgId, { user_id: userId, memory_type: ['conversation'], is_latest: true }, null, TRANSCRIPT_TAKE).catch(() => null))?.memories || [])
               .map((m) => ({
                 id: m.memory_id || m.id,
                 content: m.content || '',

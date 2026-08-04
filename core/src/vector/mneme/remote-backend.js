@@ -170,7 +170,17 @@ export async function remoteHydrate(orgId, ids) {
 // Filtered enumeration from the agent (listMemories for remote orgs). Returns { memories, cursor }.
 export async function remoteList(orgId, filter, cursor, limit, offset = 0) {
   try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
-  catch (e) { console.warn(`[mneme/remote] list failed org=${orgId}: ${e.message}`); return { memories: [], cursor: null }; }
+  catch (e) {
+    // NEVER TURN A FAILED READ INTO AN EMPTY ONE. This returned `{ memories: [] }` on any error, so a
+    // transient shard-lock collision rendered a tenant's Memories page EMPTY — visually identical to
+    // owning no memories, with only a console warning to tell them apart. That is the same defect
+    // shape as a document logged `indexed` with zero memories, or `200 []` from a broken dependency:
+    // the caller cannot distinguish "nothing here" from "I could not look".
+    // Throw, so the route answers an error and the UI can say so. A caller that genuinely wants a
+    // best-effort empty list must opt into that by catching this itself.
+    console.error(`[mneme/remote] list FAILED org=${orgId}: ${e.message} — surfacing as an error, not an empty list`);
+    throw new Error(`memory list unavailable for this workspace: ${e.message}`);
+  }
 }
 
 // Hard or soft delete of a memory row + vector + edges + versions + tombstone on the agent.

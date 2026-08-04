@@ -3737,7 +3737,22 @@ Every item must include a non-empty content field and one or more valid support_
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
         const _tExtract = Date.now();
-        let uBudget = DOC_CAP;
+        // EVERY WINDOW GETS READ. DOC_CAP caps FACTS, but it was also the gate on whether a window was
+        // sent to the LLM at all (`while (wi < len && uBudget > 0)`), so once earlier windows consumed
+        // it the tail was never looked at — measured live: "TAIL DROPPED: 1 of 6 windows never sent to
+        // the LLM (budget 30 exhausted)" on a 12175-char document, where DOC_CAP floors at 30. Those
+        // facts then exist in NO layer and are unrecoverable without a re-ingest, since nothing
+        // records WHICH window was skipped. Capping output is legitimate; declining to read part of
+        // the document is data loss.
+        // Floor the budget so every window is guaranteed a minimum grant. This only raises the cap
+        // for documents with many windows — precisely the case where the flat floor of 30 was wrong.
+        const MIN_FACTS_PER_WINDOW = Number(process.env.KB_MIN_FACTS_PER_WINDOW || 3);
+        const _budgetFloor = uWindows.length * MIN_FACTS_PER_WINDOW;
+        if (_budgetFloor > DOC_CAP) {
+          console.log(`[kb-unified] doc_cap ${DOC_CAP} raised to ${_budgetFloor} `
+            + `(${uWindows.length} windows x ${MIN_FACTS_PER_WINDOW} min) so no window is skipped`);
+        }
+        let uBudget = Math.max(DOC_CAP, _budgetFloor);
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
           while (wi < uWindows.length && uBudget > 0) {
             const w = { ...uWindows[wi++] };

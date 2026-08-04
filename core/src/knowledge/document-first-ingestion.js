@@ -59,6 +59,25 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal
  * chunk carried a heading there is no structure to report and null is the honest answer.
  * Defined here, not imported, for the same load-order reason as the cleaner above.
  */
+// A segment's display HEADING, falling back to the last component of its heading_path.
+// Measured: 16 of 16 segments carried `heading_path` while only 2 carried `heading`, so the
+// «filename : heading» prefix — an explicit owner requirement — appeared on just 2 of 30 memories
+// even though the segmentation had the structure all along. heading_path is authoritative and
+// inherited; its deepest component IS the heading of that segment ("Kapitel 1 > Preise" -> "Preise").
+export function segmentHeading(segment) {
+  const m = segment?.metadata || {};
+  if (m.heading) return String(m.heading);
+  const path = m.heading_path;
+  const parts = Array.isArray(path)
+    ? path
+    : (typeof path === 'string' ? path.split('>') : []);
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const p = String(parts[i] || '').trim();
+    if (p) return p;
+  }
+  return null;
+}
+
 export function markdownFromHeadedChunks(chunks) {
   const list = Array.isArray(chunks) ? chunks : [];
   const out = [];
@@ -3708,8 +3727,10 @@ Every item must include a non-empty content field and one or more valid support_
       const targets = winChunks.map((content, i) => ({
         segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
         content,
-        heading: null,
-        page: null,
+        // The SECOND of the "TWO places" the comment below refers to: still hardcoded null, so any
+        // document taking this fallback path lost its headings entirely.
+        heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
+        page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
         maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * FACTS_PER_K))),
         scope: metadata.scope,
         visibility: metadata.visibility,
@@ -3780,7 +3801,7 @@ Every item must include a non-empty content field and one or more valid support_
             // was `heading: null, page: null` — hardcoded, in TWO places, so the extractor
             // saw window text + filename only. Subject-less claims and ungrounded
             // importance both trace back to here.
-            heading: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.metadata?.heading || null,
+            heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
             page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
             maxFacts: Math.max(1, Math.min(UWMAX, Math.round((content.length / 1000) * UFPK))),
             scope: metadata.scope, visibility: metadata.visibility,

@@ -1094,18 +1094,22 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // separating 0.00-0.40 from 0.75-1.00. Directional instrumentation, not proof.
       const _norm = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)
         .filter((t) => t.length > 3 && /\p{L}/u.test(t));
+      const _langThreshold = Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.45);
       let _suspect = 0;
       for (const f of rawFacts) {
         const t = new Set(_norm(f?.t || f?.content));
         const q = _norm(f?.f || f?.source_quote);
         if (!t.size || q.length < 4) continue;   // too short to judge — say nothing
         const shared = q.filter((w) => t.has(w)).length / q.length;
-        if (shared < Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.45)) _suspect += 1;
+        if (shared < _langThreshold) _suspect += 1;
       }
       if (_suspect) {
-        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${rawFacts.length} facts share <15% of `
-          + `tokens with their own source quote — likely translated away from the section's language, `
-          + `which the prompt forbids. Facts kept; this is a measurement, not a filter.`);
+        // Print the ACTUAL threshold, not a literal. The first version hardcoded "<15%" while the
+        // threshold had already moved to 0.45, so the log understated the bar it was applying.
+        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${rawFacts.length} facts share under `
+          + `${Math.round(_langThreshold * 100)}% of tokens with their own source quote — likely `
+          + `translated away from the section's language, which the prompt forbids. Facts kept; this `
+          + `is a measurement, not a filter.`);
       }
     }
     // ATOMICITY. Measured on a real ingest: 23 of 29 claims were already single-sentence,

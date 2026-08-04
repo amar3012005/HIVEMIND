@@ -39,6 +39,24 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+// BINARY SNIFF — one definition, used by every tier that might be handed bytes it cannot parse.
+// Ratio of NULs and C0 control characters (excluding tab/newline/CR) to total length. A ZIP or PDF
+// container runs far above the threshold; UTF-8 prose sits at zero. Deliberately NOT a mime check:
+// the failure this exists to stop was a .pptx whose bytes were stringified regardless of its mime.
+export function binaryRatio(text) {
+  const s = String(text || '');
+  if (!s.length) return 0;
+  let bad = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c === 0 || (c < 32 && c !== 9 && c !== 10 && c !== 13) || c === 0xFFFD) bad += 1;
+  }
+  return bad / s.length;
+}
+export function looksBinary(text, threshold = Number(process.env.KB_BINARY_RATIO_THRESHOLD || 0.02)) {
+  return binaryRatio(text) > threshold;
+}
+
 const INTRA_WINDOW_REL_TYPES = ['Extends', 'Mentions', 'Contradicts', 'Updates', 'Derives'];
 // Derives is INFERRED: it gets metadata.inferred=true at write time, is barred from
 // grounded citation, and must never drive supersession — an inferred fact cannot
@@ -2904,7 +2922,9 @@ Every item must include a non-empty content field and one or more valid support_
               success: true,
               engine: parseOk ? 'docling' : 'docling-chunks-only',
               text: synthesizedText,
-              markdown: doclingResult.markdown || synthesizedText,
+              // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise NULL, so a
+              // consumer can tell "no structure available" from "structure that happens to be flat".
+              markdown: doclingResult.markdown || null,
               structure: doclingResult.json,
               tables: doclingResult.tables || [],
               pages: doclingResult.pages || [],
@@ -2921,12 +2941,39 @@ Every item must include a non-empty content field and one or more valid support_
         }
       }
 
-      // Fallback to existing parsers
+      // LAST RESORT. This used to `return { success: true, text: fileBuffer.toString('utf-8') }`
+      // under a comment claiming it fell back "to existing parsers" — it called no parser at all,
+      // it stringified the raw bytes and declared success. Measured damage in production: 4
+      // documents (2 branding PDFs where the vision tier failed, 2 PPTX) produced 642 segments of
+      // which 636 (99%) were the raw ZIP/PDF container, then chunked, embedded and indexed into a
+      // tenant's Qdrant collection. A tier that cannot parse must FAIL, loudly — turning failure
+      // into plausible-looking text is how this stayed invisible for 12 days.
+      const _asText = fileBuffer.toString('utf-8');
+      if (looksBinary(_asText)) {
+        const _pct = Math.round(100 * binaryRatio(_asText));
+        return {
+          success: false,
+          engine: 'unparsed',
+          text: '',
+          markdown: null,
+          wordCount: 0,
+          error: `no parser produced text for ${filename || 'this file'} and the raw bytes are `
+            + `${_pct}% non-text (binary container). Nothing was indexed. Likely causes: the format `
+            + `needs docling (docx/pptx/xlsx/odt/rtf/epub) and DOCLING_URL is unset or docling `
+            + `failed, or a PDF needed the vision tier and it errored. Check the tier logs for this `
+            + `upload rather than re-uploading.`,
+          metadata: { binary_ratio: binaryRatio(_asText) },
+        };
+      }
       return {
         success: true,
-        engine: 'fallback',
-        text: fileBuffer.toString('utf-8'),
-        wordCount: fileBuffer.toString('utf-8').split(/\s+/).length,
+        engine: 'plain-text',
+        text: _asText,
+        // ITEM 3: markdown is NULL unless it really is markdown. It must never alias flat text —
+        // ingestion prefers `parseResult.markdown`, so aliasing made a flat tier claim structure it
+        // does not have, and the chunker's '#' section detection then found nothing.
+        markdown: /(^|\n)#{1,6}\s/.test(_asText) ? _asText : null,
+        wordCount: _asText.split(/\s+/).filter(Boolean).length,
         metadata: {}
       };
     } catch (error) {

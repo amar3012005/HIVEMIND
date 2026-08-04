@@ -31,70 +31,32 @@ const CHUNK_CONFIG = {
  * Parse a file buffer into raw text based on mime type.
  */
 export async function parseFile(buffer, mimeType, filename) {
+  // ROUTED THROUGH THE ONE SEAM. This function used to carry its OWN extraction for pdf/docx/csv
+  // plus a catch-all `buffer.toString('utf-8')`, making it a SECOND source of format truth beside
+  // server.js's tier chain. That duplication is what let the same PPTX ingest as 270 segments on one
+  // path and 13 on the other, and what made a DOCX heading fix land here — on a path only
+  // /api/enterprise/upload/detect calls — and do nothing for real uploads.
+  //
+  // The seam owns format knowledge and the markdown contract. PDF keeps its dedicated extractor
+  // because it returns page structure this caller uses; everything else defers.
   const ext = (filename || '').split('.').pop()?.toLowerCase();
-
-  // PDF
   if (mimeType === 'application/pdf' || ext === 'pdf') {
     return extractPdfDocument(buffer, filename);
   }
-
-  // DOCX
-  if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') {
-    const mammothMod = await import('mammoth');
-    const mammoth = mammothMod.default || mammothMod;
-    // NORMALISE TO MARKDOWN. This used mammoth.extractRawText, which discards structure BY DESIGN —
-    // Word's Heading 1/2/3 styles came out as ordinary lines. Measured corpus-wide: docx segments
-    // carried a markdown heading 0 of 60 times (0%), against 100% for .md and 28% for pdf. The
-    // canonical chunker detects sections from '#', so a format that never emits '#' can never produce
-    // a heading_path, and every downstream consumer (heading_path, the «filename : heading» memory
-    // prefix, section-aware ranking) silently degrades for that whole format.
-    // convertToHtml preserves the heading styles; the <hN> -> '#' mapping below is the only
-    // conversion needed for the chunker to treat DOCX exactly like markdown.
-    let text = '';
-    try {
-      const html = await mammoth.convertToHtml({ buffer });
-      text = String(html?.value || '')
-        .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lvl, inner) => `\n\n${'#'.repeat(Number(lvl))} ${inner.replace(/<[^>]+>/g, '').trim()}\n\n`)
-        .replace(/<\/(p|div|li|tr)>/gi, '\n')
-        .replace(/<li[^>]*>/gi, '- ')
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-    } catch (e) {
-      // Never fail an upload over formatting: fall back to the old flat extraction, and SAY that
-      // headings are gone rather than letting the format silently lose them.
-      console.warn(`[docx] convertToHtml failed (${e.message}) — falling back to raw text; headings lost`);
-      const raw = await mammoth.extractRawText({ buffer });
-      text = String(raw?.value || '');
-    }
-    return {
-      text,
-      metadata: { title: filename },
-    };
+  const { normalize } = await import('./normalize.js');
+  const out = await normalize(buffer, { mime: mimeType || '', filename });
+  if (!out.ok) {
+    // Fail loudly. The predecessor returned success with raw bytes as "text".
+    const err = new Error(out.error || 'unparseable file');
+    err.code = 'UNPARSEABLE';
+    err.tier = out.tier;
+    err.meta = out.meta;
+    throw err;
   }
-
-  // CSV
-  if (mimeType === 'text/csv' || ext === 'csv') {
-    const text = buffer.toString('utf-8');
-    const lines = text.split('\n');
-    const headers = lines[0] || '';
-    return {
-      text: String(text),
-      metadata: {
-        title: filename,
-        headers: headers.split(',').map(h => h.trim()),
-        rowCount: lines.length - 1,
-      },
-    };
-  }
-
-  // TXT, MD, and fallback
-  const text = buffer.toString('utf-8');
   return {
-    text: String(text),
-    metadata: { title: filename },
+    text: out.text,
+    markdown: out.markdown,
+    metadata: { title: filename, tier: out.tier, ...(out.meta || {}) },
   };
 }
 

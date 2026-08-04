@@ -1607,7 +1607,8 @@ if (process.env.DOCLING_URL) {
               : [{ text: transcript.trim(), headings: [filename], page: 1 }];
             console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
             return {
-              text: transcript, markdown: transcript, json: { segments, language: t.language },
+              // whisper transcript — prose, no structure
+              text: transcript, markdown: null, json: { segments, language: t.language },
               tables: [], pages: 1, confidence: null, error: null,
               hybridChunks, chunkerError: null, engine: `stt-${t.provider}`,
             };
@@ -1648,7 +1649,8 @@ if (process.env.DOCLING_URL) {
               }
               console.log(`[docling-adapter] tier=plain-text file=${filename} chars=${raw.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
-                text: raw, markdown: raw, json: null,
+                // plain text / md passthrough — markdown only if it has #
+                text: raw, markdown: /(^|\n)#{1,6}\s/.test(raw) ? raw : null, json: null,
                 tables: [], pages: 1, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'plain-text',
               };
@@ -1716,7 +1718,8 @@ if (process.env.DOCLING_URL) {
               console.log(`[docling-adapter] tier=sheet-direct file=${filename} sheets=${tables.length} `
                 + `rows=${tables.reduce((n, t) => n + t.rows.length, 0)} ms=${Date.now() - tParse}`);
               return {
-                text: md, markdown: md, json: null, tables,
+                // sheet-direct — builds real markdown tables
+                text: md, markdown: md /* real markdown tables */, json: null, tables,
                 pages: tables.length, confidence: null, error: null,
                 hybridChunks: [], chunkerError: null, engine: 'sheet-direct',
               };
@@ -1744,7 +1747,8 @@ if (process.env.DOCLING_URL) {
               }
               console.log(`[docling-adapter] tier=csv file=${filename} rows=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
-                text: raw, markdown: raw, json: { headers, rowCount: hybridChunks.length },
+                // csv — pipe rows, not markdown headings
+                text: raw, markdown: null, json: { headers, rowCount: hybridChunks.length },
                 tables: [{ sheet: 'sheet1', headers, rows: lines.slice(1).map(l => l.split(delim)) }],
                 pages: 1, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'csv-direct',
@@ -1883,7 +1887,8 @@ if (process.env.DOCLING_URL) {
               // either. The fix existed; it was simply not wired to this tier.
               const _ft = collapseLetterSpacing(fast.text || '');
               return {
-                text: _ft, markdown: _ft, json: null,
+                // fast-pdf — flat text layer, no structure
+                text: _ft, markdown: null, json: null,
                 tables: [], pages: fast.pages, confidence: null, error: null,
                 hybridChunks: hybridChunks.map((c) => ({ ...c, text: collapseLetterSpacing(c.text || '') })),
                 chunkerError: null, engine: 'pdf-parse',

@@ -88,7 +88,14 @@ const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 400
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
-const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 3_000);
+// Retrieval budget. 3000ms was BELOW this system's own measured retrieval latency: a cold recall
+// runs to ~2600ms (keep-warm brings the warm floor to ~640ms, which is remote-Qdrant-bound), and
+// evidence retrieval alone measured 258-967ms warm. So a cold turn had ~400ms of headroom for every
+// hop combined and fell off the deadline — which is what produced a real "I don't have anything in
+// my memory" for a topic the workspace DID hold, answered correctly on the retry seconds later.
+// A slow answer is recoverable; a confident false negative is not, and the turn budget (60s) bounds
+// the worst case anyway. Tune down only with a measurement, not a guess.
+const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 12_000);
 
 // Model split:
 //   • structured intent planning uses Gemini 2.5 Flash-Lite;
@@ -839,6 +846,16 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     relationships: [...edgesByKey.values()],
     co_mentions: coMentions,
   });
+  // DID RETRIEVAL ACTUALLY RUN? A hop that dies on the deadline is caught per-hop and contributes
+  // nothing, which is indistinguishable downstream from "the workspace holds nothing" — and that is
+  // exactly what shipped to a user: a recall timed out and the answer stated the topic "doesn't
+  // appear in any source so far", while the very next attempt returned 5 memories + 8 evidence.
+  // A false negative asserted as fact is the worst thing this pipeline can emit.
+  // Derived from the steps ACTUALLY executed, never from intent, so it reports what happened.
+  coverage = {
+    ...coverage,
+    retrieval_timed_out: steps.some((s) => /recall deadline exceeded/.test(s?.result_summary || '')),
+  };
   if (plan.operation === 'relation_between' && relationChecked) {
     coverage = {
       ...coverage,
@@ -1177,6 +1194,23 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
   }
 
   const topic = String(message || '').replace(/^\s*\[[^\]]*\]\s*/, '').slice(0, 80);
+
+  // A TIMEOUT IS NOT AN ABSENCE. If retrieval never completed we know nothing about whether the
+  // workspace holds an answer, so claiming the topic "doesn't appear in any source" is a fabricated
+  // negative — and it is not hypothetical: a user asked a question whose answer WAS stored, the
+  // lookup exceeded its budget, and this branch told them nothing was there. Say what happened and
+  // invite a retry, which is what actually works. Mirrors sourceUnavailableResponse below, which
+  // already distinguishes "could not retrieve" from "not present".
+  if (evidence?.coverage?.retrieval_timed_out) {
+    const timeoutResponses = {
+      de: `Die Suche in meinem Gedaechtnis hat zu lange gedauert und wurde abgebrochen — ich habe also NICHT festgestellt, dass es dazu nichts gibt. Frag einfach noch einmal; meistens klappt es beim zweiten Versuch.`,
+      fr: `La recherche dans ma memoire a depasse le temps imparti et a ete interrompue — je n'ai donc PAS etabli qu'il n'y a rien a ce sujet. Repose la question, cela aboutit generalement au second essai.`,
+      es: `La busqueda en mi memoria tardo demasiado y se cancelo — asi que NO he comprobado que no haya nada sobre esto. Preguntame otra vez; normalmente funciona en el segundo intento.`,
+      en: `My memory lookup took too long and was cut off, so I have NOT established that there's nothing on this — I simply didn't get an answer back in time. Ask me again; it usually succeeds on the second attempt.`,
+    };
+    return timeoutResponses[lang] || timeoutResponses.en;
+  }
+
   const responses = {
     de: `Dazu habe ich noch nichts in meinem Gedaechtnis — "${topic}" taucht bisher in keiner Quelle auf. Lade ein Dokument hoch oder erzaehl mir kurz davon, dann merke ich es mir und kann beim naechsten Mal antworten.`,
     fr: `Je n'ai encore rien en memoire a ce sujet — "${topic}" n'apparait dans aucune source pour l'instant. Importe un document ou raconte-le-moi, je m'en souviendrai la prochaine fois.`,

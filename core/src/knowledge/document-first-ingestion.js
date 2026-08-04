@@ -124,7 +124,12 @@ async function classifyKnowledgeDocument(text, filename) {
   try {
     const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'deepseek/deepseek-v4-flash-0731';
     const parsed = await chatCompletion({
-      model, temperature: 0, max_tokens: 256, json_mode: true, feature: 'kb-document-type',
+      // 256 -> 1200. Same trap as v5-claim-structuring: this budget was tuned to gpt-oss, and
+      // deepseek emits many more tokens for the same tiny JSON, so 256 truncates it and the parse
+      // fails. The output is one {type, confidence} object; headroom is free when the model stops on
+      // its own. A model swap must re-check every token budget that was sized for the old model.
+      model, temperature: 0, max_tokens: Number(process.env.KB_DOCUMENT_TYPE_MAX_TOKENS || 1200),
+      json_mode: true, feature: 'kb-document-type',
       messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
     });
     const confidence = Number(parsed.confidence);
@@ -515,7 +520,17 @@ subject+predicate identify the claim across paraphrases and languages (normalize
               models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
                 || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
                 .split(',').map((x) => x.trim()).filter(Boolean)],
-              temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
+              // max_tokens 800 -> 2500. THE MODEL SWAP MADE THE OLD CAP A 100% FAILURE. Measured on
+              // the first .amr upload after moving to deepseek-v4-flash: EVERY call returned
+              // `completion=800 finish=length` — exactly the cap — so the JSON was always truncated,
+              // always failed to parse, and always fell through to gpt-oss-120b. That is strictly
+              // worse than before the swap: two LLM calls per claim instead of one, for the same
+              // output. deepseek emits far more tokens than gpt-oss for the same task, so a budget
+              // tuned to gpt-oss silently became a guaranteed truncation.
+              // The output here is a tiny {subject, predicate, qualifiers} object; the headroom costs
+              // nothing when the model stops on its own (observed completion=729 finish=stop).
+              temperature: 0, max_tokens: Number(process.env.KB_CLAIM_STRUCTURING_MAX_TOKENS || 2500),
+              json_mode: true, feature: 'v5-claim-structuring',
               messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
             });
             const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';

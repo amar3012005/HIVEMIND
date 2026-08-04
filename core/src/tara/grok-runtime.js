@@ -35,6 +35,21 @@ async function loadGrokVoices() {
   }
 }
 
+async function loadDeepgramVoices() {
+  const base = (process.env.TARA_DEEPGRAM_INTERNAL_URL || 'http://tara-deepgram:8091').replace(/\/$/, '');
+  try {
+    const response = await fetch(`${base}/voices`, { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`adapter ${response.status}`);
+    const data = await response.json();
+    const voices = Array.isArray(data?.voices) ? data.voices.filter((voice) => voice && voice.id) : [];
+    if (!voices.length) throw new Error('empty roster');
+    return voices.map((voice) => ({ ...voice, provider: 'deepgram' }));
+  } catch (error) {
+    console.warn('[tara] Deepgram voice catalog unavailable:', error.message);
+    return [];
+  }
+}
+
 const GROK_CONFIG_KEYS = new Set([
   'model', 'voice_id', 'language', 'reasoning_effort', 'output_speed', 'keyterms',
   'pronunciation_replacements', 'vad_threshold', 'vad_silence_duration_ms',
@@ -223,7 +238,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     if (pathname === '/api/tara/voices' && method === 'GET') {
       const provider = url.searchParams.get('provider') || (await configFor(orgId)).defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
-      const voices = provider === 'grok' ? await loadGrokVoices() : [];
+      const voices = provider === 'grok' ? await loadGrokVoices() : await loadDeepgramVoices();
       const languages = [...new Set(voices.flatMap((voice) => Array.isArray(voice?.languages)
         ? voice.languages : voice?.language ? [voice.language] : []))];
       return reply(res, { provider, voices, languages, delegated: provider !== 'grok' });

@@ -7,6 +7,7 @@ import { createRuntimeInputAdapter } from './runtime-input.js';
 import { createChildPlaybookAdapter } from './child-playbook.js';
 import { createRuntimeJournalAdapter } from './runtime-journal.js';
 import { createLeadTimelineAdapter } from './lead-timeline.js';
+import { createBrowserAdminCheckinAdapter } from './browser-admin-checkin.js';
 
 export function createProductionRuntimeAdapterRegistry({ prisma, getService = () => null } = {}) {
   const registry = new RuntimeAdapterRegistry();
@@ -18,5 +19,6 @@ export function createProductionRuntimeAdapterRegistry({ prisma, getService = ()
   registry.register(createChildPlaybookAdapter({ prisma, getService }));
   registry.register(createRuntimeJournalAdapter({ prisma }));
   registry.register(createLeadTimelineAdapter({ prisma }));
+  registry.register(createBrowserAdminCheckinAdapter());
   return registry;
 }

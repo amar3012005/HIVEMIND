@@ -1,0 +1,38 @@
+{
+  "playbook_id": "marketing.strategy-to-growth-brief",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "Marketing strategy to growth brief",
+  "description": "A preparation-only Marketing Room lifecycle for forming a source-backed positioning, audience, offer, channel, and measurement strategy before selecting downstream motions.",
+  "metadata": {
+    "owner_room_tag": "marketing",
+    "supported_actions": ["formulate_go_to_market_strategy"],
+    "purpose": "Use when the evidence is insufficient to select a trustworthy downstream motion without first forming a bounded marketing strategy.",
+    "terminal_states_by_action": {"formulate_go_to_market_strategy": ["strategy_ready", "strategy_needs_evidence", "cancelled"]}
+  },
+  "input_contract": {"fields": [
+    {"path": "context.company", "type": "object", "required": true},
+    {"path": "context.baseline", "type": "object", "required": true},
+    {"path": "request.instruction", "type": "string", "required": true}
+  ]},
+  "initial_stage_id": "form_strategy",
+  "terminal_states": ["strategy_ready", "strategy_needs_evidence", "cancelled"],
+  "stages": [
+    {
+      "id": "form_strategy",
+      "objective": "Use the Marketing Room's normal Director, skills, sources, specialist discussion, and synthesis to form a source-backed strategy artifact. Cover positioning, audience, offer framing, channel rationale, expected outcome, risks, measures, dependencies, and recommended next motions. Do not create a provider action.",
+      "input_refs": ["context.company", "context.baseline", "context.request", "context.policy"],
+      "expected_artifacts": ["marketing_strategy"],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v2", "phase_kind": "strategy"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "marketing_strategy", "value": 1},
+        {"predicate": "is_source_backed", "select": "marketing_strategy"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy", "path": "data.positioning"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy", "path": "data.recommended_next_motions"}
+      ],
+      "transitions": [{"default": true, "to_terminal": "strategy_ready"}],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    }
+  ]
+}

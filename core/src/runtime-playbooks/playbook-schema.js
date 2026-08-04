@@ -137,6 +137,21 @@ export const runtimePlaybookSchema = {
               releases_execution_slot: { type: 'boolean' },
             },
           },
+          presentation: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              waiting: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  title: { type: 'string', minLength: 1, maxLength: 240 },
+                  summary: { type: 'string', minLength: 1, maxLength: 2000 },
+                  next_action: { type: 'string', minLength: 1, maxLength: 160 },
+                },
+              },
+            },
+          },
           transitions: { type: 'array', minItems: 1, items: transitionSchema },
           on_failure: { enum: ['REPAIR', 'ESCALATE', 'TERMINATE'] },
           max_attempts: { type: 'integer', minimum: 1, maximum: 20 },

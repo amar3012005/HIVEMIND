@@ -291,7 +291,7 @@ function projectGrowthBrief(baselineArtifact, planArtifact) {
   };
 }
 
-export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, tasks, recognitionEvents }) {
+export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, tasks, recognitionEvents, adminCheckin = null }) {
   if (!runtime) return null;
   const recognition = (recognitionEvents || []).map((row) => ({
     sequence: String(row.sequence),
@@ -313,6 +313,8 @@ export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, ta
     || (firstLife?.status === 'NEEDS_ATTENTION' && !growthBrief && opportunities.length === 0);
   let phase = 'ACKNOWLEDGED';
   if (planningEvidenceMissing) phase = 'NEEDS_EVIDENCE';
+  else if (adminCheckin?.status === 'WAITING_EVENT' && adminCheckin?.currentStageId === 'capture_admin_choice') phase = 'AWAITING_ADMIN_CHECKIN';
+  else if (adminCheckin && !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(adminCheckin.status))) phase = 'RECOGNIZING';
   else if (firstLife?.status === 'AWAITING_START' || firstLife?.status === 'REVIEW_LATER') phase = 'AWAITING_START';
   else if (firstLife) phase = 'OPERATING';
   else if (growthBrief) phase = 'PLANNING';
@@ -325,6 +327,13 @@ export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, ta
     opportunities,
     recommendation,
     can_start: phase === 'AWAITING_START' && recommendation?.status === 'PROPOSED',
+    admin_checkin: adminCheckin ? {
+      run_id: adminCheckin.id,
+      status: adminCheckin.status,
+      stage: adminCheckin.currentStageId,
+      waiting_for: adminCheckin.waitingFor || null,
+      terminal_state: adminCheckin.terminalState || null,
+    } : null,
     waiting_reason: planningEvidenceMissing ? 'planning_evidence'
       : firstLife?.waiting_reason || null,
   };
@@ -787,8 +796,11 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         }) || null;
         const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns });
         const growthBrief = projectGrowthBrief(baselineArtifact, currentPlanArtifact);
+        const adminCheckin = playbookRuns.find((run) => run.playbookId === 'operations.browser-admin-checkin-to-status'
+          && run.trigger?.first_life_admin_checkin === true
+          && String(run.trigger?.runtime_epoch || '') === String(runtime.epoch)) || null;
         const firstLifeExperience = projectFirstLifeExperience({
-          runtime, firstLife, growthBrief, tasks: agentRuntimeTasks, recognitionEvents,
+          runtime, firstLife, growthBrief, tasks: agentRuntimeTasks, recognitionEvents, adminCheckin,
         });
         return jsonResponse(res, {
           work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions,
@@ -808,6 +820,55 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const sprint = await projectCurrentActivationSprint({ prisma, orgId });
         const firstLife = sprint?.policy?.id === 'runtime.first-life-policy' ? sprint : null;
         return jsonResponse(res, { first_life: firstLife, sprint });
+      }
+
+      if (pathname === '/v1/hq/first-life/admin-checkin' && req.method === 'POST') {
+        const body = await parseBody(req).catch(() => ({}));
+        const decision = String(body.decision || '').trim().toLowerCase();
+        if (!['started', 'skipped', 'completed'].includes(decision)) {
+          return jsonResponse(res, { error: 'admin_checkin_decision_invalid' }, 400);
+        }
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const rows = await prisma.runtimePlaybookRun.findMany({
+          where: { orgId, playbookId: 'operations.browser-admin-checkin-to-status' },
+          orderBy: { updatedAt: 'desc' }, take: 12,
+        });
+        const run = rows.find((row) => row.trigger?.first_life_admin_checkin === true
+          && String(row.trigger?.runtime_epoch || '') === String(runtime.epoch)) || null;
+        if (!run) return jsonResponse(res, { error: 'admin_checkin_not_available' }, 409);
+        const sessionId = String(body.session_id || '').trim().slice(0, 256) || null;
+        if (['started', 'completed'].includes(decision) && !sessionId) {
+          return jsonResponse(res, { error: 'admin_checkin_session_required' }, 400);
+        }
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const eventType = `admin_checkin.${decision}`;
+        const resumed = await service.resumeEvent(run.id, orgId, {
+          id: `admin-checkin:${run.id}:${decision}:${sessionId || 'none'}`,
+          type: eventType,
+          data: { session_id: sessionId, correlation_ref: sessionId, runtime_epoch: runtime.epoch },
+        });
+        await appendHqEvent({
+          prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+          eventType: decision === 'skipped' ? 'decision' : 'observation',
+          title: decision === 'skipped' ? 'Internal check-in skipped' : decision === 'started' ? 'Internal check-in started' : 'Internal check-in received',
+          summary: decision === 'skipped'
+            ? 'Runtime retained the explicit skip and will form the first plan from the baseline evidence.'
+            : decision === 'started'
+              ? 'Runtime will wait for the exact browser conversation before it forms the first plan.'
+              : 'Runtime received the completed browser conversation and is preparing the source-backed internal status record.',
+          details: { admin_checkin_run_id: run.id, decision, session_id: sessionId },
+        });
+        if (['skipped', 'completed'].includes(decision)) {
+          await requestWake({
+            prisma, runtime, triggerType: 'runtime_playbook_result',
+            payload: { run_id: run.id, admin_checkin: true },
+            key: `first-life-admin-checkin:${run.id}:${decision}`,
+          });
+          Promise.resolve(wakeScheduler?.()).catch(() => {});
+        }
+        return jsonResponse(res, { ok: true, decision, run: projectRuntimePlaybookSnapshot(resumed) }, 202);
       }
 
       const firstLifeStartMatch = pathname.match(/^\/v1\/hq\/first-life\/([^/]+)\/(?:start|policy)$/);

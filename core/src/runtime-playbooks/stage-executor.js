@@ -120,6 +120,7 @@ function eventWait(stage, producedArtifacts) {
   }
   return {
     ...stage.waits_for_event,
+    presentation: asObject(stage.presentation?.waiting),
     types: stage.waits_for_event.types || [stage.waits_for_event.type],
     correlation_values: [...new Set(correlationValues)],
     correlation_value: correlationValues[0] ?? null,

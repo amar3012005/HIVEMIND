@@ -11,6 +11,39 @@
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
 
+/**
+ * Which SCOPE TIER does a document belong to, for display?
+ *
+ * `_accessibleDocumentWhere` below decides who MAY see a document. This answers the
+ * separate question the chat needs: which tier did this answer come FROM, so the UI can
+ * render "(memory found in <scope>)". Chat used to report scopes for the memory lane
+ * only, so an answer built purely from uploaded documents — exactly what a KB question
+ * hits — showed no provenance chip at all, even though the document carries the tag.
+ *
+ * Reuses the tag forms `_accessibleDocumentWhere` already matches, including the
+ * `scope-key:org:<uuid>` / legacy `scope-key:organization` pair. The upload writer emits
+ * exactly ONE scopeKey per document (scopeType is single-valued in
+ * upload-authorization.js), so this checks narrow→wide and takes the first match rather
+ * than trying to merge tiers.
+ *
+ * Untagged ⇒ 'personal'. That is not a guess: untagged documents are owner-only in
+ * `_accessibleDocumentWhere`'s bare `{ userId }` arm, so personal is what they ARE.
+ */
+export function documentScopeFromTags(tags, { orgId } = {}) {
+  const t = Array.isArray(tags) ? tags : [];
+  if (!t.length) return { scope: 'personal', projectId: null };
+  const find = (prefix) => t.find((x) => typeof x === 'string' && x.startsWith(prefix));
+  if (find('scope-key:personal:')) return { scope: 'personal', projectId: null };
+  const proj = find('scope-key:project:');
+  if (proj) return { scope: 'project', projectId: proj.slice('scope-key:project:'.length) || null };
+  if (find('scope-key:team:')) return { scope: 'team', projectId: null };
+  if (t.includes(`scope-key:org:${orgId}`) || t.includes('scope-key:organization')) {
+    return { scope: 'organization', projectId: null };
+  }
+  // Carries tags, but none of them a scope-key — same owner-only reality as untagged.
+  return { scope: 'personal', projectId: null };
+}
+
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
     this.db = db;
@@ -272,7 +305,10 @@ export class EvidenceRetrievalService {
               documentType: true,
               sourcePlatform: true,
               sourceUrl: true,
-              documentDate: true
+              documentDate: true,
+              // Scope lives ONLY in tags (segments have no scope column), so without
+              // this the delivered evidence could not say which tier answered.
+              tags: true
             }
           }
         }
@@ -281,7 +317,12 @@ export class EvidenceRetrievalService {
       // Step 3: Merge with vector scores and format
       const segmentMap = new Map(segments.map(s => [s.id, s]));
       
-      const fmt = (segment, score, lexical = false) => ({
+      const fmt = (segment, score, lexical = false) => {
+        // Derive the tier BEFORE dropping tags: the chip needs the scope, the client does
+        // not need the raw tag list (it would grow every citation payload for no gain).
+        const { tags: _docTags, ...documentPublic } = segment.document || {};
+        const { scope: _scope, projectId: _scopeProjectId } = documentScopeFromTags(_docTags, { orgId });
+        return {
         type: 'evidence_segment',
         segmentId: segment.id,
         documentId: segment.documentId,
@@ -289,7 +330,11 @@ export class EvidenceRetrievalService {
         snippet: this._extractSnippet(segment.content, query),
         score,
         ...(lexical ? { _lexical: true } : {}),
-        document: segment.document,
+        document: documentPublic,
+        // Which tier this evidence came from, so chat can report provenance for
+        // upload-answered turns the same way it already does for memories.
+        scope: _scope,
+        project_id: _scopeProjectId,
         metadata: {
           segmentType: segment.segmentType,
           segmentIndex: segment.segmentIndex,
@@ -306,7 +351,8 @@ export class EvidenceRetrievalService {
           heading_path: segment.metadata?.heading_path ?? null,
           depth: segment.depth ?? null,
         },
-      });
+        };
+      };
 
       const results = vectorResults
         .map(vr => {
@@ -371,7 +417,7 @@ export class EvidenceRetrievalService {
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },
               include: {
-                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
+                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
               },
               take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
             });

@@ -1906,10 +1906,17 @@ if (process.env.DOCLING_URL) {
         //     # Marktumfeld und Wettbewerb  /  ## Technische Daten
         // Word stores headings as styles, which convertToHtml preserves and extractRawText (and
         // docling, here) drop. HTML is the same story — <h1>-<h6> are already structure.
-        // Only these two formats: PDF keeps its probe/vision/fast-pdf chain, and PPTX/XLSX stay with
-        // docling because it reads their ZIP+XML natively and the seam deliberately refuses to guess.
+        // ALSO md/markdown/txt/text. Sending markdown THROUGH docling is self-defeating: the source
+        // already IS the target format, and re-parsing it discards the '#' headings it arrived with.
+        // Measured: 14 .md and 5 .txt documents took the docling path, and 55 of the 61 docling
+        // documents carry no heading_path at all. For these the seam returns markdown only when real
+        // headings are present and text with markdown:null otherwise, so nothing gains structure it
+        // did not have.
+        // PDF keeps its probe/vision/fast-pdf chain; PPTX/XLSX stay with docling because it reads
+        // their ZIP+XML natively (xlsx is additionally served by the earlier sheet-direct tier) and
+        // the seam deliberately refuses to guess at either. CSV stays on its existing tier.
         // On any failure this falls through to the docling chain below rather than failing the upload.
-        const _seamExts = String(process.env.KB_SEAM_FORMATS || 'docx,html,htm').split(',').map((x) => x.trim());
+        const _seamExts = String(process.env.KB_SEAM_FORMATS || 'docx,html,htm,md,markdown,txt,text').split(',').map((x) => x.trim());
         if (_seamExts.includes(ext)) {
           try {
             const { normalize: _normalize } = await import('./knowledge/normalize.js');

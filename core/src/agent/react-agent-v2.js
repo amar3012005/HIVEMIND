@@ -2625,7 +2625,13 @@ export async function runReactAgentV2({
       const tiers = new Set();          // 'personal' | 'organization' | 'team'
       const projectIds = new Set();     // distinct project ids seen
       const projectNames = new Set();   // project names already on the memory
-      for (const m of (evidence.memories || [])) {
+      // BOTH LANES, not just memories. An answer built purely from uploaded documents
+      // (a KB question — the evidence lane) has an empty `memories` BY DESIGN, so this
+      // reported no scope at all on exactly the turns where the answer came from an
+      // upload. Evidence segments now carry the tier derived from their document's
+      // scope-key tag (documentScopeFromTags in knowledge/evidence-retrieval.js), so the
+      // chip is accurate for uploads too. Same shape for both, so one loop covers them.
+      for (const m of [...(evidence.memories || []), ...(evidence.evidence || [])]) {
         const s = m && m.scope;
         if (!s) continue;
         if (s === 'project') {

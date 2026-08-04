@@ -45,6 +45,47 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal
 // the failure this exists to stop was a .pptx whose bytes were stringified regardless of its mime.
 // Same cleaner as the seam's sanitizeText, defined here because this module must not depend on the
 // seam's load order during ingestion. Keep the two in step.
+/**
+ * Rebuild markdown from docling's HYBRID CHUNKS.
+ *
+ * `engine=docling-chunks-only` means docling's PARSER failed while its CHUNKER succeeded.
+ * That path joined bare `chunk.text` and set `markdown: null` — yet every chunk carries
+ * `headings: string[]` (knowledge/enterprise/docling-adapter.js:302), which we already fetch
+ * and then threw away. Measured consequence: all 26 chunks-only documents (11 pdf / 8 docx /
+ * 5 xlsx / 2 pptx) were indexed with ZERO heading_path, so their citations can only ever say
+ * "page 3", never "1. Gesellschaftliche Gründe > Lebensqualität".
+ *
+ * Same contract as the seam: markdown or NULL, never flat text dressed as markdown. If no
+ * chunk carried a heading there is no structure to report and null is the honest answer.
+ * Defined here, not imported, for the same load-order reason as the cleaner above.
+ */
+export function markdownFromHeadedChunks(chunks) {
+  const list = Array.isArray(chunks) ? chunks : [];
+  const out = [];
+  let prev = [];
+  let emitted = false;
+  for (const c of list) {
+    const hs = (Array.isArray(c?.headings) ? c.headings : [])
+      .filter((h) => typeof h === 'string' && h.trim())
+      .map((h) => h.trim());
+    // Once an ANCESTOR changes every DESCENDANT must be re-emitted — otherwise a child
+    // reusing a name under a new parent (a "Preise" section in a second product chapter)
+    // silently inherits the previous parent's heading path.
+    let changed = false;
+    for (let i = 0; i < hs.length; i += 1) {
+      if (changed || hs[i] !== prev[i]) {
+        changed = true;
+        out.push(`${'#'.repeat(Math.min(6, i + 1))} ${hs[i]}`);
+        emitted = true;
+      }
+    }
+    prev = hs;
+    const t = String(c?.text || '').trim();
+    if (t) out.push(t);
+  }
+  return emitted ? out.join('\n\n') : null;
+}
+
 export function sanitizeSegmentText(text) {
   return String(text || '')
     .replace(/\u0000/g, '')
@@ -2931,9 +2972,13 @@ Every item must include a non-empty content field and one or more valid support_
               success: true,
               engine: parseOk ? 'docling' : 'docling-chunks-only',
               text: synthesizedText,
-              // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise NULL, so a
-              // consumer can tell "no structure available" from "structure that happens to be flat".
-              markdown: doclingResult.markdown || null,
+              // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise rebuild it
+              // from the chunk headings we already fetched (chunks-only = parser failed, chunker
+              // did not), and only then fall back to NULL — so a consumer can still tell "no
+              // structure available" from "structure that happens to be flat".
+              markdown: doclingResult.markdown
+                || markdownFromHeadedChunks(doclingResult.hybridChunks)
+                || null,
               structure: doclingResult.json,
               tables: doclingResult.tables || [],
               pages: doclingResult.pages || [],

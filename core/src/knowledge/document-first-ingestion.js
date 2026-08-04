@@ -43,6 +43,15 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal
 // Ratio of NULs and C0 control characters (excluding tab/newline/CR) to total length. A ZIP or PDF
 // container runs far above the threshold; UTF-8 prose sits at zero. Deliberately NOT a mime check:
 // the failure this exists to stop was a .pptx whose bytes were stringified regardless of its mime.
+// Same cleaner as the seam's sanitizeText, defined here because this module must not depend on the
+// seam's load order during ingestion. Keep the two in step.
+export function sanitizeSegmentText(text) {
+  return String(text || '')
+    .replace(/\u0000/g, '')
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/\uFFFD/g, '');
+}
+
 export function binaryRatio(text) {
   const s = String(text || '');
   if (!s.length) return 0;
@@ -3165,7 +3174,10 @@ Every item must include a non-empty content field and one or more valid support_
                     : 'paragraph';
 
             const base = {
-              documentId, userId, orgId, segmentType, content: text, contentHash,
+              // Control bytes never reach a segment, whichever tier produced the text. The seam sanitises
+      // its own output, but server.js's upload tier chain does not go through it yet, so this is the
+      // one place every tier's text converges before it is stored, embedded and indexed.
+      documentId, userId, orgId, segmentType, content: sanitizeSegmentText(text), contentHash,
               segmentIndex, previousSegmentId, depth: _hstack.length, startOffset, endOffset,
               startPage, endPage,
               wordCount: text.split(/\s+/).length,

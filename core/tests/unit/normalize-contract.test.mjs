@@ -13,7 +13,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalize, binaryRatio, looksBinary, htmlToMarkdown, asMarkdown } from '../../src/knowledge/normalize.js';
+import { normalize, binaryRatio, looksBinary, htmlToMarkdown, asMarkdown, sanitizeText } from '../../src/knowledge/normalize.js';
 
 const buf = (s) => Buffer.from(s, 'utf-8');
 
@@ -80,4 +80,19 @@ test('asMarkdown never invents structure', () => {
 
 test('htmlToMarkdown strips inline markup inside headings and decodes entities', () => {
   assert.match(htmlToMarkdown('<h2>R&amp;D <strong>plan</strong></h2>'), /^## R&D plan/);
+});
+
+test('low-ratio control bytes are SANITISED, not rejected — good text is never thrown away', async () => {
+  // Measured reality: docling occasionally emits stray C0 bytes inside otherwise-good text
+  // (0.1-2.5%). Rejecting those documents would lose real content; indexing them poisons search.
+  const noisy = `Solvis Umbausatz kostet 13.050 EUR\u0001 netto und die Teillast betraegt 3,7 kW.`;
+  const r = await normalize(Buffer.from(noisy, 'utf-8'), { filename: 'a.txt' });
+  assert.equal(r.ok, true, 'a few control bytes must not fail the document');
+  assert.equal(/[\u0001-\u0008]/.test(r.text), false, 'control bytes must be stripped from the text');
+  assert.match(r.text, /13\.050 EUR netto/, 'the real content survives intact');
+});
+
+test('sanitizeText keeps tab/newline/CR because the chunker reads them as structure', () => {
+  const out = sanitizeText('a\tb\nc\r\n\u0000\u0007d');
+  assert.equal(out, 'a\tb\nc\r\nd');
 });

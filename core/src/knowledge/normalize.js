@@ -43,6 +43,19 @@ export function looksBinary(text, threshold = Number(process.env.KB_BINARY_RATIO
   return binaryRatio(text) > threshold;
 }
 
+// REJECT above the threshold, SANITISE below it. Measured after purging the corrupt documents: 10
+// segments still carried control bytes — one at 34.6% (genuine garbage, which the threshold now
+// rejects) and the rest at 0.1-2.5%, which is stray C0 noise inside otherwise-good docling text.
+// Throwing away good text over a few bytes would be as wrong as indexing binary, so low-ratio input
+// is cleaned instead of refused. Tab/newline/CR are preserved — they carry the structure the chunker
+// reads.
+export function sanitizeText(text) {
+  return String(text || '')
+    .replace(/\u0000/g, '')
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/\uFFFD/g, '');
+}
+
 export function hasMarkdownHeading(text) {
   return /(^|\n)#{1,6}\s/.test(String(text || ''));
 }
@@ -89,7 +102,7 @@ export async function normalize(buffer, { mime = '', filename = '' } = {}) {
       const mammoth = mod.default || mod;
       const html = await mammoth.convertToHtml({ buffer });
       const md = htmlToMarkdown(html?.value || '');
-      if (md) return { ok: true, tier: 'mammoth-markdown', markdown: asMarkdown(md), text: md, meta: {} };
+      if (md) return { ok: true, tier: 'mammoth-markdown', markdown: asMarkdown(sanitizeText(md)), text: sanitizeText(md), meta: {} };
     } catch (e) {
       // Fall through to raw text rather than failing the upload, but SAY headings are gone.
       console.warn(`[normalize] docx convertToHtml failed (${e.message}) — headings lost for ${filename}`);
@@ -100,7 +113,7 @@ export async function normalize(buffer, { mime = '', filename = '' } = {}) {
       const raw = await mammoth.extractRawText({ buffer });
       const text = String(raw?.value || '');
       if (!text.trim()) return fail('mammoth', 'docx produced no text');
-      return { ok: true, tier: 'mammoth-raw', markdown: null, text, meta: { headings_lost: true } };
+      return { ok: true, tier: 'mammoth-raw', markdown: null, text: sanitizeText(text), meta: { headings_lost: true } };
     } catch (e) {
       return fail('mammoth', `docx unreadable: ${e.message}`);
     }
@@ -110,7 +123,7 @@ export async function normalize(buffer, { mime = '', filename = '' } = {}) {
   if (ext === 'html' || ext === 'htm' || mime.includes('text/html')) {
     const md = htmlToMarkdown(buffer.toString('utf-8'));
     if (!md.trim()) return fail('html', 'html produced no text');
-    return { ok: true, tier: 'html-markdown', markdown: asMarkdown(md), text: md, meta: {} };
+    return { ok: true, tier: 'html-markdown', markdown: asMarkdown(sanitizeText(md)), text: sanitizeText(md), meta: {} };
   }
 
   // Text-ish. Markdown only when it actually carries headings.
@@ -120,8 +133,9 @@ export async function normalize(buffer, { mime = '', filename = '' } = {}) {
       return fail('text', `declared ${ext || mime} but ${Math.round(100 * binaryRatio(text))}% of bytes are non-text`,
         { binary_ratio: binaryRatio(text) });
     }
+    const clean = sanitizeText(text);
     return { ok: true, tier: ext === 'md' || ext === 'markdown' ? 'markdown-native' : 'plain-text',
-      markdown: asMarkdown(text), text, meta: {} };
+      markdown: asMarkdown(clean), text: clean, meta: {} };
   }
 
   // Anything else (pdf, pptx, xlsx, odt, rtf, epub, images) belongs to the upload tier chain —
@@ -135,7 +149,8 @@ export async function normalize(buffer, { mime = '', filename = '' } = {}) {
       + `Office formats need docling (DOCLING_URL); PDFs route to vision or fast-pdf.`,
       { binary_ratio: binaryRatio(text) });
   }
-  return { ok: true, tier: 'plain-text', markdown: asMarkdown(text), text, meta: {} };
+  const clean = sanitizeText(text);
+  return { ok: true, tier: 'plain-text', markdown: asMarkdown(clean), text: clean, meta: {} };
 }
 
 export default normalize;

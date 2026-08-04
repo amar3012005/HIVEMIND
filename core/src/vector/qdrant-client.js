@@ -304,7 +304,17 @@ export class QdrantClient {
         team_id: memory.primary_team_id || null,
         memory_type: memory.memory_type,
         tags: memory.tags || [],
-        content: memory.content,
+        // ITEM 5 — PAYLOAD IS AN INDEX, NOT A SECOND COPY OF THE TEXT. This carried the FULL
+        // memory content: measured on the live collection, memory points averaged 1,277 bytes of
+        // payload with one sampled point holding 3,272 chars, while evidence points sat at 478
+        // because they already store only a preview. At million-document scale that is the single
+        // largest avoidable cost in the vector store, and it is pure duplication — recall hydrates
+        // every candidate from Postgres (persisted-retrieval.js: `if (!memory) return null` DROPS a
+        // candidate that fails to hydrate, so no row ever reaches the ranker without PG content).
+        // A bounded preview is kept because ranker.js and tara/prompt-builder.js read
+        // `payload.content` as a defensive fallback; truncating rather than removing keeps them
+        // working while cutting the bulk. Full text lives in Postgres, which is canonical.
+        content: String(memory.content || '').slice(0, Number(process.env.QDRANT_PAYLOAD_PREVIEW_CHARS || 400)),
         is_latest: memory.is_latest ?? true,
         created_at: memory.created_at || new Date().toISOString(),
         valid_from: memory.valid_from || null,
@@ -334,7 +344,7 @@ export class QdrantClient {
     if (orgIsRemote(memory.org_id)) {
       const _rrec = {
         id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
-        content: memory.content, title: memory.title || null, tags: memory.tags || [],
+        content: String(memory.content || '').slice(0, Number(process.env.QDRANT_PAYLOAD_PREVIEW_CHARS || 400)), title: memory.title || null, tags: memory.tags || [],
         memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
         layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
         cognitiveLayerRole: memory.cognitive_layer_role || null,
@@ -380,7 +390,7 @@ export class QdrantClient {
         try {
           const _rec = {
             id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
-            content: memory.content, title: memory.title || null, tags: memory.tags || [],
+            content: String(memory.content || '').slice(0, Number(process.env.QDRANT_PAYLOAD_PREVIEW_CHARS || 400)), title: memory.title || null, tags: memory.tags || [],
             memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
             layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'), deletedAt: null,
             cognitiveLayerRole: memory.cognitive_layer_role || null,
@@ -685,7 +695,8 @@ export class QdrantClient {
           project: memory.project,
           memory_type: memory.memory_type,
           tags: memory.tags || [],
-          content: memory.content,
+          // Bounded like the other payload writers — see the ITEM 5 note above; PG is canonical.
+          content: String(memory.content || '').slice(0, Number(process.env.QDRANT_PAYLOAD_PREVIEW_CHARS || 400)),
           is_latest: memory.is_latest ?? true,
           created_at: memory.created_at || new Date().toISOString(),
           valid_from: memory.valid_from || null,

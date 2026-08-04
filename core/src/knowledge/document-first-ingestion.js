@@ -2707,7 +2707,21 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
-    const promoted = await this._promoteMemories({
+    // EVIDENCE MUST SURVIVE A MEMORY FAILURE — the document and all of its segments (plus their
+    // embeddings) are ALREADY COMMITTED by this point, and segmentation is lossless while extraction
+    // is lossy. So a promotion failure must degrade to "evidence-only", never fail the document.
+    //
+    // Before this guard, `await this._promoteMemories(...)` was unwrapped: any throw propagated out
+    // of the whole ingest, the job was marked `failed`, and complete() never ran — so a document
+    // whose segments were perfectly intact and searchable REPORTED as a failed upload. The likely
+    // real-world consequence is worse than the cosmetic one: a user sees "failed", re-uploads, and
+    // now has two documents (the duplicate-rows report).
+    //
+    // Degrading here keeps the guarantee the SHORTFALL log already promises: "the verbatim text is
+    // still in segments, so evidence recall can answer them and synthesis cannot."
+    let promoted;
+    try {
+      promoted = await this._promoteMemoriesGuarded({
       documentId: knowledgeDoc.id,
       segments,
       userId,
@@ -2723,6 +2737,18 @@ Every item must include a non-empty content field and one or more valid support_
         tags: [...(metadata.tags || []), documentTypeTag],
       },
     });
+    } catch (err) {
+      // The document + segments are durable. Report evidence-only success.
+      console.error(`[kb-unified] PROMOTION FAILED doc=${String(knowledgeDoc.id).slice(0, 8)}: ${err.message}`);
+      console.error(`[kb-unified] DEGRADED TO EVIDENCE-ONLY — ${segments.length} segments are COMMITTED, `
+        + `embedded and searchable; the MEMORY lane is empty for this document. Evidence recall can `
+        + `answer from the verbatim text; synthesis and graph traversal cannot. The document is NOT a `
+        + `failed upload and must not be re-uploaded.`);
+      promoted = {
+        memories: [], candidates: [],
+        coverage: { promotion_failed: true, promotion_error: String(err.message).slice(0, 300) },
+      };
+    }
     this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
     this._structureClaimsAsync({ memories: promoted.memories, orgId });
     const _msPromote = Date.now() - _tPromote;
@@ -3828,6 +3854,9 @@ Every item must include a non-empty content field and one or more valid support_
    * Selective: only segments that represent reusable organizational truths
    * @private
    */
+  // Alias kept so the guarded call site reads as intent; implementation unchanged.
+  async _promoteMemoriesGuarded(args) { return this._promoteMemories(args); }
+
   async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default' }) {
     const candidates = [];
     const memories = [];

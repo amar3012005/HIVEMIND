@@ -336,7 +336,14 @@ export class NativeHqEngine {
       recentPostCount === 0 ? 'recent social activity' : null,
     ].filter(Boolean);
     if (missingEvidence.length) {
-      await event(prisma, runtime, cycle, {
+      const alreadyRecorded = await prisma.hqRuntimeEvent.findFirst({
+        where: {
+          runtimeId: runtime.id,
+          eventType: 'observation',
+          details: { path: ['baseline_id'], equals: context.evidence.baseline.id },
+        },
+      }).catch(() => null);
+      if (!alreadyRecorded) await event(prisma, runtime, cycle, {
         eventType: 'observation', title: 'I recorded the baseline evidence gaps',
         summary: `The initial position is usable only with limits. I could not observe ${missingEvidence.join(', ')}. I will not present those areas as measured; the next plan must treat them as unknowns and request access when the task depends on them.`,
         details: { missing_evidence: missingEvidence, website_pages: websitePages, social_accounts: socialAccountCount, recent_posts: recentPostCount, baseline_id: context.evidence.baseline.id },

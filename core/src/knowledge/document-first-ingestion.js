@@ -59,6 +59,60 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal
  * chunk carried a heading there is no structure to report and null is the honest answer.
  * Defined here, not imported, for the same load-order reason as the cleaner above.
  */
+/**
+ * LLM PROFILES — a task's MODEL and its TOKEN BUDGET are ONE decision, so they live in ONE place.
+ *
+ * Why this exists: these were seven independent env vars with `max_tokens` numbers scattered across
+ * the file, each tuned to whichever model was current when that line was written. Swapping the
+ * extraction model to deepseek-v4-flash silently invalidated two of them and produced a 100%
+ * truncation on the claim-structuring path — `completion=800 finish=length` on EVERY call, JSON never
+ * parseable, always falling through to a second model. `finish=length` raises no error; it returns
+ * unparseable JSON, so the failure surfaced as a fallback storm and doubled latency, not an exception.
+ *
+ * The rule encoded here: budgets are sized for the MOST VERBOSE plausible model, never the current
+ * one. Headroom is free when a model stops on its own; a truncation is a total loss of that call.
+ *
+ * Each profile: which env var overrides the model, the default model, its fallback chain, and the
+ * budget (a number, or a function of batch size where the output scales with input).
+ */
+const EXTRACT_DEFAULT_MODEL = 'deepseek/deepseek-v4-flash-0731';
+const FALLBACK_CHAIN_DEFAULT = 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731';
+
+export const LLM_PROFILES = {
+  'kb-document-type':     { envModel: 'KB_DOCUMENT_TYPE_MODEL',   maxTokens: 1200 },
+  'kb-unified-extract':   { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 4500, compactMaxTokens: 2200 },
+  'kb-document-curator':  { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 4000 },
+  'kb-doc-summary':       { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 900 },
+  'kb-doc-relations':     { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 2000 },
+  // Output scales with the batch: ~220 tokens per {subject, predicate, qualifiers} plus headroom.
+  'v5-claim-structuring': { envModel: 'CLAIM_STRUCTURING_MODEL',  maxTokens: (n) => Math.min(8000, 400 + (n || 1) * 220) },
+  'v5-claim-structuring-single': { envModel: 'CLAIM_STRUCTURING_MODEL', maxTokens: 2500 },
+};
+
+/**
+ * Resolve a feature's model chain and token budget together.
+ * @param {string} feature key in LLM_PROFILES
+ * @param {{batchSize?: number, compact?: boolean}} opts
+ */
+export function llmProfile(feature, opts = {}) {
+  const prof = LLM_PROFILES[feature];
+  if (!prof) {
+    // Fail loudly rather than silently handing back a default budget for an unknown task — a wrong
+    // budget is exactly the failure mode this table exists to prevent.
+    throw new Error(`llmProfile: no profile for feature '${feature}' — add one to LLM_PROFILES`);
+  }
+  const model = (prof.envModel && process.env[prof.envModel])
+    || process.env.MEMORY_PROCESSOR_MODEL
+    || EXTRACT_DEFAULT_MODEL;
+  const fallbacks = String(process.env.KB_UNIFIED_FALLBACK_MODELS || FALLBACK_CHAIN_DEFAULT)
+    .split(',').map((x) => x.trim()).filter(Boolean)
+    // Never list the primary twice: a "fallback" to the same model retries the same weakness.
+    .filter((m) => m !== model);
+  let maxTokens = (opts.compact && prof.compactMaxTokens) ? prof.compactMaxTokens : prof.maxTokens;
+  if (typeof maxTokens === 'function') maxTokens = maxTokens(opts.batchSize);
+  return { model, models: [model, ...fallbacks], maxTokens: Number(maxTokens), feature };
+}
+
 // A segment's display HEADING, falling back to the last component of its heading_path.
 // Measured: 16 of 16 segments carried `heading_path` while only 2 carried `heading`, so the
 // «filename : heading» prefix — an explicit owner requirement — appeared on just 2 of 30 memories
@@ -147,8 +201,8 @@ async function classifyKnowledgeDocument(text, filename) {
       // deepseek emits many more tokens for the same tiny JSON, so 256 truncates it and the parse
       // fails. The output is one {type, confidence} object; headroom is free when the model stops on
       // its own. A model swap must re-check every token budget that was sized for the old model.
-      model, temperature: 0, max_tokens: Number(process.env.KB_DOCUMENT_TYPE_MAX_TOKENS || 1200),
-      json_mode: true, feature: 'kb-document-type',
+      ...(() => { const _p = llmProfile('kb-document-type'); return { model: _p.model, max_tokens: _p.maxTokens }; })(),
+      temperature: 0, json_mode: true, feature: 'kb-document-type',
       messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
     });
     const confidence = Number(parsed.confidence);
@@ -516,58 +570,146 @@ export class DocumentFirstIngestionService {
       .slice(0, 24);
     if (!targets.length) return;
     const model = process.env.CLAIM_STRUCTURING_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
-    const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
-    const system = `Extract the core CLAIM structure from one memory sentence, in ANY language.
-Return ONLY JSON: {"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}.
-subject+predicate identify the claim across paraphrases and languages (normalize to English + lowercase). qualifiers holds scope/conditions/owner/time as key-value. Keep values short. If nothing durable, return {"subject":"","predicate":"","qualifiers":{}}.`;
+    // BATCHED: ONE call for up to 24 memories, was one call PER memory.
+    // This was the last per-item LLM fan-out in ingestion. Everything else is already 1-per-document
+    // or 1-per-section-batch (kb-unified-extract returns facts AND entities together; kb-doc-relations
+    // batches 40 candidate pairs into a single call). A 25-memory document therefore issued ~24 tiny
+    // requests here — the flood of 500-1000-token calls visible in every ingest log, and the ones that
+    // truncated at 86% after the model swap. The output per memory is a tiny
+    // {subject, predicate, qualifiers}; 24 of them fit comfortably in one response.
+    // Kept post-commit and fire-and-forget, exactly as V5 designed it: this runs on the FINAL memory
+    // text, after atomic splitting, curation, dedup and prefix stamping, so it cannot be folded into
+    // the extraction call — at that point these memories do not exist yet, and one extracted fact can
+    // become several memories.
+    const SINGLE_SYSTEM = `Extract the core CLAIM structure from one memory sentence, in ANY language.
+Return ONLY JSON: {"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased>","qualifiers":{"<key>":"<value>"}}.
+subject+predicate identify the claim across paraphrases and languages. Keep values short. If nothing durable, return empty strings.`;
+    const system = `Extract the core CLAIM structure for EACH numbered memory below, in ANY language.
+Return ONLY JSON: {"claims":[{"i":<the memory's number>,"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}, ...]}.
+Emit one entry per input memory, using its exact number in "i". subject+predicate identify the claim across paraphrases and languages (normalize to English + lowercase). qualifiers holds scope/conditions/owner/time as key-value. Keep values short. For a memory with nothing durable, return empty strings for subject and predicate.`;
     (async () => {
-      let i = 0;
-      const workers = Array.from({ length: Math.min(CONC, targets.length) }, async () => {
-        while (true) {
-          const idx = i++;
-          if (idx >= targets.length) return;
-          const m = targets[idx];
-          try {
-            // THE ONLY EXTRACTION CALL LEFT ON THE BARE HELPER. Every other one uses the
-            // fallback form, and this one paid for it: measured on a live upload batch,
-            // `model=openai/gpt-oss-20b … finish=error` then
-            // `[v5-claim-structuring] Failed to parse JSON response` — twice in one batch. The
-            // memories still existed (this step only ENRICHES them with subject/predicate), so the
-            // failure was invisible except in the log, and every affected memory silently lost the
-            // claim structure that supersession and "latest per (entity, attribute)" depend on.
-            const parsed = await chatCompletionWithFallback({
-              models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
-                || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
-                .split(',').map((x) => x.trim()).filter(Boolean)],
-              // max_tokens 800 -> 2500. THE MODEL SWAP MADE THE OLD CAP A 100% FAILURE. Measured on
-              // the first .amr upload after moving to deepseek-v4-flash: EVERY call returned
-              // `completion=800 finish=length` — exactly the cap — so the JSON was always truncated,
-              // always failed to parse, and always fell through to gpt-oss-120b. That is strictly
-              // worse than before the swap: two LLM calls per claim instead of one, for the same
-              // output. deepseek emits far more tokens than gpt-oss for the same task, so a budget
-              // tuned to gpt-oss silently became a guaranteed truncation.
-              // The output here is a tiny {subject, predicate, qualifiers} object; the headroom costs
-              // nothing when the model stops on its own (observed completion=729 finish=stop).
-              temperature: 0, max_tokens: Number(process.env.KB_CLAIM_STRUCTURING_MAX_TOKENS || 2500),
-              json_mode: true, feature: 'v5-claim-structuring',
-              messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
-            });
-            const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';
-            const pred = typeof parsed?.predicate === 'string' ? parsed.predicate.trim().toLowerCase().slice(0, 500) : '';
-            if (!subj && !pred) continue;
-            const quals = (parsed && typeof parsed.qualifiers === 'object' && !Array.isArray(parsed.qualifiers)) ? parsed.qualifiers : undefined;
-            const patch = {};
-            if (subj) patch.claimSubject = subj;
-            if (pred) patch.claimPredicate = pred;
-            if (quals && Object.keys(quals).length) patch.claimQualifiers = quals;
-            if (Object.keys(patch).length) await store.updateMemory(m.id, patch);
-          } catch (err) {
-            this.logger.warn?.(`[v5-claim-structuring] ${String(m.id).slice(0, 8)}: ${err.message}`);
-          }
+      try {
+        const numbered = targets
+          .map((m, idx) => `${idx + 1}. ${String(m.content).slice(0, 800)}`)
+          .join('\n\n');
+        const parsed = await chatCompletionWithFallback({
+          models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
+            || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+            .split(',').map((x) => x.trim()).filter(Boolean)],
+          // Scales with the batch: ~120 tokens per claim object plus headroom. The old per-memory cap
+          // of 800 became a 100% truncation the moment the model changed (deepseek emits far more
+          // tokens than gpt-oss for the same task), so this is sized from the batch, not from one model.
+          temperature: 0,
+          max_tokens: llmProfile('v5-claim-structuring', { batchSize: targets.length }).maxTokens,
+          json_mode: true, feature: 'v5-claim-structuring',
+          messages: [{ role: 'system', content: system }, { role: 'user', content: numbered }],
+        });
+        const rows = Array.isArray(parsed?.claims) ? parsed.claims : (Array.isArray(parsed) ? parsed : []);
+        let applied = 0;
+        const structured = [];
+        for (const row of rows) {
+          // Map back by the model's index. A missing or out-of-range "i" is skipped rather than
+          // guessed — writing a claim onto the WRONG memory would corrupt supersession, which keys on
+          // (subject, predicate). Silence is recoverable; a mis-assigned claim identity is not.
+          const idx = Number(row?.i) - 1;
+          const m = Number.isInteger(idx) && idx >= 0 && idx < targets.length ? targets[idx] : null;
+          if (!m) continue;
+          const subj = typeof row?.subject === 'string' ? row.subject.trim().slice(0, 500) : '';
+          const pred = typeof row?.predicate === 'string' ? row.predicate.trim().toLowerCase().slice(0, 500) : '';
+          if (!subj && !pred) continue;
+          const quals = (row && typeof row.qualifiers === 'object' && !Array.isArray(row.qualifiers)) ? row.qualifiers : undefined;
+          const patch = {};
+          if (subj) patch.claimSubject = subj;
+          if (pred) patch.claimPredicate = pred;
+          if (quals && Object.keys(quals).length) patch.claimQualifiers = quals;
+          if (!Object.keys(patch).length) continue;
+          // Per-memory isolation preserved: one bad row must not abort the rest of the batch.
+          try { await store.updateMemory(m.id, patch); applied += 1; structured.push(m.id); } catch { /* enrichment only */ }
         }
-      });
-      await Promise.all(workers);
-    })().catch((err) => this.logger.warn?.(`[v5-claim-structuring] batch: ${err.message}`));
+        // VERIFY THE BATCH, THEN BACKFILL WHAT IT MISSED. Batching trades one risk for another: a
+        // capped or truncated response returns FEWER claims than memories, and without a check those
+        // memories would silently lose claim identity — the same silent-partial shape as the tail
+        // drop. So coverage is verified against the input, and any memory the batch did not cover is
+        // re-requested individually. The 1-call win holds in the common case; correctness does not
+        // depend on the batch being complete.
+        const covered = new Set(structured);
+        const missed = targets.filter((m) => !covered.has(m.id));
+        if (missed.length) {
+          this.logger.warn?.(`[v5-claim-structuring] batch covered ${applied}/${targets.length}`
+            + ` — re-requesting ${missed.length} individually (batch likely capped)`);
+          let mi = 0;
+          const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
+          const workers = Array.from({ length: Math.min(CONC, missed.length) }, async () => {
+            while (true) {
+              const k = mi++;
+              if (k >= missed.length) return;
+              const m = missed[k];
+              try {
+                const one = await chatCompletionWithFallback({
+                  models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
+                    || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+                    .split(',').map((x) => x.trim()).filter(Boolean)],
+                  temperature: 0, max_tokens: llmProfile('v5-claim-structuring-single').maxTokens, json_mode: true, feature: 'v5-claim-structuring-single',
+                  messages: [
+                    { role: 'system', content: SINGLE_SYSTEM },
+                    { role: 'user', content: String(m.content).slice(0, 800) },
+                  ],
+                });
+                const subj = typeof one?.subject === 'string' ? one.subject.trim().slice(0, 500) : '';
+                const pred = typeof one?.predicate === 'string' ? one.predicate.trim().toLowerCase().slice(0, 500) : '';
+                if (!subj && !pred) continue;
+                const q = (one && typeof one.qualifiers === 'object' && !Array.isArray(one.qualifiers)) ? one.qualifiers : undefined;
+                const patch = {};
+                if (subj) patch.claimSubject = subj;
+                if (pred) patch.claimPredicate = pred;
+                if (q && Object.keys(q).length) patch.claimQualifiers = q;
+                if (Object.keys(patch).length) { await store.updateMemory(m.id, patch); applied += 1; }
+              } catch (e) {
+                this.logger.warn?.(`[v5-claim-structuring] single ${String(m.id).slice(0, 8)}: ${e.message}`);
+              }
+            }
+          });
+          await Promise.all(workers);
+        }
+        this.logger.info?.(`[v5-claim-structuring] ${targets.length} memories → ${applied} structured`
+          + ` (1 batch call${missed.length ? ` + ${missed.length} backfill` : ''})`);
+      } catch (err) {
+        // Batch threw outright — fall back to the per-memory path for EVERYTHING rather than leaving
+        // the whole document without claim identity.
+        this.logger.warn?.(`[v5-claim-structuring] batch call failed (${err.message}) — falling back to per-memory`);
+        let fi = 0;
+        const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
+        const workers = Array.from({ length: Math.min(CONC, targets.length) }, async () => {
+          while (true) {
+            const k = fi++;
+            if (k >= targets.length) return;
+            const m = targets[k];
+            try {
+              const one = await chatCompletionWithFallback({
+                models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
+                  || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+                  .split(',').map((x) => x.trim()).filter(Boolean)],
+                temperature: 0, max_tokens: llmProfile('v5-claim-structuring-single').maxTokens, json_mode: true, feature: 'v5-claim-structuring-single',
+                messages: [
+                  { role: 'system', content: SINGLE_SYSTEM },
+                  { role: 'user', content: String(m.content).slice(0, 800) },
+                ],
+              });
+              const subj = typeof one?.subject === 'string' ? one.subject.trim().slice(0, 500) : '';
+              const pred = typeof one?.predicate === 'string' ? one.predicate.trim().toLowerCase().slice(0, 500) : '';
+              if (!subj && !pred) continue;
+              const q = (one && typeof one.qualifiers === 'object' && !Array.isArray(one.qualifiers)) ? one.qualifiers : undefined;
+              const patch = {};
+              if (subj) patch.claimSubject = subj;
+              if (pred) patch.claimPredicate = pred;
+              if (q && Object.keys(q).length) patch.claimQualifiers = q;
+              if (Object.keys(patch).length) await store.updateMemory(m.id, patch);
+            } catch { /* per-memory isolation */ }
+          }
+        });
+        await Promise.all(workers);
+      }
+    })();
   }
 
 
@@ -623,7 +765,7 @@ subject+predicate identify the claim across paraphrases and languages (normalize
     // downstream. NO domain examples → generalizes to every tenant.
     const sys = `You are a precise information-extraction engine. From each numbered SECTION, extract atomic FACTS and the CANONICAL ENTITIES it mentions.
 
-Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":[{"t":"<short title>","f":"complete standalone sentence"}, ...],"entities":["Canonical Name", ...]}]}.
+Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":[{"t":"<short title>","f":"complete standalone sentence"}, ...],"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}, ...]}]}.
 
 FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
 - Each fact is an OBJECT {"t","f"}: "f" = ONE complete, self-contained sentence (explicit subject, never a bare "it"/"they"/"this"); "t" = a SHORT 3–6 word title naming what the fact is ABOUT — its subject/topic, in Title Case, NO trailing punctuation, and NOT a restatement of the whole sentence. Good titles: "RAG grounding without retraining", "O-ring failure cause", "Q2 revenue target". Bad titles: the full sentence, "Company Info", "Fact".
@@ -916,9 +1058,18 @@ Output the JSON object and nothing else.`;
             if (/[_\/]/.test(s) && !/\s/.test(s) && /[A-Z]/.test(s) && s.length > 8) return true;                  // asset/file identifiers (an all-caps token with underscores/slashes and no spaces)
             return false;
           };
-          const rawEntityNames = (ex.entities || [])
-            .filter((e) => typeof e === 'string' && e.trim() && !_isArtifactRef(e))
+          // TYPED ENTITIES. The extractor may return a bare string or {n, k}; both are accepted, so
+          // this is additive and an older/simpler model response still works. Every canonical row was
+          // landing with entity_kind='entity' — the persister already HAS a taxonomy and
+          // normalizeEntityKind(), ingestion simply never sent a kind, so the graph could not
+          // distinguish a person from a standard.
+          const _entityPairs = (ex.entities || [])
+            .map((e) => (typeof e === 'string'
+              ? { name: e, kind: null }
+              : (e && typeof e === 'object' && typeof e.n === 'string' ? { name: e.n, kind: e.k || null } : null)))
+            .filter((e) => e && typeof e.name === 'string' && e.name.trim() && !_isArtifactRef(e.name))
             .slice(0, 8);
+          const rawEntityNames = _entityPairs.map((e) => e.name);
           const entityTags = rawEntityNames
             .map((e) => { const slug = normalizeEntity(e); return slug ? `entity:${slug}` : null; })
             .filter(Boolean);
@@ -932,7 +1083,12 @@ Output the JSON object and nothing else.`;
               // overshoot. This keeps MAX_FACTS_PER_DOC effectively binding.
               if (p && created < MAX_FACTS_PER_DOC) {
                 pending.push(p); created++;
-                if (rawEntityNames.length) canonicalItems.push({ memoryId: p.factId, entities: rawEntityNames });
+                // Carry the kinds alongside the names; the persister normalizes them and leaves
+                // unknown ones alone, so a bad kind cannot fragment the registry.
+                // Pass the TYPED pairs as `entities`. The persister accepts string | {name, kind};
+                // a separate parallel array would have been a second shape for one fact — and the
+                // persister would have ignored it, leaving the whole typing chain dead.
+                if (_entityPairs.length) canonicalItems.push({ memoryId: p.factId, entities: _entityPairs });
                 factObjs.push({
                   id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
                   title: (p.fact || '').slice(0, 80), memory_type: 'fact',
@@ -1067,7 +1223,7 @@ GOOD  <named entity, persona, or document topic> + <attribute, scope, numbers>
 If the subject of a claim is a bare role, kinship term, pronoun, or unnamed person or organisation, RESOLVE it: carry the named person, organisation, persona, product, or the document's own topic from the surrounding section INTO the claim text. Resolve pronouns to their referent. A claim you cannot give a concrete subject is not durable — drop it rather than emit it subjectless.
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
+Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: many languages capitalise every noun, so a capitalised word is not automatically a name. Test it instead: if the word names a GENERIC KIND of thing rather than one specific identifiable thing (a component, a system, a plant, a device, a document, an article), it is NOT an entity, however it is capitalised. Give each entity a "k" from the listed kinds; if none fits, omit the entity rather than guessing. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
 FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
 "t" and "f" MUST be in the same language as each other: "f" is a verbatim substring of the SECTION, so if "t" is in a different language from its own "f" you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
 // REVERTED, DO NOT REINTRODUCE: an earlier version of this paragraph also said every "t" must be
@@ -1087,7 +1243,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // source_quote + entities). 1800 tokens overflowed → finish=length →
       // truncated JSON → whole-section fact loss (~28% of calls). Give ample
       // headroom; the truncation-salvage in litellm-client is the backstop.
-      models: [model, ..._fallbacks], temperature: 0, max_tokens: compact ? 2200 : 4500, json_mode: true, feature: 'kb-unified-extract',
+      models: [model, ..._fallbacks], temperature: 0,
+      max_tokens: llmProfile('kb-unified-extract', { compact }).maxTokens,
+      json_mode: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
@@ -1727,7 +1885,9 @@ Every item must include a non-empty content field and one or more valid support_
       || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
     try {
       const parsed = await chatCompletionWithFallback({
-        models: [model, ..._curatorFallbacks], temperature: 0, max_tokens: 4000, json_mode: true, feature: 'kb-document-curator',
+        models: [model, ..._curatorFallbacks], temperature: 0,
+        max_tokens: llmProfile('kb-document-curator').maxTokens,
+        json_mode: true, feature: 'kb-document-curator',
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },
@@ -1883,7 +2043,7 @@ Every item must include a non-empty content field and one or more valid support_
           const refined = await chatCompletionWithFallback({
             models: [process.env.KB_DOC_SUMMARY_MODEL || process.env.KB_UNIFIED_MODEL
               || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731'],
-            temperature: 0.2, max_tokens: 420, feature: 'kb-doc-summary',
+            temperature: 0.2, max_tokens: llmProfile('kb-doc-summary').maxTokens, feature: 'kb-doc-summary',
             messages: [
               { role: 'system', content: 'Write ONE self-contained paragraph stating what this document establishes. '
                 + 'Use only the supplied facts. Name the subjects explicitly — never "the document", "this file", '
@@ -3816,27 +3976,30 @@ Every item must include a non-empty content field and one or more valid support_
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
         const _tExtract = Date.now();
-        // EVERY WINDOW GETS READ. DOC_CAP caps FACTS, but it was also the gate on whether a window was
-        // sent to the LLM at all (`while (wi < len && uBudget > 0)`), so once earlier windows consumed
-        // it the tail was never looked at — measured live: "TAIL DROPPED: 1 of 6 windows never sent to
-        // the LLM (budget 30 exhausted)" on a 12175-char document, where DOC_CAP floors at 30. Those
-        // facts then exist in NO layer and are unrecoverable without a re-ingest, since nothing
-        // records WHICH window was skipped. Capping output is legitimate; declining to read part of
-        // the document is data loss.
-        // Floor the budget so every window is guaranteed a minimum grant. This only raises the cap
-        // for documents with many windows — precisely the case where the flat floor of 30 was wrong.
+        // TWO SEPARATE CONCERNS, previously ONE VARIABLE — this is the seam, not a tuning knob.
+        // DOC_CAP bounded the OUTPUT (how many facts a document may produce) and simultaneously gated
+        // the INPUT (`while (wi < len && uBudget > 0)`), so when earlier windows spent it the tail of
+        // the document was never sent to the LLM at all: "TAIL DROPPED: 1 of 6 windows never sent to
+        // the LLM (budget 30 exhausted)" on a 12175-char file. Those facts existed in NO layer and
+        // could not be recovered without a re-ingest, because nothing recorded which window was skipped.
+        // My first fix floored the shared budget so it could not reach zero. That worked but left one
+        // variable owning both jobs, so the next person tuning the cap would re-break reading.
+        // Now: READING IS UNCONDITIONAL, the cap bounds output only.
+        //   readAllWindows  — every window is sent, always. Not negotiable, not a budget.
+        //   factBudget      — how many facts we ASK for in total; when it runs low a window still
+        //                     gets MIN_FACTS_PER_WINDOW so it is read and can still contribute.
+        // Consequence, stated plainly: total facts can exceed FACT_CAP by at most
+        // windows x MIN_FACTS_PER_WINDOW. That is the deliberate trade — a slightly soft output cap
+        // in exchange for never silently discarding part of a document.
         const MIN_FACTS_PER_WINDOW = Number(process.env.KB_MIN_FACTS_PER_WINDOW || 3);
-        const _budgetFloor = uWindows.length * MIN_FACTS_PER_WINDOW;
-        if (_budgetFloor > DOC_CAP) {
-          console.log(`[kb-unified] doc_cap ${DOC_CAP} raised to ${_budgetFloor} `
-            + `(${uWindows.length} windows x ${MIN_FACTS_PER_WINDOW} min) so no window is skipped`);
-        }
-        let uBudget = Math.max(DOC_CAP, _budgetFloor);
+        const FACT_CAP = DOC_CAP;
+        let factBudget = FACT_CAP;
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
-          while (wi < uWindows.length && uBudget > 0) {
+          while (wi < uWindows.length) {   // <- no budget term: every window is read
             const w = { ...uWindows[wi++] };
-            const grant = Math.max(1, Math.min(w.maxFacts || 8, uBudget));
-            uBudget -= grant;
+            const grant = Math.max(MIN_FACTS_PER_WINDOW,
+              Math.min(w.maxFacts || 8, Math.max(0, factBudget)));
+            factBudget -= grant;
             w.maxFacts = grant;
             let claims = [];
             try {
@@ -3859,10 +4022,18 @@ Every item must include a non-empty content field and one or more valid support_
               extractedCandidates.push(...claims.map((claim) => ({
                 ...claim,
                 segmentId: resolveEvidenceSegment(claim.source_quote, promotableSegments, w.segmentId),
+                // THE ACTUAL ROOT CAUSE of the missing «filename : heading» prefix. The window knows
+                // its heading and the segments carry it, but the claim never inherited it here — so
+                // `claim.heading` was undefined by the time _persistOne built the prefix, which then
+                // degraded silently to «filename» for every fact. Measured 2/30, then 1/25; the one
+                // that did have a heading was the summary, stamped on a different path.
+                // I first "fixed" this by widening the segment→heading fallback. That was the wrong
+                // layer: the value was already available and simply never copied onto the claim.
+                heading: claim.heading || w.heading || null,
                 source_window_content: w.content,
               })));
             }
-            uBudget += Math.max(0, grant - got); // return the unused part of the reservation
+            factBudget += Math.max(0, grant - got); // return the unused part of the reservation
           }
         });
         await Promise.all(uWorkers);
@@ -3870,12 +4041,16 @@ Every item must include a non-empty content field and one or more valid support_
         // NEVER exit a document silently. The tail-drop above survived because nothing
         // reported it: a truncated document and a thin document produced identical logs.
         console.log(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
-          + `budget_exhausted=${uBudget <= 0} doc_cap=${DOC_CAP} chars=${_docChars} `
+          + `fact_budget_left=${factBudget} fact_cap=${FACT_CAP} chars=${_docChars} `
           + `candidates=${extractedCandidates.length}`);
+        // INVARIANT, not an expected outcome. Reading no longer depends on any budget, so this can
+        // only fire if a future change reintroduces a gate on the read loop. Kept deliberately: the
+        // original defect was silent, and the whole point is that it can never be silent again.
         if (wi < uWindows.length) {
-          console.warn(`[kb-unified] TAIL DROPPED: ${uWindows.length - wi} of ${uWindows.length} `
-            + `windows never sent to the LLM (budget ${DOC_CAP} exhausted). Facts in those `
-            + `windows do not exist in the memory layer.`);
+          console.error(`[kb-unified] INVARIANT VIOLATED — TAIL DROPPED: ${uWindows.length - wi} of `
+            + `${uWindows.length} windows never sent to the LLM. Reading is supposed to be `
+            + `unconditional; a budget gate has been reintroduced on the read loop. Facts in those `
+            + `windows exist in NO layer.`);
         }
         // Coverage: the per-doc memory cap must scale with how much distinct
         // signal the document actually holds. A flat cap of 6 truncated dense
@@ -4014,7 +4189,7 @@ Every item must include a non-empty content field and one or more valid support_
             const _relParsed = await chatCompletionWithFallback({
               models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
                 ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
-              temperature: 0, max_tokens: 1500, json_mode: true, feature: 'kb-doc-relations',
+              temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true, feature: 'kb-doc-relations',
               messages: [
                 { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },
                 { role: 'user', content: `Document: ${docTitle}\nFacts:\n${_relList}` },

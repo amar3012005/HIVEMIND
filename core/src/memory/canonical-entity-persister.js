@@ -111,15 +111,28 @@ export async function persistCanonicalLinks({
     const bySlug = new Map();
     for (const item of items) {
       if (!item?.memoryId || !Array.isArray(item.entities)) continue;
-      for (const raw of item.entities.slice(0, MAX_ENTITIES_PER_MEMORY)) {
+      for (const rawItem of item.entities.slice(0, MAX_ENTITIES_PER_MEMORY)) {
+        // PER-ENTITY KIND. `entityKind` was one namespace for the WHOLE call, so every row the
+        // extractor produced landed as entity_kind='entity' — the taxonomy and normalizeEntityKind()
+        // existed here, but ingestion had no way to say that one name is a person and another a
+        // standard. An entity may now arrive as a bare string (unchanged behaviour) or as
+        // {name, kind}; an unrecognised kind falls back to the call-level namespace rather than
+        // minting a new one, so a bad kind cannot fragment the registry.
+        const raw = typeof rawItem === 'string' ? rawItem : (rawItem && typeof rawItem.name === 'string' ? rawItem.name : null);
         if (typeof raw !== 'string' || !raw.trim()) continue;
+        const perKind = (rawItem && typeof rawItem === 'object' && rawItem.kind)
+          ? normalizeEntityKind(rawItem.kind) : null;
+        const kindForRow = (perKind && allow.has(perKind)) ? perKind : entityKind;
         const slug = normalizeEntity(raw);
         if (!slug) continue; // junk/generic names never become canonical entities
-        let entry = bySlug.get(slug);
+        // Key by (slug, kind): the same surface form under two kinds is two identities, which is the
+        // whole point of typing. Same slug + same kind still dedupes exactly as before.
+        const bucket = `${kindForRow}::${slug}`;
+        let entry = bySlug.get(bucket);
         if (!entry) {
           if (bySlug.size >= MAX_UNIQUE_ENTITIES_PER_BATCH) continue;
-          entry = { name: raw.trim(), memoryIds: [] };
-          bySlug.set(slug, entry);
+          entry = { name: raw.trim(), memoryIds: [], kind: kindForRow, slug };
+          bySlug.set(bucket, entry);
         }
         if (!entry.memoryIds.includes(item.memoryId)) entry.memoryIds.push(item.memoryId);
       }
@@ -133,6 +146,9 @@ export async function persistCanonicalLinks({
     // re-encounter of a known name to the review queue instead of reusing it.
     // We resolve exact slug matches ourselves and reserve the resolver for
     // genuinely new or ambiguous names.
+    // Kinds actually used by this batch (plus the call-level default), so the reuse prepass covers
+    // exactly what we are about to resolve.
+    const _kindsInBatch = [...new Set([entityKind, ...[...bySlug.values()].map((e) => e.kind).filter(Boolean)])];
     const existingBySlug = new Map();
     try {
       // PAGE THE WHOLE REGISTRY. This was a single `take: 500` with no orderBy, which is a
@@ -149,8 +165,13 @@ export async function persistCanonicalLinks({
       let _cursor = null;
       for (;;) {
         const page = await prisma.canonicalEntity.findMany({
-          where: { organizationId, entityKind },
-          select: { id: true, canonicalName: true, aliases: true },
+          // Query EVERY kind present in this batch, not just the call-level namespace. With
+          // per-entity kinds a 'person' row would never be found in a cache built only from
+          // 'entity' rows, so every typed entity would miss the reuse prepass, fall through to the
+          // resolver, score 0.93 exact (< AUTO_LINK_FLOOR) and land in the review queue — the exact
+          // "+0 entities, 0 links, 1 queued for review" failure the paging fix above was written for.
+          where: { organizationId, entityKind: { in: _kindsInBatch } },
+          select: { id: true, canonicalName: true, aliases: true, entityKind: true },
           orderBy: { id: 'asc' },
           take: _pageSize,
           ...(_cursor ? { skip: 1, cursor: { id: _cursor } } : {}),
@@ -173,7 +194,10 @@ export async function persistCanonicalLinks({
           // 'wärmepumpen' reuses the existing 'Wärmepumpe' instead of minting a
           // sibling canonical. Without this, only byte-identical slugs reused — the
           // exact fragmentation the 2026-08-03 backfill had to merge (7 losers).
-          for (const key of entityMatchVariants(slug)) {
+          for (const variant of entityMatchVariants(slug)) {
+            // Keyed by kind::variant to match the lookup below. Two different kinds sharing a
+            // surface form are two identities, so they must not collide into AMBIGUOUS.
+            const key = `${row.entityKind}::${variant}`;
             const seen = existingBySlug.get(key);
             if (seen && seen !== row.id) existingBySlug.set(key, 'AMBIGUOUS');
             else if (!seen) existingBySlug.set(key, row.id);
@@ -230,8 +254,12 @@ export async function persistCanonicalLinks({
 
     // Serial per unique name: exact slug → direct reuse; otherwise resolve
     // once via the resolver (create / fuzzy-review), then fan links out.
-    for (const [slug, entry] of bySlug) {
-      const known = existingBySlug.get(slug);
+    for (const [, entry] of bySlug) {
+      // bySlug is keyed `kind::slug` now that kinds are per-entity, so the real slug and kind come
+      // off the ENTRY. Reading the map key here would have looked up "person::acme" in a cache keyed
+      // by plain slugs — every exact-reuse lookup would silently miss and re-resolve.
+      const slug = entry.slug;
+      const known = existingBySlug.get(`${entry.kind || entityKind}::${slug}`);
       if (known && known !== 'AMBIGUOUS') {
         await linkAll(known, entry.memoryIds, 1.0);
         await stampSource(known);
@@ -246,7 +274,7 @@ export async function persistCanonicalLinks({
           role: 'mentioned',
           candidates: [{
             name: entry.name,
-            kind: entityKind,
+            kind: entry.kind || entityKind,
             // Stored verbatim on CREATE by entity-resolver; stampSource below covers reuse.
             metadata: sourceMeta?.filename ? {
               source_filenames: [sourceMeta.filename],

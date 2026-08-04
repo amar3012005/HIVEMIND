@@ -113,6 +113,10 @@ export function validateCampaignBundle(bundle, campaign) {
   const errors = [];
   if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return ['Bundle must be an object'];
   if (!String(bundle.strategy || '').trim()) errors.push('Strategy is required');
+  const expectedDecisionRef = String(campaign?.brief?.decision_context?.decision_id || '').trim();
+  if (expectedDecisionRef && String(bundle.upstream_decision_ref || '').trim() !== expectedDecisionRef) {
+    errors.push('Campaign must preserve the retained Growth Planner decision');
+  }
   if (!bundle.audience || typeof bundle.audience !== 'object' || !String(bundle.audience.rationale || '').trim()) errors.push('Audience rationale is required');
   if (!Array.isArray(bundle.content_pillars) || !bundle.content_pillars.length) errors.push('Content pillars are required');
   if (!Array.isArray(bundle.kpis) || !bundle.kpis.length) errors.push('KPIs are required');
@@ -471,6 +475,13 @@ export function normalizeCampaignInput(body = {}) {
     { id: 'goal', text: goal, source: 'user' },
     ...channels.map((channel) => ({ id: `channel:${channel}`, text: `Produce approval-ready ${channel} actions and state every launch prerequisite`, source: 'channel' })),
   ];
+  const decisionContext = body.decision_context && typeof body.decision_context === 'object' && !Array.isArray(body.decision_context)
+    ? JSON.parse(JSON.stringify(body.decision_context)) : null;
+  if (decisionContext?.decision_id) requirements.push({
+    id: `decision:${String(decisionContext.decision_id).slice(0, 120)}`,
+    text: 'Continue the retained operating decision without selecting a replacement company strategy',
+    source: 'runtime',
+  });
   const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels });
   return {
     name, goal, objective, channels, autonomyMode, creationKey, requirements,
@@ -486,6 +497,7 @@ export function normalizeCampaignInput(body = {}) {
       brand_constraints: cleanText(body.brand_constraints, 4000, 'Brand constraints'),
       prohibited_claims: cleanText(body.prohibited_claims, 4000, 'Prohibited claims'),
       success_metrics: cleanStringList(body.success_metrics, 30, 160, 'Success metrics'),
+      decision_context: decisionContext,
     },
     audiencePolicy: body.audience || { mode: 'existing_first', discover_if_insufficient: true },
     schedulePolicy: { timezone, start: 'immediate_after_approval' },
@@ -575,7 +587,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
   const campaignDraft = {
     id: campaignId, orgId, ownerUserId: userId, name: input.name, goal: input.goal,
     objective: input.objective, requestedChannels: input.channels, brief: input.brief,
-    audiencePolicy: input.audiencePolicy,
+    audiencePolicy: input.audiencePolicy, sourceType: input.sourceType,
   };
   const kickoff = buildCampaignDisplayMessage(campaignDraft);
   const briefSnapshot = {

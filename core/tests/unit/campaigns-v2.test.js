@@ -26,6 +26,20 @@ test('campaign input supports organization-owned full autonomy', () => {
   assert.throws(() => normalizeCampaignInput({ ...baseInput, autonomy_mode: 'UNSAFE_AUTO' }), /Unknown approval mode/);
 });
 
+test('runtime campaign input retains the upstream planning decision as a requirement', () => {
+  const input = normalizeCampaignInput({
+    ...baseInput,
+    source_type: 'runtime_playbook',
+    decision_context: {
+      decision_id: 'growth-motion-1',
+      selected_approach: 'Lead with source-backed operating proof',
+      evidence_refs: ['baseline-1'],
+    },
+  });
+  assert.equal(input.brief.decision_context.decision_id, 'growth-motion-1');
+  assert.equal(input.requirements.at(-1).id, 'decision:growth-motion-1');
+});
+
 test('campaign autonomy settings are organization scoped and admin controlled', async () => {
   const oldEnabled = process.env.CAMPAIGNS_V2_ENABLED; const oldOrgs = process.env.CAMPAIGNS_V2_ORG_IDS;
   process.env.CAMPAIGNS_V2_ENABLED = 'true'; process.env.CAMPAIGNS_V2_ORG_IDS = 'org-a';
@@ -423,6 +437,34 @@ test('campaign room contract carries the campaign identity and completion tool',
   assert.equal(dispatch.campaign_id, 'campaign-a');
   assert.equal(normalizeCampaignRoomEvent({ t: 'campaign_bundle', bundle: {} }).t, 'campaign_bundle');
   assert.equal(normalizeCampaignRoomEvent(null), null);
+});
+
+test('runtime campaign dispatch continues the retained planner decision without replaying human strategy discovery', () => {
+  const campaign = {
+    id: 'campaign-runtime', ownerUserId: 'user-a', orgId: 'org-a',
+    goal: 'Increase qualified awareness', objective: 'AWARENESS',
+    requestedChannels: ['x_organic'], sourceType: 'runtime_playbook',
+    brief: {
+      duration_days: 7, cadence: { preset: 'focused' },
+      decision_context: {
+        decision_id: 'growth-motion-1',
+        selected_approach: 'Use a source-backed awareness sequence',
+        alternatives_considered: [], evidence_refs: ['baseline-1'],
+      },
+    },
+    audiencePolicy: {},
+  };
+  const displayMessage = buildCampaignDisplayMessage(campaign);
+  const dispatch = buildCampaignRoomDispatch({
+    campaign, room: { id: 'room-a', goal: 'Campaign room' },
+    turn: { id: 'turn-a', userMessage: displayMessage }, participantIds: ['agent-a'],
+    briefSnapshot: { ...campaign, campaign_id: campaign.id },
+  });
+  assert.match(displayMessage, /Operationalize the retained operating decision/);
+  assert.doesNotMatch(displayMessage, /Decide the strongest strategy/);
+  assert.match(dispatch.execution_context, /REQUEST_ORIGIN: HQ_RUNTIME/);
+  assert.match(dispatch.execution_context, /RETAINED_DECISION_JSON/);
+  assert.match(dispatch.execution_context, /growth-motion-1/);
 });
 
 test('first Campaign Room event advances the durable run and records progress', async () => {

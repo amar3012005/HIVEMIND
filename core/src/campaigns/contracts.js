@@ -7,11 +7,26 @@ const CHANNEL_LABELS = {
   amazon_ads: 'Amazon Ads', reddit_ads: 'Reddit Ads', pinterest_ads: 'Pinterest Ads', snapchat_ads: 'Snapchat Ads',
 };
 
+function retainedDecision(campaign) {
+  return campaign?.brief?.decision_context && typeof campaign.brief.decision_context === 'object'
+    ? campaign.brief.decision_context : null;
+}
+
+function isRuntimeContinuation(campaign) {
+  return campaign?.sourceType === 'runtime_playbook' && Boolean(retainedDecision(campaign)?.decision_id);
+}
+
 export function buildCampaignDisplayMessage(campaign, feedback = '') {
   const channels = (campaign.requestedChannels || []).map((channel) => CHANNEL_LABELS[channel] || channel).join(', ');
   const objective = String(campaign.objective || 'campaign').toLowerCase().replaceAll('_', ' ');
   const duration = Number(campaign.brief?.duration_days || 14);
   const intensity = String(campaign.brief?.cadence?.preset || 'focused').replaceAll('_', ' ');
+  if (isRuntimeContinuation(campaign)) return [
+    `Operationalize the retained operating decision for: ${campaign.goal}`,
+    channels ? `Prepare the approval-ready sequence for ${channels}.` : null,
+    `Build the complete ${duration}-day ${intensity} sequence from the supplied decision brief. Resolve execution details and explicit evidence gaps without selecting a replacement company strategy. Do not publish anything yet.`,
+    feedback ? `Requested improvement: ${String(feedback).slice(0, 4000)}` : null,
+  ].filter(Boolean).join('\n\n');
   return [
     `Create a ${objective} campaign for this goal: ${campaign.goal}`,
     channels ? `Prepare the campaign for ${channels}.` : null,
@@ -22,6 +37,7 @@ export function buildCampaignDisplayMessage(campaign, feedback = '') {
 }
 
 export function buildCampaignExecutionContext(campaign, feedback = '', channelCapabilities = []) {
+  const decision = retainedDecision(campaign);
   return [
     `CAMPAIGN_ID: ${campaign.id}`,
     `GOAL: ${campaign.goal}`,
@@ -30,12 +46,16 @@ export function buildCampaignExecutionContext(campaign, feedback = '', channelCa
     `BRIEF_JSON: ${JSON.stringify(campaign.brief || {})}`,
     `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy || {})}`,
     `CHANNEL_CAPABILITIES_JSON: ${JSON.stringify(Array.isArray(channelCapabilities) ? channelCapabilities : [])}`,
+    `REQUEST_ORIGIN: ${isRuntimeContinuation(campaign) ? 'HQ_RUNTIME' : 'HUMAN'}`,
+    decision ? `RETAINED_DECISION_JSON: ${JSON.stringify(decision)}` : null,
     feedback ? `USER_FEEDBACK: ${String(feedback).slice(0, 4000)}` : null,
     'For X, create exactly one Post per x_organic action. payload.text and final_copy must match and be 280 characters or fewer. Represent a thread as separate ordered actions, one action per Post.',
     'For paid actions, include payload.goal, payload.destination_url when the goal needs a landing page, payload.targeting.countries as ISO two-letter country codes, optional payload.targeting.languages, and payload.dsa_beneficiary when targeting EU users. Keep budget and currency in media_plan; never invent either.',
     'For every selected channel, distinguish planning readiness from execution readiness. If an account, connector, permission, budget ceiling, tracking setup, or publisher adapter is unavailable, still create the best approval-ready plan and record the exact missing prerequisite in launch_plan.blocked_by. Never imply that a plan-only channel can publish.',
     'Treat the active organization profile and supplied company evidence as ground truth. Never substitute another company or invent audience size, proof, URLs, performance, budgets, quotes, or customer results.',
-    'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and govern the complete delivery with campaign__govern_delivery. Do not send any external action.',
+    decision
+      ? 'Continue the retained operating decision. Gather only evidence needed to produce or verify the complete channel sequence, deliberate material unresolved execution choices only, and preserve the retained decision reference in the governed CampaignBundle. Do not choose a replacement company strategy or send any external action.'
+      : 'Execute the Campaign Room workflow now: gather company and existing-audience evidence first, debate the strategy, create final ready-to-send channel actions, and govern the complete delivery with campaign__govern_delivery. Do not send any external action.',
   ].filter(Boolean).join('\n');
 }
 

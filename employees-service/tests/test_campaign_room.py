@@ -236,7 +236,7 @@ def test_campaign_contract_rejects_assumptions_in_executable_copy():
     accepted, errors = campaign__submit_plan(
         bundle,
         channels=["x_organic"],
-        requirements=["goal", "channel:x_organic"],
+        requirements=["goal", "channel:x_organic", "decision:growth-motion-1"],
     )
 
     assert accepted is None
@@ -488,6 +488,37 @@ def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
         complete,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief=brief,
+    )
+    assert errors == []
+    assert accepted is not None
+
+
+def test_runtime_campaign_must_preserve_the_growth_planner_decision_reference():
+    bundle = _valid_v2_bundle()
+    brief = {"brief": {"decision_context": {
+        "decision_id": "growth-motion-1",
+        "selected_approach": "Use a source-backed awareness sequence",
+    }}}
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief=brief,
+    )
+    assert accepted is None
+    assert "upstream_decision_ref must preserve the retained Growth Planner decision" in errors
+
+    bundle["upstream_decision_ref"] = "growth-motion-1"
+    bundle["requirement_coverage"].append({
+        "requirement_id": "decision:growth-motion-1", "action_ids": ["x-1"],
+    })
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic", "decision:growth-motion-1"],
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
         campaign_brief=brief,
     )

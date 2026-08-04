@@ -1228,6 +1228,16 @@ class Director:
                           or resolve_room_kind("", room_goal or "", user_message or ""))
         self.domain_pack = get_domain_pack(self.room_kind)
         self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
+        _campaign_payload = (self.campaign_brief.get("brief")
+                             if isinstance(self.campaign_brief.get("brief"), dict)
+                             else {})
+        _campaign_decision = (_campaign_payload.get("decision_context")
+                              if isinstance(_campaign_payload.get("decision_context"), dict)
+                              else {})
+        self.campaign_continues_runtime_decision = bool(
+            str(self.campaign_brief.get("sourceType") or self.campaign_brief.get("source_type") or "").lower()
+            == "runtime_playbook" and str(_campaign_decision.get("decision_id") or "").strip()
+        )
         self.skills_used: List[str] = []
         # Room-type learned lessons ("previously effective: X→Y"), written by the
         # post-turn reflection, primed into the planner catalog block. [] = none yet.
@@ -4157,6 +4167,15 @@ class Director:
             _campaign_policy = (
                 "CAMPAIGN CONTRACT — authoritative structured input; never infer the opposite from TASK prose:\n"
                 + json.dumps(self.campaign_brief, ensure_ascii=False)[:4000] + "\n\n")
+            if self.campaign_continues_runtime_decision:
+                _campaign_policy += (
+                    "HQ RUNTIME CONTINUATION — the retained decision inside brief.decision_context was already "
+                    "selected by the source-backed Growth Planner. Treat it as the controlling company-level "
+                    "choice. Operationalize it into the complete Campaign Contract, gather only evidence needed "
+                    "to verify or implement it, and deliberate only material unresolved execution choices. Do not "
+                    "restart broad strategy selection. Preserve decision_id as upstream_decision_ref in the final "
+                    "CampaignBundle.\n\n"
+                )
         _growth_policy = ""
         if self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             _growth_policy = (
@@ -4347,7 +4366,7 @@ class Director:
                 query = str(row.get("query") or task).strip()[:240]
                 if task and query:
                     assignments.append({"role": role, "task": task, "query": query})
-            if not assignments:
+            if not assignments and not self.campaign_continues_runtime_decision:
                 assignments = [
                     {"role": "Strategist", "task": "Select the campaign strategy", "query": "campaign strategy media plan"},
                     {"role": "Builder", "task": "Build the channel-ready content", "query": "organic social copy framework"},
@@ -4632,7 +4651,14 @@ class Director:
             match = re.search(r"^CHANNELS:\s*(.+)$", self.user_message or "", re.M | re.I)
             if match:
                 channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
-        return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
+        requirements = ["goal"] + [f"channel:{channel}" for channel in channels]
+        brief_payload = (self.campaign_brief.get("brief")
+                         if isinstance(self.campaign_brief.get("brief"), dict) else {})
+        decision = (brief_payload.get("decision_context")
+                    if isinstance(brief_payload.get("decision_context"), dict) else {})
+        if str(decision.get("decision_id") or "").strip():
+            requirements.append(f"decision:{str(decision['decision_id'])[:120]}")
+        return channels, requirements
 
     @staticmethod
     def _campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[str]) -> List[str]:
@@ -4661,7 +4687,7 @@ class Director:
             "The report must use these exact Markdown H2 headings: ## Recommendation, ## Audience, ## Positioning, "
             "## Content System, ## Campaign Sequence, ## Schedule, ## Measurement, ## Risks, and ## Launch Readiness. "
             "Do not repeat internal prompts, method names, or IDs. "
-            "Required plan shape: {objective:string,strategy:string,"
+            "Required plan shape: {objective:string,strategy:string,upstream_decision_ref:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
             "company_grounding:{company_name:string,facts_used:string[],unknowns:string[]},"
             "positioning:{statement:string,proof_points:string[]},"
@@ -4696,6 +4722,14 @@ class Director:
             "In report_markdown, introduce every unsupported numeric target with the literal label 'Proposed target:' in the same sentence. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
+        if self.campaign_continues_runtime_decision:
+            system += (
+                " This Campaign continues an upstream Growth Planner decision. The supplied decision_context is "
+                "authoritative: preserve its decision_id in upstream_decision_ref and operationalize its selected "
+                "approach. Do not choose a replacement company-level strategy. strategy_options must document the "
+                "retained selected approach and its already-recorded alternatives; any new debate is limited to "
+                "unresolved implementation details."
+            )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
         msg = await self._groq(

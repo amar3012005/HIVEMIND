@@ -251,6 +251,8 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           room_tag: String(item.room_tag).toLowerCase(), skill: item.skills?.[0] || null,
           skills: Array.isArray(item.skills) ? item.skills : [],
           deliverable: String(item.deliverable || ''), success_measure: String(item.success_measure || ''),
+          execution_brief: item.execution_brief && typeof item.execution_brief === 'object'
+            ? item.execution_brief : null,
           acceptance_criteria: Array.isArray(item.acceptance_criteria) ? item.acceptance_criteria : [],
           activation_condition: String(item.activation_condition || ''), target,
           location: target.location || null, growth_stage_id: createdStage.id,

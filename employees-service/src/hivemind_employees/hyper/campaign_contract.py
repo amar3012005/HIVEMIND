@@ -255,7 +255,10 @@ def assemble_campaign_bundle(
     plan["requirement_coverage"] = [{
         "requirement_id": requirement,
         "strategy_sections": ["strategy", "actions"],
-        "action_ids": [action["id"] for action in actions if requirement == "goal" or requirement == f"channel:{action['channel']}"],
+        "action_ids": [action["id"] for action in actions if (
+            requirement == "goal" or requirement.startswith("decision:")
+            or requirement == f"channel:{action['channel']}"
+        )],
     } for requirement in requirements]
 
     prohibited = brief_payload.get("prohibited_claims")
@@ -392,6 +395,11 @@ def campaign_bundle_errors(
             errors.append(f"selected channel {channel} has no action")
     brief = campaign_brief if isinstance(campaign_brief, dict) else {}
     brief_payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    decision_context = (brief_payload.get("decision_context")
+                        if isinstance(brief_payload.get("decision_context"), dict) else {})
+    expected_decision_ref = str(decision_context.get("decision_id") or "").strip()
+    if expected_decision_ref and str(bundle.get("upstream_decision_ref") or "").strip() != expected_decision_ref:
+        errors.append("upstream_decision_ref must preserve the retained Growth Planner decision")
     cadence = brief_payload.get("cadence") if isinstance(brief_payload.get("cadence"), dict) else {}
     expected_by_channel = cadence.get("expected_actions_by_channel") if isinstance(cadence.get("expected_actions_by_channel"), dict) else {}
     for channel in channels:

@@ -121,6 +121,7 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
           ...(destinationUrl ? { destination_url: destinationUrl } : {}),
           success_metrics: ['Impressions', 'Engagements', 'Clicks'],
           audience: { mode: 'existing_first', discover_if_insufficient: false },
+          decision_context: asObject(request.planning_brief),
           brand_constraints: 'Use only claims directly supported by retained evidence. Prefer the exact evidenced wording GDPR-native; do not substitute compliant, certified, guaranteed, only, always, or never unless the cited evidence uses that exact term.',
           prohibited_claims: 'Unsupported compliance, certification, exclusivity, guarantee, and performance claims.',
           autonomy_mode: 'APPROVE_PLAN_ONCE',

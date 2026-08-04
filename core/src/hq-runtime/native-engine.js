@@ -647,6 +647,7 @@ export class NativeHqEngine {
           external_action_requested: readyTodo.context?.external_action_requested === true || readyTodo.context?.authority_mode === 'EXECUTE',
           exact_targets: Array.isArray(readyTodo.context?.exact_targets) ? readyTodo.context.exact_targets : [],
           acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
+          planning_brief: readyTodo.context?.execution_brief || null,
         },
       };
       let selectionError = null;

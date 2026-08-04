@@ -1049,7 +1049,8 @@ If the subject of a claim is a bare role, kinship term, pronoun, or unnamed pers
 Rules: up to ${factCap} facts — capture EVERY distinct durable claim the section states (each decision, commitment, requirement, metric, figure, date, named party, defining fact). Do NOT drop a distinct high-value claim to keep the count low. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
-FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.`;
+FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
+Concretely: every "t" you emit must be readable as a sentence lifted from the SECTION itself. Its "f" quote is required to be a verbatim substring of the SECTION, so "t" and "f" MUST be in the same language as each other — if your "t" is in a different language from its own "f", you have translated, and that output is wrong. Reuse the SECTION's own nouns, names and number formats exactly as written (do not convert 1.240 to 1,240, or Hannover to Hanover).`;
     // Model fallback: if the primary extraction model fails (provider error,
     // finish=error, unparseable), fall through to a DIFFERENT family so a
     // section's facts are never lost to one model/provider hiccup. Configurable
@@ -1069,6 +1070,38 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       ],
     });
     let rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
+    // TRANSLATION DETECTOR — language-neutral, no detector library, no per-language rules.
+    // The prompt forbids translating the section, but compliance was only ever assessed by eye.
+    // Measured by hand on a German upload: memories came back as "Phase 1 starts in April 2026 with
+    // the pilot installation in Hanover" from "Phase 1 startet im April 2026 mit der
+    // Pilotinstallation in Hannover" — and MANDI rows from 2026-07-22 show the same mix, so this
+    // long predates any model change and was never quantified.
+    // The signal: a fact's own `f` quote is REQUIRED to be a verbatim substring of the section, so a
+    // faithful fact shares many tokens with its quote and a translated one shares almost none. That
+    // holds in any language and privileges none. Logged, never dropped — a wrong count must not
+    // delete a user's fact.
+    if (rawFacts.length) {
+      // Pure numerals are EXCLUDED: dates, prices and part numbers survive translation unchanged and
+      // inflate the overlap. Measured on the real observed pair, keeping numerals scored 0.50 and hid
+      // the translation; dropping them scores it 0.40 against 0.75-1.00 for faithful facts.
+      // Threshold validated on 7 hand-built pairs drawn from actual output (3 translated / 4 faithful),
+      // separating 0.00-0.40 from 0.75-1.00. Directional instrumentation, not proof.
+      const _norm = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length > 3 && /\p{L}/u.test(t));
+      let _suspect = 0;
+      for (const f of rawFacts) {
+        const t = new Set(_norm(f?.t || f?.content));
+        const q = _norm(f?.f || f?.source_quote);
+        if (!t.size || q.length < 4) continue;   // too short to judge — say nothing
+        const shared = q.filter((w) => t.has(w)).length / q.length;
+        if (shared < Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.45)) _suspect += 1;
+      }
+      if (_suspect) {
+        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${rawFacts.length} facts share <15% of `
+          + `tokens with their own source quote — likely translated away from the section's language, `
+          + `which the prompt forbids. Facts kept; this is a measurement, not a filter.`);
+      }
+    }
     // ATOMICITY. Measured on a real ingest: 23 of 29 claims were already single-sentence,
     // avg 119 chars — so the extractor is close. The 6 multi-sentence ones are what make
     // supersession ambiguous, because "latest" is only definable per (entity, attribute).

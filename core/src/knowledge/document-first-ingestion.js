@@ -793,7 +793,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
     // downstream. NO domain examples → generalizes to every tenant.
     const sys = `You are a precise information-extraction engine. From each numbered SECTION, extract atomic FACTS and the CANONICAL ENTITIES it mentions.
 
-Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":[{"t":"<short title>","f":"complete standalone sentence"}, ...],"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}, ...]}]}.
+Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":[{"t":"<short title>","f":"complete standalone sentence"}, ...],"entities":["Canonical Name", ...]}]}.
 
 FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
 - Each fact is an OBJECT {"t","f"}: "f" = ONE complete, self-contained sentence (explicit subject, never a bare "it"/"they"/"this"); "t" = a SHORT 3–6 word title naming what the fact is ABOUT — its subject/topic, in Title Case, NO trailing punctuation, and NOT a restatement of the whole sentence. Good titles: "RAG grounding without retraining", "O-ring failure cause", "Q2 revenue target". Bad titles: the full sentence, "Company Info", "Fact".
@@ -1240,7 +1240,7 @@ Output the JSON object and nothing else.`;
     const sys = `Extract only high-value durable workspace memory from the SECTION.
 ${_langLine} These instructions are in English for your benefit only — they are NOT a language sample. A tenant must be able to quote their own memories back to their own stakeholders, and same-language recall degrades when claims are silently translated. Only "memory_type" and the JSON keys stay English.
 Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":["Canonical Name"]}]}
+{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
 Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:

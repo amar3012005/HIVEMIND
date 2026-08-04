@@ -213,6 +213,9 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
             },
             "replace": snapshot.get("pronunciation_replacements", {}),
             "tools": TOOL_SCHEMAS,
+            # Explicit not implicit: measured 4 realtime text inputs across 37 calls —
+            # tools were registered but never chosen. Bar lowered in prompt.py; auto here.
+            "tool_choice": "auto",
         },
     }
 

@@ -8,6 +8,7 @@ import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork } from './first-life-control.js';
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
+import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
 
 const DAY = 86400000;
 
@@ -342,6 +343,58 @@ export class NativeHqEngine {
       });
     }
 
+    // First-life check-in is an internal, user-initiated playbook.  It gates
+    // neither baseline truth nor provider authority, but it prevents planning
+    // from running ahead of an administrator who wants to add current context.
+    const firstLifePolicy = await loadFirstLifePolicy();
+    const initialPlanAbsent = !context.evidence.latest_growth_plan;
+    if (initialPlanAbsent && firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
+      const adminRuns = await prisma.runtimePlaybookRun.findMany({
+        where: { orgId: runtime.orgId },
+        orderBy: { updatedAt: 'desc' },
+        take: 24,
+      });
+      let adminRun = adminRuns.find((run) => run.playbookId === 'operations.browser-admin-checkin-to-status'
+        && Number(run.playbookVersion) === 1
+        && String(run.trigger?.runtime_epoch || '') === String(runtime.epoch)
+        && run.trigger?.first_life_admin_checkin === true) || null;
+      if (!adminRun) {
+        const room = await prisma.hyperRoom.findFirst({
+          where: { orgId: runtime.orgId, archivedAt: null, roomTag: 'general' },
+          orderBy: { updatedAt: 'desc' },
+          select: { id: true },
+        });
+        if (room) {
+          adminRun = await this.runtimePlaybooks.executor.createRun({
+            orgId: runtime.orgId,
+            roomId: room.id,
+            idempotencyKey: `first-life-admin-checkin:${runtime.epoch}`,
+            trigger: { runtime_id: runtime.id, runtime_epoch: runtime.epoch, cycle_id: cycle.id, first_life_admin_checkin: true },
+            context: {
+              company: compactCompanyOperatingContext(context.company),
+              baseline: context.evidence.baseline,
+              request: { instruction: runtime.objective || '', objective: runtime.objective || '' },
+              policy: { first_life_policy_id: firstLifePolicy.policy_id, first_life_policy_version: firstLifePolicy.version },
+            },
+          });
+          adminRun = await this.runtimePlaybooks.execute(adminRun.id, runtime.orgId);
+        }
+      }
+      if (adminRun && !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(adminRun.status))) {
+        const alreadyShown = await prisma.hqRuntimeEvent.findFirst({
+          where: { runtimeId: runtime.id, runtimeEpoch: runtime.epoch, eventType: 'decision_required', details: { path: ['admin_checkin_run_id'], equals: adminRun.id } },
+        }).catch(() => null);
+        if (!alreadyShown) await event(prisma, runtime, cycle, {
+          eventType: 'decision_required',
+          title: 'A brief internal check-in is available',
+          summary: 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
+          details: { admin_checkin_run_id: adminRun.id, first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version } },
+        });
+        await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
+        return { transition: 'WAIT_FOR_ADMIN_CHECKIN', run_id: adminRun.id };
+      }
+    }
+
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
     if (activationSprint?.status === 'AWAITING_START') {
       const alreadyRequested = await prisma.hqRuntimeEvent.findFirst({
@@ -375,7 +428,11 @@ export class NativeHqEngine {
       }) : null;
       const todoId = String(run?.trigger?.todo_id || trigger.payload?.todo_id || '');
       const todo = todoId ? await prisma.hqTodo.findFirst({ where: { id: todoId, runtimeId: runtime.id, orgId: runtime.orgId } }) : null;
-      if (!run || !todo) {
+      if (run?.trigger?.first_life_admin_checkin === true) {
+        // The check-in has no todo by design. Its persisted terminal artifact is
+        // additional planning evidence, never a work-order result.
+        context = await buildHqContext({ prisma, runtime, trigger });
+      } else if (!run || !todo) {
         await move('BLOCKED', { blockedReason: 'A playbook result arrived without its durable run or owning todo.' });
         await event(prisma, runtime, cycle, {
           eventType: 'blocked', title: 'Playbook result could not be reconciled',
@@ -384,6 +441,10 @@ export class NativeHqEngine {
         });
         return { transition: 'ESCALATE', reason: 'runtime_playbook_result_missing' };
       }
+      if (run?.trigger?.first_life_admin_checkin === true) {
+        // Continue below: the regular first-life check sees the terminal run and
+        // invokes the initial diagnosis exactly once.
+      } else {
       const artifactRefs = run.artifacts.map((artifact) => artifact.artifactId);
       const artifactCounts = run.artifacts.reduce((counts, artifact) => {
         const key = String(artifact.artifactKey || 'artifact');
@@ -421,6 +482,13 @@ export class NativeHqEngine {
         }
       } else if (run.status === 'WAITING_EVENT') {
         const waitingForCapability = (run.waitingFor?.types || []).includes('capability.connected');
+        const waitingPresentation = run.waitingFor?.presentation || {};
+        const waitingTitle = String(waitingPresentation.title || '').trim()
+          || (waitingForCapability ? `A connection is required: ${todo.title}` : `Waiting for lifecycle evidence: ${todo.title}`);
+        const waitingSummary = String(waitingPresentation.summary || '').trim()
+          || (waitingForCapability
+            ? `The Room's accepted work and ${artifactRefs.length} durable artifact(s) remain attached to this execution. HQ is waiting for the missing tenant connection and will resume the same playbook checkpoint when it becomes available.`
+            : `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). The same checkpoint will resume when its declared event or deadline arrives.`);
         await prisma.hqTodo.update({ where: { id: todo.id }, data: {
           status: waitingForCapability ? 'WAITING_FOR_CONNECTOR' : 'MONITORING',
           blockedReason: waitingForCapability ? 'A required tenant capability is not connected yet.' : null,
@@ -435,10 +503,8 @@ export class NativeHqEngine {
         } });
         await event(prisma, runtime, cycle, {
           eventType: waitingForCapability ? 'capability_required' : 'observation',
-          title: waitingForCapability ? `A connection is required: ${todo.title}` : `Response monitoring is active: ${todo.title}`,
-          summary: waitingForCapability
-            ? `The Room's accepted work and ${artifactRefs.length} durable artifact(s) remain attached to this execution. HQ is waiting for the missing tenant connection and will resume the same playbook checkpoint when it becomes available.`
-            : `The lifecycle completed ${run.completedStageIds.length} checkpointed stage(s) and retained ${artifactRefs.length} durable artifact(s). Provider response correlation is active; a matching event will resume this same run immediately.`,
+          title: waitingTitle,
+          summary: waitingSummary,
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
@@ -662,13 +728,39 @@ export class NativeHqEngine {
         },
       };
       let selectionError = null;
-      const selectedLifecycle = this.runtimePlaybooks ? await this.runtimePlaybooks.selectAssignment({
+      let selectedLifecycle = null;
+      if (this.runtimePlaybooks && readyTodo.context?.planned_playbook_id && readyTodo.context?.planned_playbook_version) {
+        try {
+          const declared = this.runtimePlaybooks.registry.get(
+            readyTodo.context.planned_playbook_id,
+            Number(readyTodo.context.planned_playbook_version),
+            { scopeKey: 'global' },
+          );
+          const requestedAction = String(readyTodo.context?.requested_action || '');
+          const actionTerminals = declared.metadata?.terminal_states_by_action?.[requestedAction];
+          selectedLifecycle = {
+            matched: true,
+            playbook: declared,
+            selection: {
+              playbook_id: declared.playbook_id,
+              version: declared.version,
+              matched_supported_action: requestedAction,
+              acceptable_terminal_states: Array.isArray(actionTerminals) && actionTerminals.length
+                ? actionTerminals : declared.terminal_states,
+              reason: 'The persisted Growth Plan already selected this exact registered lifecycle.',
+            },
+          };
+        } catch (error) {
+          selectionError = error;
+        }
+      }
+      if (!selectedLifecycle && this.runtimePlaybooks) selectedLifecycle = await this.runtimePlaybooks.selectAssignment({
         objective: boundedObjective, context: lifecycleContext,
       }).catch((error) => {
         selectionError = error;
         this.logger.warn('[hq-runtime] playbook selection unavailable:', error.message);
         return null;
-      }) : null;
+      });
       if (!selectedLifecycle?.matched) {
         const reason = selectionError
           ? `Playbook selection failed: ${String(selectionError.message || selectionError).slice(0, 1000)}`
@@ -754,6 +846,11 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: 'I am ranking the company constraints', summary: `${selectedSkill.description} I will compare the complete company state, preserve material unknowns, and order only the work justified by evidence and the operating requirements.`, skillRef: selectedSkill.id, details: { model_policy: selectedSkill.model_policy, selected_model: selectedModel } });
       await event(prisma, runtime, cycle, { eventType: 'tool_started', title: 'I am building the first Growth Operating Plan', summary: 'I will assess the complete baseline, rank multiple constraints, define the first bounded stage, and commit an ordered specialist todo queue before dispatching any work.', toolRef: 'growth_plan_run', details: { toolkit: growthToolkit.id, model: selectedModel, mode: 'initial_full' } });
       const planningRequirements = appliedInstructions.map((item) => item.instruction.body).filter(Boolean);
+      const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
+        where: { orgId: runtime.orgId, playbookId: 'operations.browser-admin-checkin-to-status', status: 'COMPLETED' },
+        include: { artifacts: { orderBy: { createdAt: 'desc' } } }, orderBy: { updatedAt: 'desc' },
+      });
+      const currentStatus = adminStatusRun?.artifacts?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
       const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global' })
         .filter((entry) => entry.status === 'ACTIVE')
         .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.playbook_id === entry.playbook_id) === index)
@@ -770,6 +867,7 @@ export class NativeHqEngine {
         result = await this.toolkits.invoke('growth_plan', 'run', {
           mode: 'initial_full', objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
           model: selectedModel, lifecycleCatalog,
+          additionalEvidence: currentStatus ? { user_current_status: { artifact_id: currentStatus.artifactId, data: currentStatus.data || {}, source_refs: currentStatus.sourceRefs || [] } } : null,
           onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
             eventType: 'observation',
             title: stage === 'context' ? 'I loaded the evidence for this decision' : stage === 'planning' ? 'I am comparing the company as a whole' : stage === 'governance' ? 'I am checking whether this plan can actually operate' : 'I am committing the chosen next move',
@@ -805,11 +903,6 @@ export class NativeHqEngine {
         eventType: 'todo_created', title: 'I committed the first operating proposals',
         summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. These remain proposed until you start the recommendation.`,
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
-      });
-      await scheduleHqWake({
-        prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-        idempotencyKey: `initial-plan-start:${result.artifact_id}`,
-        triggerType: 'queue_advance', dueAt: new Date(), payload: { growth_plan_id: result.artifact_id, reason: 'initial_start_decision' },
       });
       initialPolicyCommitted = true;
     } else if (focusedOutcome) {
@@ -858,7 +951,7 @@ export class NativeHqEngine {
       }),
       prisma.runtimePlaybookRun?.findFirst ? prisma.runtimePlaybookRun.findFirst({
         where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
-        orderBy: { updatedAt: 'asc' }, select: { id: true, currentStageId: true, status: true },
+        orderBy: { updatedAt: 'asc' }, select: { id: true, currentStageId: true, status: true, waitingFor: true },
       }).catch(() => null) : Promise.resolve(null),
     ]);
     const pendingSpecialist = pendingLegacySpecialist || (pendingPlaybookRun ? {
@@ -866,6 +959,7 @@ export class NativeHqEngine {
     } : null);
     const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
     const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
+    const waitingPresentation = pendingPlaybookRun?.waitingFor?.presentation || {};
     const sleepReason = initialPolicyCommitted
       ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
       : queueContinuationScheduled
@@ -873,7 +967,7 @@ export class NativeHqEngine {
       : openCapability
       ? `I am pausing because ${openCapability.provider} is not connected. That capability is required by the next todo; pretending otherwise would produce an unusable result. Connect it and I will wake immediately, verify the tenant binding, and continue the same todo.`
       : waitingForResponse
-        ? 'I am watching the accepted provider correlations for matching responses. The configured monitor resumes this exact checkpoint when an event arrives; there is no arbitrary measurement delay.'
+        ? String(waitingPresentation.summary || 'The active lifecycle is waiting for its declared event or deadline. The same checkpoint will resume when that evidence arrives.')
       : pendingSpecialist
         ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately.`
       : blockedTodos.length
@@ -886,7 +980,7 @@ export class NativeHqEngine {
     const waitingTitle = initialPolicyCommitted ? 'The first operating plan is ready'
       : queueContinuationScheduled ? 'The queue is still moving'
       : openCapability ? 'I am waiting for access'
-      : waitingForResponse ? 'I am monitoring for replies'
+      : waitingForResponse ? String(waitingPresentation.title || 'I am waiting for lifecycle evidence')
       : pendingSpecialist ? 'I am waiting for specialist work'
       : blockedTodos.length ? 'The operating queue needs intervention' : 'I am sleeping';
     await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });

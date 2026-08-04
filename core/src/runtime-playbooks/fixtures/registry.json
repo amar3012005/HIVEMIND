@@ -14,6 +14,8 @@
   "outreach-voice-call-to-outcome.v2.json",
   "outreach-voice-cohort-to-outcomes.v1.json",
   "operations-admin-call-to-decision.v1.json",
+  "operations-browser-admin-checkin-to-status.v1.json",
+  "marketing-strategy-to-growth-brief.v1.json",
   "campaign-awareness-to-learning.v1.json",
   "campaign-awareness-to-learning.v2.json"
 ]

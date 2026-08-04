@@ -7,7 +7,14 @@
   "metadata": {
     "owner_room_tag": "campaign",
     "supported_actions": ["plan_awareness_campaign", "prepare_campaign", "launch_campaign", "monitor_campaign", "evaluate_campaign"],
-    "purpose": "Use for a bounded awareness campaign that should be prepared by Campaign Intelligence and continue through governed launch and measurement."
+    "purpose": "Use for a bounded awareness campaign that should be prepared by Campaign Intelligence and continue through governed launch and measurement.",
+    "terminal_states_by_action": {
+      "plan_awareness_campaign": ["reviewed", "launch_blocked", "cancelled"],
+      "prepare_campaign": ["reviewed", "launch_blocked", "cancelled"],
+      "launch_campaign": ["reviewed", "launch_blocked", "cancelled"],
+      "monitor_campaign": ["reviewed", "launch_blocked", "cancelled"],
+      "evaluate_campaign": ["reviewed", "cancelled"]
+    }
   },
   "input_contract": {"fields": [
     {"path": "target.location", "type": "string", "description": "Optional retained geographic focus."},
@@ -29,6 +36,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_record", "path": "data.room_id"}
       ],
       "waits_for_event": {"types": ["campaign.contract_ready", "campaign.contract_failed"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
+      "presentation": {"waiting": {"title": "Campaign contract is being prepared", "summary": "Campaign Intelligence is preparing the persisted contract before any launch decision."}},
       "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
       "on_failure": "ESCALATE"
     },
@@ -61,6 +69,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_observation", "path": "data.correlation_ref"}
       ],
       "waits_for_event": {"types": ["campaign.visuals_ready", "campaign.contract_failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
+      "presentation": {"waiting": {"title": "Campaign visuals are being finalized", "summary": "The approved campaign contract is retained while its selected visual assets become ready."}},
       "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
       "on_failure": "ESCALATE"
     },
@@ -92,6 +101,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_capability_status", "path": "data.waiting_for_connection"}
       ],
       "waits_for_event": {"types": ["capability.connected", "campaign.connection_changed", "wait.timeout"], "timeout_after_seconds": 3600},
+      "presentation": {"waiting": {"title": "Campaign is waiting for a required connection", "summary": "The prepared contract is retained and will resume this same lifecycle when its required capability is available."}},
       "transitions": [{"default": true, "to_stage": "preflight_campaign_channels"}],
       "on_failure": "ESCALATE"
     },
@@ -125,6 +135,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_observation", "path": "data.correlation_ref"}
       ],
       "waits_for_event": {"types": ["campaign.performance_checkpoint", "campaign.completed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 604800},
+      "presentation": {"waiting": {"title": "Campaign evidence checkpoint is scheduled", "summary": "The launched campaign is awaiting its declared performance checkpoint before evaluation."}},
       "transitions": [{"default": true, "to_stage": "evaluate_campaign"}],
       "on_failure": "ESCALATE"
     },

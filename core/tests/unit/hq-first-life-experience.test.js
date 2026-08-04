@@ -37,3 +37,12 @@ test('first-life experience projects persisted recognition and one startable rec
   assert.equal(result.recommendation.expected_outcome, 'Ein messbares Ergebnis');
 });
 
+test('first-life experience presents the browser check-in before planning without inventing a task', () => {
+  const result = projectFirstLifeExperience({
+    runtime: { epoch: 'epoch-checkin' }, firstLife: null, growthBrief: null, tasks: [], recognitionEvents: [],
+    adminCheckin: { id: 'checkin-run', status: 'WAITING_EVENT', currentStageId: 'capture_admin_choice', waitingFor: { types: ['admin_checkin.started', 'admin_checkin.skipped'] } },
+  });
+  assert.equal(result.phase, 'AWAITING_ADMIN_CHECKIN');
+  assert.equal(result.admin_checkin.run_id, 'checkin-run');
+  assert.equal(result.can_start, false);
+});

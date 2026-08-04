@@ -1,8 +1,15 @@
 import crypto from 'node:crypto';
 import { buildOrgBrief } from './org-brief.js';
+import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
+const RUNTIME_OPERATOR_PROVIDER = 'grok';
+// The live xAI roster does not offer a Barry voice. Rex is a supported,
+// multilingual, professional voice and is pinned only for the Runtime-admin
+// interaction profile so a normal organization voice policy is untouched.
+const RUNTIME_OPERATOR_VOICE_ID = 'rex';
+const RUNTIME_OPERATOR_MAX_DURATION_SECONDS = 180;
 const GROK_VOICES = [
   ['eve', 'Eve', 'feminine', 'Clear, warm and conversational'],
   ['ara', 'Ara', 'feminine', 'Calm and professional'],
@@ -160,15 +167,21 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     if (pathname === '/api/tara/voice-sessions' && method === 'POST') {
       if (!capabilitySecret) return reply(res, { error: 'grok_capability_not_configured' }, 503);
       const current = await configFor(orgId);
-      const provider = current.defaultProvider;
+      const requestedMode = body.mode === 'internal' ? 'internal' : 'external';
+      const interactionProfile = requestedMode === 'internal' && body.interaction_profile === 'runtime_operator'
+        ? 'runtime_operator'
+        : null;
+      const provider = interactionProfile ? RUNTIME_OPERATOR_PROVIDER : current.defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
       let providerConfig;
       try { providerConfig = provider === 'grok' ? validatedGrokConfig(current.grokConfig) : current.deepgramConfig || {}; }
       catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }
-      const mode = body.mode === 'internal' ? 'internal' : 'external';
+      const mode = requestedMode;
       const taraConfig = await getTaraConfig?.({ userId, orgId }).catch(() => null);
       const selectedSkillId = mode === 'internal' ? taraConfig?.selected_internal_skill_id : taraConfig?.selected_external_skill_id;
-      const configuredPrompt = mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
+      const configuredPrompt = interactionProfile === 'runtime_operator'
+        ? RUNTIME_OPERATOR_PROMPT
+        : mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
       const profileContext = await (async () => {
         if (!prisma || !userId) return '';
         try {
@@ -184,7 +197,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       if (provider === 'grok') {
         try {
           effectiveProviderConfig = validatedGrokConfig(providerConfig, {
-            ...(body.voice_id ? { voice_id: boundedString(body.voice_id, 120) } : {}),
+            ...(interactionProfile ? { voice_id: RUNTIME_OPERATOR_VOICE_ID } : body.voice_id ? { voice_id: boundedString(body.voice_id, 120) } : {}),
             ...(body.language ? { language: boundedString(body.language, 16) } : {}),
           });
         } catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }
@@ -197,7 +210,8 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         language: effectiveProviderConfig.language || 'en',
         mode,
         goal: boundedString(body.goal, 300) || '',
-        skill_id: selectedSkillId || null,
+        skill_id: interactionProfile === 'runtime_operator' ? 'runtime_operator.v1' : selectedSkillId || null,
+        interaction_profile: interactionProfile,
         config_revision: current.revision,
         instructions: boundedString(configuredPrompt, 12_000) || '',
         profile_context: boundedString(profileContext, 2_000) || '',
@@ -212,9 +226,11 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
           skillPrompt: configuredPrompt,
           profileContext,
         }), 3_000) || '',
+        max_duration_seconds: interactionProfile ? RUNTIME_OPERATOR_MAX_DURATION_SECONDS : null,
+        closing_phrase: interactionProfile ? 'Noted! Boss, good luck see you soon.' : '',
       };
       const jti = crypto.randomUUID();
-      const expiresAt = new Date(Date.now() + 90_000);
+      const expiresAt = new Date(Date.now() + (interactionProfile ? 5 * 60_000 : 90_000));
       const session = await prisma.taraVoiceSession.create({ data: { orgId, userId, provider, mode: snapshot.mode, capabilityJti: jti, configSnapshot: snapshot, expiresAt } });
       const token = capability({ iss: 'hivemind-core', aud: `tara-${provider}`, sub: userId, org_id: orgId, session_id: session.id, jti, exp: expiresAt.getTime(), operations: ['voice'] }, capabilitySecret);
       return reply(res, { session_id: session.id, provider, ws_url: provider === 'grok' ? grokPublicWs : `${(process.env.TARA_DEEPGRAM_PUBLIC_WS_URL || 'wss://core.singulancelabs.com/voice2/voice')}`, capability: token, expires_at: expiresAt.toISOString(), config_revision: current.revision, audio_format: { type: 'pcm16', sample_rate: 16000 } });

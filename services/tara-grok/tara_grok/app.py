@@ -400,6 +400,8 @@ async def voice(ws: WebSocket, session_id: str):
         await ws.close(code=1011)
         return
     await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "started", "payload": {"provider": "grok", "model": config.TARA_GROK_MODEL}})
+    max_duration_seconds = int(snapshot.get("max_duration_seconds") or 0)
+    closing_phrase = str(snapshot.get("closing_phrase") or "").strip()
 
     async def browser_to_xai():
         try:
@@ -473,11 +475,33 @@ async def voice(ws: WebSocket, session_id: str):
                 tool_batch_task.cancel()
             await emit_event(session_id, terminal_event)
 
+    async def end_at_runtime_limit():
+        """Close the Runtime-admin check-in on the server even if the tab stalls."""
+        if max_duration_seconds <= 0:
+            return
+        await asyncio.sleep(max(max_duration_seconds - 6, 0))
+        if closing_phrase:
+            try:
+                await xai.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user", "content": [{
+                        "type": "input_text",
+                        "text": f"The internal check-in ends now. Say exactly: {closing_phrase}",
+                    }]},
+                }))
+                await xai.send(json.dumps({"type": "response.create"}))
+            except websockets.ConnectionClosed:
+                return
+        await asyncio.sleep(min(6, max_duration_seconds))
+        await ws.close(code=1000, reason="runtime_time_limit")
+
     tasks = [asyncio.create_task(browser_to_xai()), asyncio.create_task(xai_to_browser())]
+    deadline_task = asyncio.create_task(end_at_runtime_limit()) if max_duration_seconds > 0 else None
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        wait_for = [*tasks, *([deadline_task] if deadline_task else [])]
+        await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for task in tasks: task.cancel()
+        for task in [*tasks, *([deadline_task] if deadline_task else [])]: task.cancel()
         await xai.close()
 
 @app.post("/webhooks/telnyx")

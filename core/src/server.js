@@ -8162,7 +8162,16 @@ exit \$RC
               return jsonResponse(res, { ok: true, already_completed: true, duration_ms: call.durationMs || 0, turns: call.turnCount || 0 });
             }
             const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
-            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            // Populate estimated_cost_micros at call end (was 0 on every row). Rates
+            // live in ONE config (billing/tara-rates.js); provider + duration + the
+            // row's accumulated tokens drive the number. Never throws — cost is
+            // reporting, not correctness.
+            let estimatedCostMicros = 0;
+            try {
+              const { computeTaraCostMicros } = await import('./billing/tara-rates.js');
+              estimatedCostMicros = computeTaraCostMicros({ provider: call.provider, durationMs, promptTokens: call.promptTokens, completionTokens: call.completionTokens });
+            } catch (e) { console.warn('[tara/cost] compute failed:', e.message); }
+            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs, estimatedCostMicros } });
             const campaignAttempt = await prisma.taraCallAttempt.findFirst({ where: { orgId: tOrg, sessionId: String(body.session_id) } }).catch(() => null);
             if (campaignAttempt) {
               let attemptStatus = campaignAttempt.status;

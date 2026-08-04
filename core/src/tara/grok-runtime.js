@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { buildOrgBrief } from './org-brief.js';
+import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
@@ -181,9 +182,14 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       try { providerConfig = provider === 'grok' ? validatedGrokConfig(current.grokConfig) : current.deepgramConfig || {}; }
       catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }
       const mode = body.mode === 'internal' ? 'internal' : 'external';
+      const interactionProfile = mode === 'internal' && body.interaction_profile === 'runtime_operator'
+        ? 'runtime_operator'
+        : null;
       const taraConfig = await getTaraConfig?.({ userId, orgId }).catch(() => null);
       const selectedSkillId = mode === 'internal' ? taraConfig?.selected_internal_skill_id : taraConfig?.selected_external_skill_id;
-      const configuredPrompt = mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
+      const configuredPrompt = interactionProfile === 'runtime_operator'
+        ? RUNTIME_OPERATOR_PROMPT
+        : mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
       const profileContext = await (async () => {
         if (!prisma || !userId) return '';
         try {
@@ -212,7 +218,8 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         language: effectiveProviderConfig.language || 'en',
         mode,
         goal: boundedString(body.goal, 300) || '',
-        skill_id: selectedSkillId || null,
+        skill_id: interactionProfile === 'runtime_operator' ? 'runtime_operator.v1' : selectedSkillId || null,
+        interaction_profile: interactionProfile,
         config_revision: current.revision,
         instructions: boundedString(configuredPrompt, 12_000) || '',
         profile_context: boundedString(profileContext, 2_000) || '',

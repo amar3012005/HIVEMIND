@@ -396,20 +396,23 @@ export class NativeHqEngine {
           adminRun = await this.runtimePlaybooks.execute(adminRun.id, runtime.orgId);
         }
       }
-      if (adminRun && !['COMPLETED', 'TERMINATED', 'NEEDS_INTERVENTION'].includes(String(adminRun.status))) {
+      if (adminRun && String(adminRun.status) !== 'COMPLETED') {
         const alreadyShown = await prisma.hqRuntimeEvent.findFirst({
           // Runtime events are epoch-bounded by their parent Runtime reset. The
           // event table itself intentionally carries no runtimeEpoch column.
           where: { runtimeId: runtime.id, eventType: 'decision_required', details: { path: ['admin_checkin_run_id'], equals: adminRun.id } },
         }).catch(() => null);
+        const needsAttention = String(adminRun.status) === 'NEEDS_INTERVENTION';
         if (!alreadyShown) await event(prisma, runtime, cycle, {
-          eventType: 'decision_required',
-          title: 'A brief internal check-in is available',
-          summary: 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
+          eventType: needsAttention ? 'blocked' : 'decision_required',
+          title: needsAttention ? 'Internal check-in needs attention' : 'A brief internal check-in is available',
+          summary: needsAttention
+            ? 'Runtime retained the browser conversation but could not yet verify a source-backed current-status record. It will not form the first operating plan from an incomplete check-in.'
+            : 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
           details: { admin_checkin_run_id: adminRun.id, first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version } },
         });
-        await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
-        return { transition: 'WAIT_FOR_ADMIN_CHECKIN', run_id: adminRun.id };
+        await move(needsAttention ? 'BLOCKED' : 'WAITING', { blockedReason: needsAttention ? 'admin_checkin_status_unverified' : null, currentCycleId: null, nextWakeAt: null });
+        return { transition: needsAttention ? 'ADMIN_CHECKIN_NEEDS_ATTENTION' : 'WAIT_FOR_ADMIN_CHECKIN', run_id: adminRun.id };
       }
     }
 

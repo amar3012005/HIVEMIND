@@ -232,7 +232,7 @@ async def think(request: Request):
                 # Persona reaches the strategist too: the skill's opening lines
                 # define who TARA is + what the call is FOR — cached, so only the
                 # first turn pays the fetch before routing.
-                persona = await get_persona(user_id, org_id)
+                persona = await get_persona(user_id, org_id, session_id)
                 prompt_key = "internal_prompt" if mode == "internal" else "system_prompt"
                 persona_hint = str(persona.get(prompt_key) or "")[:280].replace("\n", " ")
                 decision = await route(

@@ -38,9 +38,9 @@ _cfg_cache: dict[tuple, dict] = {}
 _CFG_TTL = 120.0
 
 
-async def get_persona(user_id: Optional[str], org_id: Optional[str]) -> Dict[str, Any]:
+async def get_persona(user_id: Optional[str], org_id: Optional[str], session_id: Optional[str] = None) -> Dict[str, Any]:
     """Fetch the tenant's TARA config (selected-skill prompts) with caching."""
-    key = (user_id, org_id)
+    key = (user_id, org_id, session_id or "")
     hit = _cfg_cache.get(key)
     if hit and time.time() - hit["at"] < _CFG_TTL:
         return hit["cfg"]
@@ -48,7 +48,7 @@ async def get_persona(user_id: Optional[str], org_id: Optional[str]) -> Dict[str
         async with httpx.AsyncClient(timeout=8, verify=config.VERIFY_TLS) as c:
             r = await c.get(
                 f"{config.HIVEMIND_CORE_URL}/api/tara/config",
-                params={"tenant_id": "default", "agent_name": "default"},
+                params={"tenant_id": "default", "agent_name": "default", **({"session_id": session_id} if session_id else {})},
                 headers=_headers(user_id, org_id),
             )
             cfg = (r.json() or {}).get("config") or {} if r.status_code == 200 else {}

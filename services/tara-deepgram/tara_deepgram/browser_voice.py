@@ -109,7 +109,7 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
     # rides the think endpoint URL → seeds the strategist's goal_state +
     # confidence/phase engine, identical to outbound calls.
     from .core_client import get_persona
-    persona = await get_persona(user_id, org_id)
+    persona = await get_persona(user_id, org_id, session_id)
     skill_prompt = persona.get("internal_prompt" if mode == "internal" else "system_prompt") or ""
     profile_context = persona.get("profile_context") or ""
     # Org brief rides the cached /api/tara/config fetch, so the widget also opens

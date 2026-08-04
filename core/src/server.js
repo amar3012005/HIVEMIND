@@ -22269,6 +22269,23 @@ exit \$RC
               agentName,
               { userId, orgId }
             );
+            // A browser Runtime check-in pins its operator skill in the durable
+            // session snapshot. The adapter must receive that exact skill rather
+            // than refetching whichever generic internal skill was later selected.
+            const sessionId = String(url.searchParams.get('session_id') || '').trim();
+            if (sessionId && /^[0-9a-f-]{36}$/i.test(sessionId)) {
+              const session = await prisma?.taraVoiceSession.findFirst({
+                where: { id: sessionId, userId, orgId, mode: 'internal' },
+                select: { configSnapshot: true },
+              }).catch(() => null);
+              const snapshot = session?.configSnapshot && typeof session.configSnapshot === 'object'
+                ? session.configSnapshot
+                : null;
+              if (snapshot?.interaction_profile === 'runtime_operator' && snapshot.instructions) {
+                taraConfig.internal_prompt = String(snapshot.instructions);
+                taraConfig.selected_internal_skill_id = String(snapshot.skill_id || 'runtime_operator.v1');
+              }
+            }
             // Compact org brief travels with the config the voice adapters already
             // fetch and cache, so every new conversation — phone or browser widget —
             // opens knowing who the org IS, for any tenant and any skill. Kept

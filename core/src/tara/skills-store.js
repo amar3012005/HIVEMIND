@@ -16,7 +16,7 @@
  * deleted; user-created skills are fully editable.
  */
 import crypto from 'node:crypto';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_INTERNAL_PROMPT, DEFAULT_CLINICAL_PROMPT } from './config-store.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_INTERNAL_PROMPT, DEFAULT_CLINICAL_PROMPT, RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 
 const CUSTOMER_SUPPORT_PROMPT = `You are a warm, efficient customer-support voice agent. Your job is to resolve the caller's issue quickly and make them feel heard.
 
@@ -100,6 +100,7 @@ function builtinSeeds() {
     { kind: 'external', name: 'Feedback Collector', primary_prompt: FEEDBACK_COLLECTOR_PROMPT, secondary_prompt: DEFAULT_CLINICAL_PROMPT },
     { kind: 'external', name: 'Receptionist', primary_prompt: RECEPTIONIST_PROMPT, secondary_prompt: DEFAULT_CLINICAL_PROMPT },
     { kind: 'internal', name: 'Voice of HIVEMIND', primary_prompt: DEFAULT_INTERNAL_PROMPT, secondary_prompt: null },
+    { kind: 'internal', name: 'Runtime Operator', primary_prompt: RUNTIME_OPERATOR_PROMPT, secondary_prompt: null },
   ];
 }
 

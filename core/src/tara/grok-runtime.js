@@ -224,7 +224,9 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const provider = url.searchParams.get('provider') || (await configFor(orgId)).defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
       const voices = provider === 'grok' ? await loadGrokVoices() : [];
-      return reply(res, { provider, voices, delegated: provider !== 'grok' });
+      const languages = [...new Set(voices.flatMap((voice) => Array.isArray(voice?.languages)
+        ? voice.languages : voice?.language ? [voice.language] : []))];
+      return reply(res, { provider, voices, languages, delegated: provider !== 'grok' });
     }
 
     const consume = pathname.match(/^\/internal\/v1\/tara\/calls\/([0-9a-f-]{36})\/consume$/i);

@@ -12161,7 +12161,7 @@ Write the persona now.`;
     }
   }
 
-  if (pathname === '/v1/tara/runtime-config' || pathname === '/v1/tara/voice-sessions') {
+  if (pathname === '/v1/tara/runtime-config' || pathname === '/v1/tara/voice-sessions' || pathname === '/v1/tara/voices') {
     const current = await requireSession(req, res);
     if (!current) return;
     if (pathname === '/v1/tara/runtime-config' && req.method === 'PATCH') {
@@ -12172,7 +12172,11 @@ Write the persona now.`;
     return proxyToCore(req, res, {
       session: current.session,
       method: req.method,
-      path: pathname === '/v1/tara/runtime-config' ? '/api/tara/runtime-config' : '/api/tara/voice-sessions',
+      path: pathname === '/v1/tara/runtime-config'
+        ? '/api/tara/runtime-config'
+        : pathname === '/v1/tara/voices'
+          ? '/api/tara/voices'
+          : '/api/tara/voice-sessions',
       body,
       query: url.search || '',
     });

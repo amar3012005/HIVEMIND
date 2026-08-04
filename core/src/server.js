@@ -1899,6 +1899,37 @@ if (process.env.DOCLING_URL) {
           }
         }
 
+        // ── Tier 1.5: THE SEAM, for formats where it demonstrably beats docling ──
+        // Measured on a valid 2-heading DOCX: docling returned `chars=173 chunks=0` and logged
+        // "TIER FAILED EMPTY", so the document became ONE segment with no section structure. The
+        // seam's mammoth.convertToHtml path returned proper markdown for the same bytes:
+        //     # Marktumfeld und Wettbewerb  /  ## Technische Daten
+        // Word stores headings as styles, which convertToHtml preserves and extractRawText (and
+        // docling, here) drop. HTML is the same story — <h1>-<h6> are already structure.
+        // Only these two formats: PDF keeps its probe/vision/fast-pdf chain, and PPTX/XLSX stay with
+        // docling because it reads their ZIP+XML natively and the seam deliberately refuses to guess.
+        // On any failure this falls through to the docling chain below rather than failing the upload.
+        const _seamExts = String(process.env.KB_SEAM_FORMATS || 'docx,html,htm').split(',').map((x) => x.trim());
+        if (_seamExts.includes(ext)) {
+          try {
+            const { normalize: _normalize } = await import('./knowledge/normalize.js');
+            const _seam = await _normalize(fileBuffer, { mime: '', filename });  // mime is not in scope here; the seam keys off the extension, which IS (`ext`).
+            if (_seam.ok && (_seam.markdown || _seam.text)) {
+              const _body = _seam.markdown || _seam.text;
+              console.log(`[docling-adapter] tier=seam:${_seam.tier} file=${filename} chars=${_body.length} `
+                + `markdown=${_seam.markdown ? 'yes' : 'no'} ms=${Date.now() - tParse}`);
+              return {
+                text: _seam.text, markdown: _seam.markdown, json: null,
+                tables: [], pages: null, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: `seam:${_seam.tier}`,
+              };
+            }
+            console.warn(`[docling-adapter] seam declined ${filename} (${_seam.error || 'no text'}) — trying docling`);
+          } catch (e) {
+            console.warn(`[docling-adapter] seam threw for ${filename}: ${e.message} — trying docling`);
+          }
+        }
+
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
         // Text-bearing and not image-heavy → neither OCR nor picture description is

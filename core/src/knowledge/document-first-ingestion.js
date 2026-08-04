@@ -1298,20 +1298,33 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // Threshold validated on 7 hand-built pairs drawn from actual output (3 translated / 4 faithful),
       // separating 0.00-0.40 from 0.75-1.00. Directional instrumentation, not proof.
       const _norm = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)
+        // Pure numerals are EXCLUDED: dates, prices and part numbers survive translation unchanged
+        // and inflate the overlap. Keeping them scored the real observed pair 0.50 and MISSED it;
+        // dropping them scores it 0.40 against 0.75-1.00 for faithful facts.
         .filter((t) => t.length > 3 && /\p{L}/u.test(t));
       const _langThreshold = Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.45);
       let _suspect = 0;
+      let _judged = 0;
       for (const f of rawFacts) {
-        const t = new Set(_norm(f?.t || f?.content));
-        const q = _norm(f?.f || f?.source_quote);
-        if (!t.size || q.length < 4) continue;   // too short to judge — say nothing
+        // COMPARE THE CLAIM AGAINST ITS OWN QUOTE. My first version compared `t` (the SHORT TOPIC)
+        // against `f` (the full claim) — two fields that legitimately share few tokens, so it
+        // reported drift on faithful facts. Measured on an English PDF: 7 of 7 flagged when nothing
+        // had been translated. The contract is {t: short topic, f: claim, source_quote: verbatim
+        // substring}, and the only pair whose languages MUST match is the claim and its quote.
+        const claim = f?.f || f?.content;
+        const quote = f?.source_quote;
+        if (!claim || !quote) continue;          // nothing to compare — say nothing
+        const t = new Set(_norm(claim));
+        const q = _norm(quote);
+        if (!t.size || q.length < 4) continue;   // too short to judge
+        _judged += 1;
         const shared = q.filter((w) => t.has(w)).length / q.length;
         if (shared < _langThreshold) _suspect += 1;
       }
       if (_suspect) {
         // Print the ACTUAL threshold, not a literal. The first version hardcoded "<15%" while the
         // threshold had already moved to 0.45, so the log understated the bar it was applying.
-        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${rawFacts.length} facts share under `
+        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${_judged} judged facts share under `
           + `${Math.round(_langThreshold * 100)}% of tokens with their own source quote — likely `
           + `translated away from the section's language, which the prompt forbids. Facts kept; this `
           + `is a measurement, not a filter.`);

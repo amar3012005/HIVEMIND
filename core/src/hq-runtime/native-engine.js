@@ -12,6 +12,13 @@ import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
 
 const DAY = 86400000;
 
+// This internal first-life checkpoint is selected by policy, not by task text.
+// The executor still requires the immutable playbook identity at creation time.
+export const FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK = Object.freeze({
+  id: 'operations.browser-admin-checkin-to-status',
+  version: 1,
+});
+
 const hasMetric = (source, key) => Object.prototype.hasOwnProperty.call(source || {}, key)
   && source[key] !== null && source[key] !== undefined && Number.isFinite(Number(source[key]));
 const metric = (value) => Number(value).toLocaleString('en-US');
@@ -368,6 +375,8 @@ export class NativeHqEngine {
           adminRun = await this.runtimePlaybooks.executor.createRun({
             orgId: runtime.orgId,
             roomId: room.id,
+            playbookId: FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK.id,
+            playbookVersion: FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK.version,
             idempotencyKey: `first-life-admin-checkin:${runtime.epoch}`,
             trigger: { runtime_id: runtime.id, runtime_epoch: runtime.epoch, cycle_id: cycle.id, first_life_admin_checkin: true },
             context: {

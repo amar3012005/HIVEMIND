@@ -222,12 +222,26 @@ function durableTitle(title, content, max = 80) {
 }
 
 function durableEntities(entities) {
+  // Accepts a bare name or a TYPED pair ({n,k} from the extractor, {name,kind} internally) and
+  // ALWAYS returns typed pairs. This used to require `typeof entity === 'string'`, which silently
+  // discarded every typed entity the extractor produced — the kind never reached the persister and
+  // every canonical row stayed entity_kind='entity'. A filter that drops the richer shape is how the
+  // whole typing chain died without one log line.
   return (Array.isArray(entities) ? entities : [])
-    .filter((entity) => typeof entity === 'string' && entity.trim())
+    .map((e) => {
+      if (typeof e === 'string') return { name: e.trim(), kind: null };
+      if (e && typeof e === 'object') {
+        const name = typeof e.name === 'string' ? e.name : (typeof e.n === 'string' ? e.n : null);
+        const kind = e.kind || e.k || null;
+        return name ? { name: String(name).trim(), kind } : null;
+      }
+      return null;
+    })
+    .filter((e) => e && e.name)
     // Measurements, percentages, and dates are values on claims, not graph
     // identities. This language-agnostic structural gate drops numeric-led
     // phrases without maintaining a domain dictionary.
-    .filter((entity) => /^\p{L}/u.test(entity.trim()))
+    .filter((e) => /^\p{L}/u.test(e.name))
     .slice(0, 8);
 }
 
@@ -331,8 +345,22 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
       importance: Math.max(0.65, Math.min(1, importance)),
       // Canonical entities come only from exact-span extraction. The curator
       // may merge claims but cannot introduce a new graph identity.
-      entities: [...new Set(supports.flatMap((item) => durableEntities(item.entities)))].slice(0, 12),
+      // Dedupe by kind::name. durableEntities now returns typed pairs, and a Set of OBJECTS dedupes
+      // by REFERENCE — every merged candidate would have contributed a duplicate of the same entity.
+      entities: (() => {
+        const seen = new Map();
+        for (const e of supports.flatMap((item) => durableEntities(item.entities))) {
+          const key = `${e.kind || ''}::${e.name.toLowerCase()}`;
+          if (!seen.has(key)) seen.set(key, e);
+        }
+        return [...seen.values()].slice(0, 12);
+      })(),
       rels: [],
+      // FORWARD THE HEADING. This explicit field list rebuilt each claim and dropped `heading`,
+      // so the «filename : heading» prefix was empty no matter what the extractor or window
+      // supplied — the reason two earlier attempts at this changed nothing. Curation merges
+      // several candidates, so the PRIMARY support's heading is the claim's heading.
+      heading: primary.heading || supports.find((it) => it?.heading)?.heading || null,
       segmentId: primary.segmentId,
       source_quote: primary.source_quote,
       source_start: primary.source_start,
@@ -1445,7 +1473,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
-      const entityTags = (fact.entities || []).map((e) => { const s = normalizeEntity(e); return s ? `entity:${s}` : null; }).filter(Boolean);
+      // Tags key off the NAME regardless of shape (string or typed pair) — these tags are the
+      // compatibility fallback for anything not yet reading canonical entities.
+      const entityTags = (fact.entities || [])
+        .map((e) => normalizeEntity(typeof e === 'string' ? e : (e?.name || e?.n || '')))
+        .map((sl) => (sl ? `entity:${sl}` : null)).filter(Boolean);
       // ts: date tag (the previous-version rule) — derived from the doc's event
       // date (document_date) else ingest time. Put it in the fact's OWN tags so
       // BOTH the engine write AND the vector re-upsert carry it (the ingestMemory
@@ -1862,7 +1894,9 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       type: candidate.memory_type,
       claim: String(candidate.f).slice(0, 500),
       importance: Number(candidate.importance || 0.5),
-      entities: (candidate.entities || []).slice(0, 8),
+      // Names only for the curator's eyes; it reasons about text, not our internal shape.
+      entities: (candidate.entities || []).slice(0, 8)
+        .map((e) => (typeof e === 'string' ? e : (e?.name || e?.n || ''))).filter(Boolean),
       source: String(candidate.source_quote).slice(0, 500),
     }));
     const system = `You curate durable organizational memory from source-grounded candidates extracted from ONE document.

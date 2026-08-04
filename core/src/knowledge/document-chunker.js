@@ -42,9 +42,35 @@ export async function parseFile(buffer, mimeType, filename) {
   if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') {
     const mammothMod = await import('mammoth');
     const mammoth = mammothMod.default || mammothMod;
-    const result = await mammoth.extractRawText({ buffer });
+    // NORMALISE TO MARKDOWN. This used mammoth.extractRawText, which discards structure BY DESIGN —
+    // Word's Heading 1/2/3 styles came out as ordinary lines. Measured corpus-wide: docx segments
+    // carried a markdown heading 0 of 60 times (0%), against 100% for .md and 28% for pdf. The
+    // canonical chunker detects sections from '#', so a format that never emits '#' can never produce
+    // a heading_path, and every downstream consumer (heading_path, the «filename : heading» memory
+    // prefix, section-aware ranking) silently degrades for that whole format.
+    // convertToHtml preserves the heading styles; the <hN> -> '#' mapping below is the only
+    // conversion needed for the chunker to treat DOCX exactly like markdown.
+    let text = '';
+    try {
+      const html = await mammoth.convertToHtml({ buffer });
+      text = String(html?.value || '')
+        .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lvl, inner) => `\n\n${'#'.repeat(Number(lvl))} ${inner.replace(/<[^>]+>/g, '').trim()}\n\n`)
+        .replace(/<\/(p|div|li|tr)>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '- ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    } catch (e) {
+      // Never fail an upload over formatting: fall back to the old flat extraction, and SAY that
+      // headings are gone rather than letting the format silently lose them.
+      console.warn(`[docx] convertToHtml failed (${e.message}) — falling back to raw text; headings lost`);
+      const raw = await mammoth.extractRawText({ buffer });
+      text = String(raw?.value || '');
+    }
     return {
-      text: String(result?.value || ''),
+      text,
       metadata: { title: filename },
     };
   }

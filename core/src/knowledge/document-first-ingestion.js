@@ -3050,8 +3050,16 @@ Every item must include a non-empty content field and one or more valid support_
                 // the old guard rejected it along with sentence punctuation. Strip it and continue.
                 const _bare = line.replace(/:$/, '').trim();
                 if (!_bare || !/\p{L}{3}/u.test(_bare)) continue;
-                const numbered = line.match(/^(\d+(?:\.\d+)*)[.)]?\s+(\p{Lu}[^\n]{2,80})$/u);
-                if (numbered) {
+                // NUMBERED SECTIONS — but a decimal VALUE in a table row is not a section number.
+                // Measured on a real document: "0.88 Internal claim database [5]" was accepted as a
+                // heading, and because heading_path is INHERITED down the _hstack it then stamped itself
+                // onto 39 of 53 segments and into their «filename : heading» prefixes. A wrong heading is
+                // worse than none. Rejected now: a leading 0. (decimals, not sections), a bracketed
+                // citation/table ref [5], and components above 99 (measurements, not section numbers).
+                const numbered = /\[\d+\]/.test(_bare) ? null
+                  : _bare.match(/^(\d+(?:\.\d+){0,3})[.)]?\s+(\p{Lu}[^\n]{2,80})$/u);
+                if (numbered && !/^0\./.test(numbered[1])
+                    && numbered[1].split('.').every((n) => Number(n) > 0 && Number(n) <= 99)) {
                   heading = line.slice(0, 500);
                   level = numbered[1].split('.').length;
                   break;

@@ -1729,7 +1729,55 @@ async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ct
       const name = call.function?.name;
       onEvent?.({ type: 'tool_started', name, tool_call_id: call.id, arguments: args });
       const toolResult = await toolkit.execute(name, args, ctx);
-      const text = String(toolResult.content?.[0]?.text || '').slice(0, 8000);
+      // TOOL RESULTS WERE BLIND-TRUNCATED AT 8000 CHARS, SILENTLY. That is the mechanism behind
+      // "chat sometimes says it has nothing" on content that is definitely present.
+      // Measured on org 1380251c (hybrid): recall delivers 5 memories + 8 evidence segments;
+      // segments average 645 chars but reach 39,655, so ONE oversized segment can consume the whole
+      // window and evict the 693-char segment that actually holds the answer. Six identical chat
+      // requests: 4 found the article number, 2 answered "I don't have anything in my memory" — two
+      // of them with BYTE-IDENTICAL retrieval counters, so the instability is here, after retrieval.
+      //
+      // Fixed by budgeting PER ROW instead of cutting one blob: every retrieved row stays visible to
+      // the model, each bounded, so no single long row can starve the rest. Falls back to the old
+      // slice for non-JSON results, and either way it now SAYS when it truncated — a silent cap on
+      // the evidence path is indistinguishable from "there was no evidence".
+      const _rawText = String(toolResult.content?.[0]?.text || '');
+      const _cap = Math.max(2000, Number(process.env.AGENT_TOOL_RESULT_MAX_CHARS || 24000));
+      let text = _rawText;
+      if (_rawText.length > _cap) {
+        let shaped = null;
+        try {
+          const parsed = JSON.parse(_rawText);
+          const key = ['memories', 'results', 'rows', 'items', 'evidence']
+            .find((k) => Array.isArray(parsed?.[k]) && parsed[k].length);
+          if (key) {
+            const rows = parsed[key];
+            // Divide the budget evenly, so N rows are ALL represented rather than the first few
+            // verbatim and the rest dropped.
+            const per = Math.max(200, Math.floor(_cap / rows.length) - 80);
+            parsed[key] = rows.map((r) => {
+              if (!r || typeof r !== 'object') return r;
+              const out = { ...r };
+              for (const f of ['content', 'text', 'snippet', 'preview', 'excerpt']) {
+                if (typeof out[f] === 'string' && out[f].length > per) out[f] = `${out[f].slice(0, per)}…`;
+              }
+              return out;
+            });
+            parsed._truncation = { per_row_chars: per, rows: rows.length, original_chars: _rawText.length };
+            shaped = JSON.stringify(parsed);
+          }
+        } catch { /* not JSON — fall through to the blunt slice */ }
+        if (shaped && shaped.length <= _cap * 1.2) {
+          text = shaped;
+          console.warn(`[agent] ${name} result ${_rawText.length} chars -> per-row budget `
+            + `(cap ${_cap}); every row kept, each bounded`);
+        } else {
+          text = _rawText.slice(0, _cap);
+          console.warn(`[agent] ${name} result TRUNCATED ${_rawText.length} -> ${_cap} chars as one blob `
+            + `(no row array found). Rows past the cut are INVISIBLE to the model — if this tool feeds `
+            + `answers, that is a wrong-answer risk, not a formatting detail.`);
+        }
+      }
       steps.push({ tool: name, args, result_summary: text.slice(0, 240), raw: toolResult.meta?.raw || null });
       if (text) resultTexts.push(text);
       onEvent?.({ type: 'tool_completed', name, tool_call_id: call.id, status: toolResult.status, summary: text.slice(0, 240) });

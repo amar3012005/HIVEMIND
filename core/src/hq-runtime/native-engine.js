@@ -592,6 +592,7 @@ export class NativeHqEngine {
         queueContinuationScheduled = true;
       }
     }
+    }
     if (trigger.type === 'work_result') {
       const workOrderId = String(trigger.payload?.work_order_id || '');
       const order = workOrderId ? await prisma.hyperWorkOrder.findFirst({

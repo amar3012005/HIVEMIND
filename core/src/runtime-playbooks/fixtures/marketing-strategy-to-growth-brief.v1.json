@@ -11,9 +11,9 @@
     "terminal_states_by_action": {"formulate_go_to_market_strategy": ["strategy_ready", "strategy_needs_evidence", "cancelled"]}
   },
   "input_contract": {"fields": [
-    {"path": "context.company", "type": "object", "required": true},
-    {"path": "context.baseline", "type": "object", "required": true},
-    {"path": "request.instruction", "type": "string", "required": true}
+    {"path": "context.company", "type": "object", "required": true, "description": "Retained company identity and operating context."},
+    {"path": "context.baseline", "type": "object", "required": true, "description": "Source-backed baseline observations and explicit limitations."},
+    {"path": "request.instruction", "type": "string", "required": true, "description": "The current operating requirement in the selected response locale."}
   ]},
   "initial_stage_id": "form_strategy",
   "terminal_states": ["strategy_ready", "strategy_needs_evidence", "cancelled"],

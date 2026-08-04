@@ -5,7 +5,7 @@
   "name": "Browser administrator check-in to current status",
   "description": "An internal, user-initiated browser conversation that records current company status before first-life planning.",
   "metadata": {"owner_room_tag": "general", "supported_actions": ["collect_internal_company_status"]},
-  "input_contract": {"fields": [{"path": "request.instruction", "type": "string", "required": true}]},
+  "input_contract": {"fields": [{"path": "request.instruction", "type": "string", "required": true, "description": "The durable operating requirement that frames the internal check-in."}]},
   "initial_stage_id": "offer_admin_checkin",
   "terminal_states": ["admin_checkin_skipped", "admin_status_recorded"],
   "stages": [

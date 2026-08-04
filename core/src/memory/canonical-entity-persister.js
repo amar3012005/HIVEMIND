@@ -95,11 +95,19 @@ export async function persistCanonicalLinks({
   // V5 Phase 10: opt-in org ontology. When the org configured approved entity types,
   // constrain the (already-taxonomy-normalized) kind to that allow-list; unknown →
   // 'concept'. Absent/disabled ontology = default behavior (no change). Cached 5 min.
+  // Hoisted to FUNCTION scope. This was `const allow` inside the `if` below, and the per-entity kind
+  // check further down referenced it — a ReferenceError at RUNTIME ("allow is not defined") that
+  // `node --check` cannot see, swallowed by the outer catch as
+  // "[canonical-entities] batch failed: allow is not defined". Entity linking was silently dead:
+  // 5 batches failed on one upload and 0 entities were persisted.
+  // Default is the code taxonomy, so an unrecognised per-entity kind still falls back instead of
+  // fragmenting the registry; an org ontology narrows it further when configured.
+  let allowedKinds = ENTITY_TAXONOMY;
   try {
     const onto = await _loadOrgOntology(prisma, organizationId);
     if (onto?.enabled && Array.isArray(onto.approvedEntityTypes) && onto.approvedEntityTypes.length) {
-      const allow = new Set(onto.approvedEntityTypes.map((t) => String(t).toLowerCase()));
-      if (!allow.has(entityKind)) entityKind = allow.has('concept') ? 'concept' : [...allow][0];
+      allowedKinds = new Set(onto.approvedEntityTypes.map((t) => String(t).toLowerCase()));
+      if (!allowedKinds.has(entityKind)) entityKind = allowedKinds.has('concept') ? 'concept' : [...allowedKinds][0];
     }
   } catch { /* ontology is best-effort; never block entity persistence */ }
   if ((process.env.CANONICAL_ENTITY_PERSIST || 'true').toLowerCase() === 'false') return out;
@@ -122,7 +130,7 @@ export async function persistCanonicalLinks({
         if (typeof raw !== 'string' || !raw.trim()) continue;
         const perKind = (rawItem && typeof rawItem === 'object' && rawItem.kind)
           ? normalizeEntityKind(rawItem.kind) : null;
-        const kindForRow = (perKind && allow.has(perKind)) ? perKind : entityKind;
+        const kindForRow = (perKind && allowedKinds.has(perKind)) ? perKind : entityKind;
         const slug = normalizeEntity(raw);
         if (!slug) continue; // junk/generic names never become canonical entities
         // Key by (slug, kind): the same surface form under two kinds is two identities, which is the

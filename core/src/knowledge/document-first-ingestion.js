@@ -45,6 +45,47 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal
 // the failure this exists to stop was a .pptx whose bytes were stringified regardless of its mime.
 // Same cleaner as the seam's sanitizeText, defined here because this module must not depend on the
 // seam's load order during ingestion. Keep the two in step.
+/**
+ * Rebuild markdown from docling's HYBRID CHUNKS.
+ *
+ * `engine=docling-chunks-only` means docling's PARSER failed while its CHUNKER succeeded.
+ * That path joined bare `chunk.text` and set `markdown: null` — yet every chunk carries
+ * `headings: string[]` (knowledge/enterprise/docling-adapter.js:302), which we already fetch
+ * and then threw away. Measured consequence: all 26 chunks-only documents (11 pdf / 8 docx /
+ * 5 xlsx / 2 pptx) were indexed with ZERO heading_path, so their citations can only ever say
+ * "page 3", never "1. Gesellschaftliche Gründe > Lebensqualität".
+ *
+ * Same contract as the seam: markdown or NULL, never flat text dressed as markdown. If no
+ * chunk carried a heading there is no structure to report and null is the honest answer.
+ * Defined here, not imported, for the same load-order reason as the cleaner above.
+ */
+export function markdownFromHeadedChunks(chunks) {
+  const list = Array.isArray(chunks) ? chunks : [];
+  const out = [];
+  let prev = [];
+  let emitted = false;
+  for (const c of list) {
+    const hs = (Array.isArray(c?.headings) ? c.headings : [])
+      .filter((h) => typeof h === 'string' && h.trim())
+      .map((h) => h.trim());
+    // Once an ANCESTOR changes every DESCENDANT must be re-emitted — otherwise a child
+    // reusing a name under a new parent (a "Preise" section in a second product chapter)
+    // silently inherits the previous parent's heading path.
+    let changed = false;
+    for (let i = 0; i < hs.length; i += 1) {
+      if (changed || hs[i] !== prev[i]) {
+        changed = true;
+        out.push(`${'#'.repeat(Math.min(6, i + 1))} ${hs[i]}`);
+        emitted = true;
+      }
+    }
+    prev = hs;
+    const t = String(c?.text || '').trim();
+    if (t) out.push(t);
+  }
+  return emitted ? out.join('\n\n') : null;
+}
+
 export function sanitizeSegmentText(text) {
   return String(text || '')
     .replace(/\u0000/g, '')
@@ -81,7 +122,7 @@ async function classifyKnowledgeDocument(text, filename) {
   const preview = String(text || '').slice(0, 6000).trim();
   if (!preview) return { type: 'general', confidence: 0.1 };
   try {
-    const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'openai/gpt-oss-120b';
+    const model = process.env.KB_DOCUMENT_TYPE_MODEL || process.env.MEMORY_FAST_MODEL || memoryLLMRoute()?.model || 'deepseek/deepseek-v4-flash-0731';
     const parsed = await chatCompletion({
       model, temperature: 0, max_tokens: 256, json_mode: true, feature: 'kb-document-type',
       messages: [{ role: 'system', content: 'Classify this document. Return only JSON: {"type":"short_lowercase_snake_case_label","confidence":0.0}. Use a specific type such as payment_record, invoice, contract, meeting_notes, policy, contact_list, report, spreadsheet, or general. Do not use the filename as the type unless content supports it.' }, { role: 'user', content: `Filename: ${filename || 'unknown'}\n\n${preview}` }],
@@ -450,7 +491,7 @@ export class DocumentFirstIngestionService {
       .filter((m) => m?.id && typeof m.content === 'string' && m.content.trim().length >= 12)
       .slice(0, 24);
     if (!targets.length) return;
-    const model = process.env.CLAIM_STRUCTURING_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const model = process.env.CLAIM_STRUCTURING_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
     const system = `Extract the core CLAIM structure from one memory sentence, in ANY language.
 Return ONLY JSON: {"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}.
@@ -463,8 +504,18 @@ subject+predicate identify the claim across paraphrases and languages (normalize
           if (idx >= targets.length) return;
           const m = targets[idx];
           try {
-            const parsed = await chatCompletion({
-              model, temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
+            // THE ONLY EXTRACTION CALL LEFT ON THE BARE HELPER. Every other one uses the
+            // fallback form, and this one paid for it: measured on a live upload batch,
+            // `model=openai/gpt-oss-20b … finish=error` then
+            // `[v5-claim-structuring] Failed to parse JSON response` — twice in one batch. The
+            // memories still existed (this step only ENRICHES them with subject/predicate), so the
+            // failure was invisible except in the log, and every affected memory silently lost the
+            // claim structure that supersession and "latest per (entity, attribute)" depend on.
+            const parsed = await chatCompletionWithFallback({
+              models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
+                || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+                .split(',').map((x) => x.trim()).filter(Boolean)],
+              temperature: 0, max_tokens: 800, json_mode: true, feature: 'v5-claim-structuring',
               messages: [{ role: 'system', content: system }, { role: 'user', content: String(m.content).slice(0, 800) }],
             });
             const subj = typeof parsed?.subject === 'string' ? parsed.subject.trim().slice(0, 500) : '';
@@ -509,12 +560,17 @@ subject+predicate identify the claim across paraphrases and languages (normalize
    */
   async _batchExtractFacts(sections, { maxFacts = 5, entityContext = '' } = {}) {
     const apiKey = process.env.GROQ_API_KEY;
-    // gpt-oss-120b (was 20b): the 20b model only half-followed the entity rules
-    // (forked Wärmepumpe/heat-pump, emitted phrase-'entities' + generic nouns).
-    // 120b follows the English-canonical + concise-noun rules far more reliably;
-    // still supports strict json_schema + reasoning_effort=low, and the distill
-    // is async (4 calls) so the extra per-call latency is acceptable for quality.
-    const model = process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    // deepseek-v4-flash (was gpt-oss-120b, before that 20b). The history matters: 20b only
+    // half-followed the entity rules (forked Wärmepumpe/heat-pump, emitted phrase-'entities' and
+    // generic nouns), so this moved to 120b, which followed the English-canonical + concise-noun
+    // rules far more reliably. What neither gpt-oss variant does reliably is EMIT VALID JSON:
+    // measured on live uploads, `model=openai/gpt-oss-20b … finish=error` followed by
+    // "Failed to parse JSON response", repeatedly, and 120b was its only configured fallback — the
+    // same family, so the retry inherited the same weakness.
+    // deepseek-v4-flash-0731 is pinned (not the floating ~latest alias), emits clean JSON, and at
+    // $0.09/$0.18 per M with a 1M context is cheaper than both while removing the truncation
+    // pressure that produced finish=length on long windows.
+    const model = process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     // Heuristic fallback (no key): sentence-split — degraded but never blocks.
     if (!apiKey) {
       return sections.map((sec) => ({
@@ -914,7 +970,7 @@ Output the JSON object and nothing else.`;
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
   async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false } = {}) {
-    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const content = (window.content || '').slice(0, 6000);
     if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
@@ -984,7 +1040,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // section's facts are never lost to one model/provider hiccup. Configurable
     // via KB_UNIFIED_FALLBACK_MODELS (comma-separated).
     const _fallbacks = (process.env.KB_UNIFIED_FALLBACK_MODELS
-      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean);
+      || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
     const parsed = await chatCompletionWithFallback({
       // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
       // source_quote + entities). 1800 tokens overflowed → finish=length →
@@ -1432,7 +1488,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     }
     if (!pairs.length) return 0;
 
-    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const isGptOss = /gpt-oss/i.test(model);
     const list = pairs.map((p, i) => `${i}. NEW: ${p.a}\n   PRIOR: ${p.b}`).join('\n');
     const sys = `You classify the relationship of a NEW memory to a PRIOR memory. For each numbered pair output the type of NEW relative to PRIOR:
@@ -1565,7 +1621,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
 
     if (pool.length === 1) return fallback();
     const model = process.env.KB_CURATOR_MODEL || process.env.KB_UNIFIED_MODEL
-      || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+      || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const input = pool.map((candidate, index) => ({
       i: index,
       type: candidate.memory_type,
@@ -1591,7 +1647,7 @@ Every item must include a non-empty content field and one or more valid support_
     // KB_CURATOR_FALLBACK_MODELS (defaults to the extractor's chain).
     const _curatorFallbacks = (process.env.KB_CURATOR_FALLBACK_MODELS
       || process.env.KB_UNIFIED_FALLBACK_MODELS
-      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean);
+      || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
     try {
       const parsed = await chatCompletionWithFallback({
         models: [model, ..._curatorFallbacks], temperature: 0, max_tokens: 4000, json_mode: true, feature: 'kb-document-curator',
@@ -1634,7 +1690,7 @@ Every item must include a non-empty content field and one or more valid support_
    * @returns {Promise<number>} how many duplicate facts were merged away
    */
   async _consolidateDocFacts(uFacts, { docTitle = '', documentId = null } = {}) {
-    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
+    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const isGptOss = /gpt-oss/i.test(model);
     const list = uFacts.map((f, i) => `${i}: ${String(f.content || '').slice(0, 240)}`).join('\n');
     const sys = `You deduplicate extracted document facts. Group facts that state the SAME underlying fact (same subject + same attribute/claim, possibly different wording or detail level). Do NOT group facts that are merely about the same topic — only true near-duplicates. Output STRICT JSON: {"groups":[{"keep":<index of the most complete/specific fact>,"drop":[<indexes of its duplicates>]}]}. Facts with no duplicate are omitted entirely. If there are no duplicates output {"groups":[]}.`;
@@ -1749,7 +1805,7 @@ Every item must include a non-empty content field and one or more valid support_
         try {
           const refined = await chatCompletionWithFallback({
             models: [process.env.KB_DOC_SUMMARY_MODEL || process.env.KB_UNIFIED_MODEL
-              || process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b'],
+              || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731'],
             temperature: 0.2, max_tokens: 420, feature: 'kb-doc-summary',
             messages: [
               { role: 'system', content: 'Write ONE self-contained paragraph stating what this document establishes. '
@@ -2929,11 +2985,26 @@ Every item must include a non-empty content field and one or more valid support_
               : (doclingResult.hybridChunks || []).map(c => c.text).join('\n\n');
             return {
               success: true,
-              engine: parseOk ? 'docling' : 'docling-chunks-only',
+              // REPORT THE TIER THAT ACTUALLY RAN. This hardcoded 'docling', overwriting the
+              // adapter's own label — it emits at least eight (plain-text, groq-image, sheet-direct,
+              // csv-direct, groq-vision, pdf-parse, docling-fallback-vision/-fastpdf, seam:*).
+              // Verified on one upload batch: four documents logged `tier=fast-pdf` and every row
+              // recorded parse_engine='docling'. That makes "which path produced this document?"
+              // unanswerable from the data and corrupts any per-tier measurement taken from it — the
+              // "55 of 61 docling documents carry no heading_path" figure was mostly fast-pdf.
+              // Chunks-only is a property of THIS layer (parser failed, chunker did not), so it
+              // still qualifies whatever the adapter reported.
+              engine: parseOk
+                ? (doclingResult.engine || 'docling')
+                : `${doclingResult.engine || 'docling'}-chunks-only`,
               text: synthesizedText,
-              // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise NULL, so a
-              // consumer can tell "no structure available" from "structure that happens to be flat".
-              markdown: doclingResult.markdown || null,
+              // ITEM 3: no aliasing. If docling gave us real markdown use it; otherwise rebuild it
+              // from the chunk headings we already fetched (chunks-only = parser failed, chunker
+              // did not), and only then fall back to NULL — so a consumer can still tell "no
+              // structure available" from "structure that happens to be flat".
+              markdown: doclingResult.markdown
+                || markdownFromHeadedChunks(doclingResult.hybridChunks)
+                || null,
               structure: doclingResult.json,
               tables: doclingResult.tables || [],
               pages: doclingResult.pages || [],
@@ -3666,7 +3737,22 @@ Every item must include a non-empty content field and one or more valid support_
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
         const _tExtract = Date.now();
-        let uBudget = DOC_CAP;
+        // EVERY WINDOW GETS READ. DOC_CAP caps FACTS, but it was also the gate on whether a window was
+        // sent to the LLM at all (`while (wi < len && uBudget > 0)`), so once earlier windows consumed
+        // it the tail was never looked at — measured live: "TAIL DROPPED: 1 of 6 windows never sent to
+        // the LLM (budget 30 exhausted)" on a 12175-char document, where DOC_CAP floors at 30. Those
+        // facts then exist in NO layer and are unrecoverable without a re-ingest, since nothing
+        // records WHICH window was skipped. Capping output is legitimate; declining to read part of
+        // the document is data loss.
+        // Floor the budget so every window is guaranteed a minimum grant. This only raises the cap
+        // for documents with many windows — precisely the case where the flat floor of 30 was wrong.
+        const MIN_FACTS_PER_WINDOW = Number(process.env.KB_MIN_FACTS_PER_WINDOW || 3);
+        const _budgetFloor = uWindows.length * MIN_FACTS_PER_WINDOW;
+        if (_budgetFloor > DOC_CAP) {
+          console.log(`[kb-unified] doc_cap ${DOC_CAP} raised to ${_budgetFloor} `
+            + `(${uWindows.length} windows x ${MIN_FACTS_PER_WINDOW} min) so no window is skipped`);
+        }
+        let uBudget = Math.max(DOC_CAP, _budgetFloor);
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
           while (wi < uWindows.length && uBudget > 0) {
             const w = { ...uWindows[wi++] };
@@ -3847,8 +3933,8 @@ Every item must include a non-empty content field and one or more valid support_
           try {
             const _relList = uFacts.map((m, idx) => `${idx}: ${String(m.content || '').slice(0, 200)}`).join('\n');
             const _relParsed = await chatCompletionWithFallback({
-              models: [process.env.KB_UNIFIED_MODEL || 'openai/gpt-oss-120b',
-                ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,openai/gpt-oss-20b').split(',').map((x) => x.trim()).filter(Boolean)],
+              models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
+                ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
               temperature: 0, max_tokens: 1500, json_mode: true, feature: 'kb-doc-relations',
               messages: [
                 { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },

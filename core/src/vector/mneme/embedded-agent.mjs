@@ -425,12 +425,41 @@ function payloadOf(org, rec) {
 // Map preserves insertion order; re-inserting on access implements LRU eviction (evict oldest key).
 const ctxCache = new Map();
 
+// SINGLE-FLIGHT, keyed by org. The shard lock is per-OPEN, not per-process, so two
+// `MnemeStore.open()` calls for the same shard collide even inside ONE process — and the loser
+// reports "shard is locked by another process", which reads like a competing container and is not.
+// Verified: `fuser` showed a single PID holding every shard.lock, and its parent was hm-core's own
+// main PID.
+//
+// The race was structural: getCtx checked `ctxCache`, then `await`ed ensureSchema() and
+// ensureQdrant() BEFORE constructing the store and populating the cache. Two concurrent requests for
+// the same org therefore both missed the cache, both awaited, and both constructed. The startup
+// sweep does exactly that — it fans stats/list across every org at once — which is why the warnings
+// always arrived in one burst on the same handful of orgs. (Not LRU eviction: MAX_OPEN is 64 and
+// there are 13 orgs, so nothing is ever evicted.)
+// Memoising the in-flight PROMISE — not just the result — makes concurrent callers share one open.
+const ctxPending = new Map();
+
 async function getCtx(orgId) {
   if (ctxCache.has(orgId)) {
     const c = ctxCache.get(orgId);
     ctxCache.delete(orgId); ctxCache.set(orgId, c); // bump to MRU
     return c;
   }
+  const inflight = ctxPending.get(orgId);
+  if (inflight) return inflight;
+  const p = openCtx(orgId);
+  ctxPending.set(orgId, p);
+  try {
+    return await p;
+  } finally {
+    // Cleared on success AND failure: a failed open must never be cached as a poison entry, or one
+    // transient collision would make that org unreadable for the life of the process.
+    ctxPending.delete(orgId);
+  }
+}
+
+async function openCtx(orgId) {
   if (!schemaEnsured) schemaEnsured = ensureSchema();
   await schemaEnsured;
   const org = orgId;

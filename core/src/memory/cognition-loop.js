@@ -96,7 +96,9 @@ async function deriveClusterMin(prisma, orgId) {
     // Remote (self-host): memory rows live on the agent — central count is always 0. Count
     // fact/decision from a bounded agent list instead (same adaptive purpose).
     if (orgIsRemote(orgId)) {
-      const out = await remoteList(orgId, { memory_type: ['fact', 'decision'], is_latest: true }, null, 400);
+      // Background sizing heuristic — degrade to the soft floor if the shard is unavailable.
+      const out = await remoteList(orgId, { memory_type: ['fact', 'decision'], is_latest: true }, null, 400)
+        .catch((e) => { console.warn(`[cognition] remote list unavailable org=${orgId}: ${e.message}`); return null; });
       const adaptiveRemote = Math.floor((out?.memories?.length || 0) / CLUSTER_MIN_DIVISOR);
       return Math.max(CANONICAL_CLUSTER_MIN_SOFT, Math.min(CANONICAL_CLUSTER_MIN_HARD, adaptiveRemote));
     }
